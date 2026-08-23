@@ -235,10 +235,32 @@ pub fn compute(
                 // later vreg got V_then_i's slot.
                 const fr = block_stack[block_stack_len - 1];
                 if (fr.is_if and fr.merge_captured and fr.result_arity > 0) {
-                    if (sim_len >= @as(usize, fr.result_arity)) {
-                        const base = sim_len - @as(usize, fr.result_arity);
-                        var i: u32 = 0;
-                        while (i < fr.result_arity) : (i += 1) {
+                    // Indexed from the if-frame's own operand base, not from
+                    // an absolute depth: when the else-arm's only exit is a
+                    // `br`, the branch handler has drained `sim_len` back to
+                    // `entry_depth`, and `sim_len - result_arity` would then
+                    // address the ENCLOSING frame's vreg. Same case split as
+                    // the block branch below and as `emitEndIntra`.
+                    const arity: usize = fr.result_arity;
+                    const entry: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
+                    if (sim_len < entry + arity) {
+                        // No else-arm result reached the `.end` — V_then (the
+                        // vregs captured at `.else`) IS the if's result. Emit
+                        // never dropped them from `pushed_vregs`; restore them
+                        // here so the post-if consumer pops the canonical vreg.
+                        if (sim_len > entry) sim_len = entry;
+                        while (sim_len < entry) : (sim_len += 1) sim_stack[sim_len] = fr.merge_vregs[0];
+                        var i: usize = 0;
+                        while (i < arity) : (i += 1) {
+                            if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
+                            ranges.items[fr.merge_vregs[i]].last_use_pc = pc;
+                            sim_stack[sim_len] = fr.merge_vregs[i];
+                            sim_len += 1;
+                        }
+                    } else {
+                        const base = sim_len - arity;
+                        var i: usize = 0;
+                        while (i < arity) : (i += 1) {
                             ranges.items[sim_stack[base + i]].last_use_pc = pc;
                             sim_stack[base + i] = fr.merge_vregs[i];
                         }
@@ -252,10 +274,23 @@ pub fn compute(
                     // sim_stack with param_vregs so the post-if
                     // consumer pops the canonical vreg, extending
                     // its liveness.
-                    if (sim_len >= @as(usize, fr.result_arity)) {
-                        const base = sim_len - @as(usize, fr.result_arity);
-                        var i: u32 = 0;
-                        while (i < fr.result_arity) : (i += 1) {
+                    // Same base-relative indexing as the branch above.
+                    const arity: usize = fr.result_arity;
+                    const entry: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
+                    if (sim_len < entry + arity) {
+                        if (sim_len > entry) sim_len = entry;
+                        while (sim_len < entry) : (sim_len += 1) sim_stack[sim_len] = fr.param_vregs[0];
+                        var i: usize = 0;
+                        while (i < arity) : (i += 1) {
+                            if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
+                            ranges.items[fr.param_vregs[i]].last_use_pc = pc;
+                            sim_stack[sim_len] = fr.param_vregs[i];
+                            sim_len += 1;
+                        }
+                    } else {
+                        const base = sim_len - arity;
+                        var i: usize = 0;
+                        while (i < arity) : (i += 1) {
                             ranges.items[sim_stack[base + i]].last_use_pc = pc;
                             sim_stack[base + i] = fr.param_vregs[i];
                         }
@@ -509,7 +544,13 @@ pub fn compute(
             instr.op == .return_call or instr.op == .return_call_indirect or
             instr.op == .return_call_ref)
         {
-            while (sim_len > 0) {
+            // B1 PROTOTYPE (throwaway): drain only to the innermost open
+            // frame's entry depth, exactly like the `br` handler below.
+            const innermost_entry_t: u32 = if (block_stack_len == 0)
+                0
+            else
+                block_stack[block_stack_len - 1].entry_depth;
+            while (sim_len > @as(usize, innermost_entry_t)) {
                 sim_len -= 1;
                 const vreg = sim_stack[sim_len];
                 ranges.items[vreg].last_use_pc = pc;
