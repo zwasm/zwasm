@@ -940,7 +940,7 @@ test "D2 (EXIT): a WASI-P2 fs component writes a file via get-directories+open-a
     // Read the written file back through the still-open preopen dir.
     var pmem: [128]u8 = @splat(0);
     @memcpy(pmem[0..7], "out.txt");
-    try testing.expectEqual(wasi_p1.Errno.success, wasi_fd.pathOpen(&host, &pmem, dirfd, 0, 0, 7, 0, wasi_p1.RIGHTS_FD_READ, 0, 0, 96));
+    try testing.expectEqual(wasi_p1.Errno.success, wasi_fd.pathOpen(&host, &pmem, dirfd, 0, 0, 7, 0, wasi_p1.RIGHTS_FD_READ | wasi_p1.RIGHTS_FD_SEEK, 0, 0, 96));
     const rfd = std.mem.readInt(u32, pmem[96..100], .little);
     std.mem.writeInt(u32, pmem[16..20], 32, .little);
     std.mem.writeInt(u32, pmem[20..24], 6, .little);
@@ -1136,7 +1136,7 @@ test "D2: WASI-P2 descriptor.open-at creates+writes a file under a dir descripto
     // Re-open "f.txt" (the file descriptor was dropped) and read it back.
     var pmem: [128]u8 = @splat(0);
     @memcpy(pmem[0..5], "f.txt");
-    try testing.expectEqual(wasi_p1.Errno.success, wasi_fd.pathOpen(&host, &pmem, dirfd, 0, 0, 5, 0, wasi_p1.RIGHTS_FD_READ, 0, 0, 96));
+    try testing.expectEqual(wasi_p1.Errno.success, wasi_fd.pathOpen(&host, &pmem, dirfd, 0, 0, 5, 0, wasi_p1.RIGHTS_FD_READ | wasi_p1.RIGHTS_FD_SEEK, 0, 0, 96));
     const rfd = std.mem.readInt(u32, pmem[96..100], .little);
     std.mem.writeInt(u32, pmem[16..20], 32, .little);
     std.mem.writeInt(u32, pmem[20..24], 6, .little);
@@ -1186,7 +1186,7 @@ test "D2: WASI-P2 descriptor.write writes a file via the descriptor resource (fd
     // Re-open the file (the descriptor was dropped → its fd closed) and read it back.
     @memset(pmem[0..128], 0);
     @memcpy(pmem[0..8], "out.txt\x00");
-    try testing.expectEqual(wasi_p1.Errno.success, wasi_fd.pathOpen(&host, &pmem, dirfd, 0, 0, 7, 0, wasi_p1.RIGHTS_FD_READ, 0, 0, 96));
+    try testing.expectEqual(wasi_p1.Errno.success, wasi_fd.pathOpen(&host, &pmem, dirfd, 0, 0, 7, 0, wasi_p1.RIGHTS_FD_READ | wasi_p1.RIGHTS_FD_SEEK, 0, 0, 96));
     const rfd = std.mem.readInt(u32, pmem[96..100], .little);
     std.mem.writeInt(u32, pmem[16..20], 32, .little); // iovec: buf=32, len=8
     std.mem.writeInt(u32, pmem[20..24], 8, .little);
