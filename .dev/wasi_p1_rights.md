@@ -9,6 +9,15 @@ alternatives they beat are recorded in
 [ADR-0215](decisions/0215_wasi_p1_rights_model.md); this file is the table
 they operate on.
 
+> **Implementation status.** The model lands in three changes and this file
+> describes all of it, so parts of it lead the code. Advertising the table and
+> deriving rights onto opened fds: **landed**. Reading a right at each call —
+> the `zwasm entry point` column below, and "Where the check sits" — **not
+> yet**: nothing consults `rights_base` today except `fd_fdstat_set_rights`,
+> so `fd_fdstat_get` reports a capability set no call enforces. Folding `..`
+> (`path.normalize`): **not yet**. Each section that runs ahead of the code
+> repeats the fact where it appears.
+
 ## Sources
 
 | What | Where | Pin |
@@ -67,6 +76,9 @@ Ungated by design, because witx assigns them no bit: `fd_close`,
 
 ### Where the check sits
 
+**Not yet implemented** — no entry point reads `rights_base` yet; this is
+where the check goes and why it goes there.
+
 The rights check runs **after** the fd-type dispatch, never before. The fd's
 type decides whether the operation exists at all — `spipe` for a stream,
 `isdir` for a directory, `notdir` for a file — and only then does the
@@ -88,7 +100,7 @@ Two consequences worth naming:
   it first. Both are answers `directory_seek` accepts; `notsup`, which this
   used to give, is not.
 
-Three rows are deliberately not enforced today:
+Three rows stay ungated even once the checks land:
 
 - **`poll_fd_readwrite`** — `poll_oneoff` fd-readiness is `notsup` in zwasm
   (`clocks.zig`), so there is nothing to gate. It becomes live with that work.
