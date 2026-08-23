@@ -932,6 +932,13 @@ pub fn pathOpen(
     const wants_write = (fs_rights_base & p1.RIGHTS_FD_WRITE) != 0;
     // O_TRUNC resizes the file, so the handle must be writable even when the
     // guest asked for no FD_WRITE right (official `truncation_rights`).
+    //
+    // Consequence, deliberate: a truncate-open of a file the process cannot
+    // write is now `acces` from the open itself, where it used to be `inval`
+    // from `setLength` on a read-only handle one step later. The old answer
+    // was an artifact of doing the truncate in two parts, and it is why
+    // `truncation_rights` was red; wasmtime 47.0.3 answers `acces` too
+    // (measured on a 0444 file).
     const needs_writable_handle = wants_write or (oflags & p1.OFLAGS_TRUNC) != 0;
     const file = if ((oflags & p1.OFLAGS_CREAT) != 0)
         dir.createFile(io, path, .{

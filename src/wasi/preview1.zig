@@ -314,6 +314,19 @@ pub const RIGHTS_DIRECTORY_APPLICABLE: Rights =
 /// **never** masked: `RIGHTS_DIRECTORY_APPLICABLE` is a rule about what THIS
 /// fd may do, not about what it may hand down, and masking it would silently
 /// strip FD_WRITE from every file later opened under the directory.
+///
+/// A FILE target is deliberately not filetype-masked, so its `fd_fdstat_get`
+/// reports directory rights it can never use. Two reasons to leave it: the
+/// fd-type dispatch answers `notdir` before any capability check, so the bits
+/// are unreachable rather than merely unused; and wasmtime 47.0.3 reports the
+/// same set on a regular file (measured: `0x3FFFFFBF`, everything but
+/// `fd_write`). Masking them is a one-line change if that trade is re-taken.
+///
+/// The `FD_WRITE` in a file target's base also decides the HOST open mode, so
+/// every file reached through `open-at` is opened read/write and a read-only
+/// host file cannot be opened for reading at all. That is #254 — the fix is to
+/// derive these from the caller's `descriptor-flags`, which P3 already decodes
+/// one statement too late — and it predates this helper.
 pub fn rightsForRightlessOpen(oflags: Oflags) struct { base: Rights, inheriting: Rights } {
     const dir_target = (oflags & OFLAGS_DIRECTORY) != 0;
     return .{
