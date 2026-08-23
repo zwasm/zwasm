@@ -305,6 +305,26 @@ pub const RIGHTS_DIRECTORY_INHERITING: Rights =
 pub const RIGHTS_DIRECTORY_APPLICABLE: Rights =
     RIGHTS_ALL & ~(RIGHTS_FD_SEEK | RIGHTS_FD_WRITE | RIGHTS_FD_FILESTAT_SET_SIZE);
 
+/// The `(base, inheriting)` a caller with NO rights model should hand
+/// `path_open` — the component-model `open-at` paths, where the preopen IS the
+/// sandbox and WASI 0.2/0.3 has no rights concept at all.
+///
+/// `base` drops the file-content rights for a directory target, because
+/// `path_open` answers `isdir` to a write right on one. `inheriting` is
+/// **never** masked: `RIGHTS_DIRECTORY_APPLICABLE` is a rule about what THIS
+/// fd may do, not about what it may hand down, and masking it would silently
+/// strip FD_WRITE from every file later opened under the directory.
+pub fn rightsForRightlessOpen(oflags: Oflags) struct { base: Rights, inheriting: Rights } {
+    const dir_target = (oflags & OFLAGS_DIRECTORY) != 0;
+    return .{
+        .base = if (dir_target)
+            RIGHTS_DIRECTORY_INHERITING & RIGHTS_DIRECTORY_APPLICABLE
+        else
+            RIGHTS_DIRECTORY_INHERITING,
+        .inheriting = RIGHTS_DIRECTORY_INHERITING,
+    };
+}
+
 /// `fd_filestat_set_times` / `path_filestat_set_times` flags.
 pub const Fstflags = u16;
 pub const FSTFLAGS_ATIM: Fstflags = 0x0001;
@@ -506,6 +526,27 @@ test "Rights: a preopen advertises every right path_open_preopen demands" {
     // hand PATH_FILESTAT_SET_SIZE down; without it the test skips its body.
     try testing.expect(RIGHTS_DIRECTORY_BASE & RIGHTS_PATH_FILESTAT_SET_SIZE != 0);
     try testing.expect(RIGHTS_DIRECTORY_INHERITING & RIGHTS_PATH_FILESTAT_SET_SIZE != 0);
+}
+
+test "rightsForRightlessOpen: the filetype mask never reaches the inheriting ceiling" {
+    // A directory target drops the file-content rights from `base`, because
+    // `path_open` answers `isdir` to a write right on a directory.
+    const dir = rightsForRightlessOpen(OFLAGS_DIRECTORY);
+    try testing.expectEqual(@as(Rights, 0), dir.base & RIGHTS_FD_WRITE);
+    try testing.expectEqual(@as(Rights, 0), dir.base & RIGHTS_FD_SEEK);
+
+    // But NOT from `inheriting`. Masking that records a ceiling without
+    // FD_WRITE, and every file later opened under the directory then has its
+    // own base clamped to match — a component that opens a subdirectory and
+    // writes a file inside it gets `notcapable`.
+    try testing.expectEqual(RIGHTS_DIRECTORY_INHERITING, dir.inheriting);
+    try testing.expect(dir.inheriting & RIGHTS_FD_WRITE != 0);
+    try testing.expect(dir.inheriting & RIGHTS_FD_SEEK != 0);
+
+    // A file target is asked for the whole ceiling on both.
+    const file = rightsForRightlessOpen(0);
+    try testing.expectEqual(RIGHTS_DIRECTORY_INHERITING, file.base);
+    try testing.expectEqual(RIGHTS_DIRECTORY_INHERITING, file.inheriting);
 }
 
 test "Rights: DIRECTORY_APPLICABLE drops exactly the file-content rights" {
