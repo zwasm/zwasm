@@ -742,3 +742,128 @@ every one of them. Two things a literal-`.r10` grep also misses:
 never reads that subtree (`find … -maxdepth 2`, 37 of 469 x86_64 files) —
 nor would it fire here, since it checks that a handler *uses* the
 spill-aware helpers, never *where* it calls them.
+
+## Recipe 21 — differential probe of a real-world guest by re-exporting its internals
+
+**Trigger.** A toolchain-built `.wasm` (AssemblyScript / TinyGo / Rust /
+emcc) aborts under `--engine jit` but completes under `--engine interp`,
+and the module is far too big to read. Works for both "engine diverges"
+and "guest detects its own corruption" shapes.
+
+### 21a — is it a host-call boundary at all?
+
+```bash
+for e in interp jit; do ZWASM_DEBUG=mem.cksum zig-out/bin/zwasm run --engine $e F.wasm; done
+```
+
+Read the **import names**, not just the checksums. If the JIT's first
+`[dbg mem.cksum]` line names a *different* import than the interp's first
+line, the guest already took a different branch **before any host call** —
+so it is a plain miscompile, not host-boundary memory corruption. (This
+inverted the AssemblyScript-TLSF hypothesis in one command: interp's first
+line was `interp 2` = `random_get`; the JIT's was `jit fd_write`, which is
+the abort message itself.)
+
+### 21b — which guest function diverges
+
+```bash
+for e in interp jit; do ZWASM_DEBUG=jit.callcount zig-out/bin/zwasm run --engine $e F.wasm; done
+```
+
+Diff the **sets** of called indices, not the counts — interp bumps at the
+call site, the JIT in the prologue, so magnitudes are not comparable.
+Indices present on one engine only bracket the divergent branch. Pair with
+a call graph so an index maps to a role:
+
+```bash
+wasm-tools print F.wasm > /tmp/f.wat   # then: for each `(func (;N;)`, collect its `call K`
+```
+
+The function that calls both `fd_write` and `proc_exit` is the guest's
+`abort`; its callers carry the assertion's file:line as `i32.const`
+literals, which names the failing source line in the guest's own runtime.
+
+### 21c — drive an internal function directly
+
+`zwasm run` has `--invoke <name>[=a,b,...]`, so add probe exports to a
+scratch copy of the guest and call them:
+
+```bash
+wasm-tools print F.wasm > probe.wat   # append probe funcs, then:
+wasm-tools parse probe.wat -o probe.wasm
+```
+
+```wat
+;; run the guest's own initializer, then read one word of its heap
+(func $p_peek (export "p_peek") (param i32) (result i32)
+  call 22          ;; the guest's initializeRoot
+  global.get 1     ;; its root pointer
+  local.get 0 i32.add i32.load)
+;; …and a prefix hash, for binary search
+(func $p_cksum (export "p_cksum") (param i32) (result i32) ...)
+```
+
+Binary-search `p_cksum=N` interp-vs-jit for the **first differing byte** —
+~11 round trips instead of a full word sweep. In the TLSF case this landed
+on a single word (`slMap[7]`: interp `0x4000`, JIT `0x4001`).
+
+### 21d — prove which instruction writes the bad value
+
+Replace the suspect `i32.store` with `drop drop` in the scratch copy,
+keeping the address/value computation intact. If the divergence vanishes,
+that store's *value operand* is wrong; if it survives, look elsewhere.
+
+### 21e — WARNING: probes inside the suspect function hide regalloc bugs
+
+Inserting `global.set` / `global.get` captures **into** the function under
+test changes its register pressure and made this bug disappear (every
+captured value read correct, and the final store became correct too).
+That is itself the diagnosis — a Heisenbug under added pressure means
+**regalloc / liveness**, not arithmetic. Probe from *outside* the function,
+then go to `ZWASM_DEBUG=jit.dump` + Recipe 2 for the real answer.
+
+### 21f — shrink to hand-written `.wat`
+
+Once the wat pattern is known, retype it by hand and sweep variants
+(with/without the `br`, `br` vs `br_if`, `block` vs `loop`, an extra
+operand below the block). The AssemblyScript TLSF abort reduced to:
+
+```wat
+(module (func (export "f") (param $p i32) (result i32)
+  block (result i32) i32.const 7 br 0 end   ;; fall-through is DEAD
+  i32.const 1 local.get $p i32.shl i32.or))
+```
+
+`f(3)`: interp 15, JIT 9. The 54-byte body disassembles to `mov ebx,0x7` /
+`jmp` / `mov ebx,0x1` — one physical register for two live operands.
+
+## Recipe 22 — liveness's operand-stack sim must mirror emit's `pushed_vregs`
+
+**Symptom.** The JIT reads a stale value for an operand that a `block` /
+`if` produced, and `ZWASM_DEBUG=regverify` reports **no** overlap: the
+allocation is consistent with the liveness it was given, and the liveness
+is what is wrong.
+
+**Check.** `src/ir/analysis/liveness.zig` simulates the operand stack
+independently of `codegen/{arm64,x86_64}/op_control.zig`. Every place the
+emit adjusts `pushed_vregs`, liveness must make the *same* adjustment to
+`sim_stack` / `sim_len`, or the two models drift by a slot and every vreg
+after that point is mis-scoped. When auditing a control op, diff the two
+files side by side — the emit is authoritative, because it decides which
+register a value is actually read from.
+
+Concrete drift found this way: `emitEndIntra` splits a block's `.end` into
+three shapes ((a) live fall-through, (b) dead fall-through, (c) stack
+emptied below `entry + arity`), while liveness's `.end` had only shape (a)/(b)
+behind an **absolute** `sim_len >= result_arity` guard. A block whose only
+exit is `br` hits shape (c): the `br` handler drains `sim_stack` to the
+block's entry depth, the guard fails, and the captured merge vreg is never
+restored — it dies at the branch and the next push inherits its register.
+With one operand already on the stack the absolute guard is worse than
+useless: it passes, reaches *below* the block's base, and overwrites the
+enclosing frame's vreg.
+
+**Grep-able tell.** In liveness, any guard of the form
+`sim_len >= <arity>` that should be `sim_len >= entry_depth + <arity>`, and
+any `Frame` field the emit's `Label` has but liveness pins to a constant
+(`param_arity = 0` was pinned for block/loop frames).
