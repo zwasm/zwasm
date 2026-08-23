@@ -675,8 +675,13 @@ pub fn compute(
         // merge) the label result. Generic 1→1 would close it + fabricate a
         // fresh vreg → reuse window (D-220; lesson 2026-06-02-jit-liveness-
         // must-mirror-emit-pushed-vregs).
+        // ref.as_non_null has br_on_null's emit shape exactly — pop, null-
+        // check, re-append the SAME vreg — so it belongs here too, and its
+        // emit READS that vreg's register at this pc (the TEST/CMP), which
+        // is what the last-use extension records (#245).
         if (instr.op == .@"local.tee" or instr.op == .br_on_cast or
-            instr.op == .br_on_cast_fail or instr.op == .br_on_null)
+            instr.op == .br_on_cast_fail or instr.op == .br_on_null or
+            instr.op == .@"ref.as_non_null")
         {
             if (sim_len > 0) {
                 const top_vreg = sim_stack[sim_len - 1];

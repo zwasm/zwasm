@@ -62,6 +62,20 @@ pub fn stackEffect(op: ZirOp) ?StackEffect {
         // (the reverted +39-fail attempt). See lesson
         // jit-liveness-must-mirror-emit-pushed-vregs.
         .@"any.convert_extern", .@"extern.convert_any" => .{ .pops = 0, .pushes = 0 },
+        // ref.as_non_null (10.R, D-220) is operand-stack-TRANSPARENT, not
+        // 1→1: both emitters pop the src vreg, null-check it in place, and
+        // push the SAME vreg back — no result vreg, no MOV. (ref.cast /
+        // ref.test ARE 1→1 because their value comes out of a trampoline
+        // CALL and needs a vreg to land in; this one produces nothing.)
+        // Modelling it 1→1 closed the operand's range and fabricated a
+        // never-written result vreg, so the allocator handed the operand's
+        // register to the next value while the narrowed ref was still live
+        // → silent wrong answers, no trap (#245). Unlike any.convert_extern
+        // its emit READS that register, so it also takes the last-use
+        // extension arm in `compute()`, next to br_on_null (same pop-then-
+        // re-append shape). See lesson
+        // jit-liveness-must-mirror-emit-pushed-vregs.
+        .@"ref.as_non_null" => .{ .pops = 0, .pushes = 0 },
         // atomic.fence (threads, ADR-0168): 0 → 0, no operands.
         .@"atomic.fence" => .{ .pops = 0, .pushes = 0 },
         // 1 → 1 testop / unop (i32 / i64 / f32 / f64)
@@ -156,9 +170,6 @@ pub fn stackEffect(op: ZirOp) ?StackEffect {
         .@"ref.cast",
         // ref.cast_null (R-3) — like ref.cast but null passes. 1 → 1.
         .@"ref.cast_null",
-        // ref.as_non_null (10.R) pops a nullable ref, pushes the same ref
-        // non-null (or traps on null). 1 → 1. D-220.
-        .@"ref.as_non_null",
         => .{ .pops = 1, .pushes = 1 },
         // 2 → 1 binop
         .@"i32.add",

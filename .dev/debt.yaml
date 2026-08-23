@@ -2,6 +2,55 @@
 # Query/edit discipline: .claude/rules/yaml_ssot_yq.md. yq = mikefarah Go v4.
 
 entries:
+  - id: "D-596"
+    layer: "code"
+    status: "note"
+    description: |-
+      **Nothing checks that liveness's operand-stack simulation agrees with
+      what the per-arch emit does to `ctx.pushed_vregs`.** They are
+      independent hand-maintained models of one fact, and a disagreement
+      desyncs the vreg numbering: regalloc aliases slots and the JIT returns
+      wrong values with no trap and no diagnostic. Four instances have
+      landed. Three are per-op count mismatches — `local.tee` modelled 1→1
+      against a transparent emit (D-093 d-3, 8 spec failures),
+      `any.convert_extern` the same way (the reverted +39-fail attempt), and
+      `ref.as_non_null` (D-220 / #245), which shipped. The fourth (#250) is
+      not in the table at all: `.end`'s merge-vreg restore was guarded on an
+      absolute `sim_len >= result_arity` where `emitEndIntra` splits three
+      ways, so a block whose only exit is `br` lost its result vreg — every
+      allocating AssemblyScript guest aborted in `~lib/rt/tlsf.ts`.
+      A static sweep closes neither mechanism
+      (`private/issue-245/sweep_liveness_vs_emit.py`, gitignored; run at
+      `d20ddf8fd` over 847 handlers vs 545 table entries — the #250 merge
+      changed neither the table nor any handler, so the counts stand): 529
+      matched, 44 are on `liveness.compute`'s own arms, 7 unresolvable, 25
+      counted differently and 242 unreachable behind delegation. The 25 are
+      loads / stores / `select`, whose pops and pushes sit in mutually
+      exclusive branches (`op_memory.emitMemOp` is `if (is_store) pop 2
+      else pop 1`) — a static count sums branches a run takes one of. And
+      #250 shows the table is not even the whole surface.
+      Discharge: assert it at emit time instead. After each op, in a Debug
+      build, `ctx.pushed_vregs.items.len` must equal the operand-stack depth
+      `liveness.compute` simulated for that pc — a value it already computes
+      and currently discards. That covers both mechanisms, since it compares
+      the depth rather than any per-op count, and every spec / edge-case /
+      realworld run then exercises it: the class becomes a hard error at the
+      desync point rather than a wrong number downstream. Needs the per-pc
+      depth threaded out of liveness into the emit loop plus a
+      `builtin.mode` gate; deferred because no mismatch is known to remain
+      after #245 / #250 and the site is the hot emit path. debug_jit_auto
+      Recipe 22 is the manual counterpart — how to find one once suspicious.
+    first_raised: "2026-08-23"
+    last_reviewed: "2026-08-23"
+    refs: |-
+      src/ir/analysis/liveness.zig (compute — sim_stack depth per pc);
+      src/ir/analysis/liveness_stack_effect.zig (the table);
+      src/engine/codegen/{x86_64,arm64}/ctx.zig (pushed_vregs, popUnary/popBinary);
+      src/engine/codegen/{x86_64,arm64}/op_control.zig (emitEndIntra);
+      src/engine/codegen/shared/regalloc_shape_tags.zig:344 (second reader of the table);
+      .claude/skills/debug_jit_auto/RECIPES.md (Recipe 22);
+      .dev/lessons/2026-06-02-jit-liveness-must-mirror-emit-pushed-vregs.md;
+      D-093 (d-3), D-220; issues #245, #250; commits 64e634336, ca6f934ec.
   - id: "D-595"
     layer: "ci"
     status: "note"
