@@ -239,16 +239,71 @@ pub const OFLAGS_DIRECTORY: Oflags = 0x0002;
 pub const OFLAGS_EXCL: Oflags = 0x0004;
 pub const OFLAGS_TRUNC: Oflags = 0x0008;
 
-/// File-system rights — capability bits granted to a file
-/// descriptor at preopen time. The full witx rightsdef has 30+
-/// flags; only the load-bearing ones are listed here, more land
-/// alongside their consuming syscalls.
+/// File-system rights — the capability bits a file descriptor carries.
+/// The complete witx `$rights` flags record: 30 bits, in declaration
+/// order, each `1 << <its documented Bit:>`. Every bit names the call it
+/// gates; the `gate` comments below are the witx doc text, condensed.
+/// Source: `WebAssembly/WASI` `preview1/witx/typenames.witx` (branch
+/// `wasi-0.1`, fae981bae14809d91f9bc2d63852d461f331d161).
 pub const Rights = u64;
-pub const RIGHTS_FD_READ: Rights = 0x0000000000000002;
-pub const RIGHTS_FD_SEEK: Rights = 0x0000000000000004;
-pub const RIGHTS_FD_WRITE: Rights = 0x0000000000000040;
-pub const RIGHTS_FD_TELL: Rights = 0x0000000000000020;
-pub const RIGHTS_PATH_OPEN: Rights = 0x0000000000002000;
+pub const RIGHTS_FD_DATASYNC: Rights = 1 << 0; // fd_datasync
+pub const RIGHTS_FD_READ: Rights = 1 << 1; // fd_read, sock_recv; fd_pread with FD_SEEK
+pub const RIGHTS_FD_SEEK: Rights = 1 << 2; // fd_seek (implies FD_TELL)
+pub const RIGHTS_FD_FDSTAT_SET_FLAGS: Rights = 1 << 3; // fd_fdstat_set_flags
+pub const RIGHTS_FD_SYNC: Rights = 1 << 4; // fd_sync
+pub const RIGHTS_FD_TELL: Rights = 1 << 5; // fd_tell, fd_seek(cur, 0)
+pub const RIGHTS_FD_WRITE: Rights = 1 << 6; // fd_write, sock_send; fd_pwrite with FD_SEEK
+pub const RIGHTS_FD_ADVISE: Rights = 1 << 7; // fd_advise
+pub const RIGHTS_FD_ALLOCATE: Rights = 1 << 8; // fd_allocate
+pub const RIGHTS_PATH_CREATE_DIRECTORY: Rights = 1 << 9; // path_create_directory
+pub const RIGHTS_PATH_CREATE_FILE: Rights = 1 << 10; // path_open with OFLAGS_CREAT
+pub const RIGHTS_PATH_LINK_SOURCE: Rights = 1 << 11; // path_link (source dir)
+pub const RIGHTS_PATH_LINK_TARGET: Rights = 1 << 12; // path_link (target dir)
+pub const RIGHTS_PATH_OPEN: Rights = 1 << 13; // path_open
+pub const RIGHTS_FD_READDIR: Rights = 1 << 14; // fd_readdir
+pub const RIGHTS_PATH_READLINK: Rights = 1 << 15; // path_readlink
+pub const RIGHTS_PATH_RENAME_SOURCE: Rights = 1 << 16; // path_rename (source dir)
+pub const RIGHTS_PATH_RENAME_TARGET: Rights = 1 << 17; // path_rename (target dir)
+pub const RIGHTS_PATH_FILESTAT_GET: Rights = 1 << 18; // path_filestat_get
+pub const RIGHTS_PATH_FILESTAT_SET_SIZE: Rights = 1 << 19; // path_open with OFLAGS_TRUNC
+pub const RIGHTS_PATH_FILESTAT_SET_TIMES: Rights = 1 << 20; // path_filestat_set_times
+pub const RIGHTS_FD_FILESTAT_GET: Rights = 1 << 21; // fd_filestat_get
+pub const RIGHTS_FD_FILESTAT_SET_SIZE: Rights = 1 << 22; // fd_filestat_set_size
+pub const RIGHTS_FD_FILESTAT_SET_TIMES: Rights = 1 << 23; // fd_filestat_set_times
+pub const RIGHTS_PATH_SYMLINK: Rights = 1 << 24; // path_symlink
+pub const RIGHTS_PATH_REMOVE_DIRECTORY: Rights = 1 << 25; // path_remove_directory
+pub const RIGHTS_PATH_UNLINK_FILE: Rights = 1 << 26; // path_unlink_file
+pub const RIGHTS_POLL_FD_READWRITE: Rights = 1 << 27; // poll_oneoff fd_read/fd_write
+pub const RIGHTS_SOCK_SHUTDOWN: Rights = 1 << 28; // sock_shutdown
+pub const RIGHTS_SOCK_ACCEPT: Rights = 1 << 29; // sock_accept
+
+/// Every defined bit. Bit 30 and above are unassigned in preview1, so this
+/// is also the mask that keeps a complement (`~x`) inside the schema.
+pub const RIGHTS_ALL: Rights = (1 << 30) - 1;
+
+/// The rights a preopened directory advertises in `fs_rights_base` — the
+/// operations a guest may perform *through this fd itself*. Directory-scoped
+/// only: no FD_READ / FD_WRITE / FD_SEEK, which apply to file contents.
+pub const RIGHTS_DIRECTORY_BASE: Rights = RIGHTS_PATH_CREATE_DIRECTORY |
+    RIGHTS_PATH_CREATE_FILE | RIGHTS_PATH_LINK_SOURCE | RIGHTS_PATH_LINK_TARGET |
+    RIGHTS_PATH_OPEN | RIGHTS_FD_READDIR | RIGHTS_PATH_READLINK |
+    RIGHTS_PATH_RENAME_SOURCE | RIGHTS_PATH_RENAME_TARGET | RIGHTS_PATH_FILESTAT_GET |
+    RIGHTS_PATH_FILESTAT_SET_SIZE | RIGHTS_PATH_FILESTAT_SET_TIMES |
+    RIGHTS_FD_FILESTAT_GET | RIGHTS_FD_FILESTAT_SET_TIMES | RIGHTS_PATH_SYMLINK |
+    RIGHTS_PATH_REMOVE_DIRECTORY | RIGHTS_PATH_UNLINK_FILE;
+
+/// The rights a preopened directory advertises in `fs_rights_inheriting` —
+/// the ceiling on every fd derived from it. A filesystem preopen never hands
+/// out socket capabilities, so it is every bit except the two `sock_*` ones.
+pub const RIGHTS_DIRECTORY_INHERITING: Rights =
+    RIGHTS_ALL & ~(RIGHTS_SOCK_SHUTDOWN | RIGHTS_SOCK_ACCEPT);
+
+/// Rights that mean something on a DIRECTORY fd. `path_open` is allowed to
+/// return fewer rights than requested when they "do not apply to the type of
+/// file being opened" (witx `path_open`); seeking, writing and resizing name
+/// file-content operations, so a directory fd never carries them.
+pub const RIGHTS_DIRECTORY_APPLICABLE: Rights =
+    RIGHTS_ALL & ~(RIGHTS_FD_SEEK | RIGHTS_FD_WRITE | RIGHTS_FD_FILESTAT_SET_SIZE);
 
 /// `fd_filestat_set_times` / `path_filestat_set_times` flags.
 pub const Fstflags = u16;
@@ -389,4 +444,73 @@ test "Scalar aliases: width matches WASI 32-bit Wasm convention" {
     try testing.expectEqual(@as(usize, 8), @sizeOf(Filesize));
     try testing.expectEqual(@as(usize, 8), @sizeOf(Timestamp));
     try testing.expectEqual(@as(usize, 8), @sizeOf(Rights));
+}
+
+test "Rights: each flag is 1 << its witx Bit index, in declaration order" {
+    // `preview1/docs.md` renders a `Bit: N` for every flag; witx assigns them
+    // in declaration order from 0. Listing them here in that order makes a
+    // transposed pair a compile-visible off-by-one rather than a guest that
+    // silently loses a capability.
+    const in_order = [_]Rights{
+        RIGHTS_FD_DATASYNC,             RIGHTS_FD_READ,
+        RIGHTS_FD_SEEK,                 RIGHTS_FD_FDSTAT_SET_FLAGS,
+        RIGHTS_FD_SYNC,                 RIGHTS_FD_TELL,
+        RIGHTS_FD_WRITE,                RIGHTS_FD_ADVISE,
+        RIGHTS_FD_ALLOCATE,             RIGHTS_PATH_CREATE_DIRECTORY,
+        RIGHTS_PATH_CREATE_FILE,        RIGHTS_PATH_LINK_SOURCE,
+        RIGHTS_PATH_LINK_TARGET,        RIGHTS_PATH_OPEN,
+        RIGHTS_FD_READDIR,              RIGHTS_PATH_READLINK,
+        RIGHTS_PATH_RENAME_SOURCE,      RIGHTS_PATH_RENAME_TARGET,
+        RIGHTS_PATH_FILESTAT_GET,       RIGHTS_PATH_FILESTAT_SET_SIZE,
+        RIGHTS_PATH_FILESTAT_SET_TIMES, RIGHTS_FD_FILESTAT_GET,
+        RIGHTS_FD_FILESTAT_SET_SIZE,    RIGHTS_FD_FILESTAT_SET_TIMES,
+        RIGHTS_PATH_SYMLINK,            RIGHTS_PATH_REMOVE_DIRECTORY,
+        RIGHTS_PATH_UNLINK_FILE,        RIGHTS_POLL_FD_READWRITE,
+        RIGHTS_SOCK_SHUTDOWN,           RIGHTS_SOCK_ACCEPT,
+    };
+    try testing.expectEqual(@as(usize, 30), in_order.len);
+    for (in_order, 0..) |bit, i| try testing.expectEqual(@as(Rights, 1) << @intCast(i), bit);
+    var union_of: Rights = 0;
+    for (in_order) |bit| union_of |= bit;
+    try testing.expectEqual(RIGHTS_ALL, union_of);
+}
+
+test "Rights: a preopen advertises every right path_open_preopen demands" {
+    // `directory_base_rights()` in the official corpus, verbatim. The comment
+    // there calls it "more brittle than we wanted to test for" — userland
+    // expects this set on ANY directory, so a missing bit is a guest that
+    // gives up before it calls anything.
+    const required_base = RIGHTS_PATH_CREATE_DIRECTORY | RIGHTS_PATH_CREATE_FILE |
+        RIGHTS_PATH_LINK_SOURCE | RIGHTS_PATH_LINK_TARGET | RIGHTS_PATH_OPEN |
+        RIGHTS_FD_READDIR | RIGHTS_PATH_READLINK | RIGHTS_PATH_RENAME_SOURCE |
+        RIGHTS_PATH_RENAME_TARGET | RIGHTS_PATH_SYMLINK | RIGHTS_PATH_REMOVE_DIRECTORY |
+        RIGHTS_PATH_UNLINK_FILE | RIGHTS_PATH_FILESTAT_GET | RIGHTS_PATH_FILESTAT_SET_TIMES |
+        RIGHTS_FD_FILESTAT_GET | RIGHTS_FD_FILESTAT_SET_TIMES;
+    try testing.expectEqual(required_base, RIGHTS_DIRECTORY_BASE & required_base);
+
+    // `directory_inheriting_rights()` = the base set plus the file rights.
+    const required_inheriting = required_base | RIGHTS_FD_DATASYNC | RIGHTS_FD_READ |
+        RIGHTS_FD_SEEK | RIGHTS_FD_FDSTAT_SET_FLAGS | RIGHTS_FD_SYNC | RIGHTS_FD_TELL |
+        RIGHTS_FD_WRITE | RIGHTS_FD_ADVISE | RIGHTS_FD_ALLOCATE | RIGHTS_FD_FILESTAT_GET |
+        RIGHTS_FD_FILESTAT_SET_SIZE | RIGHTS_FD_FILESTAT_SET_TIMES | RIGHTS_POLL_FD_READWRITE;
+    try testing.expectEqual(required_inheriting, RIGHTS_DIRECTORY_INHERITING & required_inheriting);
+
+    // A directory fd carries no file-content rights of its own, and a
+    // filesystem preopen hands out no socket capabilities.
+    try testing.expectEqual(@as(Rights, 0), RIGHTS_DIRECTORY_BASE &
+        (RIGHTS_FD_READ | RIGHTS_FD_WRITE | RIGHTS_FD_SEEK));
+    try testing.expectEqual(@as(Rights, 0), RIGHTS_DIRECTORY_INHERITING &
+        (RIGHTS_SOCK_SHUTDOWN | RIGHTS_SOCK_ACCEPT));
+
+    // `truncation_rights` reaches its real assertions only if the preopen can
+    // hand PATH_FILESTAT_SET_SIZE down; without it the test skips its body.
+    try testing.expect(RIGHTS_DIRECTORY_BASE & RIGHTS_PATH_FILESTAT_SET_SIZE != 0);
+    try testing.expect(RIGHTS_DIRECTORY_INHERITING & RIGHTS_PATH_FILESTAT_SET_SIZE != 0);
+}
+
+test "Rights: DIRECTORY_APPLICABLE drops exactly the file-content rights" {
+    try testing.expectEqual(
+        RIGHTS_FD_SEEK | RIGHTS_FD_WRITE | RIGHTS_FD_FILESTAT_SET_SIZE,
+        RIGHTS_ALL & ~RIGHTS_DIRECTORY_APPLICABLE,
+    );
 }

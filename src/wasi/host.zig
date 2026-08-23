@@ -294,8 +294,8 @@ pub const Host = struct {
         self.preopens = new_preopens;
         try self.fd_table.append(self.alloc, .{
             .kind = .dir,
-            .rights_base = p1.RIGHTS_PATH_OPEN | p1.RIGHTS_FD_READ,
-            .rights_inheriting = p1.RIGHTS_FD_READ | p1.RIGHTS_FD_WRITE | p1.RIGHTS_FD_SEEK,
+            .rights_base = p1.RIGHTS_DIRECTORY_BASE,
+            .rights_inheriting = p1.RIGHTS_DIRECTORY_INHERITING,
             .host_handle = host_fd,
         });
         return @intCast(self.fd_table.items.len - 1);

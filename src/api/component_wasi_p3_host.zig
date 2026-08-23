@@ -333,7 +333,14 @@ fn fs3OpenAt(caller: *Caller, argsptr: u32, retptr: u32) WasiP2Error!u32 {
     const open_flags = try mem.read(u8, argsptr + 16);
     const dirfd = try fs3Fd(ctx, self_handle);
     const oflags: wasi_p1.Oflags = @intCast(open_flags & 0x0F);
-    const rights = wasi_p1.RIGHTS_FD_READ | wasi_p1.RIGHTS_FD_WRITE;
+    // The component model has no rights: the preopen IS the sandbox. Ask for
+    // everything the target type can carry and let `path_open` clamp against
+    // the parent's inheriting set. A directory must NOT be asked for write
+    // rights — preview1 answers `isdir` to that.
+    const rights = if ((oflags & wasi_p1.OFLAGS_DIRECTORY) != 0)
+        wasi_p1.RIGHTS_DIRECTORY_INHERITING & wasi_p1.RIGHTS_DIRECTORY_APPLICABLE
+    else
+        wasi_p1.RIGHTS_DIRECTORY_INHERITING;
     const scratch = try ctx.reallocGuest(4, 4);
     const errno = wasi_fd.pathOpen(ctx.host, mem.slice(), dirfd, 0, path_ptr, path_len, oflags, rights, rights, 0, scratch);
     if (errno != .success) {
