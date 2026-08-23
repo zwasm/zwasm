@@ -333,9 +333,12 @@ fn fs3OpenAt(caller: *Caller, argsptr: u32, retptr: u32) WasiP2Error!u32 {
     const open_flags = try mem.read(u8, argsptr + 16);
     const dirfd = try fs3Fd(ctx, self_handle);
     const oflags: wasi_p1.Oflags = @intCast(open_flags & 0x0F);
-    const rights = wasi_p1.RIGHTS_FD_READ | wasi_p1.RIGHTS_FD_WRITE;
+    // The component model has no rights: the preopen IS the sandbox. Ask for
+    // everything the target type can carry and let `path_open` clamp against
+    // the parent's inheriting set.
+    const rights = wasi_p1.rightsForRightlessOpen(oflags);
     const scratch = try ctx.reallocGuest(4, 4);
-    const errno = wasi_fd.pathOpen(ctx.host, mem.slice(), dirfd, 0, path_ptr, path_len, oflags, rights, rights, 0, scratch);
+    const errno = wasi_fd.pathOpen(ctx.host, mem.slice(), dirfd, 0, path_ptr, path_len, oflags, rights.base, rights.inheriting, 0, scratch);
     if (errno != .success) {
         try writeFs3Err(mem, retptr, 4, errno);
         return SUBTASK_RETURNED;

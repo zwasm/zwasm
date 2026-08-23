@@ -333,7 +333,10 @@ pub fn fdSeek(
     const slot = host.translateFd(fd) orelse return .badf;
     switch (slot.kind) {
         .stdin, .stdout, .stderr => return .spipe,
-        .dir => return .notsup,
+        // A directory has no byte offset to move. POSIX would say EISDIR, and
+        // that is one of the three answers the official `directory_seek`
+        // accepts (`notsup`, which this used to give, is not).
+        .dir => return .isdir,
         .closed => return .badf,
         .file => {},
     }
@@ -361,7 +364,7 @@ pub fn fdTell(host: *Host, mem: []u8, fd: p1.Fd, pos_ptr: u32) p1.Errno {
     const slot = host.translateFd(fd) orelse return .badf;
     switch (slot.kind) {
         .stdin, .stdout, .stderr => return .spipe,
-        .dir => return .notsup,
+        .dir => return .isdir,
         .closed => return .badf,
         .file => {},
     }
@@ -639,6 +642,26 @@ fn pathHasParentEscape(path: []const u8) bool {
     return false;
 }
 
+/// The rights a `path_open`ed fd receives. Two clamps, both from the witx
+/// `path_open` contract: a derived fd can never exceed the parent directory's
+/// `fs_rights_inheriting` ("rights that apply to file descriptors derived
+/// from it"), and the host may return fewer rights than requested when they
+/// "do not apply to the type of file being opened" — which is how a directory
+/// fd loses `fd_seek` even when the guest asked for it.
+const DerivedRights = struct { base: p1.Rights, inheriting: p1.Rights };
+
+fn deriveRights(
+    parent: *const host_mod.OpenFd,
+    req_base: p1.Rights,
+    req_inheriting: p1.Rights,
+    is_dir: bool,
+) DerivedRights {
+    const ceiling = parent.rights_inheriting;
+    var base = req_base & ceiling;
+    if (is_dir) base &= p1.RIGHTS_DIRECTORY_APPLICABLE;
+    return .{ .base = base, .inheriting = req_inheriting & ceiling };
+}
+
 fn mapOpenError(err: anyerror) p1.Errno {
     return switch (err) {
         error.FileNotFound => .noent,
@@ -901,12 +924,22 @@ pub fn pathOpen(
     // `path_*` calls resolve against it). The new slot mirrors a preopen's
     // `.dir` shape so the descendant fd composes with every dir-taking op.
     if ((oflags & p1.OFLAGS_DIRECTORY) != 0)
-        return openDirSlot(host, io, dir, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr);
+        return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .reject_write);
 
     // WASI `oflags` select create/trunc/excl; `fs_rights_base` selects the
     // access mode. O_CREAT → createFile (a `std::fs::File::create` guest);
     // else openFile read-only / read-write per RIGHTS_FD_WRITE.
     const wants_write = (fs_rights_base & p1.RIGHTS_FD_WRITE) != 0;
+    // O_TRUNC resizes the file, so the handle must be writable even when the
+    // guest asked for no FD_WRITE right (official `truncation_rights`).
+    //
+    // Consequence, deliberate: a truncate-open of a file the process cannot
+    // write is now `acces` from the open itself, where it used to be `inval`
+    // from `setLength` on a read-only handle one step later. The old answer
+    // was an artifact of doing the truncate in two parts, and it is why
+    // `truncation_rights` was red; wasmtime 47.0.3 answers `acces` too
+    // (measured on a 0444 file).
+    const needs_writable_handle = wants_write or (oflags & p1.OFLAGS_TRUNC) != 0;
     const file = if ((oflags & p1.OFLAGS_CREAT) != 0)
         dir.createFile(io, path, .{
             .read = true,
@@ -914,11 +947,15 @@ pub fn pathOpen(
             .exclusive = (oflags & p1.OFLAGS_EXCL) != 0,
         }) catch |err| return mapOpenError(err)
     else blk: {
-        const f = dir.openFile(io, path, .{ .mode = if (wants_write) .read_write else .read_only }) catch |err| {
+        const f = dir.openFile(io, path, .{ .mode = if (needs_writable_handle) .read_write else .read_only }) catch |err| {
             // POSIX-style guests (Go's os.Open before ReadDir) open a
             // directory read-only WITHOUT OFLAGS_DIRECTORY; mirror the
-            // kernel by falling back to a directory open.
-            if (err == error.IsDir) return openDirSlot(host, io, dir, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr);
+            // kernel by falling back to a directory open. wasmtime answers
+            // `isdir` here instead, but only the OFLAGS_DIRECTORY form is
+            // pinned by the official corpus, and this fallback is load-bearing
+            // for real guests.
+            if (err == error.IsDir)
+                return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .allow_write);
             return mapOpenError(err);
         };
         // O_TRUNC without O_CREAT (a bare truncate-open; the 0.3 `truncate`
@@ -928,10 +965,11 @@ pub fn pathOpen(
     };
 
     // Reserve the new fd_table slot.
+    const rights = deriveRights(dir_slot, fs_rights_base, fs_rights_inheriting, false);
     host.fd_table.append(host.alloc, .{
         .kind = .file,
-        .rights_base = fs_rights_base,
-        .rights_inheriting = fs_rights_inheriting,
+        .rights_base = rights.base,
+        .rights_inheriting = rights.inheriting,
         .fs_flags = fdflags,
         .host_handle = file.handle,
     }) catch {
@@ -943,6 +981,11 @@ pub fn pathOpen(
     return writeU32LE(mem, opened_fd_ptr, new_fd);
 }
 
+/// Whether a requested write right makes a directory target `isdir`. An
+/// explicit `OFLAGS_DIRECTORY` open says yes; the `error.IsDir` fallback from a
+/// plain open says no, because POSIX-style guests reach it read-only by design.
+const WriteRightPolicy = enum { reject_write, allow_write };
+
 /// `pathOpen` back-half for a DIRECTORY target: open `path` (relative to
 /// `dir`) iterable and append a `.dir` fd-table slot (the same shape a
 /// preopen root gets, so the descendant fd composes with every dir-taking op).
@@ -950,18 +993,30 @@ fn openDirSlot(
     host: *Host,
     io: std.Io,
     dir: std.Io.Dir,
+    parent: *const host_mod.OpenFd,
     path: []const u8,
     fs_rights_base: p1.Rights,
     fs_rights_inheriting: p1.Rights,
     fdflags: p1.Fdflags,
     mem: []u8,
     opened_fd_ptr: u32,
+    policy: WriteRightPolicy,
 ) p1.Errno {
     const sub = dir.openDir(io, path, .{ .iterate = true }) catch |err| return mapOpenError(err);
+    // A directory cannot be opened for writing, and preview1 says so through
+    // the requested rights rather than a mode flag. The check has to come
+    // AFTER the open: a missing path is `noent` and a regular file is its own
+    // error, and neither may be masked by the capability clash.
+    if (policy == .reject_write and (fs_rights_base & p1.RIGHTS_FD_WRITE) != 0) {
+        var d = sub;
+        d.close(io);
+        return .isdir;
+    }
+    const rights = deriveRights(parent, fs_rights_base, fs_rights_inheriting, true);
     host.fd_table.append(host.alloc, .{
         .kind = .dir,
-        .rights_base = fs_rights_base,
-        .rights_inheriting = fs_rights_inheriting,
+        .rights_base = rights.base,
+        .rights_inheriting = rights.inheriting,
         .fs_flags = fdflags,
         .host_handle = sub.handle,
     }) catch {
@@ -1854,4 +1909,85 @@ test "fdWrite: max_capture_bytes bounds a capture buffer and reports nospc" {
     while (i < 10) : (i += 1) try testing.expectEqual(p1.Errno.success, fdWrite(&h2, &mem, 1, 0, 1, 16));
     try testing.expectEqual(@as(usize, 40), cap2.items.len);
     try testing.expect(!h2.capture_truncated);
+}
+
+// ============================================================
+// Rights: derivation + enforcement
+// ============================================================
+
+test "deriveRights: a derived fd cannot exceed the parent's inheriting set" {
+    const parent: host_mod.OpenFd = .{
+        .kind = .dir,
+        .rights_base = p1.RIGHTS_DIRECTORY_BASE,
+        .rights_inheriting = p1.RIGHTS_FD_READ | p1.RIGHTS_FD_SEEK,
+    };
+    // Asking for more than the parent may hand down is not an error — witx
+    // lets `path_open` return an fd with fewer rights than requested.
+    const r = deriveRights(&parent, p1.RIGHTS_ALL, p1.RIGHTS_ALL, false);
+    try testing.expectEqual(p1.RIGHTS_FD_READ | p1.RIGHTS_FD_SEEK, r.base);
+    try testing.expectEqual(p1.RIGHTS_FD_READ | p1.RIGHTS_FD_SEEK, r.inheriting);
+
+    // Asking for less keeps less.
+    const narrow = deriveRights(&parent, p1.RIGHTS_FD_READ, 0, false);
+    try testing.expectEqual(p1.RIGHTS_FD_READ, narrow.base);
+    try testing.expectEqual(@as(p1.Rights, 0), narrow.inheriting);
+}
+
+test "deriveRights: a directory fd never carries fd_seek or fd_write" {
+    const parent: host_mod.OpenFd = .{
+        .kind = .dir,
+        .rights_base = p1.RIGHTS_DIRECTORY_BASE,
+        .rights_inheriting = p1.RIGHTS_DIRECTORY_INHERITING,
+    };
+    // `directory_seek` asks for FD_SEEK on an OFLAGS_DIRECTORY open and then
+    // asserts the fd does NOT report it back.
+    const dir = deriveRights(&parent, p1.RIGHTS_FD_SEEK | p1.RIGHTS_FD_READDIR, p1.RIGHTS_ALL, true);
+    try testing.expectEqual(@as(p1.Rights, 0), dir.base & p1.RIGHTS_FD_SEEK);
+    try testing.expectEqual(p1.RIGHTS_FD_READDIR, dir.base & p1.RIGHTS_FD_READDIR);
+    // The mask is a filetype rule, not a capability one: it applies to the fd
+    // itself, never to what the fd may hand down.
+    try testing.expect(dir.inheriting & p1.RIGHTS_FD_SEEK != 0);
+
+    // The same request against a regular file keeps the seek right.
+    const file = deriveRights(&parent, p1.RIGHTS_FD_SEEK, 0, false);
+    try testing.expectEqual(p1.RIGHTS_FD_SEEK, file.base);
+}
+
+test "path_open: a write right on a directory target is isdir" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    const dirfd = try h.addPreopen(tmp.dir.handle, "/sandbox");
+    const root: std.Io.Dir = .{ .handle = tmp.dir.handle };
+    try root.createDir(testing.io, "sub", std.Io.File.Permissions.default_dir);
+
+    var mem: [64]u8 = @splat(0);
+    @memcpy(mem[0..3], "sub");
+    // Read rights on a directory are fine; asking to write one is not.
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 0, 3, p1.OFLAGS_DIRECTORY, p1.RIGHTS_FD_READ, 0, 0, 32));
+    try testing.expectEqual(p1.Errno.isdir, pathOpen(&h, &mem, dirfd, 0, 0, 3, p1.OFLAGS_DIRECTORY, p1.RIGHTS_FD_READ | p1.RIGHTS_FD_WRITE, 0, 0, 32));
+    // Without OFLAGS_DIRECTORY the open falls back to a directory open — the
+    // POSIX-style pattern (Go's os.Open before ReadDir) that predates rights.
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 0, 3, 0, p1.RIGHTS_FD_WRITE, 0, 0, 32));
+
+    // The clash must not mask what the target actually is. A guest probing for
+    // a directory with write rights is owed `noent` for a missing path, not a
+    // capability answer that says the path exists. wasmtime 47.0.3 agrees on
+    // all three (measured: noent / its own not-a-directory error / isdir).
+    @memset(mem[0..64], 0);
+    @memcpy(mem[0..4], "nope");
+    const write_dir = p1.OFLAGS_DIRECTORY;
+    try testing.expectEqual(p1.Errno.noent, pathOpen(&h, &mem, dirfd, 0, 0, 4, write_dir, p1.RIGHTS_FD_WRITE, 0, 0, 32));
+    try testing.expectEqual(p1.Errno.noent, pathOpen(&h, &mem, dirfd, 0, 0, 4, write_dir, p1.RIGHTS_FD_READ, 0, 0, 32));
+
+    // And a regular file answers the same way with or without the write right.
+    @memset(mem[0..64], 0);
+    @memcpy(mem[0..5], "f.txt");
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 0, 5, p1.OFLAGS_CREAT, 0, 0, 0, 32));
+    const with_write = pathOpen(&h, &mem, dirfd, 0, 0, 5, write_dir, p1.RIGHTS_FD_WRITE, 0, 0, 32);
+    const read_only = pathOpen(&h, &mem, dirfd, 0, 0, 5, write_dir, p1.RIGHTS_FD_READ, 0, 0, 32);
+    try testing.expectEqual(read_only, with_write);
+    try testing.expect(with_write != .isdir);
 }
