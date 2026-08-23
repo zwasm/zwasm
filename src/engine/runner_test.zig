@@ -2236,6 +2236,65 @@ test "jitTableGrow: D-497 guest funcref table.grow + call_indirect grown slot (A
     try testing.expectEqual(@as(u32, 42), try entry.callI32NoArgs(compiled.module, 1, &owned.rt));
 }
 
+test "runI32Export: a block whose result arrives only via `br` keeps that vreg live past .end" {
+    if (builtin.os.tag == .windows) return skip.phaseEnd(.win64);
+    // (module (func (export "test") (result i32)
+    //   (block (result i32) (i32.const 7) (br 0))   ;; the br is the ONLY exit
+    //   (i32.const 1) (i32.const 3) i32.shl
+    //   i32.or))
+    //
+    // The br drains liveness's sim stack to the block's entry depth, so the
+    // block's `.end` sees fewer operands than `result_arity` and never puts the
+    // captured merge vreg back. The vreg then dies at the br while emit still
+    // carries it on `pushed_vregs` — regalloc hands its register to the
+    // `i32.const 1` that follows and the `i32.or` reads 1 instead of 7.
+    //
+    // Expected 7 | (1 << 3) = 15; the pre-fix JIT returned 9 (= 1 | 8).
+    // Provenance: AssemblyScript's `~lib/rt/tlsf.ts` insertBlock, whose
+    // `slMap[fl] |= 1 << sl` has exactly this shape. The spurious bit 0 in the
+    // free-list bitmap made the next searchBlock fail, and every allocating AS
+    // guest aborted at `~lib/rt/tlsf.ts(499:16)` under --engine jit.
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type 0: ()->i32
+        0x03, 0x02, 0x01, 0x00, // 1 func, type 0
+        0x07, 0x08, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x00, 0x00, // export "test"
+        0x0a, 0x11, 0x01, 0x0f, 0x00, // code
+        0x02, 0x7f, 0x41, 0x07, 0x0c, 0x00, 0x0b, // block(i32) i32.const 7; br 0; end
+        0x41, 0x01, 0x41, 0x03, 0x74, 0x72, 0x0b, // i32.const 1; i32.const 3; shl; or; end
+    };
+    try testing.expectEqual(@as(u32, 15), try runI32Export(testing.allocator, &bytes, "test"));
+}
+
+test "runI32Export: a br-only block's .end leaves the operand below its entry depth alone" {
+    if (builtin.os.tag == .windows) return skip.phaseEnd(.win64);
+    // (module (func (export "test") (result i32)
+    //   (i32.const 32)
+    //   (block (result i32) (i32.const 5) (br 0))
+    //   (i32.const 1) (i32.const 1) i32.shl
+    //   i32.or
+    //   i32.or))
+    //
+    // Same drain as above, but with an operand already on the stack when the
+    // block opens. The `.end` merge-restore must be indexed from the block's
+    // entry depth: an absolute `sim_len >= result_arity` test still passes here
+    // (one operand is left) and reaches BELOW the block, overwriting the
+    // enclosing frame's `i32.const 32` vreg with the merge vreg.
+    //
+    // Expected 32 | 5 | (1 << 1) = 39; the pre-fix JIT returned 7 (= 5 | 2).
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type 0: ()->i32
+        0x03, 0x02, 0x01, 0x00, // 1 func, type 0
+        0x07, 0x08, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x00, 0x00, // export "test"
+        0x0a, 0x14, 0x01, 0x12, 0x00, // code
+        0x41, 0x20, // i32.const 32
+        0x02, 0x7f, 0x41, 0x05, 0x0c, 0x00, 0x0b, // block(i32) i32.const 5; br 0; end
+        0x41, 0x01, 0x41, 0x01, 0x74, 0x72, 0x72, 0x0b, // i32.const 1; i32.const 1; shl; or; or; end
+    };
+    try testing.expectEqual(@as(u32, 39), try runI32Export(testing.allocator, &bytes, "test"));
+}
+
 // Trap-KIND execution tests (ADR-0164 A / D-292: unreachable=5, oob_memory=6,
 // div_by_zero=7, int_overflow=8) live in the sibling `runner_trap_test.zig`
 // (split to keep this file under the 2000-line hard cap; mirrors runner_gc_test).
