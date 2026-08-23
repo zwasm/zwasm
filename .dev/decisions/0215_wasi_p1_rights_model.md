@@ -1,6 +1,7 @@
 # 0215 — Enforce preview1 rights, and advertise the corpus minimum plus one bit
 
-- **Status**: Proposed
+- **Status**: Accepted (2026-08-23 — maintainer sign-off on PR #251; product
+  semantics per ADR-0212 D1)
 - **Date**: 2026-08-23
 - **Author**: jtakakura
 - **Tags**: wasi, product-semantics, conformance
@@ -156,7 +157,11 @@ lives in [`.dev/wasi_p1_rights.md`](../wasi_p1_rights.md).
 - **Negative**: the WASI 0.2/0.3 `open-at` trampolines now depend on a
   preview1 concept they do not model. D6's helper keeps that dependency in one
   place; a P2-native descriptor table would remove it entirely, and is not
-  scheduled.
+  scheduled. The nearest consequence is tracked as #254: both trampolines ask
+  for `FD_WRITE` unconditionally, so a read-only host file cannot be opened
+  through `open-at`. That predates this ADR — `9d74fba80` passed
+  `RIGHTS_FD_READ | RIGHTS_FD_WRITE` and discarded `descriptor-flags` — and
+  the helper neither causes nor fixes it.
 - **Neutral / follow-ups**:
   - ROADMAP §9 row 11.1 quotes "58/72 on the interpreter". Refresh it to 64/72
     when the last of the three PRs lands, not before — the number must be true
@@ -180,3 +185,10 @@ lives in [`.dev/wasi_p1_rights.md`](../wasi_p1_rights.md).
   in `scripts/vendor_wasip1_official.sh`)
 - Debt: D-583 (the 14 official-corpus failures), D-315 (follow-time symlink
   confinement, untouched)
+
+## Revision history
+
+| Date       | SHA          | Note                                                     |
+|------------|--------------|----------------------------------------------------------|
+| 2026-08-23 | `2a3b86c61`  | Initial proposed version.                                 |
+| 2026-08-23 | `<backfill>` | Maintainer sign-off; P2/P3 consequence pointed at #254.   |
