@@ -188,7 +188,6 @@ lives in [`.dev/wasi_p1_rights.md`](../wasi_p1_rights.md).
 
 ## Revision history
 
-| Date       | SHA          | Note                                                     |
-|------------|--------------|----------------------------------------------------------|
-| 2026-08-23 | `2a3b86c61`  | Initial proposed version.                                 |
-| 2026-08-23 | `<backfill>` | Maintainer sign-off; P2/P3 consequence pointed at #254.   |
+| Date       | SHA          | Note                                                              |
+|------------|--------------|-------------------------------------------------------------------|
+| 2026-08-24 | `5058d517f`  | Initial version, maintainer sign-off and the #254 reference — the branch was squashed, so all three reached `main` in one commit. |
