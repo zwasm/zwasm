@@ -2295,6 +2295,102 @@ test "runI32Export: a br-only block's .end leaves the operand below its entry de
     try testing.expectEqual(@as(u32, 39), try runI32Export(testing.allocator, &bytes, "test"));
 }
 
+test "runI32Export: an `if` whose else-arm exits only by `br` leaves the operand below the if alone" {
+    if (builtin.os.tag == .windows) return skip.phaseEnd(.win64);
+    // (module (func (export "test") (result i32)
+    //   (i32.const 32)
+    //   (block (result i32)
+    //     (if (result i32) (i32.const 0) (then (i32.const 5)) (else (i32.const 9) (br 1))))
+    //   (i32.const 1) (i32.const 1) i32.shl
+    //   i32.or i32.or))
+    //
+    // Sibling of the block-merge case: liveness's `.end` handler has three
+    // branches and only the `!fr.is_if` one is indexed from the frame's entry
+    // depth. The two `fr.is_if` branches still test the ABSOLUTE
+    // `sim_len >= fr.result_arity`, so when the else-arm's only exit is a `br`
+    // (which drains the sim stack back to the if-frame's entry depth) `base`
+    // lands one slot below the if's own base and the enclosing frame's vreg is
+    // replaced by the merge vreg.
+    //
+    // Expected 32 | 9 | (1 << 1) = 43; the JIT returns 11 (= 9 | 2) — the 32 is
+    // gone. Needs an operand below the if AND a push between the `.end` and the
+    // consumer, or nothing steals the register and the shape passes anyway.
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type 0: ()->i32
+        0x03, 0x02, 0x01, 0x00, // 1 func, type 0
+        0x07, 0x08, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x00, 0x00, // export "test"
+        0x0a, 0x1c, 0x01, 0x1a, 0x00, // code
+        0x41, 0x20, // i32.const 32
+        0x02, 0x7f, // block (result i32)
+        0x41, 0x00, 0x04, 0x7f, 0x41, 0x05, 0x05, 0x41, 0x09, 0x0c, 0x01, 0x0b, // if(0) then 5 else 9; br 1
+        0x0b, // end block
+        0x41, 0x01, 0x41, 0x01, 0x74, 0x72, 0x72, 0x0b, // 1; 1; shl; or; or; end
+    };
+    try testing.expectEqual(@as(u32, 43), try runI32Export(testing.allocator, &bytes, "test"));
+}
+
+test "runI32Export: `unreachable` after an inner block does not erase what sits below the outer block" {
+    if (builtin.os.tag == .windows) return skip.phaseEnd(.win64);
+    // (module (func (export "test") (result i32)
+    //   (i32.const 32)
+    //   (block (result i32) (block (i32.const 5) (br 1)) (unreachable))
+    //   (i32.const 1) (i32.const 1) i32.shl
+    //   i32.or i32.or))
+    //
+    // liveness closes EVERY live vreg and zeroes its sim stack on
+    // `unreachable` / `return` / `throw` / `return_call*`, while the `br`
+    // handler stops at the innermost frame's entry depth and emit's
+    // `pushed_vregs` is not drained at all. With `sim_len == 0` the outer
+    // block's `.end` takes the stack-emptied shape and pads the slots below
+    // its base with `merge_vregs[0]`, losing the record that the `i32.const 32`
+    // lived there — so that vreg's range stops early and the following
+    // `i32.const 1` inherits its register.
+    //
+    // Expected 32 | 5 | (1 << 1) = 39; the JIT returns 7 (= 5 | 2).
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type 0: ()->i32
+        0x03, 0x02, 0x01, 0x00, // 1 func, type 0
+        0x07, 0x08, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x00, 0x00, // export "test"
+        0x0a, 0x18, 0x01, 0x16, 0x00, // code
+        0x41, 0x20, // i32.const 32
+        0x02, 0x7f, // block (result i32)
+        0x02, 0x40, 0x41, 0x05, 0x0c, 0x01, 0x0b, // block (void) i32.const 5; br 1; end
+        0x00, // unreachable
+        0x0b, // end block
+        0x41, 0x01, 0x41, 0x01, 0x74, 0x72, 0x72, 0x0b, // 1; 1; shl; or; or; end
+    };
+    try testing.expectEqual(@as(u32, 39), try runI32Export(testing.allocator, &bytes, "test"));
+}
+
+test "runI32Export: a `loop` between the `br` and the block's `.end` preserves the operand below" {
+    if (builtin.os.tag == .windows) return skip.phaseEnd(.win64);
+    // (module (func (export "test") (result i32)
+    //   (i32.const 32)
+    //   (block (result i32) (loop (i32.const 5) (br 1)) (unreachable))
+    //   (i32.const 1) (i32.const 1) i32.shl
+    //   i32.or i32.or))
+    //
+    // Same drain as the test above, with a `loop` as the intervening frame
+    // instead of a `block` — the shape `emitEndIntra`'s case (c) comment cites
+    // (`labels.wast:loop1`). Expected 39; the JIT returns 7.
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type 0: ()->i32
+        0x03, 0x02, 0x01, 0x00, // 1 func, type 0
+        0x07, 0x08, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x00, 0x00, // export "test"
+        0x0a, 0x18, 0x01, 0x16, 0x00, // code
+        0x41, 0x20, // i32.const 32
+        0x02, 0x7f, // block (result i32)
+        0x03, 0x40, 0x41, 0x05, 0x0c, 0x01, 0x0b, // loop (void) i32.const 5; br 1; end
+        0x00, // unreachable
+        0x0b, // end block
+        0x41, 0x01, 0x41, 0x01, 0x74, 0x72, 0x72, 0x0b, // 1; 1; shl; or; or; end
+    };
+    try testing.expectEqual(@as(u32, 39), try runI32Export(testing.allocator, &bytes, "test"));
+}
+
 // Trap-KIND execution tests (ADR-0164 A / D-292: unreachable=5, oob_memory=6,
 // div_by_zero=7, int_overflow=8) live in the sibling `runner_trap_test.zig`
 // (split to keep this file under the 2000-line hard cap; mirrors runner_gc_test).
