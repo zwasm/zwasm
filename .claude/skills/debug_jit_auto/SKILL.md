@@ -101,6 +101,8 @@ to the heading.
 | 18 | **lldb VALUE-trace inside JIT code (`scripts/jit_value_trace.sh`)** | Mac/ubuntu | **Miscompile = wrong output, NO crash** — read regs/mem at a JIT instruction |
 | 19 | **Attribute a spec-lane fail before reading any codegen** | any | **FIRST step on every `ZWASM_SPEC_ENGINE=jit` fail** — the detail line names the func, not the module |
 | 20 | **Operand-stack-pressure sweep** | any | JIT-only wrong result/trap where each op passes in isolation → spilled operand |
+| 21 | **Differential probe by re-exporting a guest's internals** | any | **A toolchain-built `.wasm` aborts under `--engine jit` only** — too big to read |
+| 22 | **liveness sim vs emit `pushed_vregs` drift** | any | Stale block/if result AND `regverify` reports no overlap |
 
 
 ## When to invoke each recipe (decision tree)
@@ -113,6 +115,16 @@ Fail came from a spec-assert runner lane (ZWASM_SPEC_ENGINE=jit)?
     (`zwasm run --engine jit/--engine interp`) for a precise trap kind.
     Only then enter the tree below. (D-590: a `table.get` regalloc bug
     spent a cycle inside `invokeMulti` for want of this step.)
+
+A whole toolchain-built guest (AssemblyScript / TinyGo / Rust / emcc)
+aborts or misbehaves under `--engine jit` but not `--engine interp`?
+└── Recipe 21 FIRST — 21a settles in ONE command whether a host-call
+    boundary is involved at all (compare WHICH import each engine reaches
+    first under `ZWASM_DEBUG=mem.cksum`, not just the checksums), then 21b/21c
+    localize to a guest function and a single heap word without reading the
+    module. 21f ends at a hand-written `.wat`. If a probe inserted INTO the
+    suspect function makes the bug vanish (21e), it is regalloc/liveness —
+    continue at Recipe 22, then Recipe 2 on the `jit.dump` bytes.
 
 Host = Mac / ubuntunote?
 ├── JIT-only wrong result / wrong trap, but each op passes in isolation?
