@@ -923,13 +923,8 @@ pub fn pathOpen(
     // OFLAGS_DIRECTORY — open a sub-DIRECTORY (`fd_readdir` / further
     // `path_*` calls resolve against it). The new slot mirrors a preopen's
     // `.dir` shape so the descendant fd composes with every dir-taking op.
-    if ((oflags & p1.OFLAGS_DIRECTORY) != 0) {
-        // A directory cannot be opened for writing. preview1 says so through
-        // the requested rights, not through a mode flag: asking for FD_WRITE
-        // on a directory open is `isdir`.
-        if ((fs_rights_base & p1.RIGHTS_FD_WRITE) != 0) return .isdir;
-        return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr);
-    }
+    if ((oflags & p1.OFLAGS_DIRECTORY) != 0)
+        return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .reject_write);
 
     // WASI `oflags` select create/trunc/excl; `fs_rights_base` selects the
     // access mode. O_CREAT → createFile (a `std::fs::File::create` guest);
@@ -953,7 +948,7 @@ pub fn pathOpen(
             // pinned by the official corpus, and this fallback is load-bearing
             // for real guests.
             if (err == error.IsDir)
-                return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr);
+                return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .allow_write);
             return mapOpenError(err);
         };
         // O_TRUNC without O_CREAT (a bare truncate-open; the 0.3 `truncate`
@@ -979,6 +974,11 @@ pub fn pathOpen(
     return writeU32LE(mem, opened_fd_ptr, new_fd);
 }
 
+/// Whether a requested write right makes a directory target `isdir`. An
+/// explicit `OFLAGS_DIRECTORY` open says yes; the `error.IsDir` fallback from a
+/// plain open says no, because POSIX-style guests reach it read-only by design.
+const WriteRightPolicy = enum { reject_write, allow_write };
+
 /// `pathOpen` back-half for a DIRECTORY target: open `path` (relative to
 /// `dir`) iterable and append a `.dir` fd-table slot (the same shape a
 /// preopen root gets, so the descendant fd composes with every dir-taking op).
@@ -993,8 +993,18 @@ fn openDirSlot(
     fdflags: p1.Fdflags,
     mem: []u8,
     opened_fd_ptr: u32,
+    policy: WriteRightPolicy,
 ) p1.Errno {
     const sub = dir.openDir(io, path, .{ .iterate = true }) catch |err| return mapOpenError(err);
+    // A directory cannot be opened for writing, and preview1 says so through
+    // the requested rights rather than a mode flag. The check has to come
+    // AFTER the open: a missing path is `noent` and a regular file is its own
+    // error, and neither may be masked by the capability clash.
+    if (policy == .reject_write and (fs_rights_base & p1.RIGHTS_FD_WRITE) != 0) {
+        var d = sub;
+        d.close(io);
+        return .isdir;
+    }
     const rights = deriveRights(parent, fs_rights_base, fs_rights_inheriting, true);
     host.fd_table.append(host.alloc, .{
         .kind = .dir,
@@ -1954,4 +1964,23 @@ test "path_open: a write right on a directory target is isdir" {
     // Without OFLAGS_DIRECTORY the open falls back to a directory open — the
     // POSIX-style pattern (Go's os.Open before ReadDir) that predates rights.
     try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 0, 3, 0, p1.RIGHTS_FD_WRITE, 0, 0, 32));
+
+    // The clash must not mask what the target actually is. A guest probing for
+    // a directory with write rights is owed `noent` for a missing path, not a
+    // capability answer that says the path exists. wasmtime 47.0.3 agrees on
+    // all three (measured: noent / its own not-a-directory error / isdir).
+    @memset(mem[0..64], 0);
+    @memcpy(mem[0..4], "nope");
+    const write_dir = p1.OFLAGS_DIRECTORY;
+    try testing.expectEqual(p1.Errno.noent, pathOpen(&h, &mem, dirfd, 0, 0, 4, write_dir, p1.RIGHTS_FD_WRITE, 0, 0, 32));
+    try testing.expectEqual(p1.Errno.noent, pathOpen(&h, &mem, dirfd, 0, 0, 4, write_dir, p1.RIGHTS_FD_READ, 0, 0, 32));
+
+    // And a regular file answers the same way with or without the write right.
+    @memset(mem[0..64], 0);
+    @memcpy(mem[0..5], "f.txt");
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 0, 5, p1.OFLAGS_CREAT, 0, 0, 0, 32));
+    const with_write = pathOpen(&h, &mem, dirfd, 0, 0, 5, write_dir, p1.RIGHTS_FD_WRITE, 0, 0, 32);
+    const read_only = pathOpen(&h, &mem, dirfd, 0, 0, 5, write_dir, p1.RIGHTS_FD_READ, 0, 0, 32);
+    try testing.expectEqual(read_only, with_write);
+    try testing.expect(with_write != .isdir);
 }

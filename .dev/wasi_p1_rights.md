@@ -159,6 +159,13 @@ Two clamps, both from the witx `path_open` prose:
    `directory_seek` see `fs_rights_base & RIGHTS_FD_SEEK == 0` after asking
    for `RIGHTS_FD_SEEK`.
 
+`oflags::trunc` forces a writable host handle regardless of the requested
+rights, because the open must resize the file. A truncate-open of a file the
+process cannot write is therefore `acces`, from the open itself. It used to be
+`inval`, raised by `ftruncate` on a read-only handle one step later — an
+artifact of doing the truncate in two parts, and the reason `truncation_rights`
+was red. wasmtime 47.0.3 answers `acces` too (measured).
+
 Asking for `fd_write` on a directory is not a clamp but an error: `isdir`.
 `path_open_preopen` requires it, and wasmtime agrees.
 
@@ -202,9 +209,17 @@ confined to its preopen, but `..` is not itself the violation — a path that
 dips through `..` and comes back stays inside and must resolve. Only an
 absolute path, or one whose `..` ascends past the root, escapes.
 
-`path.normalize` folds the path lexically and answers `notcapable` only when
-the fold would leave the root. A trailing separator is preserved, because
-POSIX reads `x/` as "x, which must be a directory" and the host syscalls
-already enforce that. The fold is lexical, so `a/b/..` does not verify that
-`a/b` exists — the trade-off `path.Clean` makes, and the reason follow-time
-symlink confinement (D-315) remains a separate, still-open problem.
+**Not yet implemented.** `fd.zig` and `path.zig` still carry a copy each of
+`pathHasParentEscape`, which rejects any `..` segment outright; this section
+states where the rule is going, not where it is. `interesting_paths` is red
+until it lands. The change is scoped to its own PR because it is path
+resolution rather than rights, and it widens acceptance in a different
+subsystem — the criterion is being able to name one cause when a green falls.
+
+The planned shape: a single `path.normalize` folds the path lexically and
+answers `notcapable` only when the fold would leave the root. A trailing
+separator is preserved, because POSIX reads `x/` as "x, which must be a
+directory" and the host syscalls already enforce that. The fold is lexical, so
+`a/b/..` does not verify that `a/b` exists — the trade-off `path.Clean` makes,
+and the reason follow-time symlink confinement (D-315) remains a separate,
+still-open problem.
