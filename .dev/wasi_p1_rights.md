@@ -4,7 +4,10 @@
 > are bugs in the code.
 
 Which `rights` bit gates which preview1 call, what a preopen advertises, and
-which decisions here are ours rather than the spec's.
+which decisions here are ours rather than the spec's. The decisions and the
+alternatives they beat are recorded in
+[ADR-0215](decisions/0215_wasi_p1_rights_model.md); this file is the table
+they operate on.
 
 ## Sources
 
@@ -164,6 +167,15 @@ The rule is scoped to `OFLAGS_DIRECTORY`. A write-rights open of a directory
 wasmtime answers `isdir` there too, but no test pins it, and the fallback is
 load-bearing for POSIX-style guests (Go's `os.Open` before `ReadDir`, and the
 WASI 0.2 `open-at` trampoline).
+
+### Callers with no rights model
+
+WASI 0.2/0.3 `open-at` has no rights concept — the preopen IS its sandbox — so
+both trampolines ask through `p1.rightsForRightlessOpen(oflags)`. It returns a
+`base` masked by filetype for a directory target and an `inheriting` that is
+**never** masked. Masking the ceiling as well records a directory that cannot
+hand `FD_WRITE` down, and every file opened under it is then clamped to
+unwritable (ADR-0215 D6).
 
 ## Which errno
 
