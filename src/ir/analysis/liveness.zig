@@ -535,22 +535,29 @@ pub fn compute(
         // caller's frame and transfer control to the callee; from
         // liveness's straight-line view they drain the operand
         // stack identically to `return` (the args on top become
-        // the callee's params, marshalled by the emit layer; every
-        // live vreg's last use is at this pc, and control never
-        // reaches subsequent ops at this PC). ADR-0113 §A:
-        // is_terminator=true, n_successor_edges=0.
+        // the callee's params, marshalled by the emit layer, and
+        // control never reaches subsequent ops at this PC).
+        // ADR-0113 §A: is_terminator=true, n_successor_edges=0.
+        // "Drain" here means down to the innermost open frame's entry
+        // depth, not to 0 — see the body.
         if (instr.op == .@"return" or instr.op == .@"unreachable" or
             instr.op == .throw or instr.op == .throw_ref or
             instr.op == .return_call or instr.op == .return_call_indirect or
             instr.op == .return_call_ref)
         {
-            // B1 PROTOTYPE (throwaway): drain only to the innermost open
-            // frame's entry depth, exactly like the `br` handler below.
-            const innermost_entry_t: u32 = if (block_stack_len == 0)
+            // Drain only to the innermost open frame's entry depth — the
+            // same rule the `br` handler below applies, for the same reason:
+            // control never falls through, but the next reachable code
+            // resumes at that frame's `.end`, so values below it are still
+            // read. The emit does not drain `pushed_vregs` on these ops at
+            // all (it sets `dead_code` and skips the rest of the body), so
+            // draining to 0 here would desync the two models and let the
+            // block-merge `.end` pad over slots it cannot reconstruct.
+            const innermost_entry_term: u32 = if (block_stack_len == 0)
                 0
             else
                 block_stack[block_stack_len - 1].entry_depth;
-            while (sim_len > @as(usize, innermost_entry_t)) {
+            while (sim_len > @as(usize, innermost_entry_term)) {
                 sim_len -= 1;
                 const vreg = sim_stack[sim_len];
                 ranges.items[vreg].last_use_pc = pc;
