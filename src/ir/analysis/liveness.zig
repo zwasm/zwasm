@@ -275,10 +275,37 @@ pub fn compute(
                     // jumps over `.end`'s home MOV, leaving it stale
                     // (c_sha256 dropped the final `\n`). Mirrors the
                     // if/else handling above.
-                    if (sim_len >= @as(usize, fr.result_arity)) {
-                        const base = sim_len - @as(usize, fr.result_arity);
-                        var i: u32 = 0;
-                        while (i < fr.result_arity) : (i += 1) {
+                    //
+                    // The case split mirrors `emitEndIntra`. `entry` is the
+                    // block's own operand-stack base (entry depth minus the
+                    // params it consumed), so the merge vregs are homed at
+                    // `entry .. entry + result_arity`.
+                    const arity: usize = fr.result_arity;
+                    const entry: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
+                    if (sim_len < entry + arity) {
+                        // The block's only exit is a `br`: its handler drained
+                        // the body back to the innermost entry depth, so no
+                        // fall-through operand is left to home. The merge
+                        // vregs ARE the block's result — emit's `pushed_vregs`
+                        // still carries them, so put them back and keep them
+                        // live to this `.end`. Without this they die at the
+                        // branch and regalloc hands their register to the next
+                        // push, which then aliases the block's result
+                        // (AssemblyScript `~lib/rt/tlsf.ts` insertBlock's
+                        // `slMap[fl] |= 1 << sl` read 1 instead of 0).
+                        if (sim_len > entry) sim_len = entry;
+                        while (sim_len < entry) : (sim_len += 1) sim_stack[sim_len] = fr.merge_vregs[0];
+                        var i: usize = 0;
+                        while (i < arity) : (i += 1) {
+                            if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
+                            ranges.items[fr.merge_vregs[i]].last_use_pc = pc;
+                            sim_stack[sim_len] = fr.merge_vregs[i];
+                            sim_len += 1;
+                        }
+                    } else {
+                        const base = sim_len - arity;
+                        var i: usize = 0;
+                        while (i < arity) : (i += 1) {
                             ranges.items[sim_stack[base + i]].last_use_pc = pc;
                             ranges.items[fr.merge_vregs[i]].last_use_pc = pc;
                             sim_stack[base + i] = fr.merge_vregs[i];
@@ -333,9 +360,15 @@ pub fn compute(
             // handled by emit's captureOrEmitBlockMergeMov).
             const result_arity_u: u32 = instr.extra & 0xFF;
             if (result_arity_u > 8) return Error.UnsupportedOp;
+            // The block's own params are already on the operand stack at
+            // `entry_depth`, so `.end` needs them to find the block's base
+            // (mirrors emit's `entry_stack_depth - param_arity`). The mask
+            // bounds this to 0..255; `param_vregs` stays unused for
+            // block/loop frames (only if-frames re-push params at `.else`).
+            const block_param_arity_u: u32 = (instr.extra >> 8) & 0xFF;
             block_stack[block_stack_len] = .{
                 .entry_depth = @intCast(sim_len),
-                .param_arity = 0,
+                .param_arity = @intCast(block_param_arity_u),
                 .result_arity = @intCast(result_arity_u),
                 .is_if = false,
                 // D-330: a `loop` is a backward-branch target (no
