@@ -1208,6 +1208,36 @@ test "JitInstance: ref.as_non_null module JIT-compiles (liveness stackEffect)" {
     inst.deinit(testing.allocator);
 }
 
+test "runI32Export: ref.as_non_null result outliving an i32 local → 1040 (#245)" {
+    if (builtin.os.tag == .windows) return skip.phaseEnd(.win64);
+    // (module (type $pt (struct (field i32) (field i32)))
+    //   (func (export "f") (result i32) (local $p (ref $pt)) (local $k i32)
+    //     (local.set $k (i32.const 1000))
+    //     (local.set $p (ref.as_non_null (struct.new $pt (i32.const 40) (i32.const 2))))
+    //     (i32.add (local.get $k) (struct.get $pt 0 (local.get $p)))))
+    // The compile-only gate above proves ref.as_non_null EMITS; it cannot
+    // prove it computes. Both emitters push the source vreg straight back
+    // (identity, no result vreg), so a liveness model that pops-and-pushes
+    // closes the operand's range and frees its register while the narrowed
+    // ref is still live. Pre-fix the JIT returned 42: `local.get $k` handed
+    // back the `i32.const 2` that fed struct.new. Keeping the result alive
+    // across one more value is the whole trigger — a single consumer is
+    // always correct, which is why the spec corpus misses it (#245).
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x0b, 0x02, 0x5f, 0x02, 0x7f, 0x00, 0x7f, // type: $pt struct(i32,i32)
+        0x00, 0x60, 0x00, 0x01, 0x7f, // type: ()->(i32)
+        0x03, 0x02, 0x01, 0x01, // func: type 1
+        0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, // export "f" func 0
+        0x0a, 0x21, 0x01, 0x1f, 0x02, 0x01, 0x64,
+        0x00, 0x01, 0x7f, 0x41, 0xe8, 0x07, 0x21,
+        0x01, 0x41, 0x28, 0x41, 0x02, 0xfb, 0x00,
+        0x00, 0xd4, 0x21, 0x00, 0x20, 0x01, 0x20,
+        0x00, 0xfb, 0x02, 0x00, 0x00, 0x6a, 0x0b,
+    };
+    try testing.expectEqual(@as(u32, 1040), try runI32Export(testing.allocator, &bytes, "f"));
+}
+
 // ── D-212: cross-function ref-param struct.get result-class scaffolding ──
 // A struct ref passed as a call ARGUMENT, then read in the callee via
 // struct.get. The i32 control PASSES (ref-arg passing + GPR result are
