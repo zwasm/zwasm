@@ -74,7 +74,7 @@ pub const FuncResult = struct {
 pub fn deinitFuncResult(allocator: Allocator, r: *FuncResult) void {
     emit.deinit(allocator, r.out);
     regalloc.deinit(allocator, r.alloc_result);
-    if (r.func.liveness) |lv| if (lv.ranges.len != 0) allocator.free(lv.ranges);
+    if (r.func.liveness) |lv| liveness.deinit(allocator, lv);
     if (r.func.loop_info) |li| loop_info_mod.deinit(allocator, li);
     hoist.deinitArtifacts(allocator, &r.func);
     coalesce.deinitArtifacts(allocator, &r.func);
@@ -239,7 +239,7 @@ pub fn compileOne(
     // FuncResult is never constructed and the errdefer chain
     // would leak `lv.ranges`. Mirror deinitFuncResult's free
     // here so the unwind path is symmetric.
-    errdefer if (lv.ranges.len != 0) allocator.free(lv.ranges);
+    errdefer liveness.deinit(allocator, lv);
     {
         const applied: u32 = @intCast(lv.ranges.len);
         trace.passExit(func_idx, .liveness, .{ .applied = applied, .skipped = 0, .extra = applied });
