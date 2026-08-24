@@ -17,6 +17,21 @@ const ValType = zir.ValType;
 
 pub const ElementKind = enum { active, passive, declarative };
 
+/// Wasm 3.0 §5.5.12 — an element segment's element type depends on its FORM,
+/// and the two forms disagree on nullability:
+///
+///   flags 0x00-0x03  funcidx vector  -> NON-NULLABLE `(ref func)`
+///   flags 0x04       expr vector     -> nullable `funcref`
+///   flags 0x05-0x07  expr vector     -> the declared reftype
+///
+/// which is exactly what the reference decoder assigns — `(NoNull, FuncHT)`
+/// for the first group via `elem`/`elem_kind`, `(Null, FuncHT)` for 0x04
+/// (`interpreter/binary/decode.ml`). Recording the nullable `funcref` for the
+/// funcidx form made a `(ref func)` table refuse its own legacy segment, while
+/// recording the non-nullable one for 0x04 would have let a `funcref` segment
+/// pass into a `(ref func)` table.
+const FUNCIDX_ELEM_TYPE: ValType = .{ .ref = zir.RefType.abs(.func, false) };
+
 pub const ElementSegment = struct {
     kind: ElementKind,
     tableidx: u32 = 0,
@@ -111,7 +126,7 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
                     .kind = .active,
                     .tableidx = 0,
                     .offset_expr = expr,
-                    .elem_type = .funcref,
+                    .elem_type = FUNCIDX_ELEM_TYPE,
                     .funcidxs = funcs,
                 };
             },
@@ -124,7 +139,7 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
                 try sections.checkVecCount(n, body, pos); // ≥1 byte/elem — reject oversized count pre-alloc
                 const funcs = try alloc.alloc(u32, n);
                 for (funcs) |*f| f.* = try leb128.readUleb128(u32, body, &pos);
-                e.* = .{ .kind = .passive, .elem_type = .funcref, .funcidxs = funcs };
+                e.* = .{ .kind = .passive, .elem_type = FUNCIDX_ELEM_TYPE, .funcidxs = funcs };
             },
             3 => {
                 if (pos >= body.len) return sections.Error.UnexpectedEnd;
@@ -135,7 +150,7 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
                 try sections.checkVecCount(n, body, pos); // ≥1 byte/elem — reject oversized count pre-alloc
                 const funcs = try alloc.alloc(u32, n);
                 for (funcs) |*f| f.* = try leb128.readUleb128(u32, body, &pos);
-                e.* = .{ .kind = .declarative, .elem_type = .funcref, .funcidxs = funcs };
+                e.* = .{ .kind = .declarative, .elem_type = FUNCIDX_ELEM_TYPE, .funcidxs = funcs };
             },
             4 => {
                 // active, table 0, offset expr, vec(reftype-expr).
@@ -179,7 +194,7 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
                     .kind = .active,
                     .tableidx = tableidx,
                     .offset_expr = expr,
-                    .elem_type = .funcref,
+                    .elem_type = FUNCIDX_ELEM_TYPE,
                     .funcidxs = funcs,
                 };
             },
