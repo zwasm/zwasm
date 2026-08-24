@@ -41,6 +41,7 @@
 //! isolation).
 
 const std = @import("std");
+const liveness_parity = @import("../shared/liveness_parity.zig");
 const dbg = @import("../../../support/dbg.zig");
 const call_profile = @import("../../../support/call_profile.zig");
 
@@ -727,6 +728,7 @@ pub fn compile(
     var pushed_vregs: std.ArrayList(u32) = .empty;
     defer pushed_vregs.deinit(allocator);
     var next_vreg: u32 = 0;
+    const parity_on = liveness_parity.on();
 
     // Control-stack: Wasm structured-control labels (block /
     // loop). Forward fixups (br to block) land in `pending`;
@@ -904,7 +906,12 @@ pub fn compile(
         .home_save_base_disp = home_save_base_disp,
     });
 
-    for (func.instrs.items) |ins| {
+    for (func.instrs.items, 0..) |ins, pc| {
+        // D-596 — liveness's operand-stack simulation must still agree with
+        // what this loop does to `pushed_vregs`. Off unless the diagnostic is.
+        if (parity_on) {
+            liveness_parity.check(func, pc, ins.op, pushed_vregs.items, labels.items, dead_code);
+        }
         // `end` / `else` always exit the dead region — emit's own
         // bookkeeping (label-stack pop / arm switch) must run.
         // Mirror of arm64/emit.zig:381-414.

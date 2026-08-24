@@ -470,6 +470,16 @@ pub const Liveness = struct {
     /// instr index that pushed the value; `last_use_pc` is the
     /// final consuming instr (pop-side or function-level end).
     ranges: []const LiveRange = &.{},
+
+    /// D-596 — per-pc snapshot of the simulated operand stack, taken BEFORE
+    /// instr `pc`. Populated only when `ZWASM_DEBUG=liveverify` is on; the
+    /// emit compares it against its own `pushed_vregs` so a divergence
+    /// surfaces at the instruction that caused it instead of as a wrong
+    /// number downstream. `stack_digest` is FNV-1a over the vreg ids: the
+    /// class is a vreg-IDENTITY drift, and three of its four known instances
+    /// are depth-neutral. Empty (and skipped) on every other build.
+    stack_depth: []const u32 = &.{},
+    stack_digest: []const u64 = &.{},
 };
 
 pub const LiveRange = struct {
