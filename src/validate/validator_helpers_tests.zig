@@ -13,7 +13,7 @@ const zir = @import("../ir/zir.zig");
 const ValType = zir.ValType;
 const GlobalEntry = validator.GlobalEntry;
 
-test "validateConstExpr: is_const opcode set + arity + global.get mutability (§3.3.7)" {
+test "validateConstExpr: is_const opcode set + arity + global.get mutability (§3.3.13.1)" {
     var types: sections.Types = .{
         .arena = std.heap.ArenaAllocator.init(testing.allocator),
         .items = &.{},
@@ -63,13 +63,20 @@ test "validateConstExpr: is_const opcode set + arity + global.get mutability (§
     // Trailing bytes after `end`.
     try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0x41, 0x00, 0x0B, 0x41, 0x00 }, .i32, scope));
 
-    // The GC family is admissible per `is_const` but not typed here — it must
-    // come back undeterminable so an incomplete walker cannot reject a valid
-    // module (struct.new 3).
-    try testing.expectEqual(validator.ConstExprVerdict.undeterminable, validator.validateConstExpr(&[_]u8{ 0xFB, 0x00, 0x03, 0x0B }, .i32, scope));
+    // The GC family is admissible per `is_const` but not typed here. Every one
+    // of its forms yields a reference, so the verdict splits on what the
+    // position expects: a reference is undeterminable (an incomplete walker
+    // must not reject a valid module), a numeric type is an outright mismatch.
+    try testing.expectEqual(validator.ConstExprVerdict.undeterminable, validator.validateConstExpr(&[_]u8{ 0xFB, 0x00, 0x03, 0x0B }, ValType.anyref, scope));
+    try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0xFB, 0x00, 0x03, 0x0B }, .i32, scope));
+
+    // An expression deeper than a single instruction's arity is typed, not
+    // waved through: extended-const can push many operands before folding.
+    try testing.expectEqual(validator.ConstExprVerdict.ok, validator.validateConstExpr(&[_]u8{ 0x41, 0x01, 0x41, 0x02, 0x41, 0x03, 0x6A, 0x6A, 0x0B }, .i32, scope));
+    try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0x41, 0x01, 0x42, 0x02, 0x6A, 0x0B }, .i32, scope));
 }
 
-test "validateConstExpr: the readable-global window is positional (§3.3.7 context order)" {
+test "validateConstExpr: the readable-global window is positional (§3.3.13.1 context order)" {
     var types: sections.Types = .{
         .arena = std.heap.ArenaAllocator.init(testing.allocator),
         .items = &.{},

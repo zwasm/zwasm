@@ -173,7 +173,7 @@ pub fn validateTypeSection(types: *const sections.Types) bool {
     return true;
 }
 
-/// Wasm 3.0 §3.3.7 — the verdict of walking a constant expression.
+/// Wasm 3.0 §3.3.13.1 — the verdict of walking a constant expression.
 /// `undeterminable` is the conservative arm: the expression uses a shape this
 /// walker does not model (the GC `0xFB` family), so it must not be rejected.
 pub const ConstExprVerdict = enum { ok, invalid, undeterminable };
@@ -191,7 +191,7 @@ pub const ConstExprScope = struct {
     types: *const sections.Types,
 };
 
-/// Wasm 3.0 §3.3.7 — type-check a constant expression against the type its
+/// Wasm 3.0 §3.3.13.1 — type-check a constant expression against the type its
 /// position demands. Mirrors the reference interpreter's `is_const` +
 /// `check_const` pair: `is_const` fixes the admissible opcode set (including
 /// extended-const's `i32`/`i64` `add`/`sub`/`mul`, and `global.get` only for
@@ -203,10 +203,13 @@ pub fn validateConstExpr(
     expected: ValType,
     scope: ConstExprScope,
 ) ConstExprVerdict {
-    // Const exprs are tiny in every real module; a fixed stack keeps this
-    // allocation-free. An expression deep enough to overflow it is one this
-    // walker declines to judge rather than rejects.
-    var stack: [16]ValType = undefined;
+    // A fixed stack keeps this allocation-free. Extended-const lets an
+    // expression push arbitrarily many operands before folding them
+    // (`i32.const` xN followed by `i32.add` xN-1 is valid at any N), so the
+    // bound is set far above any shape a producer emits rather than at the
+    // arity of a single instruction. Overflow yields `.undeterminable`, never
+    // `.invalid` — rejecting there would reject a valid module.
+    var stack: [256]ValType = undefined;
     var sp: usize = 0;
     var pos: usize = 0;
 
@@ -279,10 +282,11 @@ pub fn validateConstExpr(
                 sp += 1;
             },
             // GC + extern-convert const forms (struct.new / array.new* /
-            // ref.i31 / any.convert_extern …). Admissible per `is_const`, but
-            // typing them needs the full GC type algebra — decline to judge
-            // rather than reject a valid module.
-            0xFB => return .undeterminable,
+            // ref.i31 / any.convert_extern …). Every one of them yields a
+            // reference, so a numeric `expected` can never be satisfied and is
+            // an outright mismatch. Typing them against a reference needs the
+            // full GC type algebra, which this walker declines to judge.
+            0xFB => return if (expected == .ref) .undeterminable else .invalid,
             else => return .invalid, // not in `is_const`
         }
     }
