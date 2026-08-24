@@ -40,14 +40,14 @@ entries:
       differ by design and are excluded from state the emit already holds: the
       dead region (`dead_code`), and the else arm of an `if (result T…)` with
       no params, where `emitElse` leaves the captured merge vregs on
-      `pushed_vregs` and liveness drops them. Prototyped and measured
-      2026-08-24 on `5058d517f`: fires on all four instances, 1 residual line
+      `pushed_vregs` and liveness drops them. Landed in #269 (`3930aa6eb`);
+      measured 2026-08-24 on `5058d517f`: fires on all four instances, 1 residual line
       over the realworld corpus (21,102 functions / 9.97M instrs), 239 over the
       spec + edge-case corpora of which 61 are the fifth instance below and 178
       remain; +0.9% compile time gated off, 12 B/instr while on, comptime-zero
       in ReleaseFast/ReleaseSmall. Shape: one shared
       `engine/codegen/shared/liveness_parity.zig` plus one call line in each
-      emit loop (arm64 already carries `pc`; x86_64 needs `, 0..`), and the
+      emit loop, and the
       snapshot rides on `zir.Liveness`, which `compile.zig:235` already threads
       into the emit.
       **Reach.** Through the CLI only. `ZWASM_DEBUG` never reaches any test
@@ -87,12 +87,12 @@ entries:
       src/ir/analysis/liveness_stack_effect.zig (the table);
       src/engine/codegen/{x86_64,arm64}/ctx.zig (pushed_vregs, popUnary/popBinary);
       src/engine/codegen/{x86_64,arm64}/op_control.zig (emitElse, emitIf, emitEndIntra);
-      src/engine/codegen/x86_64/emit.zig:907 + arm64/emit.zig:877 (the emit loops);
+      src/engine/codegen/x86_64/emit.zig:909 + arm64/emit.zig:879 (the emit loops);
       src/engine/codegen/shared/compile.zig:235 (liveness reaches the emit), :306 (regverify precedent);
       src/engine/codegen/shared/regalloc_shape_tags.zig:88-346 (third reader of the table);
       .claude/skills/debug_jit_auto/RECIPES.md (Recipe 22);
       .dev/lessons/2026-06-02-jit-liveness-must-mirror-emit-pushed-vregs.md;
-      D-093 (d-3), D-220, D-330; issues #245, #250, #253, #<ZWASM_DEBUG-never-reaches-a-runner>;
+      D-093 (d-3), D-220, D-330; issues #245, #250, #253, #268;
       commits 64e634336, ca6f934ec, b9a8afb5c, 163062bd0.
   - id: "D-595"
     layer: "ci"
