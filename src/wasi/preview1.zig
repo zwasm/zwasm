@@ -309,11 +309,15 @@ pub const RIGHTS_DIRECTORY_APPLICABLE: Rights =
 /// `path_open` — the component-model `open-at` paths, where the preopen IS the
 /// sandbox and WASI 0.2/0.3 has no rights concept at all.
 ///
-/// `base` drops the file-content rights for a directory target, because
-/// `path_open` answers `isdir` to a write right on one. `inheriting` is
-/// **never** masked: `RIGHTS_DIRECTORY_APPLICABLE` is a rule about what THIS
-/// fd may do, not about what it may hand down, and masking it would silently
-/// strip FD_WRITE from every file later opened under the directory.
+/// A directory target gets exactly `RIGHTS_DIRECTORY_BASE` — what a preopen
+/// advertises — so that a directory reached through `open-at` and one reached
+/// through a preopen hold the same capabilities. Anything wider hands the
+/// component fd rights (`fd_sync`, `fd_datasync`, `fd_fdstat_set_flags`) that
+/// a preview1 guest is refused on the same directory.
+///
+/// `inheriting` is **never** narrowed to that set: it is the ceiling for the
+/// FILES opened underneath, and clamping it there would strip FD_WRITE from
+/// every one of them.
 ///
 /// A FILE target is deliberately not filetype-masked, so its `fd_fdstat_get`
 /// reports directory rights it can never use. Two reasons to leave it: the
@@ -330,10 +334,7 @@ pub const RIGHTS_DIRECTORY_APPLICABLE: Rights =
 pub fn rightsForRightlessOpen(oflags: Oflags) struct { base: Rights, inheriting: Rights } {
     const dir_target = (oflags & OFLAGS_DIRECTORY) != 0;
     return .{
-        .base = if (dir_target)
-            RIGHTS_DIRECTORY_INHERITING & RIGHTS_DIRECTORY_APPLICABLE
-        else
-            RIGHTS_DIRECTORY_INHERITING,
+        .base = if (dir_target) RIGHTS_DIRECTORY_BASE else RIGHTS_DIRECTORY_INHERITING,
         .inheriting = RIGHTS_DIRECTORY_INHERITING,
     };
 }
@@ -555,6 +556,10 @@ test "rightsForRightlessOpen: the filetype mask never reaches the inheriting cei
     try testing.expectEqual(RIGHTS_DIRECTORY_INHERITING, dir.inheriting);
     try testing.expect(dir.inheriting & RIGHTS_FD_WRITE != 0);
     try testing.expect(dir.inheriting & RIGHTS_FD_SEEK != 0);
+
+    // A directory gets exactly what a preopen advertises, so the two ways of
+    // reaching a directory hold the same capabilities once rights are enforced.
+    try testing.expectEqual(RIGHTS_DIRECTORY_BASE, dir.base);
 
     // A file target is asked for the whole ceiling on both.
     const file = rightsForRightlessOpen(0);

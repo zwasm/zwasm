@@ -123,7 +123,18 @@ pub fn fdWrite(
 /// trampoline, where `list<u8>` is a flat `(ptr, len)` rather than a ciovec.
 pub fn writeSlice(host: *Host, fd: p1.Fd, bytes: []const u8) p1.Errno {
     const slot = host.translateFd(fd) orelse return .badf;
-    if (slot.kind == .closed) return .badf;
+    // The fd's TYPE decides whether the operation exists at all; only then does
+    // the capability decide whether THIS fd may perform it. Keeping that order
+    // is what preserves `isdir` / `notsup` / `spipe` as the answers a guest
+    // gets from a stream or a directory — measured against wasmtime 47, which
+    // reports the type error for every one of these.
+    switch (slot.kind) {
+        .stdout, .stderr, .file => {},
+        .stdin => return .notsup,
+        .dir => return .isdir,
+        .closed => return .badf,
+    }
+    if (!slot.has(p1.RIGHTS_FD_WRITE)) return .notcapable;
 
     // stdout/stderr route to a capture buffer (or are dropped); a file fd
     // writes to the host file at its cursor via std.Io.File (D-243 cycle 2).
@@ -131,13 +142,11 @@ pub fn writeSlice(host: *Host, fd: p1.Fd, bytes: []const u8) p1.Errno {
     const buffer: ?*std.ArrayList(u8) = switch (slot.kind) {
         .stdout => host.stdout_buffer,
         .stderr => host.stderr_buffer,
-        .stdin => return .notsup,
-        .dir => return .isdir,
         .file => fblk: {
             file_opt = .{ .handle = slot.host_handle orelse return .badf, .flags = .{ .nonblocking = false } };
             break :fblk null;
         },
-        .closed => return .badf,
+        .stdin, .dir, .closed => unreachable, // rejected above
     };
     const io_opt = host.io;
     if (file_opt != null and io_opt == null) return .nosys;
@@ -218,12 +227,13 @@ pub fn fdRead(
 ) p1.Errno {
     const slot = host.translateFd(fd) orelse return .badf;
     switch (slot.kind) {
-        .stdin => {},
+        .stdin, .file => {},
         .stdout, .stderr => return .notsup,
         .dir => return .isdir,
-        .file => return fdReadFile(host, mem, slot, iovec_ptr, iovec_count, nread_ptr),
         .closed => return .badf,
     }
+    if (!slot.has(p1.RIGHTS_FD_READ)) return .notcapable;
+    if (slot.kind == .file) return fdReadFile(host, mem, slot, iovec_ptr, iovec_count, nread_ptr);
 
     var total: u32 = 0;
     var i: u32 = 0;
@@ -340,6 +350,13 @@ pub fn fdSeek(
         .closed => return .badf,
         .file => {},
     }
+    // witx: FD_TELL covers the offset-preserving form (`cur` + 0); anything
+    // that can move the cursor needs FD_SEEK. FD_SEEK "implies FD_TELL", so it
+    // satisfies the offset-preserving form on its own.
+    const preserves_offset = whence == @intFromEnum(p1.Whence.cur) and offset == 0;
+    const may_seek = slot.has(p1.RIGHTS_FD_SEEK) or
+        (preserves_offset and slot.has(p1.RIGHTS_FD_TELL));
+    if (!may_seek) return .notcapable;
     const handle = slot.host_handle orelse return .badf;
     const io = host.io orelse return .nosys;
     const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
@@ -368,6 +385,8 @@ pub fn fdTell(host: *Host, mem: []u8, fd: p1.Fd, pos_ptr: u32) p1.Errno {
         .closed => return .badf,
         .file => {},
     }
+    // FD_SEEK "implies rights::fd_tell" (witx), so either bit answers for it.
+    if (!slot.has(p1.RIGHTS_FD_TELL) and !slot.has(p1.RIGHTS_FD_SEEK)) return .notcapable;
     return writeU64LE(mem, pos_ptr, slot.pos);
 }
 
@@ -384,6 +403,7 @@ pub fn fdSync(host: *Host, fd: p1.Fd) p1.Errno {
         .stdin, .stdout, .stderr => return .success,
         .closed => return .badf,
         .file, .dir => {
+            if (!slot.has(p1.RIGHTS_FD_SYNC)) return .notcapable;
             const io = host.io orelse return .nosys;
             const handle = slot.host_handle orelse return .badf;
             const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
@@ -404,6 +424,7 @@ pub fn fdDatasync(host: *Host, fd: p1.Fd) p1.Errno {
         .stdin, .stdout, .stderr => return .success,
         .closed => return .badf,
         .file, .dir => {
+            if (!slot.has(p1.RIGHTS_FD_DATASYNC)) return .notcapable;
             const io = host.io orelse return .nosys;
             const handle = slot.host_handle orelse return .badf;
             const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
@@ -428,7 +449,7 @@ pub fn fdAdvise(host: *Host, fd: p1.Fd, offset: u64, len: u64, advice: u8) p1.Er
         // Advisory information applies to file data; a directory has none
         // (official filesystem-advise.wasm asserts bad-descriptor).
         .closed, .dir => .badf,
-        .file => .success,
+        .file => if (slot.has(p1.RIGHTS_FD_ADVISE)) .success else .notcapable,
     };
 }
 
@@ -456,6 +477,9 @@ pub fn fdPread(
         .dir => return .isdir,
         .closed => return .badf,
     }
+    // witx: FD_READ "includes the right to invoke fd_pread" only when FD_SEEK
+    // is also held — positional IO is a seek plus a read.
+    if (!slot.has(p1.RIGHTS_FD_READ | p1.RIGHTS_FD_SEEK)) return .notcapable;
     const handle = slot.host_handle orelse return .badf;
     const io = host.io orelse return .nosys;
     const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
@@ -497,6 +521,7 @@ pub fn fdPwrite(
         .dir => return .isdir,
         .closed => return .badf,
     }
+    if (!slot.has(p1.RIGHTS_FD_WRITE | p1.RIGHTS_FD_SEEK)) return .notcapable;
     const handle = slot.host_handle orelse return .badf;
     const io = host.io orelse return .nosys;
     const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
@@ -609,6 +634,10 @@ pub fn fdFdstatGet(
 pub fn fdFdstatSetFlags(host: *Host, fd: p1.Fd, flags: p1.Fdflags) p1.Errno {
     const slot = host.translateFd(fd) orelse return .badf;
     if (slot.kind == .closed) return .badf;
+    switch (slot.kind) {
+        .stdin, .stdout, .stderr => {},
+        .file, .dir, .closed => if (!slot.has(p1.RIGHTS_FD_FDSTAT_SET_FLAGS)) return .notcapable,
+    }
     const allowed: p1.Fdflags = p1.FDFLAGS_APPEND | p1.FDFLAGS_DSYNC |
         p1.FDFLAGS_NONBLOCK | p1.FDFLAGS_RSYNC | p1.FDFLAGS_SYNC;
     slot.fs_flags = flags & allowed;
@@ -701,6 +730,7 @@ pub fn fdFilestatSetTimes(host: *Host, fd: p1.Fd, atim: u64, mtim: u64, fst_flag
         .closed => return .badf,
         .file, .dir => {},
     }
+    if (!slot.has(p1.RIGHTS_FD_FILESTAT_SET_TIMES)) return .notcapable;
     const io = host.io orelse return .nosys;
     const handle = slot.host_handle orelse return .badf;
     const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
@@ -731,6 +761,7 @@ pub fn fdFilestatSetSize(host: *Host, fd: p1.Fd, size: u64) p1.Errno {
         .closed => return .badf,
         .file => {},
     }
+    if (!slot.has(p1.RIGHTS_FD_FILESTAT_SET_SIZE)) return .notcapable;
     const io = host.io orelse return .nosys;
     const handle = slot.host_handle orelse return .badf;
     const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
@@ -750,6 +781,7 @@ pub fn fdAllocate(host: *Host, fd: p1.Fd, offset: u64, len: u64) p1.Errno {
         .closed => return .badf,
         .file => {},
     }
+    if (!slot.has(p1.RIGHTS_FD_ALLOCATE)) return .notcapable;
     const io = host.io orelse return .nosys;
     const handle = slot.host_handle orelse return .badf;
     const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
@@ -836,6 +868,7 @@ pub fn fdReaddir(host: *Host, mem: []u8, fd: p1.Fd, buf_ptr: u32, buf_len: u32, 
         .closed => return .badf,
         .stdin, .stdout, .stderr, .file => return .notdir,
     }
+    if (!slot.has(p1.RIGHTS_FD_READDIR)) return .notcapable;
     const io = host.io orelse return .nosys;
     const handle = slot.host_handle orelse return .badf;
     const dir: std.Io.Dir = .{ .handle = handle };
@@ -912,6 +945,12 @@ pub fn pathOpen(
     // Resolve dirfd.
     const dir_slot = host.translateFd(dirfd) orelse return .badf;
     if (dir_slot.kind != .dir) return .notdir;
+    // witx: PATH_OPEN gates the call; PATH_CREATE_FILE and
+    // PATH_FILESTAT_SET_SIZE gate the `creat` and `trunc` open-flags.
+    var needed: p1.Rights = p1.RIGHTS_PATH_OPEN;
+    if ((oflags & p1.OFLAGS_CREAT) != 0) needed |= p1.RIGHTS_PATH_CREATE_FILE;
+    if ((oflags & p1.OFLAGS_TRUNC) != 0) needed |= p1.RIGHTS_PATH_FILESTAT_SET_SIZE;
+    if (!dir_slot.has(needed)) return .notcapable;
     const dir_handle = dir_slot.host_handle orelse return .notdir;
 
     // Filesystem syscalls require an io context; tests / production
@@ -1046,6 +1085,12 @@ fn kindToFiletype(kind: std.Io.File.Kind) p1.Filetype {
 pub fn fdFilestatGet(host: *Host, mem: []u8, fd: p1.Fd, filestat_ptr: u32) p1.Errno {
     const slot = host.translateFd(fd) orelse return .badf;
     if (slot.kind == .closed) return .badf;
+    switch (slot.kind) {
+        // A stdio stream's filestat is synthetic, not a capability the guest
+        // holds over a filesystem object; wasmtime answers it too.
+        .stdin, .stdout, .stderr => {},
+        .file, .dir, .closed => if (!slot.has(p1.RIGHTS_FD_FILESTAT_GET)) return .notcapable,
+    }
     const dst = sliceMem(mem, filestat_ptr, @sizeOf(p1.Filestat)) orelse return .fault;
 
     const fs: p1.Filestat = switch (slot.kind) {
@@ -1094,6 +1139,7 @@ pub fn pathUnlinkFile(host: *Host, mem: []u8, dirfd: p1.Fd, path_ptr: u32, path_
     if (pathHasParentEscape(path)) return .notcapable;
     const dir_slot = host.translateFd(dirfd) orelse return .badf;
     if (dir_slot.kind != .dir) return .notdir;
+    if (!dir_slot.has(p1.RIGHTS_PATH_UNLINK_FILE)) return .notcapable;
     const dir_handle = dir_slot.host_handle orelse return .notdir;
     const io = host.io orelse return .nosys;
     const dir: std.Io.Dir = .{ .handle = dir_handle };
@@ -1328,7 +1374,7 @@ test "fdSync / fdDatasync: real file fd succeeds; stdio noop; closed badf" {
 
     var mem: [64]u8 = @splat(0);
     @memcpy(mem[16..28], "synced.txt\x00\x00"[0..12]);
-    const oe = pathOpen(&h, &mem, dirfd, 0, 16, 10, p1.OFLAGS_CREAT, p1.RIGHTS_FD_WRITE, 0, 0, 32);
+    const oe = pathOpen(&h, &mem, dirfd, 0, 16, 10, p1.OFLAGS_CREAT, p1.RIGHTS_FD_WRITE | p1.RIGHTS_FD_SYNC | p1.RIGHTS_FD_DATASYNC, 0, 0, 32);
     try testing.expectEqual(p1.Errno.success, oe);
     const fd = std.mem.readInt(u32, mem[32..36], .little);
 
@@ -1356,7 +1402,8 @@ test "fdPwrite / fdPread: positional round-trip at an offset (no cursor move)" {
 
     var mem: [128]u8 = @splat(0);
     @memcpy(mem[0..8], "pos.txt\x00");
-    const oe = pathOpen(&h, &mem, dirfd, 0, 0, 7, p1.OFLAGS_CREAT, p1.RIGHTS_FD_WRITE | p1.RIGHTS_FD_READ, 0, 0, 96);
+    // Positional IO is a seek plus a read/write, so it needs FD_SEEK too.
+    const oe = pathOpen(&h, &mem, dirfd, 0, 0, 7, p1.OFLAGS_CREAT, p1.RIGHTS_FD_WRITE | p1.RIGHTS_FD_READ | p1.RIGHTS_FD_SEEK, 0, 0, 96);
     try testing.expectEqual(p1.Errno.success, oe);
     const fd = std.mem.readInt(u32, mem[96..100], .little);
 
@@ -1405,10 +1452,10 @@ test "fdRenumber: moves an fd onto another; source becomes badf" {
 
     var mem: [128]u8 = @splat(0);
     @memcpy(mem[100..101], "x");
-    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 100, 1, 0, p1.RIGHTS_FD_READ, 0, 0, 108));
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 100, 1, 0, p1.RIGHTS_FD_READ | p1.RIGHTS_FD_FILESTAT_GET, 0, 0, 108));
     const fd_x = std.mem.readInt(u32, mem[108..112], .little);
     @memcpy(mem[100..101], "y");
-    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 100, 1, 0, p1.RIGHTS_FD_READ, 0, 0, 108));
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 100, 1, 0, p1.RIGHTS_FD_READ | p1.RIGHTS_FD_FILESTAT_GET, 0, 0, 108));
     const fd_y = std.mem.readInt(u32, mem[108..112], .little);
 
     // Renumber x onto y: fd_y now holds x's 5-byte file; fd_x is closed.
@@ -1528,7 +1575,8 @@ test "fdFilestatSetSize / fdAllocate: truncate-extend exact, allocate grows-only
 
     var mem: [128]u8 = @splat(0);
     @memcpy(mem[0..8], "sz.txt\x00\x00"[0..8]);
-    const oe = pathOpen(&h, &mem, dirfd, 0, 0, 6, p1.OFLAGS_CREAT, p1.RIGHTS_FD_WRITE, 0, 0, 96);
+    const oe = pathOpen(&h, &mem, dirfd, 0, 0, 6, p1.OFLAGS_CREAT, p1.RIGHTS_FD_WRITE |
+        p1.RIGHTS_FD_FILESTAT_SET_SIZE | p1.RIGHTS_FD_ALLOCATE | p1.RIGHTS_FD_FILESTAT_GET, 0, 0, 96);
     try testing.expectEqual(p1.Errno.success, oe);
     const fd = std.mem.readInt(u32, mem[96..100], .little);
 
@@ -1571,7 +1619,8 @@ test "fdFilestatSetTimes: set mtim and read it back via fdFilestatGet" {
 
     var mem: [128]u8 = @splat(0);
     @memcpy(mem[0..8], "tim.txt\x00");
-    const oe = pathOpen(&h, &mem, dirfd, 0, 0, 7, p1.OFLAGS_CREAT, p1.RIGHTS_FD_WRITE, 0, 0, 96);
+    const oe = pathOpen(&h, &mem, dirfd, 0, 0, 7, p1.OFLAGS_CREAT, p1.RIGHTS_FD_WRITE |
+        p1.RIGHTS_FD_FILESTAT_SET_TIMES | p1.RIGHTS_FD_FILESTAT_GET, 0, 0, 96);
     try testing.expectEqual(p1.Errno.success, oe);
     const fd = std.mem.readInt(u32, mem[96..100], .little);
 
@@ -1752,7 +1801,7 @@ test "fd_seek + fd_tell move + report the file cursor (set/cur/end whence)" {
 
     var mem: [128]u8 = @splat(0);
     @memcpy(mem[16..24], "seek.txt");
-    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 16, 8, 0, p1.RIGHTS_FD_READ, 0, 0, 100));
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 16, 8, 0, p1.RIGHTS_FD_READ | p1.RIGHTS_FD_SEEK | p1.RIGHTS_FD_TELL, 0, 0, 100));
     const fd = std.mem.readInt(u32, mem[100..104], .little);
     const slot = h.translateFd(fd).?;
     defer {
@@ -1914,7 +1963,6 @@ test "fdWrite: max_capture_bytes bounds a capture buffer and reports nospc" {
 // ============================================================
 // Rights: derivation + enforcement
 // ============================================================
-
 test "deriveRights: a derived fd cannot exceed the parent's inheriting set" {
     const parent: host_mod.OpenFd = .{
         .kind = .dir,
@@ -1990,4 +2038,166 @@ test "path_open: a write right on a directory target is isdir" {
     const read_only = pathOpen(&h, &mem, dirfd, 0, 0, 5, write_dir, p1.RIGHTS_FD_READ, 0, 0, 32);
     try testing.expectEqual(read_only, with_write);
     try testing.expect(with_write != .isdir);
+}
+
+/// Push a `.file` slot carrying exactly `rights` and return its guest fd. No
+/// host handle: every test below asserts the rights check fires BEFORE the
+/// handle is touched, so a `badf` here would mean the gate ran too late.
+fn pushRightsOnlyFile(h: *Host, rights: p1.Rights) !p1.Fd {
+    try h.fd_table.append(h.alloc, .{ .kind = .file, .rights_base = rights });
+    return @intCast(h.fd_table.items.len - 1);
+}
+
+test "rights gate: a call the fd cannot make is notcapable, not badf" {
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    var mem: [64]u8 = @splat(0);
+
+    const no_read = try pushRightsOnlyFile(&h, p1.RIGHTS_FD_WRITE);
+    try testing.expectEqual(p1.Errno.notcapable, fdRead(&h, &mem, no_read, 0, 1, 32));
+
+    const no_write = try pushRightsOnlyFile(&h, p1.RIGHTS_FD_READ);
+    try testing.expectEqual(p1.Errno.notcapable, fdWrite(&h, &mem, no_write, 0, 1, 32));
+
+    const bare = try pushRightsOnlyFile(&h, 0);
+    try testing.expectEqual(p1.Errno.notcapable, fdSync(&h, bare));
+    try testing.expectEqual(p1.Errno.notcapable, fdDatasync(&h, bare));
+    try testing.expectEqual(p1.Errno.notcapable, fdAdvise(&h, bare, 0, 0, 0));
+    try testing.expectEqual(p1.Errno.notcapable, fdAllocate(&h, bare, 0, 1));
+    try testing.expectEqual(p1.Errno.notcapable, fdFilestatGet(&h, &mem, bare, 0));
+    try testing.expectEqual(p1.Errno.notcapable, fdFilestatSetSize(&h, bare, 0));
+    try testing.expectEqual(p1.Errno.notcapable, fdFilestatSetTimes(&h, bare, 0, 0, 0));
+    try testing.expectEqual(p1.Errno.notcapable, fdFdstatSetFlags(&h, bare, 0));
+
+    // fd_readdir needs a directory to reach its rights check at all.
+    try h.fd_table.append(h.alloc, .{ .kind = .dir });
+    const bare_dir: p1.Fd = @intCast(h.fd_table.items.len - 1);
+    try testing.expectEqual(p1.Errno.notcapable, fdReaddir(&h, &mem, bare_dir, 0, 8, 0, 32));
+
+    // Positional IO is a seek plus a read/write, so it needs both bits.
+    const read_only = try pushRightsOnlyFile(&h, p1.RIGHTS_FD_READ);
+    try testing.expectEqual(p1.Errno.notcapable, fdPread(&h, &mem, read_only, 0, 1, 0, 32));
+    const write_only = try pushRightsOnlyFile(&h, p1.RIGHTS_FD_WRITE);
+    try testing.expectEqual(p1.Errno.notcapable, fdPwrite(&h, &mem, write_only, 0, 1, 0, 32));
+
+    // A closed or out-of-range fd is still badf — the rights check must not
+    // shadow the identity check.
+    try testing.expectEqual(p1.Errno.badf, fdRead(&h, &mem, 99, 0, 1, 32));
+}
+
+test "rights gate: fd_seek implies fd_tell, and only fd_seek moves the cursor" {
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    var mem: [64]u8 = @splat(0);
+
+    // FD_TELL alone: the offset-preserving form clears the gate (it reaches
+    // the missing handle and reports badf); a real seek does not.
+    const tell_only = try pushRightsOnlyFile(&h, p1.RIGHTS_FD_TELL);
+    try testing.expectEqual(p1.Errno.badf, fdSeek(&h, &mem, tell_only, 0, @intFromEnum(p1.Whence.cur), 32));
+    try testing.expectEqual(p1.Errno.notcapable, fdSeek(&h, &mem, tell_only, 1, @intFromEnum(p1.Whence.set), 32));
+
+    // FD_SEEK alone: witx says it implies FD_TELL, so both forms clear.
+    const seek_only = try pushRightsOnlyFile(&h, p1.RIGHTS_FD_SEEK);
+    try testing.expectEqual(p1.Errno.badf, fdSeek(&h, &mem, seek_only, 0, @intFromEnum(p1.Whence.cur), 32));
+    try testing.expectEqual(p1.Errno.success, fdTell(&h, &mem, seek_only, 32));
+
+    // Neither bit: both forms are notcapable.
+    const bare = try pushRightsOnlyFile(&h, 0);
+    try testing.expectEqual(p1.Errno.notcapable, fdSeek(&h, &mem, bare, 0, @intFromEnum(p1.Whence.cur), 32));
+    try testing.expectEqual(p1.Errno.notcapable, fdTell(&h, &mem, bare, 32));
+}
+
+test "rights gate: path_open's oflags each need their own right" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    const dirfd = try h.addPreopen(tmp.dir.handle, "/sandbox");
+
+    var mem: [64]u8 = @splat(0);
+    @memcpy(mem[0..4], "file");
+
+    // Drop PATH_CREATE_FILE: a plain open still works, OFLAGS_CREAT does not.
+    h.fd_table.items[dirfd].rights_base = p1.RIGHTS_DIRECTORY_BASE & ~p1.RIGHTS_PATH_CREATE_FILE;
+    try testing.expectEqual(p1.Errno.notcapable, pathOpen(&h, &mem, dirfd, 0, 0, 4, p1.OFLAGS_CREAT, 0, 0, 0, 32));
+
+    // Restore it, create the file, then drop PATH_FILESTAT_SET_SIZE and watch
+    // OFLAGS_TRUNC lose its right (official `truncation_rights`).
+    h.fd_table.items[dirfd].rights_base = p1.RIGHTS_DIRECTORY_BASE;
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 0, 4, p1.OFLAGS_CREAT, 0, 0, 0, 32));
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 0, 4, p1.OFLAGS_TRUNC, 0, 0, 0, 32));
+    h.fd_table.items[dirfd].rights_base = p1.RIGHTS_DIRECTORY_BASE & ~p1.RIGHTS_PATH_FILESTAT_SET_SIZE;
+    try testing.expectEqual(p1.Errno.notcapable, pathOpen(&h, &mem, dirfd, 0, 0, 4, p1.OFLAGS_TRUNC, 0, 0, 0, 32));
+
+    // And PATH_OPEN itself gates the call outright.
+    h.fd_table.items[dirfd].rights_base = 0;
+    try testing.expectEqual(p1.Errno.notcapable, pathOpen(&h, &mem, dirfd, 0, 0, 4, 0, 0, 0, 0, 32));
+}
+
+test "rights gate: a file under a component-opened subdirectory is still writable" {
+    // The WASI 0.2/0.3 `open-at` trampolines have no rights model, so they ask
+    // `path_open` for whatever `rightsForRightlessOpen` allows. If a directory
+    // open narrowed the INHERITING ceiling as well as its own base, this write
+    // would be `notcapable` — the fd under it would never have been granted
+    // FD_WRITE in the first place.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    const dirfd = try h.addPreopen(tmp.dir.handle, "/sandbox");
+    const root: std.Io.Dir = .{ .handle = tmp.dir.handle };
+    try root.createDir(testing.io, "sub", std.Io.File.Permissions.default_dir);
+
+    var mem: [128]u8 = @splat(0);
+    @memcpy(mem[0..3], "sub");
+    const dr = p1.rightsForRightlessOpen(p1.OFLAGS_DIRECTORY);
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 0, 3, p1.OFLAGS_DIRECTORY, dr.base, dr.inheriting, 0, 96));
+    const subfd = std.mem.readInt(u32, mem[96..100], .little);
+
+    @memset(mem[0..128], 0);
+    @memcpy(mem[0..5], "f.txt");
+    const fr = p1.rightsForRightlessOpen(p1.OFLAGS_CREAT);
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, subfd, 0, 0, 5, p1.OFLAGS_CREAT, fr.base, fr.inheriting, 0, 96));
+    const ffd = std.mem.readInt(u32, mem[96..100], .little);
+
+    @memcpy(mem[48..56], "hello fd");
+    std.mem.writeInt(u32, mem[32..36], 48, .little);
+    std.mem.writeInt(u32, mem[36..40], 8, .little);
+    try testing.expectEqual(p1.Errno.success, fdWrite(&h, &mem, ffd, 32, 1, 104));
+    try testing.expectEqual(@as(u32, 8), std.mem.readInt(u32, mem[104..108], .little));
+}
+
+test "rights gate: the two ways to reach a directory hold the same capabilities" {
+    // A preopen advertises RIGHTS_DIRECTORY_BASE; the component-model
+    // `open-at` path has no rights model and asks through
+    // `rightsForRightlessOpen`. If those disagree, the same directory answers
+    // differently depending on which interface opened it — measured on
+    // `fd_sync` / `fd_datasync` / `fd_fdstat_set_flags`, the three the type
+    // dispatch lets through to a `.dir` slot.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    const dirfd = try h.addPreopen(tmp.dir.handle, "/sandbox");
+    const root: std.Io.Dir = .{ .handle = tmp.dir.handle };
+    try root.createDir(testing.io, "a", std.Io.File.Permissions.default_dir);
+    try root.createDir(testing.io, "b", std.Io.File.Permissions.default_dir);
+
+    var mem: [128]u8 = @splat(0);
+    @memcpy(mem[0..1], "a");
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 0, 1, p1.OFLAGS_DIRECTORY, p1.RIGHTS_DIRECTORY_BASE, p1.RIGHTS_DIRECTORY_INHERITING, 0, 96));
+    const via_preopen = std.mem.readInt(u32, mem[96..100], .little);
+
+    @memcpy(mem[0..1], "b");
+    const rr = p1.rightsForRightlessOpen(p1.OFLAGS_DIRECTORY);
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 0, 1, p1.OFLAGS_DIRECTORY, rr.base, rr.inheriting, 0, 96));
+    const via_open_at = std.mem.readInt(u32, mem[96..100], .little);
+
+    try testing.expectEqual(h.translateFd(via_preopen).?.rights_base, h.translateFd(via_open_at).?.rights_base);
+    try testing.expectEqual(fdSync(&h, via_preopen), fdSync(&h, via_open_at));
+    try testing.expectEqual(fdDatasync(&h, via_preopen), fdDatasync(&h, via_open_at));
+    try testing.expectEqual(fdFdstatSetFlags(&h, via_preopen, 0), fdFdstatSetFlags(&h, via_open_at, 0));
 }

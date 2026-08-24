@@ -72,9 +72,11 @@ fn symlinkTargetEscapes(link_sub: []const u8, target: []const u8) bool {
 
 const Resolved = struct { dir: std.Io.Dir, sub: []const u8 };
 
-/// Resolve `(dirfd, path_ptr, path_len)` to a host `Dir` + bounded guest path.
-/// Returns the errno on failure (`.success` when `out` is populated).
-fn resolve(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32, out: *Resolved) p1.Errno {
+/// Resolve `(dirfd, path_ptr, path_len)` to a host `Dir` + bounded guest path,
+/// and check that `needed` — the right the witx doc comment names for the
+/// calling operation — is present in the dirfd's `fs_rights_base`. Returns the
+/// errno on failure (`.success` when `out` is populated).
+fn resolve(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32, needed: p1.Rights, out: *Resolved) p1.Errno {
     const path = sliceMemConst(mem, path_ptr, path_len) orelse return .fault;
     // POSIX: the empty path resolves to nothing (ENOENT). Guarded here because
     // std.Io panics on the resulting EINVAL in debug builds ("programmer bug").
@@ -82,6 +84,7 @@ fn resolve(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: 
     if (pathHasParentEscape(path)) return .notcapable;
     const slot = host.translateFd(dirfd) orelse return .badf;
     if (slot.kind != .dir) return .notdir;
+    if (!slot.has(needed)) return .notcapable;
     const handle = slot.host_handle orelse return .notdir;
     out.* = .{ .dir = .{ .handle = handle }, .sub = path };
     return .success;
@@ -119,7 +122,7 @@ fn mapDirErr(err: anyerror) p1.Errno {
 /// to the preopen `dirfd` (`std.Io.Dir.createDir`).
 pub fn pathCreateDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_CREATE_DIRECTORY, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
     r.dir.createDir(io, r.sub, std.Io.File.Permissions.default_dir) catch |err| return mapDirErr(err);
@@ -130,7 +133,7 @@ pub fn pathCreateDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr:
 /// relative to `dirfd` (`std.Io.Dir.deleteDir`; non-empty → `notempty`).
 pub fn pathRemoveDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_REMOVE_DIRECTORY, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
     // rmdir(".") is EINVAL per POSIX; guarded because std.Io panics on the
@@ -149,10 +152,10 @@ pub fn pathRemoveDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr:
 /// resolved + escape-guarded.
 pub fn pathRename(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_ptr: u32, old_len: u32, new_dirfd: p1.Fd, new_ptr: u32, new_len: u32) p1.Errno {
     var ro: Resolved = undefined;
-    const e1 = resolve(host, mem, old_dirfd, old_ptr, old_len, &ro);
+    const e1 = resolve(host, mem, old_dirfd, old_ptr, old_len, p1.RIGHTS_PATH_RENAME_SOURCE, &ro);
     if (e1 != .success) return e1;
     var rn: Resolved = undefined;
-    const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, &rn);
+    const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_RENAME_TARGET, &rn);
     if (e2 != .success) return e2;
     const io = host.io orelse return .nosys;
     // rename involving "." is EINVAL/EBUSY per POSIX; guarded because std.Io
@@ -168,10 +171,10 @@ pub fn pathRename(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_ptr: u32, 
 /// (`std.Io.Dir.hardLink`). `old_flags` bit 0 = follow-symlinks.
 pub fn pathLink(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_flags: u32, old_ptr: u32, old_len: u32, new_dirfd: p1.Fd, new_ptr: u32, new_len: u32) p1.Errno {
     var ro: Resolved = undefined;
-    const e1 = resolve(host, mem, old_dirfd, old_ptr, old_len, &ro);
+    const e1 = resolve(host, mem, old_dirfd, old_ptr, old_len, p1.RIGHTS_PATH_LINK_SOURCE, &ro);
     if (e1 != .success) return e1;
     var rn: Resolved = undefined;
-    const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, &rn);
+    const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_LINK_TARGET, &rn);
     if (e2 != .success) return e2;
     const io = host.io orelse return .nosys;
     const follow = old_flags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0;
@@ -301,7 +304,7 @@ fn winPathLink(old_dir: std.Io.Dir, old_sub: []const u8, new_dir: std.Io.Dir, ne
 pub fn pathSymlink(host: *Host, mem: []const u8, target_ptr: u32, target_len: u32, dirfd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
     const target = sliceMemConst(mem, target_ptr, target_len) orelse return .fault;
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_SYMLINK, &r);
     if (e != .success) return e;
     if (symlinkTargetEscapes(r.sub, target)) return .notcapable;
     const io = host.io orelse return .nosys;
@@ -320,7 +323,7 @@ pub fn pathReadlink(host: *Host, mem: []u8, dirfd: p1.Fd, path_ptr: u32, path_le
         break :blk mem[buf_ptr..end];
     };
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_READLINK, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
     const n = r.dir.readLink(io, r.sub, buf) catch |err| return mapDirErr(err);
@@ -359,7 +362,7 @@ pub fn pathFilestatGet(host: *Host, mem: []u8, dirfd: p1.Fd, lookupflags: u32, p
         break :blk mem[filestat_ptr..end];
     };
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_FILESTAT_GET, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
     const st = r.dir.statFile(io, r.sub, .{ .follow_symlinks = lookupflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0 }) catch |err| return mapDirErr(err);
@@ -385,7 +388,7 @@ pub fn pathFilestatSetTimes(host: *Host, mem: []const u8, dirfd: p1.Fd, lookupfl
     if (fst_flags & p1.FSTFLAGS_ATIM != 0 and fst_flags & p1.FSTFLAGS_ATIM_NOW != 0) return .inval;
     if (fst_flags & p1.FSTFLAGS_MTIM != 0 and fst_flags & p1.FSTFLAGS_MTIM_NOW != 0) return .inval;
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_FILESTAT_SET_TIMES, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
     const atime = setTimestampOf(fst_flags, p1.FSTFLAGS_ATIM_NOW, p1.FSTFLAGS_ATIM, atim);

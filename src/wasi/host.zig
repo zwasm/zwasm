@@ -62,6 +62,13 @@ pub const OpenFd = struct {
     /// `fd_seek` sets it, `fd_tell` reads it. `fd_pread`/`fd_pwrite` take an
     /// explicit offset and do NOT touch it (WASI).
     pos: u64 = 0,
+
+    /// True when this fd carries every bit in `needed`. A preview1 call is
+    /// gated by the rights its witx doc comment names; an fd whose
+    /// `fs_rights_base` is missing one owes the guest `notcapable`.
+    pub fn has(self: *const OpenFd, needed: p1.Rights) bool {
+        return self.rights_base & needed == needed;
+    }
 };
 
 /// One environment-variable entry. Both `key` and `value` are

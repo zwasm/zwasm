@@ -11,12 +11,9 @@ they operate on.
 
 > **Implementation status.** The model lands in three changes and this file
 > describes all of it, so parts of it lead the code. Advertising the table and
-> deriving rights onto opened fds: **landed**. Reading a right at each call —
-> the `zwasm entry point` column below, and "Where the check sits" — **not
-> yet**: nothing consults `rights_base` today except `fd_fdstat_set_rights`,
-> so `fd_fdstat_get` reports a capability set no call enforces. Folding `..`
-> (`path.normalize`): **not yet**. Each section that runs ahead of the code
-> repeats the fact where it appears.
+> deriving rights onto opened fds: **landed**. Reading a right at each call:
+> **landed**. Folding `..` (`path.normalize`): **not yet**. Each section that
+> runs ahead of the code repeats the fact where it appears.
 
 ## Sources
 
@@ -75,9 +72,6 @@ Ungated by design, because witx assigns them no bit: `fd_close`,
 `proc_*`, `sched_yield`.
 
 ### Where the check sits
-
-**Not yet implemented** — no entry point reads `rights_base` yet; this is
-where the check goes and why it goes there.
 
 The rights check runs **after** the fd-type dispatch, never before. The fd's
 type decides whether the operation exists at all — `spipe` for a stream,
