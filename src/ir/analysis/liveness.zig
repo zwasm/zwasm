@@ -38,9 +38,10 @@ const dbg = @import("../../support/dbg.zig");
 /// Reach: the CLI, today. `dbg.initFromEnv` has two call sites
 /// (`cli/main.zig`, `api/instance.zig`) and no test runner reaches either, so
 /// the channel is dark for the whole of `zig build test-all`. Lane coverage
-/// arrives with that gap, not with a second env mechanism here — Zone 0 and
-/// Zone 1 cannot read the env directly (ROADMAP §A1: `std.c.getenv` would
-/// re-introduce the libc dependency, and `std.posix.getenv` is gone in 0.16).
+/// arrives with that gap, not with a second env mechanism here — a
+/// `std.c.getenv` in Zone 1 would be a new site outside ADR-0070's c_api
+/// classification, and `std.posix.getenv` is gone in 0.16. `support/dbg.zig`
+/// carries the whole argument; this is a pointer, not a second copy.
 pub fn snapshotEnabled() bool {
     return dbg.on("liveverify");
 }
