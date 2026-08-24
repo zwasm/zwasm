@@ -995,7 +995,13 @@ pub fn pathOpen(
     // and the open, and that open would follow it. Narrower than the
     // follow-time gap D-315 already tracks. Revisit if std stops coupling the
     // reparse flag to the IO mode.
-    if (dirflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW == 0) {
+    // O_CREAT|O_EXCL is the exception: POSIX makes an EXISTING symlink `exist`
+    // there whatever the follow bit says — O_EXCL outranks the nofollow refusal
+    // — and `createFile(.exclusive = true)` already answers exactly that. This
+    // check stands aside rather than shadowing it with `loop`.
+    const excl_create = (oflags & (p1.OFLAGS_CREAT | p1.OFLAGS_EXCL)) ==
+        (p1.OFLAGS_CREAT | p1.OFLAGS_EXCL);
+    if (dirflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW == 0 and !excl_create) {
         if (dir.statFile(io, path, .{ .follow_symlinks = false })) |st| {
             if (st.kind == .sym_link) return .loop;
         } else |_| {
