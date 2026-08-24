@@ -498,7 +498,14 @@ pub fn compute(
                         }
                         fr.merge_captured = true;
                     }
-                    sim_len = fr.entry_depth;
+                    // D-596 — mirror `emitElse`, which truncates to
+                    // `entry_stack_depth - param_arity` BEFORE re-pushing the
+                    // params. Both depths are recorded after the cond pop
+                    // (with the params still on the stack), so restoring to
+                    // `entry_depth` and then pushing left this side
+                    // `param_arity` too deep through every `if (param T...)`
+                    // else arm. Same base the `.end` arms above compute.
+                    sim_len = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
                     var i: u32 = 0;
                     while (i < fr.param_arity) : (i += 1) {
                         if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
