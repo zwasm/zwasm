@@ -108,10 +108,20 @@ fn symlinkTargetEscapes(link_sub: []const u8, target: []const u8) bool {
 /// literal `.` and `./` alone left `a/.` reaching the host, where a guest
 /// could abort the runtime with one call.
 fn endsInDotComponent(path: []const u8) bool {
+    return finalComponentIs(path, .dot_only);
+}
+
+/// Which dotted spellings a caller must reject as a final component. `rmdir`
+/// needs only `.` — POSIX makes a trailing `..` EEXIST/ENOTEMPTY, which maps —
+/// while `rename` needs both, because POSIX makes either EINVAL.
+const DottedFinal = enum { dot_only, dot_or_dotdot };
+
+fn finalComponentIs(path: []const u8, which: DottedFinal) bool {
     var last: []const u8 = &.{};
     var it = std.mem.tokenizeScalar(u8, path, '/');
     while (it.next()) |seg| last = seg;
-    return std.mem.eql(u8, last, ".");
+    if (std.mem.eql(u8, last, ".")) return true;
+    return which == .dot_or_dotdot and std.mem.eql(u8, last, "..");
 }
 
 const Resolved = struct { dir: std.Io.Dir, sub: []const u8 };
@@ -203,10 +213,13 @@ pub fn pathRename(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_ptr: u32, 
     const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_RENAME_TARGET, &rn);
     if (e2 != .success) return e2;
     const io = host.io orelse return .nosys;
-    // rename involving "." is EINVAL/EBUSY per POSIX; guarded because std.Io
-    // panics on the unexpected EINVAL in debug builds.
-    if (std.mem.eql(u8, ro.sub, ".") or std.mem.eql(u8, ro.sub, "./") or
-        std.mem.eql(u8, rn.sub, ".") or std.mem.eql(u8, rn.sub, "./")) return .inval;
+    // POSIX makes `rename` EINVAL when either side's final component is `.` or
+    // `..`, and `std.Io` turns EINVAL into a debug panic. Linux hides this by
+    // answering EBUSY; macOS and Windows do not — measured, both abort the
+    // runtime from a guest calling `path_rename("a/.", …)` (#265). Answering
+    // `inval` here gives all three the errno POSIX names.
+    if (finalComponentIs(ro.sub, .dot_or_dotdot) or
+        finalComponentIs(rn.sub, .dot_or_dotdot)) return .inval;
     ro.dir.rename(ro.sub, rn.dir, rn.sub, io) catch |err| return mapDirErr(err);
     return .success;
 }
@@ -738,12 +751,14 @@ test "mutating path_* survive a dotted final component on every host (#265)" {
     // load-bearing assertion is that each call RETURNS. A host that panics
     // takes its whole leg down, which is the answer we are looking for.
     //
-    // `path_remove_directory` is excluded: `endsInDotComponent` guards it, and
-    // its own test pins the guard. The four below have no dot-guard reaching
-    // these inputs — `pathRename`'s matches the literal `.` and `./`, which
-    // neither `a/.` nor `a/..` is — so each really does reach the host. Adding a
-    // guard to any of them makes this test measure the guard instead; move that
-    // call to a guard test if you do.
+    // `path_remove_directory` and `path_rename` are excluded: both are guarded
+    // now, and each has its own test pinning the guard. `path_rename` used to be
+    // here — it is what this test caught, on macOS and Windows both — and moved
+    // out when the guard landed, per the rule below.
+    //
+    // The three below have no dot-guard, so each really does reach the host.
+    // Adding a guard to any of them makes this test measure the guard instead;
+    // move that call to a guard test if you do.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var h = try Host.init(testing.allocator);
@@ -763,8 +778,6 @@ test "mutating path_* survive a dotted final component on every host (#265)" {
         const len: u32 = @intCast(dotted.len);
 
         const outcomes = [_]p1.Errno{
-            pathRename(&h, &mem, dirfd, 0, len, dirfd, 16, 1),
-            pathRename(&h, &mem, dirfd, 16, 1, dirfd, 0, len),
             pathLink(&h, &mem, dirfd, 0, 0, len, dirfd, 16, 1),
             pathSymlink(&h, &mem, 16, 1, dirfd, 0, len),
             @import("fd.zig").pathUnlinkFile(&h, &mem, dirfd, 0, len),
@@ -774,4 +787,37 @@ test "mutating path_* survive a dotted final component on every host (#265)" {
         // returning, not by aborting.
         for (outcomes) |e| try testing.expect(e != .success);
     }
+}
+
+test "path_rename: a dotted final component is inval on every host (#265)" {
+    // Measured before the guard existed: Linux answers EBUSY and maps it, but
+    // macOS panics on EINVAL and Windows on STATUS_INVALID_PARAMETER, so a guest
+    // aborted the runtime with one call on two of the three platforms zwasm
+    // ships. POSIX names EINVAL for either side's final component being `.` or
+    // `..`, so `inval` is what all three answer now.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    const dirfd = try h.addPreopen(tmp.dir.handle, "/sandbox");
+    const root: std.Io.Dir = .{ .handle = tmp.dir.handle };
+    try root.createDir(testing.io, "a", std.Io.File.Permissions.default_dir);
+    try root.writeFile(testing.io, .{ .sub_path = "t", .data = "x" });
+
+    var mem: [128]u8 = @splat(0);
+    writeGuestPath(&mem, 16, "t");
+    for ([_][]const u8{ ".", "./", "a/.", "a/..", "./a/.." }) |dotted| {
+        @memset(mem[0..16], 0);
+        writeGuestPath(&mem, 0, dotted);
+        const len: u32 = @intCast(dotted.len);
+        // Either side of the rename.
+        try testing.expectEqual(p1.Errno.inval, pathRename(&h, &mem, dirfd, 0, len, dirfd, 16, 1));
+        try testing.expectEqual(p1.Errno.inval, pathRename(&h, &mem, dirfd, 16, 1, dirfd, 0, len));
+    }
+    // An ordinary rename still works — the guard is on the final component, not
+    // on `.`/`..` appearing anywhere in the path.
+    @memset(mem[0..16], 0);
+    writeGuestPath(&mem, 0, "a/../t2");
+    try testing.expectEqual(p1.Errno.success, pathRename(&h, &mem, dirfd, 16, 1, dirfd, 0, 7));
 }
