@@ -266,6 +266,14 @@ jobs:
       # `conclusion` — and therefore the job's, and therefore
       # `needs.gate.result` that `ci-required` reads — stays `success`.
       #
+      # PUSH-ONLY since 2026-08-24. The paragraph above is exactly why: a
+      # failure here could not block a PR and never could, so the 175 s it
+      # cost on every PR bought no gate signal — measured at `c294ac99f`,
+      # 135 s on the macOS leg plus 40 s across linux and windows. It still
+      # runs on the merge to `main`, the same window `ZWASM_CI_EXTENDED`
+      # already accepts for its own checks, so the corpus verdict stays a
+      # per-merge number. D-583's 14 known failures are unaffected either way.
+      #
       # Deliberately a step in THIS job rather than a job of its own: a
       # separate job would repeat the Zig install and rebuild zwasm from a cold
       # `.zig-cache` on all three runners (nothing caches `.zig-cache`), paying
@@ -276,6 +284,7 @@ jobs:
       # green on all three OSes the step moves into `test-all` and this block
       # is deleted.
       - name: test-wasi-p1-official (advisory, D-582)
+        if: github.event_name == 'push'
         continue-on-error: true
         shell: bash
         run: zig build test-wasi-p1-official
