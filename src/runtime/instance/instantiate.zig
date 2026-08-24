@@ -37,6 +37,7 @@ const verifier_mod = @import("../../ir/verifier.zig");
 const parser = @import("../../parse/parser.zig");
 const sections = @import("../../parse/sections.zig");
 const validator = @import("../../validate/validator.zig");
+const gc_subtype = @import("../../validate/gc_subtype.zig");
 const zir = @import("../../ir/zir.zig");
 const leb128 = @import("../../support/leb128.zig");
 const testing = std.testing;
@@ -275,6 +276,26 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
         };
     }
 
+    // §3.3.7 `check_table` — a table's init expr is a constant expression of
+    // the table's element type, and it runs BEFORE the globals are folded into
+    // the context (`check_module` order: … memories → tables → globals), so it
+    // may read only IMPORTED globals. A defined global is out of scope here
+    // even though it is in scope for a data or elem offset further down.
+    if (tables_owned) |t| {
+        for (t.items) |entry| {
+            if (entry.init_expr.len == 0) continue;
+            const scope: validator.ConstExprScope = .{
+                .globals = global_entries[0..imp_global_count],
+                .func_type_indices = func_type_indices,
+                .types = &types_owned,
+            };
+            if (validator.validateConstExpr(entry.init_expr, entry.elem_type, scope) == .invalid) {
+                diagnostic.setDiag(.validate, .other, .unknown, "table init expr is not a valid constant expression (§3.3.7)", .{});
+                return false;
+            }
+        }
+    }
+
     // Memory0's idx_type drives the validator's memory-op address
     // valtype (i32 vs i64). Wasm 3.0 memory64 modules declare a
     // memory section with flag bit 0x04 set; without threading
@@ -381,20 +402,40 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
         elem_types_validate = alloc.alloc(zir.ValType, elems.items.len) catch return false;
         for (elems.items, 0..) |seg, i| {
             elem_types_validate[i] = seg.elem_type;
-            // §3.3.7 — an active segment's offset is a constant expression of
-            // the target table's index type. By this point the context holds
-            // every global (imports + defined), which is the window the
-            // reference interpreter's `check_elem` sees.
-            if (seg.kind == .active and seg.offset_expr.len != 0) {
-                const want: zir.ValType = if (seg.tableidx < table_entries.len and table_entries[seg.tableidx].idx_type == .i64) .i64 else .i32;
-                const scope: validator.ConstExprScope = .{
-                    .globals = global_entries,
-                    .func_type_indices = func_type_indices,
-                    .types = &types_owned,
-                };
-                if (validator.validateConstExpr(seg.offset_expr, want, scope) == .invalid) {
-                    diagnostic.setDiag(.validate, .other, .unknown, "elem segment offset is not a valid constant expression (§3.3.7)", .{});
+            if (seg.kind == .active) {
+                // §3.3.7 `check_elemmode` — the named table must exist, the
+                // segment's element type must be a SUBTYPE of the table's
+                // (not merely equal: a `funcref` segment does not fit a
+                // non-nullable `(ref func)` table), and the offset is a
+                // constant expression at the table's index type. By this point
+                // the context holds every global, which is the window
+                // `check_elem` sees.
+                if (seg.tableidx >= table_entries.len) {
+                    diagnostic.setDiag(.validate, .other, .unknown, "elem segment names a table that does not exist (§3.3.7)", .{});
                     return false;
+                }
+                const tbl = table_entries[seg.tableidx];
+                // An IMPORTED table's entry carries a synthesised permissive
+                // `funcref` (§A10 gives imports kind-only here), not its real
+                // element type, so the subtype rule has nothing truthful to
+                // compare against and is skipped for those slots.
+                if (seg.tableidx >= imp_table_count and
+                    !gc_subtype.gcValTypeSubtype(seg.elem_type, tbl.elem_type, &types_owned))
+                {
+                    diagnostic.setDiag(.validate, .other, .unknown, "elem segment type is not a subtype of the table's element type (§3.3.7)", .{});
+                    return false;
+                }
+                if (seg.offset_expr.len != 0) {
+                    const want: zir.ValType = if (tbl.idx_type == .i64) .i64 else .i32;
+                    const scope: validator.ConstExprScope = .{
+                        .globals = global_entries,
+                        .func_type_indices = func_type_indices,
+                        .types = &types_owned,
+                    };
+                    if (validator.validateConstExpr(seg.offset_expr, want, scope) == .invalid) {
+                        diagnostic.setDiag(.validate, .other, .unknown, "elem segment offset is not a valid constant expression (§3.3.7)", .{});
+                        return false;
+                    }
                 }
             }
             for (seg.funcidxs) |fidx| {
@@ -459,29 +500,19 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
         null;
     defer if (datas_owned) |*d| d.deinit();
     const data_count_validate: u32 = if (datas_owned) |d| @intCast(d.items.len) else 0;
-    // §3.3.7 — same rule for an active data segment's offset, at the memory's
-    // index type. The memory section is decoded here purely to read that
-    // width: a memory64 offset is an `i64` constant expression, and typing it
-    // as `i32` would reject valid modules.
+    // §3.3.7 `check_datamode` — an active segment names a memory that must
+    // exist, and its offset is a constant expression at THAT memory's index
+    // type (a memory64 offset is `i64`; typing it as `i32` would reject valid
+    // modules). `memory_idx_types` already spans imports-then-defined.
     if (datas_owned) |d| {
-        var mems_owned: ?sections.Memories = if (module.find(.memory)) |s|
-            sections.decodeMemory(alloc, s.body) catch return false
-        else
-            null;
-        defer if (mems_owned) |*m| m.deinit();
-        var imp_mem_count: usize = 0;
-        if (imports_decoded) |im| for (im.items) |it| {
-            if (it.kind == .memory) imp_mem_count += 1;
-        };
         for (d.items) |seg| {
-            if (seg.kind != .active or seg.offset_expr.len == 0) continue;
-            const want: zir.ValType = blk: {
-                if (seg.memidx < imp_mem_count) break :blk .i32; // import width not threaded here
-                const def_i = seg.memidx - imp_mem_count;
-                const mems = if (mems_owned) |m| m.items else &.{};
-                if (def_i >= mems.len) break :blk .i32;
-                break :blk if (mems[def_i].idx_type == .i64) .i64 else .i32;
-            };
+            if (seg.kind != .active) continue;
+            if (seg.memidx >= total_memory_count) {
+                diagnostic.setDiag(.validate, .other, .unknown, "data segment names a memory that does not exist (§3.3.7)", .{});
+                return false;
+            }
+            if (seg.offset_expr.len == 0) continue;
+            const want: zir.ValType = if (memory_idx_types[seg.memidx] == .i64) .i64 else .i32;
             const scope: validator.ConstExprScope = .{
                 .globals = global_entries,
                 .func_type_indices = func_type_indices,
