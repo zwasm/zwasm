@@ -76,7 +76,6 @@ entries:
     refs: |-
       ADR-0214 D3; .github/workflows/ci.yml (Cache Zig package deps);
       PR #239.
-
   - id: "D-593"
     layer: "test"
     status: "note"
@@ -1570,19 +1569,26 @@ entries:
     front: B-hardening
   - id: "D-315"
     layer: "code"
-    status: "blocked-by"
+    status: "now"
     description: |-
-      blocked-by (FOLLOW-TIME half needs cross-platform path-resolution rework +
-      3-host test): WASI `path_*` confinement is escape-guarded on the GUEST path
+      now (FOLLOW-TIME half: a `wasi/path.zig` per-component resolver rework +
+      3-host test — sized work, no external barrier; see the 2026-08-24 measurement
+      below): WASI `path_*` confinement is escape-guarded on the GUEST path
       (`pathHasParentEscape` rejects absolute + `..`; resolution is `openat`-relative
       via a preopen dirfd). PLANT-TIME symlink confinement is now DONE
       (`symlinkTargetEscapes`, @<this>): a guest can no longer CREATE a symlink whose
       target escapes the preopen root (lexical containment vs the link's depth;
       absolute targets refused) → the "plant then read through it" escalation is
-      closed for symlinks created via zwasm's API. REMAINING (the blocked half): no
-      cap-std-style "beneath" confinement at FOLLOW time — `path_open`/`statFile`/
-      `readLink` follow modes delegate to `std.Io.Dir` with no RESOLVE_BENEATH /
-      O_NOFOLLOW component walk, so a PRE-EXISTING on-disk symlink (placed by
+      closed for symlinks created via zwasm's API. FINAL-COMPONENT no-follow is now
+      DONE 2026-08-24 (`pathOpen`, @<this>): `path_open` honours `dirflags` bit 0
+      through `std.Io.Dir`'s own `follow_symlinks` (→ `O_NOFOLLOW`), so a guest that
+      asks NOT to follow is no longer followed anyway. This does NOT reduce exposure
+      — the follow bit is the GUEST's to set, and a guest that sets it resolves
+      exactly as before. It narrows the remaining gap to "the guest asked to follow",
+      nothing more. REMAINING (the open half): no cap-std-style "beneath" confinement
+      when the guest DOES ask to follow — `path_open` (follow case) / `statFile` /
+      `readLink` hand whole-path resolution to `std.Io.Dir`, which confines no
+      INTERMEDIATE component, so a PRE-EXISTING on-disk symlink (placed by
       something other than the guest, inside an operator-granted writable preopen)
       that escapes would still be followed. Only bites once a writable preopen
       containing attacker-or-foreign symlinks is granted to untrusted code (no
@@ -1590,20 +1596,34 @@ entries:
       each path component within the preopen, following symlinks only while they
       stay beneath the root (Linux `openat2(RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS)`;
       a manual component walk with `O_NOFOLLOW` + re-resolve elsewhere; or a
-      post-resolve realpath-prefix check). Blocked because `std.Io.Dir` exposes no
-      openat2/O_NOFOLLOW (the file deliberately avoids `std.posix` for Win64), the
-      Host stores only `(host_handle, guest_path)` not a root PATH (so a realpath
-      check needs new state), and the fix needs Mac+Linux+Windows verification.
+      post-resolve realpath-prefix check). What it costs (and why this sat as
+      `blocked-by` until 2026-08-24): there is no ONE-CALL beneath-confinement to
+      reach for — but O_NOFOLLOW is NOT the blocker. Measured 2026-08-24, Zig 0.16.0,
+      x86_64-linux: (a) O_NOFOLLOW IS exposed — `Dir.OpenOptions.follow_symlinks` and
+      `Dir.OpenFileOptions.follow_symlinks`, both `O.NOFOLLOW` in `Io/Threaded.zig`
+      (`dirOpenDirPosix` / `dirOpenFilePosix`); `CreateFileOptions` still has none, so
+      the O_CREAT path can only pre-check. (b) `std.Io` never ISSUES `openat2` — only
+      the syscall number exists, in `os/linux/syscalls.zig`. (c) TRAP:
+      `Dir.OpenFileOptions.resolve_beneath` exists and is guarded by
+      `@hasField(posix.O, "RESOLVE_BENEATH")`, which is FALSE on Linux (it is a
+      FreeBSD `O_RESOLVE_BENEATH`) — passing it on Linux is accepted and SILENTLY
+      IGNORED. So the fix is a hand-rolled per-component walk (open each component
+      `follow_symlinks = false`; on a symlink component, `readLink` + re-resolve
+      lexically within the root) — buildable with today's std — plus: the Host stores
+      only `(host_handle, guest_path)` not a root PATH (so a realpath check needs new
+      state), and it needs Mac+Linux+Windows verification.
       DISCHARGE: when FS-grant-to-untrusted ships, OR proactively as a
       `wasi/path.zig` resolver rework with a 3-host symlink-escape test.
-      CW-V1 IMPACT = NONE today (verified 2026-06-08): only bites a guest given a
-      WRITABLE preopen, and cw grants no writable preopen to untrusted wasm; the
-      plant-time half (done) already blocks the guest-plant vector. Becomes
-      relevant if cw later grants FS write to untrusted code. Priority for cw v1: LOW.
+      CW-V1 IMPACT = NONE today (verified 2026-06-08; UNCHANGED by the 2026-08-24
+      no-follow half — that half only affects guests that ask NOT to follow): only
+      bites a guest given a WRITABLE preopen, and cw grants no writable preopen to
+      untrusted wasm; the plant-time half (done) already blocks the guest-plant
+      vector. Becomes relevant if cw later grants FS write to untrusted code.
+      Priority for cw v1: LOW.
     first_raised: "2026-06-08"
-    last_reviewed: "2026-08-12"
+    last_reviewed: "2026-08-24"
     refs: |-
-      src/wasi/path.zig (symlinkTargetEscapes DONE; resolve / pathHasParentEscape; the FOLLOW-time gap is pathOpen/statFile/readLink follow modes via std.Io.Dir); src/wasi/host.zig (PreopenEntry: host_handle + guest_path, no host root path)
+      src/wasi/path.zig (symlinkTargetEscapes DONE; resolve / pathHasParentEscape; the FOLLOW-time gap is pathOpen (follow case only)/statFile/readLink follow modes via std.Io.Dir); src/wasi/host.zig (PreopenEntry: host_handle + guest_path, no host root path)
     front: B-hardening
   - id: "D-316"
     layer: "code"

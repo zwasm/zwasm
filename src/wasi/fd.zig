@@ -941,9 +941,10 @@ pub fn fdReaddir(host: *Host, mem: []u8, fd: p1.Fd, buf_ptr: u32, buf_len: u32, 
 /// On success, a new `.file` (or `.dir`) slot is appended to
 /// `host.fd_table`; the new guest fd is written to
 /// `opened_fd_ptr`. `oflags` CREAT / TRUNC / EXCL / DIRECTORY are
-/// honoured (see the body). `dirflags` (the symlink-follow bit) is
-/// currently IGNORED — follow-time symlink confinement is the
-/// blocked half of D-315.
+/// honoured (see the body). `dirflags` bit 0 (LOOKUP_SYMLINK_FOLLOW)
+/// is honoured for the FINAL path component, via `std.Io.Dir`'s own
+/// `follow_symlinks` — POSIX `O_NOFOLLOW`. Intermediate components are
+/// followed either way: confining THOSE is the open half of D-315.
 pub fn pathOpen(
     host: *Host,
     mem: []u8,
@@ -957,8 +958,6 @@ pub fn pathOpen(
     fdflags: p1.Fdflags,
     opened_fd_ptr: u32,
 ) p1.Errno {
-    _ = dirflags;
-
     // Bounds-check the path slice.
     const path_end = @as(usize, path_ptr) + @as(usize, path_len);
     if (path_end > mem.len) return .fault;
@@ -985,11 +984,19 @@ pub fn pathOpen(
 
     const dir: std.Io.Dir = .{ .handle = dir_handle };
 
+    // `dirflags` bit 0 is LOOKUP_SYMLINK_FOLLOW, and it governs the FINAL path
+    // component only — every earlier one is followed either way. `std.Io.Dir`
+    // carries the bit natively as `follow_symlinks`, which the POSIX backend
+    // maps to `O_NOFOLLOW`. Riding along with the open is what makes it sound:
+    // a stat-then-open pre-check would leave a window for the name to become a
+    // symlink between the two, and the open would then follow it.
+    const follow = dirflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0;
+
     // OFLAGS_DIRECTORY — open a sub-DIRECTORY (`fd_readdir` / further
     // `path_*` calls resolve against it). The new slot mirrors a preopen's
     // `.dir` shape so the descendant fd composes with every dir-taking op.
     if ((oflags & p1.OFLAGS_DIRECTORY) != 0)
-        return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .reject_write);
+        return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .reject_write, follow);
 
     // WASI `oflags` select create/trunc/excl; `fs_rights_base` selects the
     // access mode. O_CREAT → createFile (a `std::fs::File::create` guest);
@@ -1005,14 +1012,31 @@ pub fn pathOpen(
     // `truncation_rights` was red; wasmtime 47.0.3 answers `acces` too
     // (measured on a 0444 file).
     const needs_writable_handle = wants_write or (oflags & p1.OFLAGS_TRUNC) != 0;
-    const file = if ((oflags & p1.OFLAGS_CREAT) != 0)
-        dir.createFile(io, path, .{
+    const file = if ((oflags & p1.OFLAGS_CREAT) != 0) cblk: {
+        // `CreateFileOptions` carries no `follow_symlinks`, so O_CREAT is the
+        // one path where the refusal cannot ride along with the open. Stat
+        // first and refuse: racy in principle — the name could become a symlink
+        // between the two calls — but the alternative is following one the
+        // guest told us not to. A failing stat means there is nothing here to
+        // refuse, so a fresh name still gets created.
+        if (!follow) {
+            if (dir.statFile(io, path, .{ .follow_symlinks = false })) |st| {
+                if (st.kind == .sym_link) return .loop;
+            } else |_| {
+                // Stat failed: nothing here to refuse. Let `createFile` answer
+                // — a fresh name still gets created, a real error still surfaces.
+            }
+        }
+        break :cblk dir.createFile(io, path, .{
             .read = true,
             .truncate = (oflags & p1.OFLAGS_TRUNC) != 0,
             .exclusive = (oflags & p1.OFLAGS_EXCL) != 0,
-        }) catch |err| return mapOpenError(err)
-    else blk: {
-        const f = dir.openFile(io, path, .{ .mode = if (needs_writable_handle) .read_write else .read_only }) catch |err| {
+        }) catch |err| return mapOpenError(err);
+    } else blk: {
+        const f = dir.openFile(io, path, .{
+            .mode = if (needs_writable_handle) .read_write else .read_only,
+            .follow_symlinks = follow,
+        }) catch |err| {
             // POSIX-style guests (Go's os.Open before ReadDir) open a
             // directory read-only WITHOUT OFLAGS_DIRECTORY; mirror the
             // kernel by falling back to a directory open. wasmtime answers
@@ -1020,7 +1044,7 @@ pub fn pathOpen(
             // pinned by the official corpus, and this fallback is load-bearing
             // for real guests.
             if (err == error.IsDir)
-                return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .allow_write);
+                return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .allow_write, follow);
             return mapOpenError(err);
         };
         // O_TRUNC without O_CREAT (a bare truncate-open; the 0.3 `truncate`
@@ -1066,8 +1090,9 @@ fn openDirSlot(
     mem: []u8,
     opened_fd_ptr: u32,
     policy: WriteRightPolicy,
+    follow: bool,
 ) p1.Errno {
-    const sub = dir.openDir(io, path, .{ .iterate = true }) catch |err| return mapOpenError(err);
+    const sub = dir.openDir(io, path, .{ .iterate = true, .follow_symlinks = follow }) catch |err| return mapOpenError(err);
     // A directory cannot be opened for writing, and preview1 says so through
     // the requested rights rather than a mode flag. The check has to come
     // AFTER the open: a missing path is `noent` and a regular file is its own
