@@ -70,6 +70,21 @@ pub fn confine(path: []const u8) p1.Errno {
 /// wrote it — `confine` has passed it, so it is relative and stays inside, but
 /// it may still carry `.` and `..`, which the depth walk below folds.
 ///
+/// Two things make that fold sound, and neither is local to this function:
+///
+///  - `depth` is a PERMISSIVENESS budget: a larger one lets the target spend
+///    more `..` before this returns true. So an under-count is strict and an
+///    over-count is the dangerous direction. `confine` running first is what
+///    rules out the over-count — it guarantees `link_sub` is relative and
+///    never dips below the root, so the `depth > 0` clamp here can only fire
+///    on a path that already balanced out.
+///  - A `link_sub` whose last component is `.` or `..` DOES mis-count, because
+///    the fold consumes it and then "drop the link's own final component"
+///    drops a second one. It under-counts, so it errs strict. It is also
+///    unreachable: `symlinkat` answers EEXIST for every such name (measured —
+///    `a/.`, `a/..`, `a/b/.`, `a/b/..` on Linux), so the host refuses before
+///    the miscount could matter.
+///
 /// Following a PRE-EXISTING on-disk symlink that escapes is the separate
 /// follow-time confinement (RESOLVE_BENEATH / component walk) tracked by D-315;
 /// this lexical check is sound and matches the WASI host policy for creation.
