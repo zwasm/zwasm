@@ -896,11 +896,12 @@ pub fn fdReaddir(host: *Host, mem: []u8, fd: p1.Fd, buf_ptr: u32, buf_len: u32, 
 ///   (preopens are the only roots) → `notdir` otherwise.
 /// - The path string spans `mem[path_ptr .. path_ptr +
 ///   path_len]`. Out-of-bounds → `fault`.
-/// - Path must be relative and contain no `..` segments —
-///   absolute paths or any traversal escape returns
-///   `notcapable`. The kernel-side `openat` would also block
-///   most escapes, but the explicit pre-check is part of the
-///   WASI security contract.
+/// - Path must be relative and must not ascend past the preopen —
+///   `path.confine` walks the segments with a depth counter, so a
+///   `..` that comes back stays inside and resolves, while an
+///   absolute path or one that would leave returns `notcapable`.
+///   The kernel-side `openat` would also block most escapes, but
+///   the explicit pre-check is part of the WASI security contract.
 /// - Open is delegated to `std.Io.Dir{.fd = slot.host_handle}
 ///   .openFile(io, ...)`. Errors map through `mapOpenError`.
 ///
@@ -1123,8 +1124,9 @@ pub fn fdFilestatGet(host: *Host, mem: []u8, fd: p1.Fd, filestat_ptr: u32) p1.Er
 
 /// Wasm WASI snapshot-1 `path_unlink_file` — delete a file relative to a
 /// preopen `.dir` fd. Mirrors `pathOpen`'s front-half (preopen resolution
-/// + `..`-escape guard) then `std.Io.Dir.deleteFile`. Non-preopen dirfd →
-/// `notdir`; absolute / `..`-escaping path → `notcapable`.
+/// + `path.confine`) then `std.Io.Dir.deleteFile`. Non-preopen dirfd →
+/// `notdir`; an absolute path, or one whose `..` ascends past the preopen →
+/// `notcapable`. A balanced `..` resolves.
 pub fn pathUnlinkFile(host: *Host, mem: []u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
     const raw = sliceMemConst(mem, path_ptr, path_len) orelse return .fault;
     // POSIX: the empty path is ENOENT. Must be pre-OS: NT resolves "" against
