@@ -97,10 +97,27 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
     // present.
     if (!preDecodeSectionBodies(alloc, &module)) return false;
 
-    const type_section = module.find(.type) orelse return validateNoCode(alloc, &module);
-    const code_section = module.find(.code) orelse return true;
+    // A module with no type section still needs every section-level check
+    // below — global init-expr typing (§3.4.3), elem/data offset typing.
+    // This used to `return validateNoCode(...)`, a documented no-op, so a
+    // module holding only a global / data / elem section validated clean
+    // here while `compileWasm` rejected the same bytes. Decoding a
+    // synthetic empty type vector keeps ONE path for both shapes.
+    const empty_type_body = [_]u8{0x00}; // vec(typedef), count 0
+    // The code section is OPTIONAL here. It used to `orelse return true`,
+    // which skipped every section-level check below — global init-expr
+    // typing (§3.4.3), elem/data offset typing, the function/code length
+    // agreement (§5.5.15) — for any module without functions. The spec's
+    // `assert_invalid` corpus is full of exactly those modules, so 47 of
+    // them validated clean through this path while `compileWasm` rejected
+    // the same bytes (the #233 family: a check that lives on only one of
+    // the two validation paths is unenforced on the other).
+    const code_section_opt = module.find(.code);
 
-    var types_owned = sections.decodeTypes(alloc, type_section.body) catch return false;
+    var types_owned = (if (module.find(.type)) |ts|
+        sections.decodeTypes(alloc, ts.body)
+    else
+        sections.decodeTypes(alloc, &empty_type_body)) catch return false;
     defer types_owned.deinit();
 
     const func_section = module.find(.function);
@@ -110,10 +127,17 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
         alloc.alloc(u32, 0) catch return false;
     defer alloc.free(defined_func_indices);
 
-    var codes_owned = sections.decodeCodes(alloc, code_section.body) catch return false;
-    defer codes_owned.deinit();
+    var codes_owned: ?sections.Codes = if (code_section_opt) |cs|
+        (sections.decodeCodes(alloc, cs.body) catch return false)
+    else
+        null;
+    defer if (codes_owned) |*c| c.deinit();
 
-    if (codes_owned.items.len != defined_func_indices.len) return false;
+    // §5.5.15 — the code section carries exactly one entry per function
+    // section entry. With the section absent this now rejects a function
+    // section that has no bodies, where the early return accepted it.
+    const code_items = if (codes_owned) |c| c.items else &.{};
+    if (code_items.len != defined_func_indices.len) return false;
 
     // `func_types` must span the full funcidx space (imports
     // first, then defined) — the validator's `call N` checks
@@ -201,6 +225,26 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
     // const-expr shapes pass (an incomplete evaluator must not reject valid
     // modules).
     if (globals_owned) |g| {
+        // §3.3.7 — a defined global's init expr sees the imported globals plus
+        // the globals declared BEFORE it, never itself or a later one (the
+        // reference interpreter extends the context one global at a time in
+        // `check_global`). Anything this walker declines to judge falls back to
+        // the older subtype-only check, which is conservative by construction.
+        for (g.items, 0..) |gd, i| {
+            const scope: validator.ConstExprScope = .{
+                .globals = global_entries[0 .. imp_global_count + i],
+                .func_type_indices = func_type_indices,
+                .types = &types_owned,
+            };
+            switch (validator.validateConstExpr(gd.init_expr, gd.valtype, scope)) {
+                .ok => {},
+                .invalid => {
+                    diagnostic.setDiag(.validate, .other, .unknown, "global init-expr is not a valid constant expression (§3.3.7)", .{});
+                    return false;
+                },
+                .undeterminable => {},
+            }
+        }
         if (!validator.validateGlobalInits(g.items, global_entries, func_type_indices, &types_owned)) {
             diagnostic.setDiag(.validate, .other, .unknown, "global init-expr type mismatch (§3.4.3)", .{});
             return false;
@@ -337,6 +381,22 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
         elem_types_validate = alloc.alloc(zir.ValType, elems.items.len) catch return false;
         for (elems.items, 0..) |seg, i| {
             elem_types_validate[i] = seg.elem_type;
+            // §3.3.7 — an active segment's offset is a constant expression of
+            // the target table's index type. By this point the context holds
+            // every global (imports + defined), which is the window the
+            // reference interpreter's `check_elem` sees.
+            if (seg.kind == .active and seg.offset_expr.len != 0) {
+                const want: zir.ValType = if (seg.tableidx < table_entries.len and table_entries[seg.tableidx].idx_type == .i64) .i64 else .i32;
+                const scope: validator.ConstExprScope = .{
+                    .globals = global_entries,
+                    .func_type_indices = func_type_indices,
+                    .types = &types_owned,
+                };
+                if (validator.validateConstExpr(seg.offset_expr, want, scope) == .invalid) {
+                    diagnostic.setDiag(.validate, .other, .unknown, "elem segment offset is not a valid constant expression (§3.3.7)", .{});
+                    return false;
+                }
+            }
             for (seg.funcidxs) |fidx| {
                 // ref.null entries encoded as maxInt(u32) per the
                 // element decoder; skip those.
@@ -399,6 +459,40 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
         null;
     defer if (datas_owned) |*d| d.deinit();
     const data_count_validate: u32 = if (datas_owned) |d| @intCast(d.items.len) else 0;
+    // §3.3.7 — same rule for an active data segment's offset, at the memory's
+    // index type. The memory section is decoded here purely to read that
+    // width: a memory64 offset is an `i64` constant expression, and typing it
+    // as `i32` would reject valid modules.
+    if (datas_owned) |d| {
+        var mems_owned: ?sections.Memories = if (module.find(.memory)) |s|
+            sections.decodeMemory(alloc, s.body) catch return false
+        else
+            null;
+        defer if (mems_owned) |*m| m.deinit();
+        var imp_mem_count: usize = 0;
+        if (imports_decoded) |im| for (im.items) |it| {
+            if (it.kind == .memory) imp_mem_count += 1;
+        };
+        for (d.items) |seg| {
+            if (seg.kind != .active or seg.offset_expr.len == 0) continue;
+            const want: zir.ValType = blk: {
+                if (seg.memidx < imp_mem_count) break :blk .i32; // import width not threaded here
+                const def_i = seg.memidx - imp_mem_count;
+                const mems = if (mems_owned) |m| m.items else &.{};
+                if (def_i >= mems.len) break :blk .i32;
+                break :blk if (mems[def_i].idx_type == .i64) .i64 else .i32;
+            };
+            const scope: validator.ConstExprScope = .{
+                .globals = global_entries,
+                .func_type_indices = func_type_indices,
+                .types = &types_owned,
+            };
+            if (validator.validateConstExpr(seg.offset_expr, want, scope) == .invalid) {
+                diagnostic.setDiag(.validate, .other, .unknown, "data segment offset is not a valid constant expression (§3.3.7)", .{});
+                return false;
+            }
+        }
+    }
     // `data_count_section_present` defaults to `true` on the
     // Validator struct; `validateFunctionWithMemIdxAndTags` doesn't
     // override it. Modules using memory.init MUST declare a
@@ -408,7 +502,7 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
     // `data_count_section_present` boolean if a fixture surfaces a
     // miscompile around its absence.
 
-    for (codes_owned.items, defined_func_indices, 0..) |code, type_idx, def_idx| {
+    for (code_items, defined_func_indices, 0..) |code, type_idx, def_idx| {
         const sig = types_owned.items[type_idx];
         validator.validateFunctionWithMemIdxAndTags(
             sig,

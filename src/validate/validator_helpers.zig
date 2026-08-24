@@ -10,6 +10,7 @@
 //! SIBLING-PUB: the `pub` symbols here are consumed only by the sibling
 //! `validator.zig` (which re-exports them) + its callers; the pub-ness is an
 //! extraction artifact, not a wide public API surface.
+const std = @import("std");
 const leb128 = @import("../support/leb128.zig");
 const zir = @import("../ir/zir.zig");
 const sections = @import("../parse/sections.zig");
@@ -170,4 +171,120 @@ pub fn validateTypeSection(types: *const sections.Types) bool {
         if (!typeDefIsSubtype(@intCast(i), s, types)) return false; // structural conformance
     }
     return true;
+}
+
+/// Wasm 3.0 §3.3.7 — the verdict of walking a constant expression.
+/// `undeterminable` is the conservative arm: the expression uses a shape this
+/// walker does not model (the GC `0xFB` family), so it must not be rejected.
+pub const ConstExprVerdict = enum { ok, invalid, undeterminable };
+
+/// The globals a constant expression may read, in index order (imports first).
+/// The window differs per position because the spec builds the validation
+/// context incrementally — reference interpreter `check_module`
+/// (`interpreter/valid/valid.ml`) folds the module in the order
+/// imports → tags → funcs → memories → tables → globals → datas → elems, so a
+/// table's init expr sees only imported globals, a defined global's init sees
+/// the globals declared before it, and data/elem offsets see all of them.
+pub const ConstExprScope = struct {
+    globals: []const GlobalEntry,
+    func_type_indices: []const u32,
+    types: *const sections.Types,
+};
+
+/// Wasm 3.0 §3.3.7 — type-check a constant expression against the type its
+/// position demands. Mirrors the reference interpreter's `is_const` +
+/// `check_const` pair: `is_const` fixes the admissible opcode set (including
+/// extended-const's `i32`/`i64` `add`/`sub`/`mul`, and `global.get` only for
+/// an IMMUTABLE global), and `check_const` then types the sequence as a block
+/// producing exactly `[expected]` — which is where arity, emptiness and
+/// subtyping are decided.
+pub fn validateConstExpr(
+    expr: []const u8,
+    expected: ValType,
+    scope: ConstExprScope,
+) ConstExprVerdict {
+    // Const exprs are tiny in every real module; a fixed stack keeps this
+    // allocation-free. An expression deep enough to overflow it is one this
+    // walker declines to judge rather than rejects.
+    var stack: [16]ValType = undefined;
+    var sp: usize = 0;
+    var pos: usize = 0;
+
+    while (pos < expr.len) {
+        const op = expr[pos];
+        pos += 1;
+        switch (op) {
+            0x0B => { // end — must be the last byte, leaving exactly [expected]
+                if (pos != expr.len) return .invalid;
+                if (sp != 1) return .invalid;
+                return if (gc_subtype.gcValTypeSubtype(stack[0], expected, scope.types)) .ok else .invalid;
+            },
+            0x41 => { // i32.const
+                _ = leb128.readSleb128(i32, expr, &pos) catch return .invalid;
+                if (sp >= stack.len) return .undeterminable;
+                stack[sp] = .i32;
+                sp += 1;
+            },
+            0x42 => { // i64.const
+                _ = leb128.readSleb128(i64, expr, &pos) catch return .invalid;
+                if (sp >= stack.len) return .undeterminable;
+                stack[sp] = .i64;
+                sp += 1;
+            },
+            0x43, 0x44 => { // f32.const / f64.const
+                const width: usize = if (op == 0x43) 4 else 8;
+                if (pos + width > expr.len) return .invalid;
+                pos += width;
+                if (sp >= stack.len) return .undeterminable;
+                stack[sp] = if (op == 0x43) .f32 else .f64;
+                sp += 1;
+            },
+            0xD0 => { // ref.null ht
+                const t = init_expr.readTypedRef(expr, &pos, true) catch return .invalid;
+                if (sp >= stack.len) return .undeterminable;
+                stack[sp] = t;
+                sp += 1;
+            },
+            0xD2 => { // ref.func i → non-null (ref <typeof i>)
+                const idx = leb128.readUleb128(u32, expr, &pos) catch return .invalid;
+                if (idx >= scope.func_type_indices.len) return .invalid;
+                if (sp >= stack.len) return .undeterminable;
+                stack[sp] = .{ .ref = .{ .nullable = false, .heap_type = .{ .concrete = scope.func_type_indices[idx] } } };
+                sp += 1;
+            },
+            0x23 => { // global.get j — const only for an immutable global in scope
+                const idx = leb128.readUleb128(u32, expr, &pos) catch return .invalid;
+                if (idx >= scope.globals.len) return .invalid;
+                if (scope.globals[idx].mutable) return .invalid;
+                if (sp >= stack.len) return .undeterminable;
+                stack[sp] = scope.globals[idx].valtype;
+                sp += 1;
+            },
+            0x6A, 0x6B, 0x6C, 0x7C, 0x7D, 0x7E => { // extended-const i32/i64 add/sub/mul
+                const want: std.meta.Tag(ValType) = if (op <= 0x6C) .i32 else .i64;
+                if (sp < 2) return .invalid;
+                // ValType is a tagged union (ref types carry a payload), so the
+                // operand check compares tags, not values.
+                if (std.meta.activeTag(stack[sp - 1]) != want) return .invalid;
+                if (std.meta.activeTag(stack[sp - 2]) != want) return .invalid;
+                sp -= 1; // two operands in, one result out
+            },
+            0xFD => { // v128.const is the only constant SIMD op
+                const sub = leb128.readUleb128(u32, expr, &pos) catch return .invalid;
+                if (sub != 0x0C) return .invalid;
+                if (pos + 16 > expr.len) return .invalid;
+                pos += 16;
+                if (sp >= stack.len) return .undeterminable;
+                stack[sp] = .v128;
+                sp += 1;
+            },
+            // GC + extern-convert const forms (struct.new / array.new* /
+            // ref.i31 / any.convert_extern …). Admissible per `is_const`, but
+            // typing them needs the full GC type algebra — decline to judge
+            // rather than reject a valid module.
+            0xFB => return .undeterminable,
+            else => return .invalid, // not in `is_const`
+        }
+    }
+    return .invalid; // ran off the end without `end`
 }
