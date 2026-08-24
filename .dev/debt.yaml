@@ -2,6 +2,51 @@
 # Query/edit discipline: .claude/rules/yaml_ssot_yq.md. yq = mikefarah Go v4.
 
 entries:
+  - id: "D-597"
+    layer: "code"
+    status: "note"
+    description: |-
+      **`check_libc_boundary.sh` classifies a libc site by symbol, not by
+      where it appears**, so a symbol admitted for one call site is admitted
+      everywhere. `classify()` (`scripts/check_libc_boundary.sh:144-158`)
+      matches the line text against `NECESSARY` / `REPLACEABLE` /
+      `CONVENIENCE` token lists; no file path or zone is consulted. `getenv`
+      is on `NECESSARY` for a reason scoped to one place — the comment at
+      :42-43 says "c_api exports (wasm_engine_new) lack std.process.Init" —
+      but the mechanization is not scoped at all.
+      Measured 2026-08-24 on `5058d517f`: the D-596 parity prototype's
+      measurement patch adds `std.c.getenv` to `src/ir/analysis/liveness.zig`
+      (Zone 1) and `src/engine/codegen/shared/liveness_parity.zig` (Zone 2).
+      `check_libc_boundary.sh` reports `necessary: 60 -> 62 sites`,
+      `unclassified: 0`, `[check_libc_boundary] OK`, and `--gate` exits 0.
+      `zone_check.sh --gate` also exits 0 — it extracts `@import("….zig")`
+      and nothing else (:75-77), so a libc call crossing a zone boundary is
+      outside what it can see. Both gates green; review caught it.
+      The count is the only signal, and it is not printed per-site:
+      `NECESSARY_OUT` is collected at :167 and never emitted, so 60 -> 62
+      surfaces as a bare number with no baseline in the reviewer's diff.
+      No live instance in `src/` today (measured: `std.c.*` calls are 6 files
+      under `platform/` and 2 under `api/`; `support/` and `diagnostic/`
+      mention it in comments only; zero in Zones 1 and 2).
+      Same shape in two other gates, discharged separately: `zig build lint`
+      points the linter at the repository root with no exclusions, so it walks
+      every worktree and the gitignored `private/` scratch (#266);
+      `dbg.initFromEnv` has two call sites and no test runner reaches either,
+      so every `ZWASM_DEBUG` channel — `regverify` included — is dark under
+      `zig build test-all` (#268). Three gates, three different axes
+      unexamined: path, initialisation, and here the call site.
+      Discharge: scope the allowlists per path (`getenv` admissible under
+      `src/api/` only), or print the necessary-site list so a count change is
+      visible where it is introduced.
+    first_raised: "2026-08-24"
+    last_reviewed: "2026-08-24"
+    refs: |-
+      scripts/check_libc_boundary.sh:144-158 (symbol-only classify), :167 + :190 (list collected, count printed);
+      scripts/zone_check.sh:75-77 (the @import-only extraction);
+      .claude/rules/libc_boundary.md; ADR-0070 (the 3-category classification);
+      ROADMAP §14 ("Unconscious libc fanout"), §A1 (import direction only);
+      src/api/instance.zig:186 (the call site getenv was admitted for);
+      D-596 (the prototype that walked through both gates).
   - id: "D-596"
     layer: "code"
     status: "note"
