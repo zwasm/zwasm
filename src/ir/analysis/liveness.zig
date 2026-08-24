@@ -45,7 +45,12 @@ pub fn snapshotEnabled() bool {
     return dbg.on("liveverify");
 }
 
-fn snapshotDigest(vregs: []const u32) u64 {
+/// FNV-1a over a vreg vector, little-endian per element. `pub` because the
+/// emit-side parity check (Zone 2, `codegen/shared/liveness_parity.zig`)
+/// compares its own vector against `Liveness.stack_digest` and must hash it
+/// the same way — one implementation, not two kept byte-identical by hand.
+/// D-596 is the row about exactly that failure mode.
+pub fn snapshotDigest(vregs: []const u32) u64 {
     var h: u64 = 0xcbf29ce484222325;
     for (vregs) |v| {
         var b: [4]u8 = undefined;
@@ -75,7 +80,10 @@ pub const Error = error{
 /// Bounded VM operand-stack simulation. 1024 mirrors the
 /// validator's `max_operand_stack` so a function the validator
 /// accepts cannot exceed this depth at runtime.
-const max_simulated_stack: usize = 1024;
+/// `pub` for the same reason as `snapshotDigest`: the parity check sizes its
+/// own scratch stack from this, and a hand-copied constant would be a
+/// prose-only invariant (`.claude/rules/comment_as_invariant.md`).
+pub const max_simulated_stack: usize = 1024;
 const max_control_stack: usize = 256;
 
 // Stack effect catalog extracted to `liveness_stack_effect.zig`

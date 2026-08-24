@@ -31,6 +31,7 @@ const builtin = @import("builtin");
 
 const dbg = @import("../../../support/dbg.zig");
 const zir = @import("../../../ir/zir.zig");
+const liveness = @import("../../../ir/analysis/liveness.zig");
 
 /// Comptime-dead in the release modes `dbg` is comptime-dead in, so the call
 /// site collapses to nothing there.
@@ -49,21 +50,12 @@ pub fn on() bool {
     return dbg.on("liveverify");
 }
 
-/// Mirrors `liveness.max_simulated_stack`.
-const max_stack: usize = 1024;
-
-pub fn digest(vregs: []const u32) u64 {
-    var h: u64 = 0xcbf29ce484222325;
-    for (vregs) |v| {
-        var b: [4]u8 = undefined;
-        std.mem.writeInt(u32, &b, v, .little);
-        for (b) |x| {
-            h ^= x;
-            h *%= 0x100000001b3;
-        }
-    }
-    return h;
-}
+/// The liveness snapshot and this check must agree on both the buffer bound
+/// and the hash, so both come from the producer rather than being mirrored
+/// here. A second copy of either would be the D-596 failure mode inside the
+/// D-596 diagnostic.
+const max_stack: usize = liveness.max_simulated_stack;
+const digest = liveness.snapshotDigest;
 
 /// Compare the operand stack entering instr `pc`. Prints and returns on a
 /// mismatch — a diagnostic, not a gate, mirroring `ZWASM_DEBUG=regverify`.
