@@ -116,8 +116,12 @@ const x86_64_sysv_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and buil
 /// via hidden RCX pointer when > 8 bytes). The thunk performs the
 /// CALL in inline-asm, passes rt in RCX (Win64 first int arg), and
 /// captures the result registers directly. Lists every Win64
-/// caller-saved (volatile) GPR + XMM0–XMM5 (XMM6–XMM15 are
-/// non-volatile under Win64 and the JIT prologue preserves them).
+/// caller-saved (volatile) GPR + XMM0–XMM5. XMM6–XMM15 are non-volatile
+/// under Win64 and the JIT does NOT preserve them: its pool takes xmm8-xmm13
+/// with xmm14/xmm15 as the spill stage (`x86_64/abi.zig`), and
+/// `x86_64/prologue.zig` emits no XMM save at all. Tracked separately; listing
+/// them here would only tell the compiler they are destroyed, which is true
+/// but does not restore a host value the guest already overwrote.
 const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) std.builtin.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) .{
         .rax = true,
@@ -145,9 +149,12 @@ const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and bui
 /// host→JIT `@call` lets ReleaseSafe's optimized host lose any live value it
 /// kept there → heap-corruption SEGV. `jitTrampoline` clobber-lists this set
 /// so ITS prologue/epilogue saves & restores the cohort around the call,
-/// masking the JIT's clobber. XMM/FP is omitted — the JIT already preserves
-/// win64 XMM6-15, and the SysV/AAPCS64 FP cohort is caller-saved. The x86_64
-/// arm is identical for SysV and Windows (same JIT regalloc pool).
+/// masking the JIT's clobber. Two claims that used to sit here are false and
+/// are tracked separately: the JIT does not preserve win64 XMM6-15 (no XMM
+/// save exists in `x86_64/prologue.zig`), and the x86_64 arm is NOT identical
+/// across the two ABIs — `win64.allocatable_gprs` also holds RDI and RSI,
+/// neither of which this list names. The SysV/AAPCS64 FP cohort being
+/// caller-saved does hold.
 pub const jit_cohort_clobbers: if (builtin.target.cpu.arch == .aarch64 or builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .aarch64) .{
         .x19 = true,
@@ -295,9 +302,11 @@ inline fn invokeAndCheckVoid(
             // named register — `"r"` was free to pick x0, or to pick the register a
             // neighbouring line had just written.
             //
-            // Those registers are also in the clobber list. That overlap is the
-            // tolerance the note at the head of this file already records; it is not
-            // the reason this is correct.
+            // Those registers are also in the clobber list. The note at the head
+            // of this file sanctions that overlap for OUTPUTS; the inputs here
+            // go beyond it. Both are consumed before the `blr`, so nothing the
+            // callee destroys is still needed — but this leans on LLVM
+            // tolerating a shape GCC rejects, not on the documented rule.
             : [callee] "{x9}" (f),
               [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
@@ -1420,9 +1429,11 @@ pub fn callI32f64NoArgs(
               // named register — `"r"` was free to pick x0, or to pick the register a
               // neighbouring line had just written.
               //
-              // Those registers are also in the clobber list. That overlap is the
-              // tolerance the note at the head of this file already records; it is not
-              // the reason this is correct.
+              // Those registers are also in the clobber list. The note at the head
+              // of this file sanctions that overlap for OUTPUTS; the inputs here go
+              // beyond it. Both are consumed before the `blr`, so nothing the callee
+              // destroys is still needed — but this leans on LLVM tolerating a shape
+              // GCC rejects, not on the documented rule.
             : [callee] "{x9}" (f),
               [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
@@ -1434,8 +1445,9 @@ pub fn callI32f64NoArgs(
         // in the other four — the same defect D-245 fixed for the void path,
         // still open here. Measured on x86_64-linux at ReleaseSafe: the corpus
         // that exercises these shapes faulted before this bracket existed.
-        // Callee in RAX, rt in RDI; 5 pushes + `sub $8` keep the pre-CALL RSP
-        // 16-aligned the way SysV wants it.
+        // rt in RDI; the callee register is left to the allocator, which is
+        // safe here because `push` does not destroy it. 5 pushes + `sub $8`
+        // keep the pre-CALL RSP 16-aligned the way SysV wants it.
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
         var r0_raw: u64 = undefined;
@@ -1551,9 +1563,11 @@ pub fn callF64i32NoArgs(
               // named register — `"r"` was free to pick x0, or to pick the register a
               // neighbouring line had just written.
               //
-              // Those registers are also in the clobber list. That overlap is the
-              // tolerance the note at the head of this file already records; it is not
-              // the reason this is correct.
+              // Those registers are also in the clobber list. The note at the head
+              // of this file sanctions that overlap for OUTPUTS; the inputs here go
+              // beyond it. Both are consumed before the `blr`, so nothing the callee
+              // destroys is still needed — but this leans on LLVM tolerating a shape
+              // GCC rejects, not on the documented rule.
             : [callee] "{x9}" (f),
               [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
@@ -1565,8 +1579,9 @@ pub fn callF64i32NoArgs(
         // in the other four — the same defect D-245 fixed for the void path,
         // still open here. Measured on x86_64-linux at ReleaseSafe: the corpus
         // that exercises these shapes faulted before this bracket existed.
-        // Callee in RAX, rt in RDI; 5 pushes + `sub $8` keep the pre-CALL RSP
-        // 16-aligned the way SysV wants it.
+        // rt in RDI; the callee register is left to the allocator, which is
+        // safe here because `push` does not destroy it. 5 pushes + `sub $8`
+        // keep the pre-CALL RSP 16-aligned the way SysV wants it.
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
         var r0_raw: f64 = undefined;
@@ -1690,9 +1705,11 @@ pub fn callF64f32NoArgs(
               // named register — `"r"` was free to pick x0, or to pick the register a
               // neighbouring line had just written.
               //
-              // Those registers are also in the clobber list. That overlap is the
-              // tolerance the note at the head of this file already records; it is not
-              // the reason this is correct.
+              // Those registers are also in the clobber list. The note at the head
+              // of this file sanctions that overlap for OUTPUTS; the inputs here go
+              // beyond it. Both are consumed before the `blr`, so nothing the callee
+              // destroys is still needed — but this leans on LLVM tolerating a shape
+              // GCC rejects, not on the documented rule.
             : [callee] "{x9}" (f),
               [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);

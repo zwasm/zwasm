@@ -62,6 +62,6 @@ if zig-out/bin/zwasm-spec-wasm-2-0-assert "$MIXED_DIR" >/dev/null 2>&1; then
     echo "[check_jit_releasesafe] OK — mixed int/float multi-result returns survive optimisation."
 else
     rc=$?
-    echo "[check_jit_releasesafe] FAIL (exit $rc) — the aarch64 mixed-result thunks regressed in ReleaseSafe; see src/engine/codegen/shared/entry.zig callI32f64NoArgs / callF64i32NoArgs / callF64f32NoArgs (x0 must not be both an input and an output of the asm; X19-X28 must be saved around the BLR)." >&2
+    echo "[check_jit_releasesafe] FAIL (exit $rc) — the mixed-result thunks regressed in ReleaseSafe (this leg runs on whichever host builds it — aarch64 and x86_64 alike); see src/engine/codegen/shared/entry.zig callI32f64NoArgs / callF64i32NoArgs / callF64f32NoArgs (x0 must not be both an input and an output of the asm; X19-X28 must be saved around the BLR)." >&2
     exit 1
 fi
