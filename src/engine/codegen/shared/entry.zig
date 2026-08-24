@@ -271,6 +271,7 @@ inline fn invokeAndCheckVoid(
             \\ stp x23, x24, [sp, #32]
             \\ stp x25, x26, [sp, #48]
             \\ stp x27, x28, [sp, #64]
+            \\ mov x0, x10
             \\ blr %[callee]
             \\ ldp x21, x22, [sp, #16]
             \\ ldp x23, x24, [sp, #32]
@@ -278,8 +279,20 @@ inline fn invokeAndCheckVoid(
             \\ ldp x27, x28, [sp, #64]
             \\ ldp x19, x20, [sp], #80
             :
-            : [callee] "r" (f),
-              [rt_arg] "{x0}" (rt),
+            // Neither input asks for x0. These thunks return a 16-byte
+            // `FuncRet_*`, and AAPCS64 returns that indirectly: x0 carries the
+            // caller's result buffer for the whole call, so it is not the
+            // compiler's to hand out. `"{x0}"` put a second claim on it; under
+            // optimisation the sret pointer won and the argument setup was
+            // dropped, so `blr` ran the JIT body with a result buffer where the
+            // runtime should be — a small constant fault address, a field
+            // offset read off a pointer that was never the runtime. Debug
+            // allocated differently and never showed it.
+            //
+            // x9 and x10 are both in the clobber list, so the callee is free to
+            // destroy them and the compiler keeps nothing live there.
+            : [callee] "{x9}" (f),
+              [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
     } else if (comptime builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag != .windows and args.len == 0) {
         // D-245 (x86_64 SysV): the JIT uses an all-callee-saved regalloc pool
@@ -1368,12 +1381,36 @@ pub fn callI32f64NoArgs(
         var r0_raw: u64 = undefined;
         var r1_raw: u64 = undefined;
         asm volatile (
+            \\ stp x19, x20, [sp, #-80]!
+            \\ stp x21, x22, [sp, #16]
+            \\ stp x23, x24, [sp, #32]
+            \\ stp x25, x26, [sp, #48]
+            \\ stp x27, x28, [sp, #64]
+            \\ mov x0, x10
             \\ blr %[callee]
-            \\ fmov %[r1_bits], d0
-            : [r0_out] "={x0}" (r0_raw),
-              [r1_bits] "=r" (r1_raw),
-            : [callee] "r" (f),
-              [rt_arg] "{x0}" (rt),
+            \\ mov x11, x0
+            \\ ldp x21, x22, [sp, #16]
+            \\ ldp x23, x24, [sp, #32]
+            \\ ldp x25, x26, [sp, #48]
+            \\ ldp x27, x28, [sp, #64]
+            \\ ldp x19, x20, [sp], #80
+            \\ fmov x12, d0
+            : [r0_out] "={x11}" (r0_raw),
+              [r1_bits] "={x12}" (r1_raw),
+              // Neither input asks for x0. These thunks return a 16-byte
+              // `FuncRet_*`, and AAPCS64 returns that indirectly: x0 carries the
+              // caller's result buffer for the whole call, so it is not the
+              // compiler's to hand out. `"{x0}"` put a second claim on it; under
+              // optimisation the sret pointer won and the argument setup was
+              // dropped, so `blr` ran the JIT body with a result buffer where the
+              // runtime should be — a small constant fault address, a field
+              // offset read off a pointer that was never the runtime. Debug
+              // allocated differently and never showed it.
+              //
+              // x9 and x10 are both in the clobber list, so the callee is free to
+              // destroy them and the compiler keeps nothing live there.
+            : [callee] "{x9}" (f),
+              [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
         if (rt.trap_flag != 0) return Error.Trap;
         return .{ .r0 = r0_raw, .r1 = @bitCast(r1_raw) };
@@ -1427,12 +1464,36 @@ pub fn callF64i32NoArgs(
         var r0_raw: u64 = undefined;
         var r1_raw: u64 = undefined;
         asm volatile (
+            \\ stp x19, x20, [sp, #-80]!
+            \\ stp x21, x22, [sp, #16]
+            \\ stp x23, x24, [sp, #32]
+            \\ stp x25, x26, [sp, #48]
+            \\ stp x27, x28, [sp, #64]
+            \\ mov x0, x10
             \\ blr %[callee]
-            \\ fmov %[r0_bits], d0
-            : [r0_bits] "=r" (r0_raw),
-              [r1_out] "={x0}" (r1_raw),
-            : [callee] "r" (f),
-              [rt_arg] "{x0}" (rt),
+            \\ mov x11, x0
+            \\ ldp x21, x22, [sp, #16]
+            \\ ldp x23, x24, [sp, #32]
+            \\ ldp x25, x26, [sp, #48]
+            \\ ldp x27, x28, [sp, #64]
+            \\ ldp x19, x20, [sp], #80
+            \\ fmov x12, d0
+            : [r0_bits] "={x12}" (r0_raw),
+              [r1_out] "={x11}" (r1_raw),
+              // Neither input asks for x0. These thunks return a 16-byte
+              // `FuncRet_*`, and AAPCS64 returns that indirectly: x0 carries the
+              // caller's result buffer for the whole call, so it is not the
+              // compiler's to hand out. `"{x0}"` put a second claim on it; under
+              // optimisation the sret pointer won and the argument setup was
+              // dropped, so `blr` ran the JIT body with a result buffer where the
+              // runtime should be — a small constant fault address, a field
+              // offset read off a pointer that was never the runtime. Debug
+              // allocated differently and never showed it.
+              //
+              // x9 and x10 are both in the clobber list, so the callee is free to
+              // destroy them and the compiler keeps nothing live there.
+            : [callee] "{x9}" (f),
+              [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
         if (rt.trap_flag != 0) return Error.Trap;
         return .{ .r0 = @bitCast(r0_raw), .r1 = r1_raw };
@@ -1494,13 +1555,36 @@ pub fn callF64f32NoArgs(
         var r0_raw: u64 = undefined;
         var r1_raw: u64 = undefined;
         asm volatile (
+            \\ stp x19, x20, [sp, #-80]!
+            \\ stp x21, x22, [sp, #16]
+            \\ stp x23, x24, [sp, #32]
+            \\ stp x25, x26, [sp, #48]
+            \\ stp x27, x28, [sp, #64]
+            \\ mov x0, x10
             \\ blr %[callee]
-            \\ fmov %[r0_bits], d0
-            \\ fmov %[r1_bits], d1
-            : [r0_bits] "=r" (r0_raw),
-              [r1_bits] "=r" (r1_raw),
-            : [callee] "r" (f),
-              [rt_arg] "{x0}" (rt),
+            \\ fmov x12, d0
+            \\ fmov x13, d1
+            \\ ldp x21, x22, [sp, #16]
+            \\ ldp x23, x24, [sp, #32]
+            \\ ldp x25, x26, [sp, #48]
+            \\ ldp x27, x28, [sp, #64]
+            \\ ldp x19, x20, [sp], #80
+            : [r0_bits] "={x12}" (r0_raw),
+              [r1_bits] "={x13}" (r1_raw),
+              // Neither input asks for x0. These thunks return a 16-byte
+              // `FuncRet_*`, and AAPCS64 returns that indirectly: x0 carries the
+              // caller's result buffer for the whole call, so it is not the
+              // compiler's to hand out. `"{x0}"` put a second claim on it; under
+              // optimisation the sret pointer won and the argument setup was
+              // dropped, so `blr` ran the JIT body with a result buffer where the
+              // runtime should be — a small constant fault address, a field
+              // offset read off a pointer that was never the runtime. Debug
+              // allocated differently and never showed it.
+              //
+              // x9 and x10 are both in the clobber list, so the callee is free to
+              // destroy them and the compiler keeps nothing live there.
+            : [callee] "{x9}" (f),
+              [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
         if (rt.trap_flag != 0) return Error.Trap;
         const r1_f32: f32 = @bitCast(@as(u32, @truncate(r1_raw)));
