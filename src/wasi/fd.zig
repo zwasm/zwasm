@@ -897,8 +897,15 @@ pub fn fdReaddir(host: *Host, mem: []u8, fd: p1.Fd, buf_ptr: u32, buf_len: u32, 
     // cross-checks to confirm "." names the directory it is reading. ".."
     // stays 0: naming the parent is the escape `path_open` refuses, and 0 is
     // the conventional "inode unknown" answer a readdir is allowed to give.
-    const self_file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
-    const self_ino: u64 = @intCast((self_file.stat(io) catch return .io).inode);
+    //
+    // Only the cookie-0 call writes ".", so only that call pays the stat: a
+    // paging guest resumes at cookie >= 2, skips both dots, and never reaches
+    // the `.io` this can raise.
+    var self_ino: u64 = 0;
+    if (cookie == 0) {
+        const self_file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
+        self_ino = @intCast((self_file.stat(io) catch return .io).inode);
+    }
     const dots: [2]struct { name: []const u8, ino: u64 } = .{
         .{ .name = ".", .ino = self_ino },
         .{ .name = "..", .ino = 0 },
