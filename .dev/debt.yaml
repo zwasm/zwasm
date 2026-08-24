@@ -27,7 +27,8 @@ entries:
       surfaces as a bare number with no baseline in the reviewer's diff.
       No live instance in `src/` today (measured: `std.c.*` calls are 6 files
       under `platform/` and 2 under `api/`; `support/` and `diagnostic/`
-      mention it in comments only; zero in Zones 1 and 2).
+      mention it in comments only; zero calls in Zones 1 and 2 — #269 shipped two
+      comments naming `std.c.getenv` there, so a bare grep hits).
       Same shape in two other gates, discharged separately: `zig build lint`
       points the linter at the repository root with no exclusions, so it walks
       every worktree and the gitignored `private/` scratch (#266);
