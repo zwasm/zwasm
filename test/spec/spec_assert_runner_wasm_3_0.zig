@@ -693,44 +693,49 @@ pub fn main(init: std.process.Init) !void {
             //  - export section (id 7): 5 entries (memory + 4 globals)
             const spectest_bytes = [_]u8{
                 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+                // table section (id 4, before memory's id 5): 1 entry,
+                // funcref (0x70), flags=1 (has max), min=10, max=20 — the
+                // shape the spec's own `spectest` module exports.
+                0x04, 0x05, 0x01, 0x70, 0x01, 0x0a, 0x14,
                 // memory section: 1 entry, flags=1, min=1, max=2
-                0x05, 0x04, 0x01, 0x01, 0x01, 0x02,
+                0x05,
+                0x04, 0x01, 0x01, 0x01, 0x02,
                 // global section: 4 entries (33 bytes content)
                 //   each: valtype byte + mutable byte + init_expr + 0x0B end
-                0x06, 0x21,
-                0x04,
+                0x06, 0x21, 0x04,
                 //   global 0: i32 (0x7F) const 0x9A 0x05 (666 LEB128) — immutable
                 0x7f, 0x00, 0x41, 0x9a, 0x05, 0x0b,
                 //   global 1: i64 (0x7E) const 0x9A 0x05 (666) — immutable
-                0x7e,
-                0x00, 0x42, 0x9a, 0x05, 0x0b,
+                0x7e, 0x00,
+                0x42, 0x9a, 0x05, 0x0b,
                 //   global 2: f32 (0x7D) const 0.0 — immutable
-                0x7d, 0x00, 0x43,
-                0x00, 0x00, 0x00, 0x00, 0x0b,
+                0x7d, 0x00, 0x43, 0x00,
+                0x00, 0x00, 0x00, 0x0b,
                 //   global 3: f64 (0x7C) const 0.0 — immutable
-                0x7c, 0x00, 0x44,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x0b,
-                // export section: 5 entries (62 bytes content)
-                0x07, 0x3e, 0x05,
+                0x7c, 0x00, 0x44, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b,
+                // export section: 6 entries (70 bytes content)
+                0x07, 0x46, 0x06,
+                //   "table" table 0
+                0x05, 't',  'a',  'b',  'l',
+                'e',  0x01, 0x00,
                 //   "memory" memory 0
-                0x06, 'm',  'e',  'm',
-                'o',  'r',  'y',  0x02, 0x00,
+                0x06, 'm',  'e',  'm',  'o',
+                'r',  'y',  0x02, 0x00,
                 //   "global_i32" global 0
-                0x0a, 'g',  'l',
-                'o',  'b',  'a',  'l',  '_',  'i',  '3',  '2',
-                0x03, 0x00,
-                //   "global_i64" global 1
-                0x0a, 'g',  'l',  'o',  'b',  'a',
-                'l',  '_',  'i',  '6',  '4',  0x03, 0x01,
-                //   "global_f32" global 2
-                0x0a,
-                'g',  'l',  'o',  'b',  'a',  'l',  '_',  'f',
-                '3',  '2',  0x03, 0x02,
-                //   "global_f64" global 3
                 0x0a, 'g',  'l',  'o',
-                'b',  'a',  'l',  '_',  'f',  '6',  '4',  0x03,
-                0x03,
+                'b',  'a',  'l',  '_',  'i',  '3',  '2',  0x03,
+                0x00,
+                //   "global_i64" global 1
+                0x0a, 'g',  'l',  'o',  'b',  'a',  'l',
+                '_',  'i',  '6',  '4',  0x03, 0x01,
+                //   "global_f32" global 2
+                0x0a, 'g',
+                'l',  'o',  'b',  'a',  'l',  '_',  'f',  '3',
+                '2',  0x03, 0x02,
+                //   "global_f64" global 3
+                0x0a, 'g',  'l',  'o',  'b',
+                'a',  'l',  '_',  'f',  '6',  '4',  0x03, 0x03,
             };
             if (cur_engine.compile(&spectest_bytes)) |spectest_mod_compiled| {
                 var spectest_mod = spectest_mod_compiled;
@@ -742,6 +747,19 @@ pub fn main(init: std.process.Init) !void {
                             const inst_ptr = &instances_list.items[instances_list.items.len - 1];
                             if (inst_ptr.memory()) |mem| {
                                 cur_linker.defineMemory("spectest", "memory", mem) catch {};
+                            }
+                            // A fixture importing `(import "spectest" "table" …)`
+                            // could not instantiate at all while this was absent,
+                            // and the runner reported its own missing host surface
+                            // as the module failing to instantiate.
+                            {
+                                if (inst_ptr.handle.runtime) |rt| {
+                                    for (inst_ptr.handle.exports_storage) |exp| {
+                                        if (exp.kind == .table) {
+                                            cur_linker.defineTable("spectest", "table", rt.tables[exp.idx]) catch {};
+                                        }
+                                    }
+                                }
                             }
                             // 10.M-D195b cycle 77 — register the
                             // synth module's global exports under
