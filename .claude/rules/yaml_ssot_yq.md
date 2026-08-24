@@ -84,3 +84,14 @@ error).
   use `key: ""`.
 - **Block-scalar indent**: content is exactly 2 spaces deeper than its key; drift
   = parse failure. Use the Edit tool, mirror an existing entry's indent.
+
+## Rotting values
+
+**A measured value does not go in a row.** The row carries the claim; a
+re-derivation command carries the evidence — `zig build test-wasi-p1-official`,
+not `58/72`. A value that must be written carries its measurement date and SHA
+(`measured 2026-08-24 on 5058d517f`).
+
+Measured 2026-08-24: 28 of 89 rows held a rotting number, and most of the 11
+corrections in the never-reviewed sweep (#273) were replacing one.
+

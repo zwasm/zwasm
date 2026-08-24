@@ -29,6 +29,40 @@
 const std = @import("std");
 
 const zir = @import("../zir.zig");
+const dbg = @import("../../support/dbg.zig");
+
+/// D-596 — whether to record the per-pc operand-stack snapshot the emit's
+/// parity check consumes. Hoisted so the walk pays one predicate, not one per
+/// instruction.
+///
+/// Reach: the CLI, today. `dbg.initFromEnv` has two call sites
+/// (`cli/main.zig`, `api/instance.zig`) and no test runner reaches either, so
+/// the channel is dark for the whole of `zig build test-all`. Lane coverage
+/// arrives with that gap, not with a second env mechanism here — a
+/// `std.c.getenv` in Zone 1 would be a new site outside ADR-0070's c_api
+/// classification, and `std.posix.getenv` is gone in 0.16. `support/dbg.zig`
+/// carries the whole argument; this is a pointer, not a second copy.
+pub fn snapshotEnabled() bool {
+    return dbg.on("liveverify");
+}
+
+/// FNV-1a over a vreg vector, little-endian per element. `pub` because the
+/// emit-side parity check (Zone 2, `codegen/shared/liveness_parity.zig`)
+/// compares its own vector against `Liveness.stack_digest` and must hash it
+/// the same way — one implementation, not two kept byte-identical by hand.
+/// D-596 is the row about exactly that failure mode.
+pub fn snapshotDigest(vregs: []const u32) u64 {
+    var h: u64 = 0xcbf29ce484222325;
+    for (vregs) |v| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, v, .little);
+        for (b) |x| {
+            h ^= x;
+            h *%= 0x100000001b3;
+        }
+    }
+    return h;
+}
 
 const Allocator = std.mem.Allocator;
 const ZirFunc = zir.ZirFunc;
@@ -47,7 +81,10 @@ pub const Error = error{
 /// Bounded VM operand-stack simulation. 1024 mirrors the
 /// validator's `max_operand_stack` so a function the validator
 /// accepts cannot exceed this depth at runtime.
-const max_simulated_stack: usize = 1024;
+/// `pub` for the same reason as `snapshotDigest`: the parity check sizes its
+/// own scratch stack from this, and a hand-copied constant would be a
+/// prose-only invariant (`.claude/rules/comment_as_invariant.md`).
+pub const max_simulated_stack: usize = 1024;
 const max_control_stack: usize = 256;
 
 // Stack effect catalog extracted to `liveness_stack_effect.zig`
@@ -167,6 +204,20 @@ pub fn compute(
     var sim_stack: [max_simulated_stack]u32 = undefined;
     var sim_len: usize = 0;
 
+    // D-596 snapshot buffers. Owned by the returned `Liveness`; freed
+    // alongside `ranges`.
+    const snapshot = snapshotEnabled();
+    var snap_depth: []u32 = &.{};
+    var snap_digest: []u64 = &.{};
+    errdefer if (snap_depth.len != 0) {
+        allocator.free(snap_depth);
+        allocator.free(snap_digest);
+    };
+    if (snapshot and func.instrs.items.len != 0) {
+        snap_depth = try allocator.alloc(u32, func.instrs.items.len);
+        snap_digest = try allocator.alloc(u64, func.instrs.items.len);
+    }
+
     // D-093 (d-9) — `block` / `loop` / `if` entry depths so `.br N`
     // can close only vregs ABOVE the target's entry, leaving lower
     // values live for post-block consumers. Per Wasm spec §3.4.4:
@@ -202,6 +253,11 @@ pub fn compute(
 
     for (func.instrs.items, 0..) |instr, idx| {
         const pc: u32 = @intCast(idx);
+
+        if (snap_depth.len != 0) {
+            snap_depth[idx] = @intCast(sim_len);
+            snap_digest[idx] = snapshotDigest(sim_stack[0..sim_len]);
+        }
 
         // The function-level `end` closes every still-live vreg.
         if (instr.op == .end) {
@@ -443,7 +499,14 @@ pub fn compute(
                         }
                         fr.merge_captured = true;
                     }
-                    sim_len = fr.entry_depth;
+                    // D-596 — mirror `emitElse`, which truncates to
+                    // `entry_stack_depth - param_arity` BEFORE re-pushing the
+                    // params. Both depths are recorded after the cond pop
+                    // (with the params still on the stack), so restoring to
+                    // `entry_depth` and then pushing left this side
+                    // `param_arity` too deep through every `if (param T...)`
+                    // else arm. Same base the `.end` arms above compute.
+                    sim_len = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
                     var i: u32 = 0;
                     while (i < fr.param_arity) : (i += 1) {
                         if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
@@ -814,11 +877,17 @@ pub fn compute(
         }
     }
 
-    return .{ .ranges = try ranges.toOwnedSlice(allocator) };
+    return .{
+        .ranges = try ranges.toOwnedSlice(allocator),
+        .stack_depth = snap_depth,
+        .stack_digest = snap_digest,
+    };
 }
 
 pub fn deinit(allocator: Allocator, info: Liveness) void {
     if (info.ranges.len != 0) allocator.free(info.ranges);
+    if (info.stack_depth.len != 0) allocator.free(info.stack_depth);
+    if (info.stack_digest.len != 0) allocator.free(info.stack_digest);
 }
 
 const testing = std.testing;
@@ -908,7 +977,7 @@ test "compute: br closes all live vregs at branch site (sub-7.5c-iv)" {
     defer f.deinit(testing.allocator);
 
     const live = try compute(testing.allocator, &f, &.{}, &.{});
-    defer testing.allocator.free(live.ranges);
+    defer deinit(testing.allocator, live);
     try testing.expectEqual(@as(usize, 1), live.ranges.len);
     try testing.expectEqual(@as(u32, 1), live.ranges[0].last_use_pc); // br at pc=1
 }
@@ -925,7 +994,7 @@ test "compute: pop on empty stack is tolerant (validator-cleared dead-code path)
     defer f.deinit(testing.allocator);
 
     const live = try compute(testing.allocator, &f, &.{}, &.{});
-    defer testing.allocator.free(live.ranges);
+    defer deinit(testing.allocator, live);
     try testing.expectEqual(@as(usize, 0), live.ranges.len);
 }
 
@@ -949,7 +1018,7 @@ test "compute: dead code after `br 0` does not underflow" {
     // Should compute successfully — no underflow on the dead
     // i32.const after the br.
     const live = try compute(testing.allocator, &f, &.{}, &.{});
-    defer testing.allocator.free(live.ranges);
+    defer deinit(testing.allocator, live);
     // Two i32.const pushes → 2 vreg ranges.
     try testing.expectEqual(@as(usize, 2), live.ranges.len);
 }
