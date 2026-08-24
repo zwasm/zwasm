@@ -38,9 +38,10 @@ const dbg = @import("../../support/dbg.zig");
 /// Reach: the CLI, today. `dbg.initFromEnv` has two call sites
 /// (`cli/main.zig`, `api/instance.zig`) and no test runner reaches either, so
 /// the channel is dark for the whole of `zig build test-all`. Lane coverage
-/// arrives with that gap, not with a second env mechanism here — Zone 0 and
-/// Zone 1 cannot read the env directly (ROADMAP §A1: `std.c.getenv` would
-/// re-introduce the libc dependency, and `std.posix.getenv` is gone in 0.16).
+/// arrives with that gap, not with a second env mechanism here — a
+/// `std.c.getenv` in Zone 1 would be a new site outside ADR-0070's c_api
+/// classification, and `std.posix.getenv` is gone in 0.16. `support/dbg.zig`
+/// carries the whole argument; this is a pointer, not a second copy.
 pub fn snapshotEnabled() bool {
     return dbg.on("liveverify");
 }
@@ -498,7 +499,14 @@ pub fn compute(
                         }
                         fr.merge_captured = true;
                     }
-                    sim_len = fr.entry_depth;
+                    // D-596 — mirror `emitElse`, which truncates to
+                    // `entry_stack_depth - param_arity` BEFORE re-pushing the
+                    // params. Both depths are recorded after the cond pop
+                    // (with the params still on the stack), so restoring to
+                    // `entry_depth` and then pushing left this side
+                    // `param_arity` too deep through every `if (param T...)`
+                    // else arm. Same base the `.end` arms above compute.
+                    sim_len = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
                     var i: u32 = 0;
                     while (i < fr.param_arity) : (i += 1) {
                         if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
