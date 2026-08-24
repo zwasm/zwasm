@@ -1,7 +1,7 @@
 //! WASI 0.1 `path_*` handlers (D-278): filesystem operations relative to a
 //! preopen `.dir` fd. Each resolves the dirfd + bounds-checks the guest path
-//! + rejects `..`-escape (the WASI sandbox contract, mirroring `fd.zig`'s
-//! `pathOpen` front-half), then delegates to the cross-platform `std.Io.Dir`
+//! + confines it to the preopen (`confine`: a balanced `..` resolves, one that
+//! ascends past the root does not), then delegates to the cross-platform `std.Io.Dir`
 //! API (NOT `std.posix.*` — those hardcode POSIX `c_int` fds and break Win64;
 //! see lesson windowsmini-reconciliation).
 //!
@@ -25,15 +25,40 @@ fn sliceMemConst(mem: []const u8, ptr: u32, len: u32) ?[]const u8 {
     return mem[ptr..end];
 }
 
-/// A guest path is sandboxed to its preopen root: absolute paths and any `..`
-/// segment escape the root and are rejected with `notcapable`.
-fn pathHasParentEscape(path: []const u8) bool {
-    if (path.len > 0 and path[0] == '/') return true;
+/// Reject a guest path that would leave the preopen it is resolved against.
+///
+/// preview1 confines every path to its preopen, but `..` is not itself the
+/// violation: a path that dips through `..` and comes back stays inside and
+/// must resolve. Only an absolute path, or one whose `..` segments ascend PAST
+/// the root, escapes.
+///
+/// This is a CHECK, not a rewrite. The path reaches the host exactly as the
+/// guest wrote it, so `.`, `..` and trailing separators keep their POSIX
+/// meaning — `f/.` and `f/..` on a regular file stay `notdir`, which a folded
+/// path would silently turn into a successful open of `f`.
+///
+/// The walk is lexical, so it cannot see a symlink component that redirects
+/// the real resolution; that is the follow-time confinement D-315 tracks, and
+/// it is unchanged by this.
+pub fn confine(path: []const u8) p1.Errno {
+    if (path.len == 0) return .noent;
+    if (path[0] == '/') return .notcapable;
+    // An interior NUL would be truncated by the host's C path conversion, so
+    // the guest would silently open a DIFFERENT path than the one it named.
+    if (std.mem.findScalar(u8, path, 0) != null) return .inval;
+
+    var depth: usize = 0;
     var it = std.mem.tokenizeScalar(u8, path, '/');
     while (it.next()) |seg| {
-        if (std.mem.eql(u8, seg, "..")) return true;
+        if (std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (depth == 0) return .notcapable; // ascends above the preopen root
+            depth -= 1;
+            continue;
+        }
+        depth += 1;
     }
-    return false;
+    return .success;
 }
 
 /// A symlink TARGET escapes the preopen root if, resolved relative to the
@@ -41,8 +66,9 @@ fn pathHasParentEscape(path: []const u8) bool {
 /// absolute). This is the PLANT-time half of cap-std-style confinement: it
 /// stops a guest from CREATING, through zwasm's own API, a symlink that points
 /// outside the sandbox — the primary "plant then read through it" escalation.
-/// `link_sub` is the link's path relative to the preopen root and has already
-/// passed `pathHasParentEscape` (no `..`, not absolute).
+/// `link_sub` is the link's path relative to the preopen root, as the guest
+/// wrote it — `confine` has passed it, so it is relative and stays inside, but
+/// it may still carry `.` and `..`, which the depth walk below folds.
 ///
 /// Following a PRE-EXISTING on-disk symlink that escapes is the separate
 /// follow-time confinement (RESOLVE_BENEATH / component walk) tracked by D-315;
@@ -54,6 +80,10 @@ fn symlinkTargetEscapes(link_sub: []const u8, target: []const u8) bool {
     var lit = std.mem.tokenizeScalar(u8, link_sub, '/');
     while (lit.next()) |seg| {
         if (std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (depth > 0) depth -= 1;
+            continue;
+        }
         depth += 1;
     }
     if (depth > 0) depth -= 1; // drop the link's own final component
@@ -70,6 +100,20 @@ fn symlinkTargetEscapes(link_sub: []const u8, target: []const u8) bool {
     return false;
 }
 
+/// Whether `path`'s LAST component is `.` — `a/.`, `./`, `.` all qualify.
+///
+/// POSIX makes `rmdir` on such a path EINVAL, and Zig's `std.Io` classifies
+/// that errno as a programmer bug and panics on it in debug builds. So the
+/// check has to happen here, and it has to match every spelling: guarding the
+/// literal `.` and `./` alone left `a/.` reaching the host, where a guest
+/// could abort the runtime with one call.
+fn endsInDotComponent(path: []const u8) bool {
+    var last: []const u8 = &.{};
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next()) |seg| last = seg;
+    return std.mem.eql(u8, last, ".");
+}
+
 const Resolved = struct { dir: std.Io.Dir, sub: []const u8 };
 
 /// Resolve `(dirfd, path_ptr, path_len)` to a host `Dir` + bounded guest path,
@@ -81,7 +125,8 @@ fn resolve(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: 
     // POSIX: the empty path resolves to nothing (ENOENT). Guarded here because
     // std.Io panics on the resulting EINVAL in debug builds ("programmer bug").
     if (path.len == 0) return .noent;
-    if (pathHasParentEscape(path)) return .notcapable;
+    const ce = confine(path);
+    if (ce != .success) return ce;
     const slot = host.translateFd(dirfd) orelse return .badf;
     if (slot.kind != .dir) return .notdir;
     if (!slot.has(needed)) return .notcapable;
@@ -136,9 +181,9 @@ pub fn pathRemoveDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr:
     const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_REMOVE_DIRECTORY, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
-    // rmdir(".") is EINVAL per POSIX; guarded because std.Io panics on the
-    // unexpected EINVAL in debug builds.
-    if (std.mem.eql(u8, r.sub, ".") or std.mem.eql(u8, r.sub, "./")) return .inval;
+    // rmdir on a path whose last component is `.` is EINVAL per POSIX; guarded
+    // because std.Io panics on that errno in debug builds (see the helper).
+    if (endsInDotComponent(r.sub)) return .inval;
     r.dir.deleteDir(io, r.sub) catch |err| return mapDirErr(err);
     return .success;
 }
@@ -610,4 +655,72 @@ test "path_* resolution: escape / non-dir / out-of-bounds rejections" {
     // Removing a missing directory → noent.
     writeGuestPath(&mem, 0, "ghost");
     try testing.expectEqual(p1.Errno.noent, pathRemoveDirectory(&h, &mem, dirfd, 0, 5));
+}
+
+// ============================================================
+// Path confinement
+// ============================================================
+
+test "confine: a `..` that stays inside the preopen root is allowed" {
+    // The literal path the official `interesting_paths` opens and expects to
+    // resolve — it dips through `..` twice and comes back.
+    try testing.expectEqual(p1.Errno.success, confine("dir/.//nested/../../dir/nested/../nested///./file"));
+    try testing.expectEqual(p1.Errno.success, confine("a/b"));
+    try testing.expectEqual(p1.Errno.success, confine("./a/./b"));
+    try testing.expectEqual(p1.Errno.success, confine("a/b/../c"));
+    try testing.expectEqual(p1.Errno.success, confine("a/../b"));
+    try testing.expectEqual(p1.Errno.success, confine("."));
+    try testing.expectEqual(p1.Errno.success, confine("a/.."));
+}
+
+test "confine: leaving the preopen root is notcapable" {
+    try testing.expectEqual(p1.Errno.notcapable, confine("/dir/nested/file"));
+    try testing.expectEqual(p1.Errno.notcapable, confine("/"));
+    try testing.expectEqual(p1.Errno.notcapable, confine(".."));
+    try testing.expectEqual(p1.Errno.notcapable, confine("../escape"));
+    try testing.expectEqual(p1.Errno.notcapable, confine("dir/nested/../../../dir/nested/file"));
+    // Balanced to exactly the root is still inside it.
+    try testing.expectEqual(p1.Errno.success, confine("dir/.."));
+}
+
+test "confine: the empty path and an interior NUL are rejected" {
+    try testing.expectEqual(p1.Errno.noent, confine(""));
+    // The host's C path conversion would truncate at the NUL and resolve a
+    // DIFFERENT path than the guest named.
+    try testing.expectEqual(p1.Errno.inval, confine("dir/nested/file\x00"));
+}
+
+test "confine: POSIX meaning survives, because the path is not rewritten" {
+    // A fold would drop these components and turn `f/.` into a successful open
+    // of `f`; the host has to see them to answer `notdir`. Verified end to end
+    // against wasmtime 47.3: `f/.`, `f/./.` and `f/..` are all `notdir` there.
+    for ([_][]const u8{ "f/.", "f/./.", "f/..", "f/", "dir/nested/", "dir/nested/file/" }) |p| {
+        try testing.expectEqual(p1.Errno.success, confine(p));
+    }
+}
+
+test "path_remove_directory: every spelling of a trailing `.` is inval, not a host panic" {
+    // `std.Io` treats the EINVAL that `rmdir` returns for these as a programmer
+    // bug and panics in debug builds, so reaching the host at all is a guest
+    // aborting the runtime. Guarding only the literal `.` and `./` left `a/.`.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    const dirfd = try h.addPreopen(tmp.dir.handle, "/sandbox");
+    const root: std.Io.Dir = .{ .handle = tmp.dir.handle };
+    try root.createDir(testing.io, "a", std.Io.File.Permissions.default_dir);
+
+    var mem: [64]u8 = @splat(0);
+    for ([_][]const u8{ ".", "./", "a/.", "a/./", "./a/." }) |p| {
+        @memset(mem[0..32], 0);
+        @memcpy(mem[0..p.len], p);
+        try testing.expectEqual(p1.Errno.inval, pathRemoveDirectory(&h, &mem, dirfd, 0, @intCast(p.len)));
+    }
+    // A trailing `..` is NOT this case: the host answers notempty, which maps
+    // cleanly, so it must still reach it.
+    @memset(mem[0..32], 0);
+    @memcpy(mem[0..4], "a/..");
+    try testing.expectEqual(p1.Errno.notempty, pathRemoveDirectory(&h, &mem, dirfd, 0, 4));
 }
