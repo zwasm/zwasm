@@ -12,7 +12,7 @@ they operate on.
 > **Implementation status.** The model lands in three changes and this file
 > describes all of it, so parts of it lead the code. Advertising the table and
 > deriving rights onto opened fds, reading a right at each call, and folding
-> `..` (`path.normalize`): all **landed**.
+> `..` (`path.confine`): all **landed**.
 
 ## Sources
 
@@ -214,10 +214,17 @@ confined to its preopen, but `..` is not itself the violation — a path that
 dips through `..` and comes back stays inside and must resolve. Only an
 absolute path, or one whose `..` ascends past the root, escapes.
 
-One `path.normalize` folds the path lexically and
-answers `notcapable` only when the fold would leave the root. A trailing
-separator is preserved, because POSIX reads `x/` as "x, which must be a
-directory" and the host syscalls already enforce that. The fold is lexical, so
-`a/b/..` does not verify that `a/b` exists — the trade-off `path.Clean` makes,
-and the reason follow-time symlink confinement (D-315) remains a separate,
-still-open problem.
+One `path.confine` replaces both copies of the old check. It walks the
+segments with a depth counter and answers `notcapable` only when a `..` would
+take the depth below zero — an absolute path is rejected outright.
+
+It is a **check, not a rewrite**: the path reaches the host exactly as the
+guest wrote it. That matters more than it looks. A folded path drops `.` and
+resolves `..` before the host sees it, so `f/.` and `f/..` on a regular file
+become a successful open of `f`, where POSIX — and wasmtime — answer `notdir`.
+Not rewriting keeps every such case correct for free, and keeps trailing
+separators meaningful without a special case.
+
+The walk is lexical, so it cannot see a symlink component that redirects the
+real resolution. That is the follow-time confinement D-315 tracks, and it is
+unchanged.

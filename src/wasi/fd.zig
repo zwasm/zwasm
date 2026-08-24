@@ -932,10 +932,9 @@ pub fn pathOpen(
     // POSIX: the empty path is ENOENT. Must be pre-OS: NT resolves "" against
     // a RootDirectory handle as the directory itself.
     if (raw.len == 0) return .noent;
-    var path_buf: [path_mod.max_guest_path]u8 = undefined;
-    var path: []const u8 = undefined;
-    const norm = path_mod.normalize(raw, &path_buf, &path);
-    if (norm != .success) return norm;
+    const path = raw;
+    const conf = path_mod.confine(path);
+    if (conf != .success) return conf;
 
     // Resolve dirfd.
     const dir_slot = host.translateFd(dirfd) orelse return .badf;
@@ -1131,10 +1130,9 @@ pub fn pathUnlinkFile(host: *Host, mem: []u8, dirfd: p1.Fd, path_ptr: u32, path_
     // POSIX: the empty path is ENOENT. Must be pre-OS: NT resolves "" against
     // a RootDirectory handle as the directory itself (delete would hit the dir).
     if (raw.len == 0) return .noent;
-    var path_buf: [path_mod.max_guest_path]u8 = undefined;
-    var path: []const u8 = undefined;
-    const norm = path_mod.normalize(raw, &path_buf, &path);
-    if (norm != .success) return norm;
+    const path = raw;
+    const conf = path_mod.confine(path);
+    if (conf != .success) return conf;
     const dir_slot = host.translateFd(dirfd) orelse return .badf;
     if (dir_slot.kind != .dir) return .notdir;
     if (!dir_slot.has(p1.RIGHTS_PATH_UNLINK_FILE)) return .notcapable;
