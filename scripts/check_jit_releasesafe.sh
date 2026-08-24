@@ -39,3 +39,29 @@ else
     echo "[check_jit_releasesafe] FAIL (exit $rc) — runI32Export crashed/mismatched in ReleaseSafe; D-245 RESULT-path preservation regressed (see src/engine/codegen/shared/entry.zig jitTrampoline / invokeAndCheck)." >&2
     exit 1
 fi
+
+# 2026-08-25 — the two legs above cover the VOID path and the i32 RESULT path.
+# They do not reach the MIXED multi-result thunks (`(i32, f64)`, `(f64, i32)`,
+# `(f64, f32)`), which have their own hand-written asm and had the same defect
+# this gate exists for: they never bracketed the JIT call with a save of
+# X19-X28, so an optimised host lost live values there. They also claimed x0 as
+# both an input and an output while AAPCS64 was using it for the indirect
+# return of the 16-byte result struct.
+#
+# The corpus that reaches them is `call_indirect`, whose `type-all-i32-f64` and
+# siblings return mixed pairs. Debug passes it either way — the whole point is
+# that only an optimised build shows the fault — so this runs the real runner
+# against the real corpus at ReleaseSafe. Every optimisation mode failed
+# identically when the defect was live, so ReleaseSafe alone is a faithful
+# probe.
+echo "[check_jit_releasesafe] mixed multi-result thunks at ReleaseSafe ..."
+MIXED_DIR=$(mktemp -d)
+trap 'rm -rf "$MIXED_DIR"' EXIT
+cp -r test/spec/wasm-2.0-assert/call_indirect "$MIXED_DIR/"
+if zig-out/bin/zwasm-spec-wasm-2-0-assert "$MIXED_DIR" >/dev/null 2>&1; then
+    echo "[check_jit_releasesafe] OK — mixed int/float multi-result returns survive optimisation."
+else
+    rc=$?
+    echo "[check_jit_releasesafe] FAIL (exit $rc) — the aarch64 mixed-result thunks regressed in ReleaseSafe; see src/engine/codegen/shared/entry.zig callI32f64NoArgs / callF64i32NoArgs / callF64f32NoArgs (x0 is the sret pointer; X19-X28 must be saved around the BLR)." >&2
+    exit 1
+fi
