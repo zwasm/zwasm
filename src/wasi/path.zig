@@ -724,3 +724,54 @@ test "path_remove_directory: every spelling of a trailing `.` is inval, not a ho
     @memcpy(mem[0..4], "a/..");
     try testing.expectEqual(p1.Errno.notempty, pathRemoveDirectory(&h, &mem, dirfd, 0, 4));
 }
+
+test "mutating path_* survive a dotted final component on every host (#265)" {
+    // `std.Io` classifies EINVAL from a filesystem syscall as a programmer bug
+    // and panics on it in debug builds, so a guest path the host answers EINVAL
+    // to aborts the runtime instead of returning an errno. Nine of the `std.Io`
+    // operations `src/wasi/` calls route EINVAL there.
+    //
+    // POSIX lets a host answer EINVAL when the final component is `.` or `..`,
+    // and the hosts disagree about whether it does: Linux says EBUSY for rename
+    // and EISDIR for unlink, while BSD documents EINVAL for renaming `.`. This
+    // test exists to settle that from CI rather than from the spec — the
+    // load-bearing assertion is that each call RETURNS. A host that panics
+    // takes its whole leg down, which is the answer we are looking for.
+    //
+    // `path_remove_directory` is excluded: `endsInDotComponent` guards it, and
+    // its own test pins the guard. The four below have no dot-guard reaching
+    // these inputs — `pathRename`'s matches the literal `.` and `./`, which
+    // neither `a/.` nor `a/..` is — so each really does reach the host. Adding a
+    // guard to any of them makes this test measure the guard instead; move that
+    // call to a guard test if you do.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    const dirfd = try h.addPreopen(tmp.dir.handle, "/sandbox");
+    const root: std.Io.Dir = .{ .handle = tmp.dir.handle };
+    try root.createDir(testing.io, "a", std.Io.File.Permissions.default_dir);
+    try root.writeFile(testing.io, .{ .sub_path = "t", .data = "x" });
+
+    // Both spellings, since `confine` admits a balanced `..` as of the previous
+    // change and the reviewer's EINVAL claim was about the `..` form.
+    for ([_][]const u8{ "a/.", "a/.." }) |dotted| {
+        var mem: [128]u8 = @splat(0);
+        writeGuestPath(&mem, 0, dotted);
+        writeGuestPath(&mem, 16, "t");
+        const len: u32 = @intCast(dotted.len);
+
+        const outcomes = [_]p1.Errno{
+            pathRename(&h, &mem, dirfd, 0, len, dirfd, 16, 1),
+            pathRename(&h, &mem, dirfd, 16, 1, dirfd, 0, len),
+            pathLink(&h, &mem, dirfd, 0, 0, len, dirfd, 16, 1),
+            pathSymlink(&h, &mem, 16, 1, dirfd, 0, len),
+            @import("fd.zig").pathUnlinkFile(&h, &mem, dirfd, 0, len),
+        };
+        // None of these is a legal thing to do to a path naming a directory as
+        // itself or as its parent, so every one must fail — and must fail by
+        // returning, not by aborting.
+        for (outcomes) |e| try testing.expect(e != .success);
+    }
+}
