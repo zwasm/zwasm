@@ -25,15 +25,56 @@ fn sliceMemConst(mem: []const u8, ptr: u32, len: u32) ?[]const u8 {
     return mem[ptr..end];
 }
 
-/// A guest path is sandboxed to its preopen root: absolute paths and any `..`
-/// segment escape the root and are rejected with `notcapable`.
-fn pathHasParentEscape(path: []const u8) bool {
-    if (path.len > 0 and path[0] == '/') return true;
+/// The longest guest path a preview1 call may present, in bytes. Longer is
+/// `nametoolong` — the host syscalls would say the same.
+pub const max_guest_path = 4096;
+
+/// Fold a guest path into a form relative to the preopen root it is resolved
+/// against, writing the result into `buf` and publishing it through `out`.
+///
+/// A preview1 path is confined to its preopen, but `..` is NOT itself the
+/// violation: a path that dips through `..` and comes back stays inside the
+/// root and must resolve. Only an absolute path, or one whose `..` segments
+/// ascend PAST the root, escapes — both are `notcapable`.
+///
+/// `.` and repeated separators are folded out. A trailing separator is KEPT,
+/// because POSIX reads `x/` as "x, which must be a directory" and the host
+/// syscalls already enforce that. The fold is lexical, so `a/b/..` does not
+/// verify that `a/b` exists — the same trade-off `path.Clean` makes.
+pub fn normalize(path: []const u8, buf: []u8, out: *[]const u8) p1.Errno {
+    if (path.len == 0) return .noent;
+    if (path[0] == '/') return .notcapable;
+    // An interior NUL would be truncated by the host's C path conversion, so
+    // the guest would silently open a DIFFERENT path than the one it named.
+    if (std.mem.findScalar(u8, path, 0) != null) return .inval;
+    // Each kept component is written with its separator, so the fold can be
+    // one byte longer than the input ("a" -> "a/").
+    if (path.len + 1 > buf.len) return .nametoolong;
+
+    var len: usize = 0;
     var it = std.mem.tokenizeScalar(u8, path, '/');
     while (it.next()) |seg| {
-        if (std.mem.eql(u8, seg, "..")) return true;
+        if (std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (len == 0) return .notcapable; // ascends above the preopen root
+            // Drop the last component: every written one ends in '/', so the
+            // separator before it bounds what to cut.
+            len = if (std.mem.findScalarLast(u8, buf[0 .. len - 1], '/')) |i| i + 1 else 0;
+            continue;
+        }
+        @memcpy(buf[len..][0..seg.len], seg);
+        len += seg.len;
+        buf[len] = '/';
+        len += 1;
     }
-    return false;
+    if (len == 0) {
+        // Everything folded away: the path names the dirfd itself.
+        out.* = ".";
+        return .success;
+    }
+    if (path[path.len - 1] != '/') len -= 1; // no trailing separator asked for
+    out.* = buf[0..len];
+    return .success;
 }
 
 /// A symlink TARGET escapes the preopen root if, resolved relative to the
@@ -42,7 +83,7 @@ fn pathHasParentEscape(path: []const u8) bool {
 /// stops a guest from CREATING, through zwasm's own API, a symlink that points
 /// outside the sandbox — the primary "plant then read through it" escalation.
 /// `link_sub` is the link's path relative to the preopen root and has already
-/// passed `pathHasParentEscape` (no `..`, not absolute).
+/// been folded by `normalize` (no `..`, no `.`, not absolute).
 ///
 /// Following a PRE-EXISTING on-disk symlink that escapes is the separate
 /// follow-time confinement (RESOLVE_BENEATH / component walk) tracked by D-315;
@@ -72,21 +113,27 @@ fn symlinkTargetEscapes(link_sub: []const u8, target: []const u8) bool {
 
 const Resolved = struct { dir: std.Io.Dir, sub: []const u8 };
 
+/// Scratch for one normalised path. Declared by the caller so `Resolved.sub`
+/// points at storage that outlives `resolve`.
+const PathBuf = [max_guest_path]u8;
+
 /// Resolve `(dirfd, path_ptr, path_len)` to a host `Dir` + bounded guest path,
 /// and check that `needed` — the right the witx doc comment names for the
 /// calling operation — is present in the dirfd's `fs_rights_base`. Returns the
 /// errno on failure (`.success` when `out` is populated).
-fn resolve(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32, needed: p1.Rights, out: *Resolved) p1.Errno {
+fn resolve(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32, needed: p1.Rights, buf: *PathBuf, out: *Resolved) p1.Errno {
     const path = sliceMemConst(mem, path_ptr, path_len) orelse return .fault;
     // POSIX: the empty path resolves to nothing (ENOENT). Guarded here because
     // std.Io panics on the resulting EINVAL in debug builds ("programmer bug").
     if (path.len == 0) return .noent;
-    if (pathHasParentEscape(path)) return .notcapable;
+    var sub: []const u8 = undefined;
+    const ne = normalize(path, buf, &sub);
+    if (ne != .success) return ne;
     const slot = host.translateFd(dirfd) orelse return .badf;
     if (slot.kind != .dir) return .notdir;
     if (!slot.has(needed)) return .notcapable;
     const handle = slot.host_handle orelse return .notdir;
-    out.* = .{ .dir = .{ .handle = handle }, .sub = path };
+    out.* = .{ .dir = .{ .handle = handle }, .sub = sub };
     return .success;
 }
 
@@ -121,8 +168,9 @@ fn mapDirErr(err: anyerror) p1.Errno {
 /// `path_create_directory(dirfd, path) → errno` — create a directory relative
 /// to the preopen `dirfd` (`std.Io.Dir.createDir`).
 pub fn pathCreateDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
+    var buf: PathBuf = undefined;
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_CREATE_DIRECTORY, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_CREATE_DIRECTORY, &buf, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
     r.dir.createDir(io, r.sub, std.Io.File.Permissions.default_dir) catch |err| return mapDirErr(err);
@@ -132,8 +180,9 @@ pub fn pathCreateDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr:
 /// `path_remove_directory(dirfd, path) → errno` — remove an empty directory
 /// relative to `dirfd` (`std.Io.Dir.deleteDir`; non-empty → `notempty`).
 pub fn pathRemoveDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
+    var buf: PathBuf = undefined;
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_REMOVE_DIRECTORY, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_REMOVE_DIRECTORY, &buf, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
     // rmdir(".") is EINVAL per POSIX; guarded because std.Io panics on the
@@ -151,11 +200,13 @@ pub fn pathRemoveDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr:
 /// (move) a path across two preopen dirfds (`std.Io.Dir.rename`). Both ends are
 /// resolved + escape-guarded.
 pub fn pathRename(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_ptr: u32, old_len: u32, new_dirfd: p1.Fd, new_ptr: u32, new_len: u32) p1.Errno {
+    var obuf: PathBuf = undefined;
     var ro: Resolved = undefined;
-    const e1 = resolve(host, mem, old_dirfd, old_ptr, old_len, p1.RIGHTS_PATH_RENAME_SOURCE, &ro);
+    const e1 = resolve(host, mem, old_dirfd, old_ptr, old_len, p1.RIGHTS_PATH_RENAME_SOURCE, &obuf, &ro);
     if (e1 != .success) return e1;
+    var nbuf: PathBuf = undefined;
     var rn: Resolved = undefined;
-    const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_RENAME_TARGET, &rn);
+    const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_RENAME_TARGET, &nbuf, &rn);
     if (e2 != .success) return e2;
     const io = host.io orelse return .nosys;
     // rename involving "." is EINVAL/EBUSY per POSIX; guarded because std.Io
@@ -170,11 +221,13 @@ pub fn pathRename(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_ptr: u32, 
 /// create a hard link at `new_path` to the existing `old_path`
 /// (`std.Io.Dir.hardLink`). `old_flags` bit 0 = follow-symlinks.
 pub fn pathLink(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_flags: u32, old_ptr: u32, old_len: u32, new_dirfd: p1.Fd, new_ptr: u32, new_len: u32) p1.Errno {
+    var obuf: PathBuf = undefined;
     var ro: Resolved = undefined;
-    const e1 = resolve(host, mem, old_dirfd, old_ptr, old_len, p1.RIGHTS_PATH_LINK_SOURCE, &ro);
+    const e1 = resolve(host, mem, old_dirfd, old_ptr, old_len, p1.RIGHTS_PATH_LINK_SOURCE, &obuf, &ro);
     if (e1 != .success) return e1;
+    var nbuf: PathBuf = undefined;
     var rn: Resolved = undefined;
-    const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_LINK_TARGET, &rn);
+    const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_LINK_TARGET, &nbuf, &rn);
     if (e2 != .success) return e2;
     const io = host.io orelse return .nosys;
     const follow = old_flags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0;
@@ -303,8 +356,9 @@ fn winPathLink(old_dir: std.Io.Dir, old_sub: []const u8, new_dir: std.Io.Dir, ne
 /// points outside the sandbox (`notcapable`).
 pub fn pathSymlink(host: *Host, mem: []const u8, target_ptr: u32, target_len: u32, dirfd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
     const target = sliceMemConst(mem, target_ptr, target_len) orelse return .fault;
+    var buf: PathBuf = undefined;
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_SYMLINK, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_SYMLINK, &buf, &r);
     if (e != .success) return e;
     if (symlinkTargetEscapes(r.sub, target)) return .notcapable;
     const io = host.io orelse return .nosys;
@@ -322,8 +376,9 @@ pub fn pathReadlink(host: *Host, mem: []u8, dirfd: p1.Fd, path_ptr: u32, path_le
         if (end > mem.len) return .fault;
         break :blk mem[buf_ptr..end];
     };
+    var pbuf: PathBuf = undefined;
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_READLINK, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_READLINK, &pbuf, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
     const n = r.dir.readLink(io, r.sub, buf) catch |err| return mapDirErr(err);
@@ -361,8 +416,9 @@ pub fn pathFilestatGet(host: *Host, mem: []u8, dirfd: p1.Fd, lookupflags: u32, p
         if (end > mem.len) return .fault;
         break :blk mem[filestat_ptr..end];
     };
+    var buf: PathBuf = undefined;
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_FILESTAT_GET, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_FILESTAT_GET, &buf, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
     const st = r.dir.statFile(io, r.sub, .{ .follow_symlinks = lookupflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0 }) catch |err| return mapDirErr(err);
@@ -387,8 +443,9 @@ pub fn pathFilestatGet(host: *Host, mem: []u8, dirfd: p1.Fd, lookupflags: u32, p
 pub fn pathFilestatSetTimes(host: *Host, mem: []const u8, dirfd: p1.Fd, lookupflags: u32, path_ptr: u32, path_len: u32, atim: u64, mtim: u64, fst_flags: p1.Fstflags) p1.Errno {
     if (fst_flags & p1.FSTFLAGS_ATIM != 0 and fst_flags & p1.FSTFLAGS_ATIM_NOW != 0) return .inval;
     if (fst_flags & p1.FSTFLAGS_MTIM != 0 and fst_flags & p1.FSTFLAGS_MTIM_NOW != 0) return .inval;
+    var buf: PathBuf = undefined;
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_FILESTAT_SET_TIMES, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_FILESTAT_SET_TIMES, &buf, &r);
     if (e != .success) return e;
     const io = host.io orelse return .nosys;
     const atime = setTimestampOf(fst_flags, p1.FSTFLAGS_ATIM_NOW, p1.FSTFLAGS_ATIM, atim);
@@ -610,4 +667,65 @@ test "path_* resolution: escape / non-dir / out-of-bounds rejections" {
     // Removing a missing directory → noent.
     writeGuestPath(&mem, 0, "ghost");
     try testing.expectEqual(p1.Errno.noent, pathRemoveDirectory(&h, &mem, dirfd, 0, 5));
+}
+
+// ============================================================
+// Path folding
+// ============================================================
+
+fn expectNormalized(expected: []const u8, path: []const u8) !void {
+    var buf: PathBuf = undefined;
+    var got: []const u8 = undefined;
+    try testing.expectEqual(p1.Errno.success, normalize(path, &buf, &got));
+    try testing.expectEqualStrings(expected, got);
+}
+
+test "normalize: folds `.` and `..` that stay inside the preopen root" {
+    // The literal path the official `interesting_paths` opens and expects to
+    // resolve — it dips through `..` twice and comes back.
+    try expectNormalized("dir/nested/file", "dir/.//nested/../../dir/nested/../nested///./file");
+    try expectNormalized("a/b", "a/b");
+    try expectNormalized("a/b", "./a/./b");
+    try expectNormalized("a/c", "a/b/../c");
+    try expectNormalized("b", "a/../b");
+    // Folding everything away names the dirfd itself.
+    try expectNormalized(".", ".");
+    try expectNormalized(".", "a/..");
+    try expectNormalized(".", "./");
+}
+
+test "normalize: a trailing separator survives the fold" {
+    // POSIX reads `x/` as "x, which must be a directory"; the host syscalls
+    // enforce that, so the fold must not quietly drop it (official
+    // `interesting_paths` opens `dir/nested/` and `dir/nested/file/`).
+    try expectNormalized("dir/nested/", "dir/nested/");
+    try expectNormalized("dir/nested/", "dir/nested///");
+    try expectNormalized("dir/nested/file/", "dir/nested/file///");
+    try expectNormalized("dir/nested/file", "dir/nested/file");
+}
+
+test "normalize: leaving the preopen root is notcapable" {
+    var buf: PathBuf = undefined;
+    var got: []const u8 = undefined;
+    // Absolute.
+    try testing.expectEqual(p1.Errno.notcapable, normalize("/dir/nested/file", &buf, &got));
+    try testing.expectEqual(p1.Errno.notcapable, normalize("/", &buf, &got));
+    // One `..` too many — the fold would ascend above the root.
+    try testing.expectEqual(p1.Errno.notcapable, normalize("..", &buf, &got));
+    try testing.expectEqual(p1.Errno.notcapable, normalize("../escape", &buf, &got));
+    try testing.expectEqual(p1.Errno.notcapable, normalize("dir/nested/../../../dir/nested/file", &buf, &got));
+    // Balanced to exactly the root is still inside it.
+    try expectNormalized(".", "dir/..");
+}
+
+test "normalize: an interior NUL and an over-long path are rejected" {
+    var buf: PathBuf = undefined;
+    var got: []const u8 = undefined;
+    // The host's C path conversion would truncate at the NUL and resolve a
+    // DIFFERENT path than the guest named.
+    try testing.expectEqual(p1.Errno.inval, normalize("dir/nested/file\x00", &buf, &got));
+    try testing.expectEqual(p1.Errno.noent, normalize("", &buf, &got));
+
+    var long: [max_guest_path + 1]u8 = @splat('a');
+    try testing.expectEqual(p1.Errno.nametoolong, normalize(&long, &buf, &got));
 }

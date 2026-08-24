@@ -32,6 +32,7 @@ const std = @import("std");
 
 const p1 = @import("preview1.zig");
 const host_mod = @import("host.zig");
+const path_mod = @import("path.zig");
 const dbg = @import("../support/dbg.zig");
 
 const Host = host_mod.Host;
@@ -662,15 +663,6 @@ pub fn fdFdstatSetRights(host: *Host, fd: p1.Fd, rights_base: p1.Rights, rights_
 // path_open  (§9.4 / 4.5 chunk b)
 // ============================================================
 
-fn pathHasParentEscape(path: []const u8) bool {
-    if (path.len > 0 and path[0] == '/') return true;
-    var iter = std.mem.tokenizeScalar(u8, path, '/');
-    while (iter.next()) |seg| {
-        if (std.mem.eql(u8, seg, "..")) return true;
-    }
-    return false;
-}
-
 /// The rights a `path_open`ed fd receives. Two clamps, both from the witx
 /// `path_open` contract: a derived fd can never exceed the parent directory's
 /// `fs_rights_inheriting` ("rights that apply to file descriptors derived
@@ -936,11 +928,14 @@ pub fn pathOpen(
     // Bounds-check the path slice.
     const path_end = @as(usize, path_ptr) + @as(usize, path_len);
     if (path_end > mem.len) return .fault;
-    const path = mem[path_ptr..path_end];
+    const raw = mem[path_ptr..path_end];
     // POSIX: the empty path is ENOENT. Must be pre-OS: NT resolves "" against
     // a RootDirectory handle as the directory itself.
-    if (path.len == 0) return .noent;
-    if (pathHasParentEscape(path)) return .notcapable;
+    if (raw.len == 0) return .noent;
+    var path_buf: [path_mod.max_guest_path]u8 = undefined;
+    var path: []const u8 = undefined;
+    const norm = path_mod.normalize(raw, &path_buf, &path);
+    if (norm != .success) return norm;
 
     // Resolve dirfd.
     const dir_slot = host.translateFd(dirfd) orelse return .badf;
@@ -1132,11 +1127,14 @@ pub fn fdFilestatGet(host: *Host, mem: []u8, fd: p1.Fd, filestat_ptr: u32) p1.Er
 /// + `..`-escape guard) then `std.Io.Dir.deleteFile`. Non-preopen dirfd →
 /// `notdir`; absolute / `..`-escaping path → `notcapable`.
 pub fn pathUnlinkFile(host: *Host, mem: []u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
-    const path = sliceMemConst(mem, path_ptr, path_len) orelse return .fault;
+    const raw = sliceMemConst(mem, path_ptr, path_len) orelse return .fault;
     // POSIX: the empty path is ENOENT. Must be pre-OS: NT resolves "" against
     // a RootDirectory handle as the directory itself (delete would hit the dir).
-    if (path.len == 0) return .noent;
-    if (pathHasParentEscape(path)) return .notcapable;
+    if (raw.len == 0) return .noent;
+    var path_buf: [path_mod.max_guest_path]u8 = undefined;
+    var path: []const u8 = undefined;
+    const norm = path_mod.normalize(raw, &path_buf, &path);
+    if (norm != .success) return norm;
     const dir_slot = host.translateFd(dirfd) orelse return .badf;
     if (dir_slot.kind != .dir) return .notdir;
     if (!dir_slot.has(p1.RIGHTS_PATH_UNLINK_FILE)) return .notcapable;

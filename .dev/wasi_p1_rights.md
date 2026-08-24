@@ -11,9 +11,8 @@ they operate on.
 
 > **Implementation status.** The model lands in three changes and this file
 > describes all of it, so parts of it lead the code. Advertising the table and
-> deriving rights onto opened fds: **landed**. Reading a right at each call:
-> **landed**. Folding `..` (`path.normalize`): **not yet**. Each section that
-> runs ahead of the code repeats the fact where it appears.
+> deriving rights onto opened fds, reading a right at each call, and folding
+> `..` (`path.normalize`): all **landed**.
 
 ## Sources
 
@@ -215,14 +214,7 @@ confined to its preopen, but `..` is not itself the violation — a path that
 dips through `..` and comes back stays inside and must resolve. Only an
 absolute path, or one whose `..` ascends past the root, escapes.
 
-**Not yet implemented.** `fd.zig` and `path.zig` still carry a copy each of
-`pathHasParentEscape`, which rejects any `..` segment outright; this section
-states where the rule is going, not where it is. `interesting_paths` is red
-until it lands. The change is scoped to its own PR because it is path
-resolution rather than rights, and it widens acceptance in a different
-subsystem — the criterion is being able to name one cause when a green falls.
-
-The planned shape: a single `path.normalize` folds the path lexically and
+One `path.normalize` folds the path lexically and
 answers `notcapable` only when the fold would leave the root. A trailing
 separator is preserved, because POSIX reads `x/` as "x, which must be a
 directory" and the host syscalls already enforce that. The fold is lexical, so
