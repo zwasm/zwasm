@@ -1,4 +1,4 @@
-// FILE-SIZE-EXEMPT: uniform-pattern catalog (127 callXX_yy per-shape entry helpers; monotonic growth with Wasm signature shapes — +8 D-467 multi-scalar→v128 + 2 D-467 load/store-lane (i32,v128)→v128/i64) (cap=3200) (per ADR-0063 + ADR-0099 Revision 2026-05-24)
+// FILE-SIZE-EXEMPT: uniform-pattern catalog (127 callXX_yy per-shape entry helpers; monotonic growth with Wasm signature shapes — +8 D-467 multi-scalar→v128 + 2 D-467 load/store-lane (i32,v128)→v128/i64; 2026-08-25 +110 for the host→JIT register-cohort save that every mixed multi-result thunk was missing on all three targets — the sequence is pasted per call site because Zig inline asm takes a single string and folding it into shared constants was tried and reverted as more fragile than the duplication) (cap=3450) (per ADR-0063 + ADR-0099 Revision 2026-05-24)
 // Comptime generation is a follow-up; see ADR-0063 Alternative B + debt ledger.
 
 //! JIT entry frame (ADR-0017).
@@ -1429,11 +1429,38 @@ pub fn callI32f64NoArgs(
         if (rt.trap_flag != 0) return Error.Trap;
         return .{ .r0 = r0_raw, .r1 = @bitCast(r1_raw) };
     } else if (comptime builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag != .windows) {
-        const Fn = *const fn (rt: *const JitRuntime) callconv(.c) FuncRet_i32f64;
+        // The JIT allocates from RBX/R12-R15 and its prologue saves only R15,
+        // so a plain Zig call lets an optimised host lose whatever it had live
+        // in the other four — the same defect D-245 fixed for the void path,
+        // still open here. Measured on x86_64-linux at ReleaseSafe: the corpus
+        // that exercises these shapes faulted before this bracket existed.
+        // Callee in RAX, rt in RDI; 5 pushes + `sub $8` keep the pre-CALL RSP
+        // 16-aligned the way SysV wants it.
+        const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
-        const result = f(rt);
+        var r0_raw: u64 = undefined;
+        var r1_raw: f64 = undefined;
+        asm volatile (
+            \\ pushq %%rbx
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
+            \\ subq $8, %%rsp
+            \\ callq *%[callee]
+            \\ addq $8, %%rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rbx
+            : [r0_out] "={rax}" (r0_raw),
+              [r1_out] "={xmm0}" (r1_raw),
+            : [callee] "r" (f),
+              [rt_arg] "{rdi}" (rt),
+            : x86_64_sysv_call_clobbers);
         if (rt.trap_flag != 0) return Error.Trap;
-        return result;
+        return .{ .r0 = r0_raw, .r1 = r1_raw };
     } else if (comptime builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) {
         // Win64 (D-161): rt in RCX, 32 B shadow + 8 B alignment via
         // `sub $40`, CALL, capture RAX (i32) + XMM0 (f64).
@@ -1442,9 +1469,23 @@ pub fn callI32f64NoArgs(
         var r0_raw: u64 = undefined;
         var r1_raw: f64 = undefined;
         asm volatile (
+            \\ pushq %%rbx
+            \\ pushq %%rsi
+            \\ pushq %%rdi
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
             \\ subq $40, %rsp
             \\ callq *%[callee]
             \\ addq $40, %rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rdi
+            \\ popq %%rsi
+            \\ popq %%rbx
             : [r0_out] "={rax}" (r0_raw),
               [r1_out] "={xmm0}" (r1_raw),
             : [callee] "r" (f),
@@ -1519,11 +1560,38 @@ pub fn callF64i32NoArgs(
         if (rt.trap_flag != 0) return Error.Trap;
         return .{ .r0 = @bitCast(r0_raw), .r1 = r1_raw };
     } else if (comptime builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag != .windows) {
-        const Fn = *const fn (rt: *const JitRuntime) callconv(.c) FuncRet_f64i32;
+        // The JIT allocates from RBX/R12-R15 and its prologue saves only R15,
+        // so a plain Zig call lets an optimised host lose whatever it had live
+        // in the other four — the same defect D-245 fixed for the void path,
+        // still open here. Measured on x86_64-linux at ReleaseSafe: the corpus
+        // that exercises these shapes faulted before this bracket existed.
+        // Callee in RAX, rt in RDI; 5 pushes + `sub $8` keep the pre-CALL RSP
+        // 16-aligned the way SysV wants it.
+        const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
-        const result = f(rt);
+        var r0_raw: f64 = undefined;
+        var r1_raw: u64 = undefined;
+        asm volatile (
+            \\ pushq %%rbx
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
+            \\ subq $8, %%rsp
+            \\ callq *%[callee]
+            \\ addq $8, %%rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rbx
+            : [r0_out] "={xmm0}" (r0_raw),
+              [r1_out] "={rax}" (r1_raw),
+            : [callee] "r" (f),
+              [rt_arg] "{rdi}" (rt),
+            : x86_64_sysv_call_clobbers);
         if (rt.trap_flag != 0) return Error.Trap;
-        return result;
+        return .{ .r0 = r0_raw, .r1 = r1_raw };
     } else if (comptime builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) {
         // Win64 (D-161): same shadow-space pattern as
         // `callI32f64NoArgs`; capture XMM0 (f64) + RAX (i32).
@@ -1532,9 +1600,23 @@ pub fn callF64i32NoArgs(
         var r0_raw: f64 = undefined;
         var r1_raw: u64 = undefined;
         asm volatile (
+            \\ pushq %%rbx
+            \\ pushq %%rsi
+            \\ pushq %%rdi
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
             \\ subq $40, %rsp
             \\ callq *%[callee]
             \\ addq $40, %rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rdi
+            \\ popq %%rsi
+            \\ popq %%rbx
             : [r0_out] "={xmm0}" (r0_raw),
               [r1_out] "={rax}" (r1_raw),
             : [callee] "r" (f),
@@ -1622,8 +1704,22 @@ pub fn callF64f32NoArgs(
         const f = module.entry(func_idx, Fn);
         var r0_raw: f64 = undefined;
         var r1_raw: f32 = undefined;
+        // Same cohort save as the sibling SysV thunks — the JIT allocates from
+        // RBX/R12-R15 and restores only R15.
         asm volatile (
+            \\ pushq %%rbx
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
+            \\ subq $8, %%rsp
             \\ callq *%[callee]
+            \\ addq $8, %%rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rbx
             : [r0_out] "={xmm0}" (r0_raw),
               [r1_out] "={xmm1}" (r1_raw),
             : [callee] "r" (f),
@@ -1639,9 +1735,23 @@ pub fn callF64f32NoArgs(
         var r0_raw: f64 = undefined;
         var r1_raw: f32 = undefined;
         asm volatile (
+            \\ pushq %%rbx
+            \\ pushq %%rsi
+            \\ pushq %%rdi
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
             \\ subq $40, %rsp
             \\ callq *%[callee]
             \\ addq $40, %rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rdi
+            \\ popq %%rsi
+            \\ popq %%rbx
             : [r0_out] "={xmm0}" (r0_raw),
               [r1_out] "={xmm1}" (r1_raw),
             : [callee] "r" (f),
