@@ -36,6 +36,7 @@
 //! per ROADMAP §A3.
 
 const std = @import("std");
+const liveness_parity = @import("../shared/liveness_parity.zig");
 const dbg = @import("../../../support/dbg.zig");
 const builtin = @import("builtin");
 
@@ -874,7 +875,12 @@ pub fn compile(
     // them in emit avoids spurious AllocationMissing on pops
     // that the validator already deemed polymorphic-OK.
     var dead_code: bool = false;
+    const parity_on = liveness_parity.on();
     for (func.instrs.items, 0..) |ins, pc| {
+        // D-596 — mirror of the x86_64 call; see `shared/liveness_parity.zig`.
+        if (parity_on) {
+            liveness_parity.check(func, pc, ins.op, pushed_vregs.items, labels.items, dead_code);
+        }
         // Diagnostic surface: on any error return
         // from the per-op switch below, surface the failing op
         // tag + pc so the realworld_run_jit cap-removal regression
