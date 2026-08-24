@@ -55,16 +55,24 @@ pub fn main(init: std.process.Init) !void {
 /// the corpus does not match what it says about itself.
 ///
 /// Each non-comment line is `<dir> expect=fixtures` or
-/// `<dir> expect=skip reason=<text>`:
+/// `<dir> expect=skip <reason>`:
 ///
-///   - `expect=fixtures` and the directory yields no result-checked fixture
-///     (a `.wasm` with a sibling `.expect`) — reported and fails the lane.
-///   - `expect=skip` — printed with its reason and does not fail.
-///   - a directory named here that does not exist at all — fails.
+///   - `expect=fixtures` and the directory yields no fixture this runner can
+///     reach a verdict on — reported and fails the lane.
+///   - `expect=skip` — printed with its reason and does not fail. The reason
+///     is required; a skip with nothing to say is the silence this file exists
+///     to remove.
+///   - a directory named here that does not exist — fails.
+///   - a directory present in the corpus and NOT named here — fails.
 ///
-/// A directory NOT named here is left alone, so adding fixtures never requires
-/// touching this file first. Absent `EXPECTED.txt`, nothing changes: the four
-/// other corpora this runner serves keep their plain walk.
+/// That last rule is what makes this a ledger rather than a roster. Listing
+/// only the directories someone remembered to list would close today's silent
+/// green and leave the next one open: drop in a new directory holding nothing
+/// but a README and it would pass unmentioned, which is exactly the defect.
+/// The cost is that adding a directory means adding a line here.
+///
+/// Absent `EXPECTED.txt`, nothing changes: the other corpora this runner
+/// serves keep their plain walk.
 fn checkExpected(
     io: std.Io,
     gpa: std.mem.Allocator,
@@ -75,8 +83,33 @@ fn checkExpected(
     var root = cwd.openDir(io, root_path, .{ .iterate = true }) catch return false;
     defer root.close(io);
 
-    const text = root.readFileAlloc(io, "EXPECTED.txt", gpa, .limited(64 << 10)) catch return false;
+    const text = root.readFileAlloc(io, "EXPECTED.txt", gpa, .limited(64 << 10)) catch |err| {
+        // Only "there is no such file" means this corpus opted out. Anything
+        // else — unreadable, too large — is a corpus that HAS a ledger the
+        // runner could not consult, and silently reverting to the plain walk
+        // there would reinstate the very silence this file removes.
+        if (err == error.FileNotFound) return false;
+        stdout.print("EXPECTED  cannot read EXPECTED.txt: {s}\n", .{@errorName(err)}) catch {};
+        return true;
+    };
     defer gpa.free(text);
+
+    // Every directory in the root must be accounted for, so collect them and
+    // strike each off as its line is read.
+    var seen = std.StringHashMap(void).init(gpa);
+    defer {
+        var it = seen.keyIterator();
+        while (it.next()) |k| gpa.free(k.*);
+        seen.deinit();
+    }
+    {
+        var it = root.iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.kind != .directory) continue;
+            const owned = try gpa.dupe(u8, entry.name);
+            seen.put(owned, {}) catch gpa.free(owned);
+        }
+    }
 
     var unmet = false;
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -99,22 +132,50 @@ fn checkExpected(
             continue;
         }
 
+        if (seen.fetchRemove(dir_name)) |kv| {
+            gpa.free(kv.key);
+        } else {
+            // Either the directory is missing, or an earlier line already
+            // claimed it. Both are the ledger disagreeing with the corpus.
+            try stdout.print("EXPECTED  {s}: named here but not present as an unclaimed directory\n", .{dir_name});
+            unmet = true;
+            continue;
+        }
+
+        const reason = std.mem.trim(u8, fields.rest(), " \t");
+        if (want_skip and reason.len == 0) {
+            try stdout.print("EXPECTED  {s}: expect=skip needs a reason\n", .{dir_name});
+            unmet = true;
+            continue;
+        }
+        if (want_fixtures and reason.len != 0) {
+            try stdout.print("EXPECTED  {s}: trailing text after expect=fixtures: '{s}'\n", .{ dir_name, reason });
+            unmet = true;
+            continue;
+        }
+        if (want_skip) {
+            const shown = if (std.mem.startsWith(u8, reason, "reason=")) reason["reason=".len..] else reason;
+            try stdout.print("SKIP      {s}: {s}\n", .{ dir_name, shown });
+            continue;
+        }
+
         var sub = root.openDir(io, dir_name, .{ .iterate = true }) catch {
-            try stdout.print("EXPECTED  {s}: named here but the directory is missing\n", .{dir_name});
+            try stdout.print("EXPECTED  {s}: cannot open the directory\n", .{dir_name});
             unmet = true;
             continue;
         };
         defer sub.close(io);
-        const checked = try countResultChecked(io, gpa, &sub);
-
-        if (want_skip) {
-            try stdout.print("SKIP      {s}: {s}\n", .{ dir_name, fields.rest() });
-            continue;
-        }
-        if (checked == 0) {
-            try stdout.print("EXPECTED  {s}: expected result-checked fixtures, found none\n", .{dir_name});
+        if (try countResultChecked(io, gpa, &sub) == 0) {
+            try stdout.print("EXPECTED  {s}: expected fixtures this runner can judge, found none\n", .{dir_name});
             unmet = true;
         }
+    }
+
+    // Whatever is left was never mentioned.
+    var leftover = seen.keyIterator();
+    while (leftover.next()) |name| {
+        try stdout.print("EXPECTED  {s}: present in the corpus but absent from EXPECTED.txt\n", .{name.*});
+        unmet = true;
     }
     return unmet;
 }
