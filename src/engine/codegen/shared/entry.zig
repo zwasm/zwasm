@@ -279,18 +279,25 @@ inline fn invokeAndCheckVoid(
             \\ ldp x27, x28, [sp, #64]
             \\ ldp x19, x20, [sp], #80
             :
-            // Neither input asks for x0. These thunks return a 16-byte
-            // `FuncRet_*`, and AAPCS64 returns that indirectly: x0 carries the
-            // caller's result buffer for the whole call, so it is not the
-            // compiler's to hand out. `"{x0}"` put a second claim on it; under
-            // optimisation the sret pointer won and the argument setup was
-            // dropped, so `blr` ran the JIT body with a result buffer where the
-            // runtime should be — a small constant fault address, a field
-            // offset read off a pointer that was never the runtime. Debug
-            // allocated differently and never showed it.
+            // x0 is not an operand of this asm.
             //
-            // x9 and x10 are both in the clobber list, so the callee is free to
-            // destroy them and the compiler keeps nothing live there.
+            // It used to be both: an input `"{x0}"` carrying the runtime and an
+            // output `"={x0}"` reading a result. The two are untied, so the
+            // allocator may materialise the output's def before the input's use —
+            // and under optimisation it did, leaving `blr` to enter the JIT body
+            // with x0 holding whatever the output slot had been given rather than
+            // the runtime. The fault address was a small constant: a field offset
+            // read off that garbage. Debug allocated differently and never showed
+            // it.
+            //
+            // The runtime now arrives in x10 and is placed in x0 by the asm itself;
+            // results come back through x11/x12/x13. Every operand is pinned to a
+            // named register — `"r"` was free to pick x0, or to pick the register a
+            // neighbouring line had just written.
+            //
+            // Those registers are also in the clobber list. That overlap is the
+            // tolerance the note at the head of this file already records; it is not
+            // the reason this is correct.
             : [callee] "{x9}" (f),
               [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
@@ -1397,18 +1404,25 @@ pub fn callI32f64NoArgs(
             \\ fmov x12, d0
             : [r0_out] "={x11}" (r0_raw),
               [r1_bits] "={x12}" (r1_raw),
-              // Neither input asks for x0. These thunks return a 16-byte
-              // `FuncRet_*`, and AAPCS64 returns that indirectly: x0 carries the
-              // caller's result buffer for the whole call, so it is not the
-              // compiler's to hand out. `"{x0}"` put a second claim on it; under
-              // optimisation the sret pointer won and the argument setup was
-              // dropped, so `blr` ran the JIT body with a result buffer where the
-              // runtime should be — a small constant fault address, a field
-              // offset read off a pointer that was never the runtime. Debug
-              // allocated differently and never showed it.
+              // x0 is not an operand of this asm.
               //
-              // x9 and x10 are both in the clobber list, so the callee is free to
-              // destroy them and the compiler keeps nothing live there.
+              // It used to be both: an input `"{x0}"` carrying the runtime and an
+              // output `"={x0}"` reading a result. The two are untied, so the
+              // allocator may materialise the output's def before the input's use —
+              // and under optimisation it did, leaving `blr` to enter the JIT body
+              // with x0 holding whatever the output slot had been given rather than
+              // the runtime. The fault address was a small constant: a field offset
+              // read off that garbage. Debug allocated differently and never showed
+              // it.
+              //
+              // The runtime now arrives in x10 and is placed in x0 by the asm itself;
+              // results come back through x11/x12/x13. Every operand is pinned to a
+              // named register — `"r"` was free to pick x0, or to pick the register a
+              // neighbouring line had just written.
+              //
+              // Those registers are also in the clobber list. That overlap is the
+              // tolerance the note at the head of this file already records; it is not
+              // the reason this is correct.
             : [callee] "{x9}" (f),
               [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
@@ -1480,18 +1494,25 @@ pub fn callF64i32NoArgs(
             \\ fmov x12, d0
             : [r0_bits] "={x12}" (r0_raw),
               [r1_out] "={x11}" (r1_raw),
-              // Neither input asks for x0. These thunks return a 16-byte
-              // `FuncRet_*`, and AAPCS64 returns that indirectly: x0 carries the
-              // caller's result buffer for the whole call, so it is not the
-              // compiler's to hand out. `"{x0}"` put a second claim on it; under
-              // optimisation the sret pointer won and the argument setup was
-              // dropped, so `blr` ran the JIT body with a result buffer where the
-              // runtime should be — a small constant fault address, a field
-              // offset read off a pointer that was never the runtime. Debug
-              // allocated differently and never showed it.
+              // x0 is not an operand of this asm.
               //
-              // x9 and x10 are both in the clobber list, so the callee is free to
-              // destroy them and the compiler keeps nothing live there.
+              // It used to be both: an input `"{x0}"` carrying the runtime and an
+              // output `"={x0}"` reading a result. The two are untied, so the
+              // allocator may materialise the output's def before the input's use —
+              // and under optimisation it did, leaving `blr` to enter the JIT body
+              // with x0 holding whatever the output slot had been given rather than
+              // the runtime. The fault address was a small constant: a field offset
+              // read off that garbage. Debug allocated differently and never showed
+              // it.
+              //
+              // The runtime now arrives in x10 and is placed in x0 by the asm itself;
+              // results come back through x11/x12/x13. Every operand is pinned to a
+              // named register — `"r"` was free to pick x0, or to pick the register a
+              // neighbouring line had just written.
+              //
+              // Those registers are also in the clobber list. That overlap is the
+              // tolerance the note at the head of this file already records; it is not
+              // the reason this is correct.
             : [callee] "{x9}" (f),
               [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
@@ -1571,18 +1592,25 @@ pub fn callF64f32NoArgs(
             \\ ldp x19, x20, [sp], #80
             : [r0_bits] "={x12}" (r0_raw),
               [r1_bits] "={x13}" (r1_raw),
-              // Neither input asks for x0. These thunks return a 16-byte
-              // `FuncRet_*`, and AAPCS64 returns that indirectly: x0 carries the
-              // caller's result buffer for the whole call, so it is not the
-              // compiler's to hand out. `"{x0}"` put a second claim on it; under
-              // optimisation the sret pointer won and the argument setup was
-              // dropped, so `blr` ran the JIT body with a result buffer where the
-              // runtime should be — a small constant fault address, a field
-              // offset read off a pointer that was never the runtime. Debug
-              // allocated differently and never showed it.
+              // x0 is not an operand of this asm.
               //
-              // x9 and x10 are both in the clobber list, so the callee is free to
-              // destroy them and the compiler keeps nothing live there.
+              // It used to be both: an input `"{x0}"` carrying the runtime and an
+              // output `"={x0}"` reading a result. The two are untied, so the
+              // allocator may materialise the output's def before the input's use —
+              // and under optimisation it did, leaving `blr` to enter the JIT body
+              // with x0 holding whatever the output slot had been given rather than
+              // the runtime. The fault address was a small constant: a field offset
+              // read off that garbage. Debug allocated differently and never showed
+              // it.
+              //
+              // The runtime now arrives in x10 and is placed in x0 by the asm itself;
+              // results come back through x11/x12/x13. Every operand is pinned to a
+              // named register — `"r"` was free to pick x0, or to pick the register a
+              // neighbouring line had just written.
+              //
+              // Those registers are also in the clobber list. That overlap is the
+              // tolerance the note at the head of this file already records; it is not
+              // the reason this is correct.
             : [callee] "{x9}" (f),
               [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
