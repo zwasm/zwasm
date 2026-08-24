@@ -393,6 +393,11 @@ test "decodeElement: single active form 0 with two funcidxs" {
     try testing.expectEqual(ElementKind.active, e.items[0].kind);
     try testing.expectEqual(@as(u32, 0), e.items[0].tableidx);
     try testing.expectEqualSlices(u32, &[_]u32{ 0, 1 }, e.items[0].funcidxs);
+    // The funcidx form's items are `ref.func`, so its element type is the
+    // NON-NULLABLE `(ref func)` — not the nullable `funcref` this used to
+    // record for every shape. A `(ref func)` table accepts this segment
+    // precisely because of the nullability here.
+    try testing.expect(e.items[0].elem_type.eql(.{ .ref = zir.RefType.abs(.func, false) }));
 }
 
 test "decodeElement: form 6 typed-ref (ref 0) elem with ref.func init expr" {
