@@ -160,7 +160,7 @@ entries:
       Raised by external review on #239 R2; deferred per the stop criterion
       (no fail-open, no false public number, no correctness regression).
     first_raised: "2026-08-22"
-    last_reviewed: "2026-08-22"
+    last_reviewed: "2026-08-24"
     refs: |-
       ADR-0214 D3; .github/workflows/ci.yml (Cache Zig package deps);
       PR #239.
@@ -198,7 +198,7 @@ entries:
       on-demand tools, and the `spec_pin.yaml` staleness is standing
       maintenance work (runbook: `.dev/spec_revendor_runbook.md`).
     first_raised: "2026-08-19"
-    last_reviewed: "2026-08-19"
+    last_reviewed: "2026-08-24"
     refs: |-
       ADR-0211 D1 (the retirement decision + discussion #201);
       scripts/gen_fuzz_corpus.sh + build.zig (fuzz-campaign,
@@ -227,7 +227,7 @@ entries:
       parallel jobs, if the matrix ever shares a machine, or when two gates are
       launched by hand — which is how it was found.
     first_raised: "2026-08-15"
-    last_reviewed: "2026-08-15"
+    last_reviewed: "2026-08-24"
     refs: |-
       `zig build test-all` (the test/ aggregator); the WASI fixtures that take
       a preopen directory; `scripts/gate_commit.sh` + `scripts/ci_gate.sh` (the
@@ -336,62 +336,14 @@ entries:
       call-succeeds tests); src/engine/compile_init.zig
       (applyTableInitForTable + patchTableImportFuncptrs — the (d) pair);
       D-294 (null-ELEMENT sentinel, a different case); zwasm#186
-  - id: "D-582"
-    layer: "test"
-    status: "now"
-    front: B-hardening
-    description: |-
-      now: **`test-wasi-p1` gated 3 hand-written fixtures while the official
-      corpus has 72 — vendor the corpus and put a real runner behind the
-      step.** The step name reads like preview1 coverage and `test-all` ran it
-      on all three OSes, so it looked gated; what it actually walked was
-      `test/wasi/{hello,env_echo,proc_exit_42}`. Nothing in the tree could
-      have caught a preview1 behaviour regression.
-      ---
-      Scope of THIS row (infrastructure only — the behaviour gaps it exposes
-      are D-583): vendor the `prod/testsuite-base` prebuilt `wasm32-wasip1`
-      binaries via `scripts/vendor_wasip1_official.sh`, write a runner that
-      reads the official manifests, expose it as `zig build
-      test-wasi-p1-official`, and run it as an **advisory step**
-      (step-level `continue-on-error`) at the end of the existing `gate` job.
-      The step stays OUT of `test-all` until D-583 closes: `test-all` is the
-      blocking gate, so folding a known-14-red corpus into it would red every
-      PR. A failing `continue-on-error` step keeps `outcome: failure` (visible)
-      while its `conclusion` is `success`, so `needs.gate.result` — what
-      `ci-required` reads — is unaffected. A job of its own was rejected: it
-      would rebuild zwasm from a cold `.zig-cache` on all three runners
-      (nothing caches `.zig-cache`), paying a second full build per PR.
-      ---
-      Two design constraints, both learned the hard way on 2026-08-14:
-      (1) **Copy the preopen tree per test.** The tests mutate it, and a
-      reused tree turns a real failure into a pass (see D-583's
-      `dangling_symlink` note).
-      (2) **Pin the engine and run `interp` and `jit` as separate lanes.** The
-      default `auto` prefers the JIT; a single unpinned lane hides the
-      engine-specific failures D-583 records.
-      Also: a missing corpus root must `exit 1`, never report 0-tests-green
-      (ADR-0174 no-silent-skip; the same guard `test-corpus-presence` gives
-      the spec runners).
-      ---
-        DISCHARGE: corpus vendored, `zig build test-wasi-p1-official` runs it,
-        and the advisory CI step prints real per-suite counts on all three OSes.
-        NOT `test-all` wiring — this row says the step stays out of `test-all`
-        until D-583 closes, and that wiring is item (1) of D-583's own
-        discharge. One cycle.
-    first_raised: "2026-08-14"
-    last_reviewed: "2026-08-14"
-    refs: |-
-      test/wasi/wasip1_official/** (vendored corpus, 72 tests);
-      scripts/vendor_wasip1_official.sh (pin + regen); legal/THIRD_PARTY.md;
-      build.zig (test-wasi-p1 / test-all wiring); ADR-0174 (no-silent-skip);
-      ROADMAP §11.1 (test layers) + §11.2 (test data policy); D-583
   - id: "D-583"
     layer: "code"
     status: "now"
     front: B-hardening
     description: |-
-      now: **preview1 behavioural conformance measured for the first time —
-      14 engine-independent failures.** This does NOT contradict §11.1 /
+      now: **preview1 behavioural conformance is measured and is not
+      green — 8 failures, identical on both engines (2026-08-24).** This
+      does NOT contradict §11.1 /
       ADR-0161. That row records the preview1 **syscall surface** at 46/46 (up
       from the 21/46-subset overclaim) and the surface is complete. What no
       gate ever checked is whether those syscalls **behave to spec**.
@@ -401,28 +353,21 @@ entries:
       `--engine interp` **58/72**, `--engine jit` **54/72**. A wasmtime 47.0.3
       control run through the identical harness in the same session scored
       **72/72**, so these are zwasm gaps, not adapter artifacts.
-        Both figures include the `dangling_symlink` correction: the raw runner
-        output reads 59 and 55 because that test leaves
-        `dangling_symlink_symlink.cleanup` behind, and every later run against
-        the same preopen tree passes on the leftover. With a fresh preopen per
-        test it fails 20 of 20, on both engines. 72 - 14 = 58, 72 - 14 - 4 = 54.
       ---
-      **14 engine-independent** (this row's work): `dangling_symlink`,
-      `dir_fd_op_failures`, `directory_seek`, `fd_fdstat_set_rights`,
-      `fd_flags_set`, `fd_readdir`, `interesting_paths`, `nofollow_errors`,
-      `path_open_preopen`, `path_open_read_write`, `poll_oneoff_stdio`,
-      `renumber`, `truncation_rights` (rust) + `pwrite-with-append` (c).
-      Deliberately NOT pre-split by symptom: the grouping that suggests itself
-      (path_open / fd-state / readdir) is by test NAME, not by measured root
-      cause, and a single path-resolution defect could close several at once.
-      Split into sub-rows once the first root cause is known, not before.
-      ---
-      **4 further failures are JIT-only**, tracked here as a distinct class:
-      `args_get-multiple-arguments`, `environ_get-multiple-variables`,
-      `random_get-zero-length`, `fd_write-to-stdout` — all four in the
-        AssemblyScript suite — pass on
-      the interpreter and fail under `--engine jit`. That is a JIT-path
-      defect, not a WASI one.
+      Re-measured 2026-08-24 at `3930aa6eb` (x86_64-linux, `zig build
+      test-wasi-p1-official`, fresh preopen per test): `interp` **64/72**,
+      `jit` **64/72** — the SAME 8 failures on both engines:
+      `dangling_symlink`, `dir_fd_op_failures`, `fd_flags_set`,
+      `fd_readdir`, `nofollow_errors`, `poll_oneoff_stdio`, `renumber`
+      (rust) + `pwrite-with-append` (c). The 4 JIT-only failures of the
+      2026-08-14 measurement (args_get / environ_get / random_get /
+      fd_write, all AssemblyScript) are green — that class is closed.
+      `poll_oneoff_stdio` is #263's defect (fd-readiness answers `notsup`).
+      Deliberately NOT pre-split by symptom: the grouping that suggests
+      itself is by test NAME, not by measured root cause, and a single
+      defect can close several at once — 6 of the original 14 closed
+      between the two measurements. Split into sub-rows once the first
+      root cause is known, not before.
       ---
       **`dangling_symlink` looks flaky and is not.** It fails on a clean
       preopen tree (20/20), leaves `dangling_symlink_symlink.cleanup` behind,
@@ -430,10 +375,8 @@ entries:
       first pass of the 2026-08-14 measurement recorded it as flaky for
       exactly this reason.
       ---
-        DISCHARGE: all 14 green AND the 4 JIT-only failures green, on all
-        three OSes. Both classes, because item (1) wires BOTH lanes into
-        `test-all` and `test-all` is the blocking gate: fixing only the 14
-        would leave the JIT lane red and stop every PR.
+        DISCHARGE: all 8 green on all three OSes, on both lanes (item (1)
+        wires BOTH lanes into `test-all`, the blocking gate).
         Four edits land together — anything left behind is a doc that outlives
         its subject, which is how §11.2 came to describe neither reality nor
         intent:
@@ -443,13 +386,13 @@ entries:
       (3) `docs/development.md` — drop the "Not in `test-all`" marker from the
           table row, restore `test-all`'s "all of the above", and delete the
           paragraph about the advisory placement;
-      (4) this row and D-582 — deleted, per the ledger's delete-on-discharge
-          rule.
+      (4) this row — deleted, per the ledger's delete-on-discharge rule
+          (D-582 discharged 2026-08-24).
       Until then the step reports real counts and stays non-blocking — a
       deliberate, time-boxed advisory in the sense of ADR-0174 ("NOT a silent
       skip"), not an indefinite workaround.
     first_raised: "2026-08-14"
-    last_reviewed: "2026-08-14"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/wasi/** (preview1 syscall implementations); test/wasi/wasip1_official/**;
       ROADMAP §11.1 (syscall surface 46/46); ADR-0161 (preview1 completion
@@ -466,11 +409,11 @@ entries:
       `Run.hasSideEffects()`, which for the default `stdio = .infer_from_args`
       returns `!hasAnyOutputArgs()` - true, i.e. ALWAYS RE-RUN - unless the
       step captures stdout/stderr or produces an output file
-      (`std/Build/Step/Run.zig` 221 / 707-715 / 926). Every one of the 53
+      (`std/Build/Step/Run.zig` 221 / 707-715 / 926). Every one of the 56
       `addRunArtifact` steps in build.zig is in that shape: 0 `captureStdOut`,
       0 `captureStdErr`, 0 `addOutputDirectoryArg` (the 2 `addOutputFileArg`
       are on `addSystemCommand` generators). So the spec lanes always re-ran,
-      and the 19 pre-existing `has_side_effects = true` lines are no-ops.
+      and 20 of the 21 `has_side_effects = true` lines are no-ops.
       Confirmed by behaviour, not only by reading: `zig build test-spec` twice
       unchanged ran both times, and adding one corpus file (no exe delta)
       printed `PASS zz_probe.wasm` and moved the count 3 -> 4.
@@ -494,7 +437,7 @@ entries:
       with `exited with code 0 (expected exited with code 1)`).
       NOT a CI hole either way - CI checks out fresh, so the cache is cold.
       The exposure was local gates (`test-all`, gate_commit, gate_merge).
-      The 19 no-op `has_side_effects = true` lines are KEPT, now labelled
+      The no-op `has_side_effects = true` lines are KEPT, now labelled
       redundant-but-intentional in their comments (run_edge_*, run_realworld,
       run_fuzz, run_latency). Deleting them is safe today but would remove the
       stated intent, and `run_latency` shows why that intent matters: add one
@@ -507,9 +450,9 @@ entries:
       so delete-on-discharge would leave the citations dangling while the ID
       stays unreusable. Nothing here is actionable, which is what `note` says.
     first_raised: "2026-08-15"
-    last_reviewed: "2026-08-15"
+    last_reviewed: "2026-08-24"
     refs: |-
-      build.zig (run_oob_trap - the fix; the 19 no-op has_side_effects sites);
+      build.zig (run_oob_trap - the fix; the 20 no-op has_side_effects sites);
       std/Build/Step/Run.zig:221,707-715,926,1555 (zig 0.16.0, the mechanism -
       1555 is the `.infer_from_args` stdio arm that decides inherit vs ignore);
       scripts/record_latency_bench.sh (its comment named the same wrong
@@ -565,7 +508,7 @@ entries:
       surface: flush at the tail of each proposal iteration, so a lane that
       dies still reports everything it had already established.
     first_raised: "2026-08-18"
-    last_reviewed: "2026-08-18"
+    last_reviewed: "2026-08-24"
     refs: |-
       test/spec/spec_assert_runner_wasm_3_0.zig (the 1 KiB `stdout_buf`, the
         `for (PROPOSALS)` loop, `printProposal` at its tail, the post-loop
@@ -623,7 +566,7 @@ entries:
       `failed > 0`. The wasm-3.0 runner needed a separate `manifest_errors`
       counter only because its equivalents were `catch continue`.
     first_raised: "2026-08-15"
-    last_reviewed: "2026-08-15"
+    last_reviewed: "2026-08-24"
     refs: |-
       test/spec/spec_assert_runner_base.zig (AssertTally.accounted/residual/overcounted);
       test/spec/spec_assert_runner.zig; test/spec/wast_runner.zig;
@@ -631,7 +574,7 @@ entries:
       .dev/decisions/0210_spec_runner_enumeration_accounting.md
   - id: "D-584"
     layer: "perf"
-    status: "now"
+    status: "note"
     description: |-
       The JIT entry helpers recompute `computeStackLimit` on EVERY invocation
       (entry.zig 232/255, entry_buffer_write.zig 86). On Linux/glibc initial
@@ -653,41 +596,13 @@ entries:
       instance's life), so an instance-scoped cache would be WRONG; a
       thread-local cache satisfies both.
     first_raised: "2026-08-14"
-    last_reviewed: "2026-08-14"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/engine/codegen/shared/entry.zig (232, 255);
       src/engine/codegen/shared/entry_buffer_write.zig (86);
       src/runtime/runtime.zig (593, the cached interp side);
       src/platform/stack_limit.zig; ADR-0105 D1 (specifies instantiation time,
       not call time); commit a31e00558; ADR-0209
-  - id: "D-585"
-    layer: "perf"
-    status: "now"
-    description: |-
-      The public embedding API resolves the export by NAME on every call:
-      `JitInstance.invoke` calls `findExportFunc`, which runs `parser.parse()`
-      over the WHOLE module. Measured on aarch64-macos (where D-584's constant
-      is absent, so this is visible): the public API costs 161 ns against
-      10.5 ns for `invokeIdx` underneath it, about 15x, and LOSES to `.interp`
-      at 0 and 1 loop trips on a 107-byte guest. The cost is LINEAR in module
-      size: 687-859 ns per KiB above a few KiB. Measured, not extrapolated:
-      a 101 KiB module costs 76.0-78.0 us per call and a 1.1 MiB module
-      779-781 us. This is the
-      more serious of the two per-call costs for embedding use, because module
-      size is what an embedding host varies, whereas D-584 is a fixed ~25 us.
-      The fix shape already exists: `invokeIdx(func_idx, args)` is public and
-      takes the index directly, so resolving once into the typed-func handle
-      would do it. Note `Instance.jitHandle` is private, so an embedder cannot
-      reach `invokeIdx` today. NOT YET TRACED: `Instance.invokeJit` also calls
-      `exportFuncSig`, which parses a second time, yet the measured overhead
-      matches roughly ONE findExportFunc, so either the second parse is much
-      cheaper or the facade path does not reach it.
-    first_raised: "2026-08-14"
-    last_reviewed: "2026-08-14"
-    refs: |-
-      src/engine/runner.zig (invoke / findExportFunc / invokeIdx);
-      src/zwasm/instance.zig (jitHandle, private);
-      bench/latency/percall_runner.zig; ADR-0209
   - id: "D-580"
     layer: "code"
     status: "note"
@@ -699,7 +614,7 @@ entries:
       triage 2026-08-12 sweep S1). Deliberately sequenced AFTER the
       v2.5.0 tag (the sweep gates the release; an impl split does not).
     first_raised: "2026-08-12"
-    last_reviewed: "2026-08-12"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/feature/component/canon.zig; ADR-0099
   - id: "D-581"
@@ -713,131 +628,9 @@ entries:
       triage 2026-08-12 sweep S1). Sequenced AFTER the v2.5.0 tag,
       same reasoning as D-580.
     first_raised: "2026-08-12"
-    last_reviewed: "2026-08-12"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/feature/component/types.zig; ADR-0099
-  - id: "D-533"
-    layer: "code"
-    status: "resolved"
-    front: D-wasi
-    description: |-
-      **A capture buffer had no bound, and no other budget supplied one.** An
-      embedder that captures guest stdout/stderr (`runWasmCapturedFull`, the
-      WASI-P2/P3 test harnesses) handed zwasm an `ArrayList` that `fd_write`
-      appended to without limit. Fuel bounds INSTRUCTIONS, and bytes-per-
-      instruction is entirely the guest's choice, so fuel does not bound this.
-
-      MEASURED from the consumer side (ClojureWasm `wasm/run`, its D-349): a
-      25-line WASI guest looping on a 64-byte `fd_write` buffered exactly
-      64,000,000 bytes for 1,000,000 fuel — 64 bytes per unit of fuel. Under
-      zwasm's own default of 1e9 fuel that is ~64 GB of host memory before the
-      fuel trap fires. A 1e8-fuel run (~6.4 GB) had to be killed at 120 s.
-
-      FIX: `Host.max_capture_bytes` (`src/wasi/host.zig`) — null = unbounded,
-      which is what every existing caller had and still gets. Honoured at the
-      single append site in `writeSlice` (`src/wasi/fd.zig`): the prefix that
-      fits is KEPT and the errno is `.nospc`, the one a real fd gives when the
-      device is full, rather than a silent accept. `Host.capture_truncated`
-      lets the embedder report it; zwasm does not decide what truncation means
-      to the caller. Threaded through `cli.run.Limits.max_output_bytes` so a
-      captured run caps the same way it caps fuel and memory. The cap is PER
-      BUFFER, so capping both stdout and stderr bounds an embedder at 2x.
-      Regression: `fdWrite: max_capture_bytes bounds a capture buffer and
-      reports nospc` in `src/wasi/fd.zig` — covers the exact-fit, partial-fit,
-      no-room, and null-cap-is-unbounded cases.
-
-      FOLLOW-UP (same day, #159): the first wiring reached only
-      `runWasmJitCaptured`'s host. The C-API captured path builds its OWN host
-      through `zwasm_wasi_config_new`, so it did not inherit the cap — and that
-      is the path ClojureWasm's `wasm/run` actually takes, so the axis existed
-      and did nothing for the consumer that motivated it. Caught by measuring
-      rather than by reading: the capped run still buffered exactly the 64 MB
-      the cap was supposed to prevent. Both sites now set it, with a behavioural
-      regression (`runWasmCapturedFull: max_output_bytes caps the C-API capture
-      path too`) driving a guest that ignores the errno.
-      The general shape, worth naming: a second surface landing beside a
-      hardened one does not inherit the hardening.
-    refs: |-
-      src/wasi/host.zig (`max_capture_bytes` / `capture_truncated`);
-      src/wasi/fd.zig (`writeSlice` append site + the regression test);
-      src/cli/run.zig (`Limits.max_output_bytes`); ClojureWasm D-349 (the
-      consumer-side row this was measured from).
-    first_raised: "2026-08-04"
-    last_reviewed: "2026-08-04"
-  - id: "D-527"
-    layer: "code"
-    status: "resolved"
-    front: D-component
-    description: |-
-      **Any component with two or more exports fails validation with
-      `InvalidSort`.** Single-export components load fine regardless of type
-      complexity, which is why this survived: every component fixture in zwasm's
-      and cljw's trees exports exactly one function.
-
-      REPRODUCTION (hand-written WAT guest, no Rust toolchain):
-
-        package local:cljwit@0.1.0;
-        world echo {
-          export echo-bool: func(v: bool) -> bool;
-          export echo-s32:  func(v: s32)  -> s32;
-        }
-
-        wasm-tools parse echo.wat -o echo.core.wasm
-        wasm-tools component embed echo.wit echo.core.wasm -o echo.embed.wasm
-        wasm-tools component new echo.embed.wasm -o two_export.wasm
-        zwasm run --invoke echo-bool two_export.wasm 1
-        # -> cannot run component: InvalidSort
-
-      Controls: dropping to ONE export makes it load (reaches
-      `ArgArityMismatch`); a lone `string` echo — memory + cabi_realloc + a
-      post-return — also loads. Confirmed across three independent export pairs
-      (bool+s32, f32+f64, s32+u64), so the trigger is export COUNT, not any
-      particular type. `wasm-tools validate --features all` accepts every one of
-      these, so zwasm is rejecting spec-valid components.
-
-      ROOT CAUSE (located, not guessed): `src/feature/component/types.zig`
-      appends to `component_funcs` for imports (`.func`), canon `.lift`s and
-      `.func` aliases, but the `.@"export"` section arm appends ONLY to
-      `type_space`, for type exports:
-
-          .@"export" => for (exports.items[exports_before..], exports_before..) |ex, ex_abs| {
-              if (std.meta.activeTag(ex.sort) == .type) try type_space.append(...);
-          },
-
-      Per the Component Model a component-level `export` of a func introduces a
-      new entry in the func index space — which is why `wasm-tools print`
-      numbers them `(;1;)`, `(;3;)`, … interleaved with the lifts. zwasm counts
-      only the lifts, so from the second export onward each lift's sortidx reads
-      out of bounds and `validate.zig`'s
-      `.func => if (ex.index >= info.component_funcs.items.len) return Error.InvalidSort`
-      fires. The same omission presumably affects `.instance`, `.component` and
-      `.value` exports; only `.type` is handled today.
-
-      IMPACT: this blocks ClojureWasm's headline feature outright —
-      `(:require ["x.wasm" :as x])` is sold as "a component becomes a
-      namespace", and today it can only load components with a single function.
-      Filed from the cljw side as D-567.
-
-      FIXED (branch `develop/component-export-index-space`): `ComponentFuncDef`
-      gains a `re_export` variant and the `.@"export"` section arm appends it
-      for `.func` exports (and `.local` to `instance_origins` for `.instance`
-      exports, which had the same omission). Because appends happen in
-      definition order, the space now interleaves lift / export / lift / export
-      and every later sortidx lands in bounds. `liftForFuncIndex` resolves a
-      re-export to the func it re-exports; the target is always defined earlier,
-      and a `target >= fi` guard makes that structural rather than assumed.
-      Verified: the two-export and the 16-export typed fixtures both go from
-      `InvalidSort` to `ArgArityMismatch` (i.e. they load; only the CLI's arg
-      passing is wrong), matching the single-export control. Regression test
-      `D-527:` in `api/component_tests.zig` over `test/component/two_export.wasm`
-      — removing the one-line append makes it fail with the original
-      `InvalidSort`.
-    first_raised: "2026-08-04"
-    last_reviewed: "2026-08-04"
-    refs: |-
-      src/feature/component/types.zig (the `.@"export"` section arm, ~line 1676);
-      src/feature/component/validate.zig (the `.func` sortidx bound, ~line 78);
-      ClojureWasm D-567 + its test/e2e/fixtures/wasm/README_echo.md.
   - id: "D-526"
     layer: "docs"
     status: "note"
@@ -979,32 +772,6 @@ entries:
     refs: |-
       ADR-0205 (campaign; phases A-E); proposal_watch 2026-07-17 + 2026-08-10
       entries; D-335 REMAINING(2); D-523 (test-side)
-  - id: "D-525"
-    layer: "build"
-    status: "resolved"
-    description: |-
-      RESOLVED 2026-08-12 (sweep S2): option (b) — the -Dgc flag, its
-      build_options.enable_gc threading, and the register.zig re-export are
-      retired; ADR-0115 carries the revision note. The strip lever is and
-      stays -Dwasm (wasm-level DCE). Original row:
-      The `-Dgc` build option is INERT: `build.zig` threads it to
-      `build_options.enable_gc`, whose only reader is the
-      `src/feature/gc/register.zig` re-export that nothing consumes —
-      GC compiles in (and executes) whenever `-Dwasm=v3_0` (the default);
-      the actual strip lever is the wasm-level DCE (`check_build_dce.sh`
-      asserts `gc_struct`/`i31_new` absent from v1_0/v2_0 builds only).
-      ADR-0115 §3 planned `enable_gc` as the op-handler compile-time gate
-      ("WAMR-equivalent nuclear strip") but the op handlers never adopted
-      it. DISCHARGE (pick one): (a) wire the gate — branch the wasm_3_0
-      GC per-op registrations/handlers on `enable_gc` + extend
-      check_build_dce with a `-Dgc=false` leg (binary-size relevant,
-      cf. ADR-0204); or (b) retire the flag + the register.zig re-export
-      and amend ADR-0115 §3. Docs corrected 2026-07-17 (migration guide
-      no longer claims "GC opt-in via -Dgc").
-    first_raised: "2026-07-17"
-    last_reviewed: "2026-07-17"
-    refs: |-
-      ADR-0115 §3; scripts/check_build_dce.sh; migration_v1_to_v2.md §3.2
   - id: "D-522"
     layer: "api"
     status: "note"
@@ -1031,7 +798,7 @@ entries:
       Constraints unchanged: no api break, no per-call regression beyond
       noise (ADR-0181 bench series).
     first_raised: "2026-07-16"
-    last_reviewed: "2026-07-16"
+    last_reviewed: "2026-08-24"
     refs: |-
       ADR-0204 D1; from_cljw_05 request 2 (re-prioritized: thunk
       cross-product >> api-surface gating, which ADR-0073 already covers)
@@ -1058,7 +825,7 @@ entries:
       proposal_watch: Threads = Phase 4, zwasm intent v0.2.0. ADR + ROADMAP
       §9-scope amendment required at kickoff (per §18.2).
     first_raised: "2026-07-06"
-    last_reviewed: "2026-07-06"
+    last_reviewed: "2026-08-24"
     refs: |-
       .dev/meta_audits/2026-07-06-senior-runtime-gap-analysis.md §0/§1
       .dev/proposal_watch.md (Phase 4 table)
@@ -1081,7 +848,7 @@ entries:
       wamrc (down to xtensa/riscv). Do NOT conflate with new-arch backends
       (riscv etc.) — that is a separate, much larger front nobody asked for.
     first_raised: "2026-07-06"
-    last_reviewed: "2026-07-06"
+    last_reviewed: "2026-08-24"
     refs: |-
       .dev/meta_audits/2026-07-06-senior-runtime-gap-analysis.md §2.7
       src/engine/codegen/shared/compile.zig:43 (comptime arch dispatch)
@@ -1103,7 +870,7 @@ entries:
       code_map entries which already exist for EH). cljw is the natural
       first consumer to validate (a).
     first_raised: "2026-07-06"
-    last_reviewed: "2026-07-06"
+    last_reviewed: "2026-08-24"
     refs: |-
       .dev/meta_audits/2026-07-06-senior-runtime-gap-analysis.md §3(debug)
       src/engine/codegen/shared/code_map.zig (pc→func mapping to reuse)
@@ -1122,13 +889,14 @@ entries:
       same ratio (codegen quality, not compile mode). Startup/lean axis zwasm
       WINS (hello 5.2ms JIT / 3.4ms interp vs 7.3/9.6/16.4). The decision:
       (a) re-affirm single-pass (lean/latency identity; close this row);
-      (b) targeted single-pass upgrades only (D-507 guard pages + regalloc
-      quality + branch-hint consumption — no new tier); (c) a second
+      (b) targeted single-pass upgrades only (regalloc quality +
+      branch-hint consumption — no new tier); (c) a second
       optimising tier (Cranelift-class scope — months). Present the report's
-      numbers when the user wants to decide. Until then D-507/D-508 harvest
-      the tier-free wins.
+      numbers when the user wants to decide. The tier-free wins landed and
+      were discharged meanwhile: D-507 (guard-page bounds elision, ADR-0202)
+      + D-508 (AOT cache, ADR-0203).
     first_raised: "2026-07-06"
-    last_reviewed: "2026-07-06"
+    last_reviewed: "2026-08-24"
     refs: |-
       .dev/meta_audits/2026-07-06-senior-runtime-gap-analysis.md §0/§2.1/§4
     front: G-senior-gap
@@ -1149,7 +917,7 @@ entries:
       not a correctness gap. Recipe: gate the `!ctx.bounds_elided` block in
       arm64 op_simd + thread the flag through x86_64 op_simd handlers.
     first_raised: "2026-07-07"
-    last_reviewed: "2026-07-07"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/engine/codegen/arm64/op_simd.zig (ctx-threaded, one-line gate)
       src/engine/codegen/x86_64/op_simd.zig (v128MemPrologue + ~12 handlers, param-threaded)
@@ -1203,7 +971,7 @@ entries:
       alias-stash. Non-trivial handler redesign + `abi.zig` reservation change →
       own ADR when a real high-pressure-SIMD consumer or bench motivates it.
     first_raised: "2026-07-03"
-    last_reviewed: "2026-07-03"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/engine/codegen/arm64/op_simd.zig (emitV128Bitselect / emitV128FpFma
       SPILL-EXEMPT) · src/engine/codegen/arm64/abi.zig:229 fp_spill_stage_vregs ·
@@ -1213,8 +981,8 @@ entries:
     status: "note"
     description: |-
       note (headroom watch, NOT an extraction mandate): `entry.zig` is at
-      3161/3200 (98.8%) of its FILE-SIZE-EXEMPT cap. It is a uniform-pattern
-      per-shape call-helper CATALOG (127 callXX_yy helpers, monotonic growth
+      3169/3200 (99.0%) of its FILE-SIZE-EXEMPT cap. It is a uniform-pattern
+      per-shape call-helper CATALOG (125 call* helpers, monotonic growth
       with Wasm signature shapes) — exactly the irreducible-catalog class where
       raising the cap marker is the SANCTIONED resolution (memory
       feedback_filesize_cap_relax_ok; ADR-0099 Rev 2026-05-24). So the next
@@ -1222,12 +990,12 @@ entries:
       should BUMP `(cap=3200)` — not force a synthetic split. Recorded so the
       trip is expected, not a surprise BLOCK. Ties into the E-段 scaffolding
       audit's soft/hard-cap re-evaluation (the cap-as-smell-detector premise has
-      shifted post-campaign). Also re-approaching: validator.zig 3392/3510.
+      shifted post-campaign). Also re-approaching: validator.zig 3403/3510.
     first_raised: "2026-07-03"
-    last_reviewed: "2026-07-03"
+    last_reviewed: "2026-08-24"
     refs: |-
-      src/engine/codegen/shared/entry.zig:1 (FILE-SIZE-EXEMPT cap=3200 marker; file 3161L) ·
-      src/validate/validator.zig (3392/3510) · ADR-0099 · memory feedback_filesize_cap_relax_ok
+      src/engine/codegen/shared/entry.zig:1 (FILE-SIZE-EXEMPT cap=3200 marker; file 3169L) ·
+      src/validate/validator.zig (3403/3510) · ADR-0099 · memory feedback_filesize_cap_relax_ok
   - id: "D-502"
     layer: "code"
     status: "note"
@@ -1249,7 +1017,7 @@ entries:
       DISCHARGE (residual): thread the resolved encoding into invokeString's
       CanonContext + drop the utf8 gate + add a non-utf8 export round-trip fixture.
     first_raised: "2026-07-03"
-    last_reviewed: "2026-07-03"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/feature/component/canon.zig (lowerString / liftString / liftUtf16 / liftLatin1 — DONE) ·
       src/api/component.zig invokeStringExport (residual utf8 gate) ·
@@ -1302,7 +1070,7 @@ entries:
       CW dogfooding UNAFFECTED today (no table.grow / no no-max tables, pin already on the
       `.auto` flip); forward-caveat only, workaround `{:engine :interp}`.
     first_raised: "2026-07-01"
-    last_reviewed: "2026-07-01"
+    last_reviewed: "2026-08-24"
     refs: |-
       zwasm: src/engine/setup.zig `growCapacity` no-max→cap (~734/736) + `.max=cap` (~783) ·
       `jitTableGrowCore` `new_len > d.max` (setup.zig:241) · src/zwasm/table.zig:108-113
@@ -1359,7 +1127,7 @@ entries:
       so it traps at v128.const before reaching these (no interp crash). Regression fixture
       array_fill_v128_traps asserts the clean trap (flip to a value when this lands).
     first_raised: "2026-06-21"
-    last_reviewed: "2026-06-21"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/engine/codegen/shared/jit_abi.zig (jitGcArrayFill ~999 + jitGcAllocArrayFill ~961; the u64 value arg)
       src/engine/codegen/{arm64,x86_64}/ops/wasm_3_0/array_fill.zig (emit: marshal v128 value via ptr)
@@ -1392,7 +1160,7 @@ entries:
       a `(select (result anyref) ...)` fixture validates + lowers + JIT-executes without
       ref truncation on both arches.
     first_raised: "2026-06-21"
-    last_reviewed: "2026-06-21"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/validate/validator.zig:3041 (opSelectTyped partial switch) + src/ir/lower.zig:354 (0x1c partial switch)
       src/parse/init_expr.zig:110 (readValType — canonical, handles all GC reftypes)
@@ -1421,9 +1189,10 @@ entries:
       `rt.host_payloads_base[K]` (*HostFuncPayload), calls `WasmFuncCallback`, sets trap_flag.
       instantiateJit threads builder_state + `collectHostFuncTargets` (covered sig planted;
       uncovered rejected to `.interp`). Gated: `jit_callback.c` (0-arg) + `jit_callback_args.c`
-      (i32×2→i32, i64→i64). Remaining: FP (f32/f64) args/results — SEPARATE register class, needs
-      positionally-typed thunks (the u64-collapse only holds all-GP); then `.auto`-to-JIT flip.
-      proc_exit exit-code INCOMPLETE (jit_dispatch.zig:313). Original host-func
+      (i32×2→i32, i64→i64). FP (f32/f64) results + FP args at arity ≤2 LANDED (`fpBridge1/2`
+      positionally-typed thunks, shared bodies per D-522); remaining: FP-arg sigs at arity 3-4
+      (rejected to `.interp`). proc_exit exit-code DONE (D-244: `src/wasi/jit_dispatch.zig` proc_exit
+      records `host.exit_code`; `run.zig` surfaces it). Original host-func
       SURVEY 2026-06-21 (design `private/notes/d478-host-func-jit-bridge-design.md`): the
       JIT passes guest CALL args to `dispatch[idx]` in NATIVE arg registers per the callee's
       exact C sig (no uniform buffer; `op_call.zig` marshalCallArgs) → the host bridge must be
@@ -1448,7 +1217,7 @@ entries:
       + Win64 ≥4-param stack-spill = the D-477 niche slivers (tracked there). Build on
       demand as cljw/real consumers exercise them.
     first_raised: "2026-06-21"
-    last_reviewed: "2026-06-21"
+    last_reviewed: "2026-08-24"
     refs: |-
       .dev/decisions/0200_jit_backed_embedding_api.md
       src/api/instance.zig (instantiateJit + wasm_func_call JIT arm + instanceNewWithEngine)
@@ -1717,7 +1486,7 @@ entries:
       store-count knob now would be a speculative feature; keep as a note until a
       guest-triggered instantiation path exists. Priority for cw v1: LOW.
     first_raised: "2026-06-08"
-    last_reviewed: "2026-06-08"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/zwasm/engine.zig (InitOpts); src/runtime/instance/instantiate.zig (instance/table alloc); src/runtime/runtime.zig (growMemory page cap)
     front: B-hardening
@@ -1919,7 +1688,7 @@ entries:
       DISCHARGE (downgraded): practical large-frame body-local cases lifted (done); the degenerate
       param/stack arms tracked here, no fixture forced.
     first_raised: "2026-06-05"
-    last_reviewed: "2026-06-05"
+    last_reviewed: "2026-08-24"
     refs: |-
       `340eaf5e` (GPR fix); `test/edge_cases/p9/large_frame/`; `src/engine/codegen/arm64/gpr.zig` (frameAddrLarge/frameLdrGpr/frameStrGpr); `src/engine/codegen/arm64/emit.zig` (FP/v128 + param :397-455 + stack-args :466-531 remaining); D-244; D-291 (ed25519 runtime SIGSEGV)
     front: B-hardening
@@ -1939,7 +1708,7 @@ entries:
       (measure headroom before building speculative perf), this stays DEFERRED until a fill/init-bound workload
       is measured. Not a correctness gap; revisit when a bench actually exercises it.
     first_raised: "2026-06-05"
-    last_reviewed: "2026-06-05"
+    last_reviewed: "2026-08-24"
     refs: |-
       `.dev/findings/d285_jit_bulk_memory_byteloop.md` §Results; `src/engine/codegen/arm64/op_memory.zig:483` (emitMemoryFill) `:763` (emitMemoryInit); `src/engine/codegen/x86_64/op_memory.zig`; D-285 (the copy fix, resolved)
     front: B-hardening
@@ -2154,7 +1923,7 @@ entries:
       code-size measurement (D-314 item e) on a realworld corpus. Cadence: re-run the
       recorder at phase boundaries alongside run_bench.sh --phase-record.
     first_raised: "2026-06-13"
-    last_reviewed: "2026-06-13"
+    last_reviewed: "2026-08-24"
     refs: |-
       ADR-0181 Consequences; D-314 (e); bench/ history
     front: B-hardening
@@ -2201,7 +1970,7 @@ entries:
       compile, not mid-corpus). Not gating anything; recorded so a future "clean Rosetta corpus run"
       isn't expected.
     first_raised: "2026-06-12"
-    last_reviewed: "2026-06-12"
+    last_reviewed: "2026-08-24"
     refs: |-
       `test/spec/spec_assert_runner_wasm_3_0.zig`; `zig build test-spec-wasm-3.0-assert -Dtarget=x86_64-macos`
       (ZWASM_SPEC_ENGINE=jit → SEGV; interp → green); `.dev/lessons/2026-05-17-d134-rosetta-2-signal-translation-limit.md`
@@ -2300,7 +2069,7 @@ entries:
       `w45_addi`/`w45_addc` hyperfine if a native-x86_64 perf question arises; the mechanism-fixed +
       correctness-green evidence already closes D-265, so this is confirmation-only, not a blocker.
     first_raised: "2026-06-04"
-    last_reviewed: "2026-06-04"
+    last_reviewed: "2026-08-24"
     refs: |-
       bench/results/s15p_parity_vs_v1.md (D-265 post-rework verification table); ADR-0153 (rework campaign);
       private/spikes/s15p-parity/ (w45_addi/w45_addc); scripts/run_remote_ubuntu.sh; ~/Documents/MyProducts/zwasm
@@ -2322,7 +2091,7 @@ entries:
       win exists, raise max_homed; else document the x86_64 budget as the deliberate ceiling. Measure-first
       (commit/revert) before building.
     first_raised: "2026-06-04"
-    last_reviewed: "2026-06-04"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/ir/analysis/local_homing.zig:60,88 (max_homed @min(6, arch)); ADR-0155 (register-homed locals);
       ADR-0153 (D-265 campaign); bench/results/s15p_parity_vs_v1.md; ROADMAP §16 (完成形 surface/perf bar)
@@ -2331,15 +2100,16 @@ entries:
     layer: "perf"
     status: "note"
     description: |-
-      **note: `wasm_module_serialize` = source-bytes, no compiled-artifact cache (QoI vs wasmtime).** zwasm's
+      **note: `wasm_module_serialize` = source-bytes, not the `.cwasm` compiled artifact (QoI vs wasmtime).** zwasm's
       `Module` is a byte-holder that re-compiles per instance, so the wasm-c-api serialized blob IS the wasm
       bytes: serialize = copy `module.bytes`, deserialize = `wasm_module_new` (re-parse). Round-trips correctly
-      (§16.2 G, `src/api/module_serialize.zig`), but unlike wasmtime there is NO persisted compiled artifact, so
-      deserialize re-parses + each instance re-compiles — functionally correct, not the startup-perf shortcut the
-      API implies. ENHANCEMENT (not a bug): if an AOT/compiled-artifact cache lands (cf. §14 AOT work), serialize
-      could emit it for faster deserialize. Until then the byte-model is the honest, correct impl.
+      (§16.2 G, `src/api/module_serialize.zig`); deserialize re-parses + each instance re-compiles — not
+      the startup-perf shortcut the API implies. The compiled artifact EXISTS now (`.cwasm`,
+      `src/engine/codegen/aot/serialise.zig` + `zwasm run --cache`, ADR-0203); the wasm-c-api serialize
+      path just does not emit it. ENHANCEMENT (not a bug): serialize could emit the `.cwasm` for faster
+      deserialize. Until then the byte-model is the honest, correct impl.
     first_raised: "2026-06-05"
-    last_reviewed: "2026-06-05"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/api/module_serialize.zig; include/wasm.h:422-423 (serialize/deserialize); ROADMAP §16.2 G; D-269
     front: B-hardening
@@ -2352,8 +2122,8 @@ entries:
       fd_table has no socket fds — preview1 has NO socket-creation syscall (connect/bind/listen are wasi-sockets
       extensions, not preview1), so a socket can only reach the guest via a host preopen (wasmtime's `--listen`).
       To make sockets functional: add a `.socket` FdKind + a host-config preopen-socket path (CLI `--listen`/C-API)
-      + real recv/send/accept/shutdown via `std.posix.socket`/`accept`/`recv`/`send` (std.Io has no sockets — std.net
-      gone 0.14; std.posix OK per ADR-0070, not raw libc; Win64 needs the HANDLE-aware path). DISCHARGE: a guest
+      + real recv/send/accept/shutdown via `std.Io.net` (the pinned 0.16 stdlib has NO raw `std.posix` socket
+      surface — networking is io-based; `src/wasi/p2_sockets.zig` already ships TCP on it). DISCHARGE: a guest
       that accepts + echoes on a preopened listener works Mac+Linux. Not blocking v0.1.0 — `notsock` is spec-correct
       for the no-socket-fd model; networking is opt-in. Pairs with ADR-0161 §3 (WASI sockets / wasi-sockets).
       ---
@@ -2363,7 +2133,7 @@ entries:
       simplification parity gap → the ADR-0153 "rework a v1-parity miss" posture does NOT apply. Confirmed: this
       stays an on-demand post-v0.1.0 completeness item, correctly deferred (not a measured deficiency).
     first_raised: "2026-06-05"
-    last_reviewed: "2026-06-05"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/wasi/fd.zig (sock_accept/recv/send/shutdown = notsock); src/api/wasi.zig (thunks); ADR-0161 §3;
       ROADMAP §11.1; D-278 (preview1 surface, now 46/46)
@@ -2378,16 +2148,17 @@ entries:
       `1d2cb8df`: spec_assert_runner_non_simd 25437/0, diff_runner, wast_runner, every runner 0-failed — the error
       is POST-tests build-graph noise, not downstream of a test failure). D-028 lineage: Microsoft Defender scans
       `.zig-cache`/`zig-out` and can delete/lock a `tmp/<hash>` configure-result file mid-build → FileNotFound race.
-      **Loop guidance: a windows red whose log shows ALL runners 0-failed + only the configure-phase FileNotFound =
+      **Triage guidance: a windows red whose log shows ALL runners 0-failed + only the configure-phase FileNotFound =
       this env flake → treat Win64 as green-for-correctness (cross-compile + all-tests-pass), do NOT classify as a
-      code regression.** Tracked via `scripts/track_heisenbug.sh win-configure-phase`. MITIGATION (user/env, out of
-      repo scope): add a Defender exclusion for the repo `.zig-cache`, or point `--cache-dir` at a scan-exempt path
-      on windowsmini. DISCHARGE: 5 clean windows runs after a Defender exclusion, or a zig-0.16 build-driver fix.
+      code regression.** Tracked via `scripts/track_heisenbug.sh win-configure-phase`. The Defender exclusions
+      (repo root + `.zig-cache` + `zig-out`, windows_ssh_setup.md baseline) were in place from 2026-05-22 —
+      BEFORE this row was raised — so the flake reproduces WITH them active; an exclusion is not the lever.
+      DISCHARGE: a zig-0.16+ build-driver fix, or 5 consecutive clean `test-all` runs on windowsmini.
     first_raised: "2026-06-05"
-    last_reviewed: "2026-06-05"
+    last_reviewed: "2026-08-24"
     refs: |-
       scripts/run_remote_windows.sh; CLAUDE.md (D-028 Defender note); ADR-0076 D7 (win64 gate);
-      scripts/track_heisenbug.sh (win-configure-phase); /tmp/win.log
+      scripts/track_heisenbug.sh (win-configure-phase); .dev/windows_ssh_setup.md (Defender baseline)
     front: B-hardening
   - id: "D-283"
     layer: "test"
@@ -2502,7 +2273,7 @@ entries:
       DISCHARGE: P0 (--env) DONE; P1 (--verbose) deferred-to-M5; P2 (WAT) = direction call. Audit method reusable
       for the C-API + Zig-API surface audits (the other two 完成形 targets — no findings carried over from P0).
     first_raised: "2026-06-06"
-    last_reviewed: "2026-06-06"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/cli/main.zig (arg parse ~120-176, --dir@159, --env wiring target); src/cli/run.zig (runWasmJit@44 /
       runCwasmWasi@122 / runWasmCapturedWithPreopens — setArgs+addPreopen sites @56/62/149/152/253/260);
@@ -2704,7 +2475,7 @@ entries:
         user-visible trap-output FORMAT change → left for a deliberate call. Full audit:
         private/notes/d-diag-audit-2026-06-15.md. (Trap-message table + CLI exit codes audited CLEAN.)
     first_raised: "2026-06-15"
-    last_reviewed: "2026-06-15"
+    last_reviewed: "2026-08-24"
     refs: |-
       `240f97de` (F1/F3/F5b shipped); src/validate/validator.zig (~736-742 reject sites; F5a);
       src/parse/{parser.zig,sections.zig} (F6); src/cli/run.zig:590-617 (F4 trap format);
@@ -2944,7 +2715,7 @@ entries:
       The clean general fix is a host-call error contract (guest-fault => trap,
       host-failure => a propagating InvokeError.HostError) — ADR-grade, deferred.
     first_raised: "2026-06-16"
-    last_reviewed: "2026-06-16"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/zwasm/instance.zig (mapDispatchErr else=>@panic);
       src/api/component_wasi_p2.zig (mapAsyncFault; copy/drop/cancel wrappers);
@@ -2972,7 +2743,7 @@ entries:
       toolchain bug real wit-bindgen output won't emit). Sibling of Gap A
       (afcf889a, the must-produce-a-result trap, which IS done).
     first_raised: "2026-06-16"
-    last_reviewed: "2026-06-16"
+    last_reviewed: "2026-08-24"
     refs: |-
       src/feature/component/validate.zig (checkCanons .task_return arm ~L1073);
       src/api/component_wasi_p2.zig (p2TaskReturn);
@@ -2982,33 +2753,23 @@ entries:
     status: "note"
     front: D-wasi03
     description: |-
-      note (front② gap-mining TIER-2/3; design-grade async breadth not single-task
-      reachable). The wasmtime async corpus surfaced gaps zwasm's stackless single-
-      task model (ADR-0187, no fibers) cannot reach without a scheduler/peer or new
-      machinery. Gap matrix: `private/notes/p17-wasmtime-async-gaps.md`. Front②
-      TIER-1 (single-task reachable) is DONE: task.return-or-trap (afcf889a),
-      copy-requires-IDLE (05b35c28), cancel-not-copying-traps (already correct).
-      REMAINING, each its own future sub-effort:
-      (a) **guest↔guest stream/future COMPLETION** (`intra-streams.wast`,
-      `intra-futures.wast`): a completed copy needs BOTH ends progressing — the
-      Zone-1 rendezvous doesn't buffer bytes; needs a host buffer-ring or a task
-      scheduler. Also unblocks future write-after-write-succeeded traps
-      (`trap-if-done.wast`) which need a completed write. Lesson
-      `2026-06-16-stackless-stream-completion-needs-host-peer`. ADR-grade.
-      (b) **typed/multi-byte element marshalling** (`partial-stream-copies.wast`,
-      `stream-big-read-and-writes.wast`): E moved u8 only (count==bytes); generalise
-      via canon.zig store/load + bytes=count*elem_size. Needs (a) for an exercise
-      path (host stdio is u8).
-      (c) **error-context** type + `error-context.{new,debug-message,drop}` canon
-      builtins (`error-context.wast`): a new CM-async value type + ops, currently
-      undecoded/unimplemented.
-      (d) **subtask scheduler** (`task-deletion.wast`, `backpressure-deadlock.wast`,
-      `cancel-sibling-subtask.wast`, `subtask-wait.wast`): multi-task concurrency —
-      the biggest gap; the stackless model runs one task. Post-MVP.
+      note (front② gap-mining; was the async-breadth gap matrix). The
+      wasmtime async corpus surfaced gaps the then-single-task stackless
+      model could not reach. Since raised, (a) guest↔guest stream/future
+      COMPLETION, (b) typed/multi-byte element marshalling, and (d) the
+      multi-task subtask scheduler ALL LANDED via ADR-0195 (@a82b4f84,
+      FUNCTIONALLY COMPLETE: `TaskTable` + `driveScheduler`, `SharedStream`
+      byte buffer, elem_size marshalling per D-335); residual
+      adversarial-corpus work is D-464. TIER-1 (task.return-or-trap
+      afcf889a, copy-requires-IDLE 05b35c28, cancel-not-copying-traps) was
+      DONE at raise time. REMAINING here — (c) only: **error-context**
+      type + `error-context.{new,debug-message,drop}` canon builtins
+      (0x1c–0x1e): the canon decode's `else` arm still returns
+      `Error.UnsupportedCanon` (`src/feature/component/types.zig`).
     first_raised: "2026-06-16"
-    last_reviewed: "2026-06-16"
+    last_reviewed: "2026-08-24"
     refs: |-
-      private/notes/p17-wasmtime-async-gaps.md (gap matrix);
+      .dev/decisions/0195_multitask_async_scheduler.md;
       src/feature/component/async.zig (SharedStream/SharedFuture rendezvous);
       ~/Documents/OSS/wasmtime/tests/misc_testsuite/component-model/async/
   - id: "D-448"
@@ -3025,16 +2786,17 @@ entries:
       crt1-command.o/libc.a). VERIFIED: a real rust wasip3 component builds + zwasm
       runs it → exit 1 (cli-exit). Full recipe + rationale: lesson
       `2026-06-16-wasip3-hermetic-build-recipe`. CAVEATS (the residual debt): (a)
-      the pinned nightly `2026-06-14` needs periodic refresh; (b) the wasip2-libc-
+      the pinned nightly (`2026-06-24` as of 2026-08-24) needs periodic refresh; (b) the wasip2-libc-
       borrow assumes wasip3's libc ABI stays == wasip2's (re-verify on a wasip3 std
-      bump); (c) the OFFICIAL wasi-testsuite (Buck2 + wit-bindgen-async + wkg) is
-      NOT wired — path ② (plain rust wasip3, user-chosen) is used instead, which
-      proves the same behaviors without the heavy bleeding-edge pipeline. NEXT
-      (front ①, tracked in handover): author plain-rust wasip3 fixtures (cli-exit
-      done as the spike; cli-stdio-roundtrip, cli-env) + a runner asserting the
-      wasi-testsuite `.json` expectations, committed `.wasm` run via the edge-runner.
+      bump); (c) the official wasi-testsuite BUILD pipeline (Buck2 +
+      wit-bindgen-async + wkg) stays un-adopted — DONE another way: the
+      official corpus is vendored as prebuilt binaries (ADR-0205 D3,
+      `scripts/vendor_wasip3_official.sh`, 45 `.wasm` + `.json`
+      expectations) and the plain-rust fixtures + `.json`-asserting tests
+      landed (`src/api/component_wasi_p3.zig` runOfficialWasip3Test); the
+      corpus's missing enumerator/build-step is #214.
     first_raised: "2026-06-16"
-    last_reviewed: "2026-06-16"
+    last_reviewed: "2026-08-24"
     refs: |-
       flake.nix (devShells.gen rustWasm targets — wasip3 NOT addable yet);
       ~/Documents/OSS/wasi-testsuite/tests/rust/wasm32-wasip3/ (BUCK + wit + src/bin)
@@ -3094,7 +2856,7 @@ entries:
       reworked for another reason (then the class-A peephole rides along as a
       general win). Lesson `2026-06-16-base64-single-pass-register-pressure-ceiling`.
     first_raised: "2026-06-16"
-    last_reviewed: "2026-06-16"
+    last_reviewed: "2026-08-24"
     refs: |-
       bench/results/all_engine_matrix.md (the measured ratios);
       bench/runners/wasm/shootout/base64.wasm (profile target);
@@ -3126,21 +2888,6 @@ entries:
     refs: |-
       /tmp/hoot-spike (spike artifacts); test/edge_cases/p10/gc/ (GC execution fixtures);
       lessons validator-exact-eql-where-reftype-subtyping-required + leb-decode-desync-manifests-far-downstream
-  - id: "D-456"
-    layer: "test"
-    status: "note"
-    front: D-wmt-misc
-    description: |-
-      note (ADR-0192 campaign, 2026-06-16). The native wasm-3.0 assert runner
-      (spec_assert_runner_wasm_3_0.zig) did NOT compare ref-typed assert_return
-      results (D-222). RESOLVED (ref-part, 7ae5f54c): null-ref args +
-      externref/null-funcref result compare wired; re-sweep shows 0 value/ref
-      mismatches across all native buckets. REMAINING (note): FAILsetup/
-      UnknownImport fails are fixtures importing host functions the runner doesn't
-      define — wiring those host imports is the only path to running them.
-    first_raised: "2026-06-16"
-    last_reviewed: "2026-06-16"
-    refs: ""
   - id: "D-458"
     layer: "test"
     status: "note"
@@ -3170,7 +2917,7 @@ entries:
       wording: "100% spec, 0 skip" is a skip-impl gate on curated EXECUTION corpora,
       NOT full-upstream execution — reconcile in the USER-requested doc-inventory phase.
     first_raised: "2026-06-16"
-    last_reviewed: "2026-06-16"
+    last_reviewed: "2026-08-24"
     refs: |-
       scripts/regen_spec_2_0_assert.sh (NAMES + distiller fmt guard); test/spec/wasm-2.0-assert/{align,local_init};
       lesson hardcoded-corpus-subset-hides-whole-op-families
