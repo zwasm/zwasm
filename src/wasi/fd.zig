@@ -198,12 +198,23 @@ pub fn writeSlice(host: *Host, fd: p1.Fd, bytes: []const u8) p1.Errno {
             return .nospc;
         }
     }
-    if (file_opt) |f| {
+    if (file_opt) |f| if (bytes.len > 0) {
         // Positional write at the slot's logical cursor + advance (mirrors
         // fdReadFile; std.Io.File is positional-only).
-        f.writePositionalAll(io_opt.?, bytes, slot.pos) catch return .io;
-        slot.pos += bytes.len;
-    }
+        //
+        // FDFLAGS_APPEND retargets the write to end-of-file and drags the
+        // cursor there with it: under append the cursor the guest set with
+        // `fd_seek` does NOT select where the bytes land. The end has to be
+        // re-read per write — the host handle carries no O_APPEND (the flag
+        // lives in the slot, and `fd_fdstat_set_flags` can clear it mid-life),
+        // so the kernel will not do the retarget for us.
+        const at = if ((slot.fs_flags & p1.FDFLAGS_APPEND) != 0)
+            (f.stat(io_opt.?) catch return .io).size
+        else
+            slot.pos;
+        f.writePositionalAll(io_opt.?, bytes, at) catch return .io;
+        slot.pos = at + bytes.len;
+    };
     if (std_stream) |s| s.writeStreamingAll(io_opt.?, bytes) catch return .io;
     return .success;
 }
@@ -314,11 +325,15 @@ pub fn fdClose(host: *Host, fd: p1.Fd) p1.Errno {
 /// `fd_renumber(from, to) → errno` — renumber fd `from` onto `to`: `to` now
 /// refers to `from`'s open file and `from` is closed. Mirrors `fd_close`'s
 /// slot-only model (the host fd is not eagerly closed — process-lifetime, as
-/// in `fdClose`); `to`'s prior slot is overwritten. Both must be in range.
+/// in `fdClose`); `to`'s prior slot is overwritten. Both must be OPEN fds.
 pub fn fdRenumber(host: *Host, from: p1.Fd, to: p1.Fd) p1.Errno {
     const slot_from = host.translateFd(from) orelse return .badf;
     if (slot_from.kind == .closed) return .badf;
     const slot_to = host.translateFd(to) orelse return .badf;
+    // `to` must name an OPEN descriptor: renumber REPLACES one, it does not
+    // conjure one at a free slot. A closed slot is in range but is not a
+    // descriptor, so it answers `badf` just like an out-of-range fd.
+    if (slot_to.kind == .closed) return .badf;
     if (from == to) return .success;
     slot_to.* = slot_from.*;
     slot_from.kind = .closed;
@@ -858,7 +873,8 @@ fn writeDirent(buf: []u8, written: *usize, d_next: u64, d_ino: u64, d_type: p1.F
 /// start); each entry's `d_next` is the cookie to resume AFTER it. The host
 /// `std.Io.Dir` iterator has no seekdir, so cookie is treated as an index and
 /// the iteration restarts each call (skip `cookie` entries). Synthesises `.`
-/// and `..` first (ino 0, directory) as WASI/POSIX consumers expect.
+/// and `..` first, as WASI/POSIX consumers expect: `.` carries this
+/// directory's own inode, `..` carries 0 (inode unknown).
 pub fn fdReaddir(host: *Host, mem: []u8, fd: p1.Fd, buf_ptr: u32, buf_len: u32, cookie: u64, bufused_ptr: u32) p1.Errno {
     if (@as(usize, bufused_ptr) + 4 > mem.len) return .fault;
     const buf = sliceMem(mem, buf_ptr, buf_len) orelse return .fault;
@@ -876,9 +892,19 @@ pub fn fdReaddir(host: *Host, mem: []u8, fd: p1.Fd, buf_ptr: u32, buf_len: u32, 
     var written: usize = 0;
     var idx: u64 = 0;
 
-    // Synthetic "." then "..".
-    inline for ([_][]const u8{ ".", ".." }) |dot| {
-        if (idx >= cookie and !writeDirent(buf, &written, idx + 1, 0, .directory, dot)) {
+    // Synthetic "." then "..". "." reports the directory's OWN inode — the
+    // same number `fd_filestat_get` gives for this fd, and the pair a guest
+    // cross-checks to confirm "." names the directory it is reading. ".."
+    // stays 0: naming the parent is the escape `path_open` refuses, and 0 is
+    // the conventional "inode unknown" answer a readdir is allowed to give.
+    const self_file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
+    const self_ino: u64 = @intCast((self_file.stat(io) catch return .io).inode);
+    const dots: [2]struct { name: []const u8, ino: u64 } = .{
+        .{ .name = ".", .ino = self_ino },
+        .{ .name = "..", .ino = 0 },
+    };
+    for (dots) |dot| {
+        if (idx >= cookie and !writeDirent(buf, &written, idx + 1, dot.ino, .directory, dot.name)) {
             std.mem.writeInt(u32, mem[bufused_ptr..][0..4], @intCast(written), .little);
             return .success;
         }
@@ -1174,15 +1200,19 @@ pub fn fdPrestatGet(host: *Host, mem: []u8, fd: p1.Fd, prestat_ptr: u32) p1.Errn
 }
 
 /// Wasm WASI snapshot-1 `fd_prestat_dir_name` — copy a preopen's
-/// guest path into the guest buffer (truncated to `path_len`). The
-/// guest sizes the buffer from the `fd_prestat_get` name length.
+/// guest path into the guest buffer. The guest sizes the buffer from
+/// the `fd_prestat_get` name length, so a buffer too small to hold the
+/// whole name is `nametoolong`, NOT a request to truncate: a truncated
+/// preopen path names a different root, and every later path would then
+/// resolve against it. A larger-than-needed buffer is fine — only the
+/// name's own bytes are written.
 pub fn fdPrestatDirName(host: *Host, mem: []u8, fd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
     const slot = host.translateFd(fd) orelse return .badf;
     if (slot.kind != .dir) return .badf;
     const name = preopenName(host, slot) orelse return .badf;
+    if (path_len < name.len) return .nametoolong;
     const dst = sliceMem(mem, path_ptr, path_len) orelse return .fault;
-    const n = @min(name.len, dst.len);
-    @memcpy(dst[0..n], name[0..n]);
+    @memcpy(dst[0..name.len], name);
     return .success;
 }
 

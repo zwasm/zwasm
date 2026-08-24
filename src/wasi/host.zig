@@ -60,7 +60,9 @@ pub const OpenFd = struct {
     /// start. `fd_read`/`fd_write` use positional IO at this offset and advance
     /// it (Zig 0.16 `std.Io.File` is positional-only — no OS-cursor seek);
     /// `fd_seek` sets it, `fd_tell` reads it. `fd_pread`/`fd_pwrite` take an
-    /// explicit offset and do NOT touch it (WASI).
+    /// explicit offset and do NOT touch it (WASI). One exception: while
+    /// `fs_flags` carries FDFLAGS_APPEND, `fd_write` ignores this cursor as a
+    /// destination and writes at end-of-file, then leaves the cursor there.
     pos: u64 = 0,
 
     /// True when this fd carries every bit in `needed`. A preview1 call is
