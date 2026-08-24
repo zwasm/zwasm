@@ -13,11 +13,14 @@
 //!
 //! ## Initialization (D-009 refactor)
 //!
-//! Zone 0 (`src/support/`) cannot read process env directly per
-//! ROADMAP §A1 (`std.c.getenv` would re-introduce the libc
-//! dependency this zone explicitly excludes; `std.posix.getenv`
-//! was removed in Zig 0.16). The env value is plumbed down from
-//! Zone 3 entry points:
+//! Zone 0 (`src/support/`) cannot read process env directly:
+//! `std.posix.getenv` was removed in Zig 0.16, and
+//! `std.process.Environ.getPosix` needs a `std.process.Init`
+//! that only a Zig `main` owns. That leaves `std.c.getenv`,
+//! which ADR-0070 classifies Necessary for the c_api context
+//! only — a new site here needs an ADR-0070 amendment (ROADMAP
+//! §14 forbidden list; `.claude/rules/libc_boundary.md`). The
+//! env value is plumbed down from Zone 3 entry points:
 //!
 //! - `cli/main.zig` reads `init.environ.getPosix("ZWASM_DEBUG")`
 //!   and calls `dbg.initFromEnv(value)` at startup.
