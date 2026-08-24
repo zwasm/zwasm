@@ -29,28 +29,71 @@ entries:
       exclusive branches (`op_memory.emitMemOp` is `if (is_store) pop 2
       else pop 1`) — a static count sums branches a run takes one of. And
       #250 shows the table is not even the whole surface.
-      Discharge: assert it at emit time instead. After each op, in a Debug
-      build, `ctx.pushed_vregs.items.len` must equal the operand-stack depth
-      `liveness.compute` simulated for that pc — a value it already computes
-      and currently discards. That covers both mechanisms, since it compares
-      the depth rather than any per-op count, and every spec / edge-case /
-      realworld run then exercises it: the class becomes a hard error at the
-      desync point rather than a wrong number downstream. Needs the per-pc
-      depth threaded out of liveness into the emit loop plus a
-      `builtin.mode` gate; deferred because no mismatch is known to remain
-      after #245 / #250 and the site is the hot emit path. debug_jit_auto
-      Recipe 22 is the manual counterpart — how to find one once suspicious.
+      Discharge: assert it at emit time instead — but on the vreg **identity**,
+      not the depth. Before each op, in a Debug build, the vreg vector the emit
+      holds in `ctx.pushed_vregs` must equal the operand stack
+      `liveness.compute` simulated for that pc. Depth alone catches #250 and
+      nothing else: measured per function on the pre-fix trees, D-330 is 0
+      depth / 13+10+1+1+1+1+1 identity, #245 is 0 / 6+6+6, and two of #253's
+      three shapes are 0 / 5+5 — `ref.as_non_null` modelled 1→1 against an emit
+      that pops one and pushes one cannot move the length at all. Two regions
+      differ by design and are excluded from state the emit already holds: the
+      dead region (`dead_code`), and the else arm of an `if (result T…)` with
+      no params, where `emitElse` leaves the captured merge vregs on
+      `pushed_vregs` and liveness drops them. Prototyped and measured
+      2026-08-24 on `5058d517f`: fires on all four instances, 1 residual line
+      over the realworld corpus (21,102 functions / 9.97M instrs), 239 over the
+      spec + edge-case corpora of which 61 are the fifth instance below and 178
+      remain; +0.9% compile time gated off, 12 B/instr while on, comptime-zero
+      in ReleaseFast/ReleaseSmall. Shape: one shared
+      `engine/codegen/shared/liveness_parity.zig` plus one call line in each
+      emit loop (arm64 already carries `pc`; x86_64 needs `, 0..`), and the
+      snapshot rides on `zir.Liveness`, which `compile.zig:235` already threads
+      into the emit.
+      **Reach.** Through the CLI only. `ZWASM_DEBUG` never reaches any test
+      runner, so **the 239/178 figures above were taken with the gate bypassed**
+      (a direct env read, kept out of the patch: `support/dbg.zig:16-19` states
+      why `dbg` cannot read the env itself, and `std.c` has no call site in
+      Zone 1 or Zone 2 today) and are not values CI re-derives today. That gap, and the AOT-serialization refusal
+      sitting behind it, are filed as an issue — see refs; this row does not
+      restate them.
+      **Diagnostic vs gate.** As a `ZWASM_DEBUG` channel that prints and
+      continues, no ADR — `regverify` (`shared/compile.zig:306`) is the
+      precedent. Making it block CI does need one: ADR-0076 D9 defines the
+      merge gate and ADR-0212 D1 puts gate definitions in the sign-off set. The
+      precondition for that ADR is the 178-line spec residual at **zero**, not
+      "the corpus is green" — it already is.
+      **A fifth instance is open.** liveness's `.else` restores to
+      `entry_depth` and then re-pushes `param_arity` params, while `emitElse`
+      truncates to `entry_stack_depth - param_arity` first, and both record the
+      depth after the cond pop (`x86_64/op_control.zig:1093`,
+      `arm64/op_control.zig:586`) — so liveness runs `param_arity` too deep
+      inside every `if (param T…)` else arm. One line; `test-all` green with
+      it; it accounts for 61 of the check's 239 spec-corpus lines, so once the
+      check lands the check firing IS its red test. Land it second.
+      **A third consumer is uncovered.** `shared/regalloc_shape_tags.zig:88-346`
+      re-derives the same def-order vreg numbering from the same `stackEffect`
+      table to index a per-vreg ShapeTag array. This check does not reach it.
+      **Anti-note.** Rejected: suppressing the check after a terminator until
+      the two stacks re-converge. It zeroes the realworld residual and silences
+      #250 and all three #253 shapes completely while the JIT still answers 9
+      for 15 and 11 for 43 — it trades false positives for false negatives.
+      debug_jit_auto Recipe 22 is the manual counterpart — how to find one once
+      suspicious.
     first_raised: "2026-08-23"
-    last_reviewed: "2026-08-23"
+    last_reviewed: "2026-08-24"
     refs: |-
-      src/ir/analysis/liveness.zig (compute — sim_stack depth per pc);
+      src/ir/analysis/liveness.zig (compute — sim_stack per pc);
       src/ir/analysis/liveness_stack_effect.zig (the table);
       src/engine/codegen/{x86_64,arm64}/ctx.zig (pushed_vregs, popUnary/popBinary);
-      src/engine/codegen/{x86_64,arm64}/op_control.zig (emitEndIntra);
-      src/engine/codegen/shared/regalloc_shape_tags.zig:344 (second reader of the table);
+      src/engine/codegen/{x86_64,arm64}/op_control.zig (emitElse, emitIf, emitEndIntra);
+      src/engine/codegen/x86_64/emit.zig:907 + arm64/emit.zig:877 (the emit loops);
+      src/engine/codegen/shared/compile.zig:235 (liveness reaches the emit), :306 (regverify precedent);
+      src/engine/codegen/shared/regalloc_shape_tags.zig:88-346 (third reader of the table);
       .claude/skills/debug_jit_auto/RECIPES.md (Recipe 22);
       .dev/lessons/2026-06-02-jit-liveness-must-mirror-emit-pushed-vregs.md;
-      D-093 (d-3), D-220; issues #245, #250; commits 64e634336, ca6f934ec.
+      D-093 (d-3), D-220, D-330; issues #245, #250, #253, #<ZWASM_DEBUG-never-reaches-a-runner>;
+      commits 64e634336, ca6f934ec, b9a8afb5c, 163062bd0.
   - id: "D-595"
     layer: "ci"
     status: "note"
