@@ -45,3 +45,20 @@ runners (renamed from the legacy SKIP-P10-EH-GAP which conflated
 The legacy token reference in `.dev/phase10_design_plan_ja.md`
 §400 ("SKIP-P10-EH-GAP = 0" exit criterion for core EH ops +
 landing pad emit) is now SATISFIED.
+
+## 2026-08-25 — the fixture now exists, and running it found a defect
+
+Built with `emcc -fwasm-exceptions -sWASM_LEGACY_EXCEPTIONS=0 -O1
+-sSTANDALONE_WASM -sEXPORTED_FUNCTIONS=_test --no-entry` over
+`../../src/emscripten_eh/cxx_throw_catch.cpp`; the `.wasm` is committed beside
+that source. The flag is load-bearing: emscripten still defaults to
+`WASM_LEGACY_EXCEPTIONS=1`, whose output uses the superseded `try` / `catch`
+opcodes that this runtime rejects with `NotImplemented`. Only `=0` produces the
+`try_table` form zwasm implements.
+
+The module is NOT wired in as a running fixture yet. wasmtime and the zwasm
+interpreter both return the expected value; the JIT traps `oob_memory` (#280),
+and this lane runs fixtures through the JIT. `../EXPECTED.txt` registers this
+directory as an enumerated skip naming that issue, so the gap is announced
+rather than invisible. When #280 closes, move the `.wasm` here with an
+`i32: 42` sidecar and flip the entry to `expect=fixtures`.

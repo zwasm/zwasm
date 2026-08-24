@@ -40,9 +40,110 @@ pub fn main(init: std.process.Init) !void {
     var failed: u32 = 0;
     try walkAndRun(io, gpa, stdout, corpus_dir_arg, &passed, &failed);
 
+    // A corpus may state which of its directories are supposed to yield
+    // result-checked fixtures. Without that statement this runner cannot tell
+    // an empty directory from a passing one — both report zero failures — so a
+    // directory whose fixtures were never produced reads as green forever.
+    const unmet = try checkExpected(io, gpa, stdout, corpus_dir_arg);
+
     try stdout.print("\nedge-case runner: {d} passed, {d} failed\n", .{ passed, failed });
     try stdout.flush();
-    if (failed != 0) std.process.exit(1);
+    if (failed != 0 or unmet) std.process.exit(1);
+}
+
+/// Reads `<root>/EXPECTED.txt` if present and reports on it. Returns true when
+/// the corpus does not match what it says about itself.
+///
+/// Each non-comment line is `<dir> expect=fixtures` or
+/// `<dir> expect=skip reason=<text>`:
+///
+///   - `expect=fixtures` and the directory yields no result-checked fixture
+///     (a `.wasm` with a sibling `.expect`) — reported and fails the lane.
+///   - `expect=skip` — printed with its reason and does not fail.
+///   - a directory named here that does not exist at all — fails.
+///
+/// A directory NOT named here is left alone, so adding fixtures never requires
+/// touching this file first. Absent `EXPECTED.txt`, nothing changes: the four
+/// other corpora this runner serves keep their plain walk.
+fn checkExpected(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    stdout: *std.Io.Writer,
+    root_path: []const u8,
+) !bool {
+    const cwd = std.Io.Dir.cwd();
+    var root = cwd.openDir(io, root_path, .{ .iterate = true }) catch return false;
+    defer root.close(io);
+
+    const text = root.readFileAlloc(io, "EXPECTED.txt", gpa, .limited(64 << 10)) catch return false;
+    defer gpa.free(text);
+
+    var unmet = false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        const dir_name = fields.next() orelse continue;
+        const expect_field = fields.next() orelse {
+            try stdout.print("EXPECTED  {s}: malformed line (no expect=)\n", .{dir_name});
+            unmet = true;
+            continue;
+        };
+        const want_fixtures = std.mem.eql(u8, expect_field, "expect=fixtures");
+        const want_skip = std.mem.eql(u8, expect_field, "expect=skip");
+        if (!want_fixtures and !want_skip) {
+            try stdout.print("EXPECTED  {s}: unknown '{s}'\n", .{ dir_name, expect_field });
+            unmet = true;
+            continue;
+        }
+
+        var sub = root.openDir(io, dir_name, .{ .iterate = true }) catch {
+            try stdout.print("EXPECTED  {s}: named here but the directory is missing\n", .{dir_name});
+            unmet = true;
+            continue;
+        };
+        defer sub.close(io);
+        const checked = try countResultChecked(io, gpa, &sub);
+
+        if (want_skip) {
+            try stdout.print("SKIP      {s}: {s}\n", .{ dir_name, fields.rest() });
+            continue;
+        }
+        if (checked == 0) {
+            try stdout.print("EXPECTED  {s}: expected result-checked fixtures, found none\n", .{dir_name});
+            unmet = true;
+        }
+    }
+    return unmet;
+}
+
+/// Fixtures in `dir` (recursively) that this runner would actually check: a
+/// `.wasm` whose sibling `.expect` states an expectation this runner
+/// understands.
+///
+/// The `.expect` must PARSE, not merely exist. A file the runner cannot read
+/// an expectation out of is skipped at run time, so counting it here would
+/// let a directory satisfy `expect=fixtures` while contributing no verdict —
+/// the same hole in a smaller place.
+fn countResultChecked(io: std.Io, gpa: std.mem.Allocator, dir: *std.Io.Dir) !u32 {
+    var walker = try dir.walk(gpa);
+    defer walker.deinit();
+    var n: u32 = 0;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.path, ".wasm")) continue;
+        const expect_path = try std.mem.concat(gpa, u8, &.{
+            entry.path[0 .. entry.path.len - ".wasm".len],
+            ".expect",
+        });
+        defer gpa.free(expect_path);
+        const bytes = dir.readFileAlloc(io, expect_path, gpa, .limited(4096)) catch continue;
+        defer gpa.free(bytes);
+        if (parseExpect(bytes) != .unsupported) n += 1;
+    }
+    return n;
 }
 
 /// Recursively walks `root_path`. For each `<case>.wasm` whose

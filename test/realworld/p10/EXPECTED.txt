@@ -1,0 +1,34 @@
+# What this directory is supposed to contain.
+#
+# The runner walks for `<case>.wasm` with a sibling `<case>.expect` and reports
+# pass/fail. That alone cannot distinguish a directory whose fixtures were
+# never produced from one where every fixture passes — both yield zero
+# failures. This file supplies the missing half.
+#
+#   <dir> expect=fixtures            must yield at least one checked fixture
+#   <dir> expect=skip reason=<text>  announced with its reason, does not fail
+#
+# A directory not named here is left alone, so adding fixtures does not require
+# editing this file first.
+
+clang_O0_arr_sum   expect=fixtures
+clang_O0_fp_sum    expect=fixtures
+clang_musttail     expect=fixtures
+clang_wasm64       expect=fixtures
+moonbit            expect=fixtures
+rust_bubble_sort   expect=fixtures
+rust_data          expect=fixtures
+rust_fib           expect=fixtures
+rust_loop_sum      expect=fixtures
+
+# The EH leg. The fixture EXISTS — emcc -fwasm-exceptions
+# -sWASM_LEGACY_EXCEPTIONS=0 over test/realworld/src/emscripten_eh/, and the
+# built .wasm is committed beside that source — but running it leaves this lane
+# red: the JIT traps where the interpreter and wasmtime both return the value
+# (#280). Flip this to expect=fixtures, and move the .wasm here with an
+# `i32: 42` sidecar, when #280 closes.
+emscripten_eh      expect=skip reason=#280 JIT miscompiles the emitted try_table
+
+# The GC x EH x TC cross-check ADR-0117 asks for. No other fixture reaches all
+# three proposals in one module, so this stays named rather than deleted.
+wasm_of_ocaml      expect=skip reason=#226 toolchain not provisioned
