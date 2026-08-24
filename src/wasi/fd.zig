@@ -941,9 +941,10 @@ pub fn fdReaddir(host: *Host, mem: []u8, fd: p1.Fd, buf_ptr: u32, buf_len: u32, 
 /// On success, a new `.file` (or `.dir`) slot is appended to
 /// `host.fd_table`; the new guest fd is written to
 /// `opened_fd_ptr`. `oflags` CREAT / TRUNC / EXCL / DIRECTORY are
-/// honoured (see the body). `dirflags` (the symlink-follow bit) is
-/// currently IGNORED — follow-time symlink confinement is the
-/// blocked half of D-315.
+/// honoured (see the body). `dirflags` bit 0 (LOOKUP_SYMLINK_FOLLOW)
+/// is honoured for the FINAL path component: one that is a symlink is
+/// `loop`, as with POSIX `O_NOFOLLOW`. Intermediate components are
+/// followed either way: confining THOSE is the open half of D-315.
 pub fn pathOpen(
     host: *Host,
     mem: []u8,
@@ -957,8 +958,6 @@ pub fn pathOpen(
     fdflags: p1.Fdflags,
     opened_fd_ptr: u32,
 ) p1.Errno {
-    _ = dirflags;
-
     // Bounds-check the path slice.
     const path_end = @as(usize, path_ptr) + @as(usize, path_len);
     if (path_end > mem.len) return .fault;
@@ -986,6 +985,37 @@ pub fn pathOpen(
     const io = host.io orelse return .nosys;
 
     const dir: std.Io.Dir = .{ .handle = dir_handle };
+
+    // `dirflags` bit 0 is LOOKUP_SYMLINK_FOLLOW, and it governs the FINAL path
+    // component only — every earlier one is followed either way, which is what
+    // a no-follow `statFile` measures.
+    //
+    // Stat-then-refuse, NOT `std.Io.Dir`'s own `follow_symlinks`, and that is
+    // deliberate. On Windows `follow_symlinks = false` does not merely add
+    // OPEN_REPARSE_POINT: `dirOpenFileWtf16` also flips the handle from
+    // SYNCHRONOUS_NONALERT to ASYNCHRONOUS, and the next `readPositional` on
+    // it reaches `.PENDING => unreachable` inside std. (`openDir`'s Windows
+    // path does not flip the mode, but one mechanism for all three opens beats
+    // two that differ by OS.)
+    //
+    // The cost is a window: the name could become a symlink between the stat
+    // and the open, and that open would follow it. Narrower than the
+    // follow-time gap D-315 already tracks. Revisit if std stops coupling the
+    // reparse flag to the IO mode.
+    // O_CREAT|O_EXCL is the exception: POSIX makes an EXISTING symlink `exist`
+    // there whatever the follow bit says — O_EXCL outranks the nofollow refusal
+    // — and `createFile(.exclusive = true)` already answers exactly that. This
+    // check stands aside rather than shadowing it with `loop`.
+    const excl_create = (oflags & (p1.OFLAGS_CREAT | p1.OFLAGS_EXCL)) ==
+        (p1.OFLAGS_CREAT | p1.OFLAGS_EXCL);
+    if (dirflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW == 0 and !excl_create) {
+        if (dir.statFile(io, path, .{ .follow_symlinks = false })) |st| {
+            if (st.kind == .sym_link) return .loop;
+        } else |_| {
+            // Stat failed: nothing here to refuse. Let the open answer — a
+            // fresh name still gets created, a real error still surfaces.
+        }
+    }
 
     // OFLAGS_DIRECTORY — open a sub-DIRECTORY (`fd_readdir` / further
     // `path_*` calls resolve against it). The new slot mirrors a preopen's
