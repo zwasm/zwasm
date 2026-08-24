@@ -264,10 +264,17 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
         var cursor: usize = 0;
         if (imports_decoded) |im| for (im.items) |it| {
             if (it.kind != .table) continue;
-            // Imported table descriptions come kind-only via §A10;
-            // synthesise a permissive funcref so `table.*` ops
-            // don't trip bounds checks during validation.
-            table_entries[cursor] = .{ .elem_type = .funcref, .min = 0 };
+            // The import payload carries the table's real element type and
+            // index width, so use them. A synthesised permissive `funcref` /
+            // `.i32` here silently mistypes every check that reads the entry:
+            // an imported table64's elem offset is `i64`, and an imported
+            // `externref` table takes `externref` segments.
+            table_entries[cursor] = .{
+                .elem_type = it.payload.table.elem_type,
+                .idx_type = it.payload.table.idx_type,
+                .min = it.payload.table.min,
+                .max = it.payload.table.max,
+            };
             cursor += 1;
         };
         if (tables_owned) |t| for (t.items) |entry| {
@@ -395,6 +402,10 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
     // type-check array.init_elem (segment <: array element) and
     // table.init (segment == table elem_type). Empty = legacy callers.
     var elem_types_validate: []zir.ValType = &.{};
+    // Registered at the declaration, not after the block below: the segment
+    // checks in that block return early, and `frontendValidate` returns `bool`
+    // rather than an error union, so an `errdefer` would never fire for them.
+    defer if (elem_types_validate.len != 0) alloc.free(elem_types_validate);
     if (module.find(.element)) |elem_section| {
         var elems = sections.decodeElement(alloc, elem_section.body) catch return false;
         defer elems.deinit();
@@ -415,13 +426,7 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
                     return false;
                 }
                 const tbl = table_entries[seg.tableidx];
-                // An IMPORTED table's entry carries a synthesised permissive
-                // `funcref` (§A10 gives imports kind-only here), not its real
-                // element type, so the subtype rule has nothing truthful to
-                // compare against and is skipped for those slots.
-                if (seg.tableidx >= imp_table_count and
-                    !gc_subtype.gcValTypeSubtype(seg.elem_type, tbl.elem_type, &types_owned))
-                {
+                if (!gc_subtype.gcValTypeSubtype(seg.elem_type, tbl.elem_type, &types_owned)) {
                     diagnostic.setDiag(.validate, .other, .unknown, "elem segment type is not a subtype of the table's element type (§3.3.7)", .{});
                     return false;
                 }
@@ -447,7 +452,6 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
             }
         }
     }
-    defer if (elem_types_validate.len != 0) alloc.free(elem_types_validate);
     if (module.find(.@"export")) |exp_section| {
         // Manual export scan tolerant of Wasm 3.0 export-kind
         // extensions (e.g., `tag = 4` from the EH proposal which
