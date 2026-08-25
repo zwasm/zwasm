@@ -435,8 +435,8 @@ Windows Error Reporting auto-drops a `.dmp` file to
 
 ```bash
 ssh windowsmini "bash -lc '
-  ls -la /c/Users/shota/AppData/Local/CrashDumps/
-  lldb -c /c/Users/shota/AppData/Local/CrashDumps/zwasm-spec-runner.exe.<pid>.dmp \
+  ls -la ~/AppData/Local/CrashDumps/
+  lldb -c ~/AppData/Local/CrashDumps/zwasm-spec-runner.exe.<pid>.dmp \
     -o \"thread backtrace all\" \
     -o \"register read\" \
     -o \"quit\"
