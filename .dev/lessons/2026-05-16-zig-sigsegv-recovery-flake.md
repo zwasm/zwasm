@@ -138,10 +138,10 @@ no such change has landed.
 
 ```sh
 orb run -m my-ubuntu-amd64 bash -c '
-  cd /Users/shota.508/Documents/MyProducts/zwasm_from_scratch
+  cd ~/Documents/MyProducts/zwasm_from_scratch
   zig build test-spec-wasm-2.0-assert
   BIN=$(find .zig-cache -name "zwasm-spec-wasm-2-0-assert" -type f | head -1)
-  for i in 1 2 3 4 5; do "$BIN" /Users/shota.508/Documents/MyProducts/zwasm_from_scratch/test/spec/wasm-2.0-assert > /dev/null; echo "run $i exit=$?"; done
+  for i in 1 2 3 4 5; do "$BIN" ~/Documents/MyProducts/zwasm_from_scratch/test/spec/wasm-2.0-assert > /dev/null; echo "run $i exit=$?"; done
 '
 ```
 

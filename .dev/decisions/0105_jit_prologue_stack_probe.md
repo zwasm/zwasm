@@ -44,8 +44,8 @@ testsuite) established:
      `error.StackOverflow` (from the trap stub) to clean spec-
      compliant `Trap`.
    - v1's `guard.zig` Windows handler only filters
-     `EXCEPTION_ACCESS_VIOLATION` (`/Users/shota.508/Documents/
-     MyProducts/zwasm/src/guard.zig:289-309`); hardware
+     `EXCEPTION_ACCESS_VIOLATION` (`src/guard.zig:289-309` at tag
+     `v1.11.1`); hardware
      EXCEPTION_STACK_OVERFLOW path is **bypassed by design**.
 
 2. **wasmtime uses path (b)**:

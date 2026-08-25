@@ -36,7 +36,7 @@ the same install path).
 
 ```sh
 ssh windowsmini "powershell -NoLogo -NoProfile -ExecutionPolicy Bypass \
-    -File C:\\Users\\shota\\Documents\\MyProducts\\zwasm_from_scratch\\scripts\\windows\\install_tools.ps1"
+    -File %USERPROFILE%\\Documents\\MyProducts\\zwasm_from_scratch\\scripts\\windows\\install_tools.ps1"
 ```
 
 The PS1 is idempotent — tools already at the pinned version

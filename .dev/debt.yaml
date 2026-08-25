@@ -682,9 +682,15 @@ entries:
           align the runbook to the env vars, and note the reference clones are
           absent even locally (spec re-vendor is maintainer-only; the baked corpora
           under test/spec/ ship in the clone).
-      (8) OPEN — [cleanup] `scripts/win64_debug/attach_dump.sh` +
-          `.claude/skills/debug_jit_auto/RECIPES.md` hardcode literal
-          `Documents/MyProducts/zwasm` / `/c/Users/shota/…` with no override.
+      (8) FIXED 2026-08-25 — [cleanup] no tracked file names a maintainer
+          account any more. `RECIPES.md`'s crash-dump recipe reads
+          `~/AppData/Local/CrashDumps`, and the same sweep reached
+          ADR-0105, the SIGSEGV-flake lesson, `orbstack_setup.md` and the
+          archived phase-9 close plan. The half of this row naming
+          `attach_dump.sh` was stale: it takes `ZWASM_REMOTE_DIR` and
+          `ZWASM_WINDOWS_HOST`, and hardcodes no path. Home-relative
+          `~/Documents/MyProducts/…` remains throughout, which is the
+          working-dir convention CLAUDE.md sets and carries no account name.
       WORKS (fair): Zig 0.16.0 pinned coherently (flake.nix / versions.lock /
       README); the build needs exactly one tool beyond Zig (wasm-tools, pinned);
       committed spec corpus + realworld fixtures run with NO external clone; git
