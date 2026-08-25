@@ -260,11 +260,24 @@ jobs:
         run: bash scripts/ci_gate.sh
 
       # Official wasi-testsuite wasm32-wasip1 corpus (D-582). ADVISORY: the
-      # corpus reports 14 engine-independent failures today (D-583), so a
-      # blocking placement would red every PR. Step-level `continue-on-error`
+      # corpus is not green (D-583), so a blocking placement would red every
+      # PR. No count here on purpose: D-583 carries the live one and
+      # `zig build test-wasi-p1-official` re-derives it. A count copied to a
+      # second file is what went stale — this block said 14 while the row
+      # already said 8. Step-level `continue-on-error`
       # keeps the step's `outcome` as `failure` (visible in the run) while its
       # `conclusion` — and therefore the job's, and therefore
       # `needs.gate.result` that `ci-required` reads — stays `success`.
+      #
+      # PUSH-ONLY since 2026-08-24. The paragraph above is exactly why: a
+      # failure here could not block a PR and never could, so the 182 s it
+      # cost on every PR bought no gate signal — measured 2026-08-25 on
+      # `286a91f89`, over the four same-base PR runs that still ran it:
+      # 138 s on the macOS leg (spread 7 s) plus 44 s across linux and
+      # windows. It still runs on the merge to `main`, the same window
+      # `ZWASM_CI_EXTENDED` already accepts for its own checks, so the corpus
+      # verdict stays a per-merge number. D-583's remaining failures are
+      # unaffected either way.
       #
       # Deliberately a step in THIS job rather than a job of its own: a
       # separate job would repeat the Zig install and rebuild zwasm from a cold
@@ -272,10 +285,11 @@ jobs:
       # a second full build per PR to run two lanes over 72 small binaries.
       # Here it reuses what `ci_gate.sh` just built.
       #
-      # Time-boxed in the ADR-0174 sense, not indefinite: when D-583's 14 go
+      # Time-boxed in the ADR-0174 sense, not indefinite: when D-583 goes
       # green on all three OSes the step moves into `test-all` and this block
-      # is deleted.
+      # is deleted. That row's DISCHARGE clause lists the four edits.
       - name: test-wasi-p1-official (advisory, D-582)
+        if: github.event_name == 'push'
         continue-on-error: true
         shell: bash
         run: zig build test-wasi-p1-official
