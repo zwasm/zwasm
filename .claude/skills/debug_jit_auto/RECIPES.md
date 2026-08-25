@@ -928,5 +928,6 @@ first explanation written for this bug claimed x0 held an sret pointer for a
 16-byte struct return. The callee was declared to return `void`, so there was
 no struct return in the call at all; and AAPCS64 returns a 16-byte non-HFA
 composite in x0+x1 directly, putting the indirect-return pointer in x8 when it
-uses one (`~/Documents/OSS/wasmtime/cranelift/codegen/src/isa/aarch64/abi.rs`).
+uses one — cross-checked against cranelift's aarch64 ABI lowering
+(`cranelift/codegen/src/isa/aarch64/abi.rs` in `bytecodealliance/wasmtime`).
 Read the callee's declared type first, then the ABI, then the disassembly.
