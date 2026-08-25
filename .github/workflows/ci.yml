@@ -82,7 +82,17 @@ jobs:
           echo "changed files:"; printf '%s\n' "$files"
           # Paths that do NOT need the 3-host build/test gate (docs / meta only).
           nondoc="$(printf '%s\n' "$files" | grep -vE '(^|/)[^/]*\.md$|^docs/|^\.dev/|^\.claude/|^LICENSE$' || true)"
-          if [ -n "${nondoc//[[:space:]]/}" ]; then
+          # `docs/examples/` is not documentation despite the path: `build.zig`
+          # compiles and runs the embedding consumers there — run_c_host,
+          # run_zig_host and run_zig_host_jit are in `test-all`, run_rust_host
+          # in `ci_gate.sh`. `^docs/` above swallowed them, so a change to a
+          # build input skipped the whole 3-OS gate while `ci-required` still
+          # reported success (#297). Whole directory, not the four files
+          # build.zig names today: a fifth example must not re-open this by
+          # being forgotten here. The `.md` rule still applies inside it, so
+          # `docs/examples/README.md` stays doc-only.
+          examples="$(printf '%s\n' "$files" | grep -E '^docs/examples/' | grep -vE '(^|/)[^/]*\.md$' || true)"
+          if [ -n "${nondoc//[[:space:]]/}" ] || [ -n "${examples//[[:space:]]/}" ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"; echo "non-doc changes -> run 3-host gate"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"; echo "doc-only -> skip 3-host gate"
