@@ -10,7 +10,6 @@
 //! Helpers with NO binding dependency (Step A1):
 //!
 //! - `frontendValidate` — read-only parse + per-fn validate pass.
-//! - `validateNoCode` — short-circuit when the module has no code.
 //! - `buildExportTypes` — populate `Instance.export_types` per
 //!   ADR-0014 §3.4.10 (drives D-006's import-vs-export check).
 //! - `evalConstExprValue` / `evalConstI32Expr` — Wasm const-
@@ -37,6 +36,7 @@ const verifier_mod = @import("../../ir/verifier.zig");
 const parser = @import("../../parse/parser.zig");
 const sections = @import("../../parse/sections.zig");
 const validator = @import("../../validate/validator.zig");
+const gc_subtype = @import("../../validate/gc_subtype.zig");
 const zir = @import("../../ir/zir.zig");
 const leb128 = @import("../../support/leb128.zig");
 const testing = std.testing;
@@ -97,10 +97,20 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
     // present.
     if (!preDecodeSectionBodies(alloc, &module)) return false;
 
-    const type_section = module.find(.type) orelse return validateNoCode(alloc, &module);
-    const code_section = module.find(.code) orelse return true;
+    // The type and code sections are both optional, and their absence does
+    // not excuse a module from the section-level checks below — global
+    // init-expr typing (§3.4.3), elem/data offset typing, the function/code
+    // length agreement (§5.5.13). A module holding only a global / data /
+    // elem section is exactly the shape the `assert_invalid` corpus uses, so
+    // the walk must reach it. Decoding a synthetic empty type vector keeps
+    // ONE path for both shapes rather than a second, thinner one.
+    const empty_type_body = [_]u8{0x00}; // vec(typedef), count 0
+    const code_section_opt = module.find(.code);
 
-    var types_owned = sections.decodeTypes(alloc, type_section.body) catch return false;
+    var types_owned = (if (module.find(.type)) |ts|
+        sections.decodeTypes(alloc, ts.body)
+    else
+        sections.decodeTypes(alloc, &empty_type_body)) catch return false;
     defer types_owned.deinit();
 
     const func_section = module.find(.function);
@@ -110,10 +120,17 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
         alloc.alloc(u32, 0) catch return false;
     defer alloc.free(defined_func_indices);
 
-    var codes_owned = sections.decodeCodes(alloc, code_section.body) catch return false;
-    defer codes_owned.deinit();
+    var codes_owned: ?sections.Codes = if (code_section_opt) |cs|
+        (sections.decodeCodes(alloc, cs.body) catch return false)
+    else
+        null;
+    defer if (codes_owned) |*c| c.deinit();
 
-    if (codes_owned.items.len != defined_func_indices.len) return false;
+    // §5.5.13 — the code section carries exactly one entry per function
+    // section entry. An absent code section therefore means an absent
+    // function section, not a licence to skip the comparison.
+    const code_items = if (codes_owned) |c| c.items else &.{};
+    if (code_items.len != defined_func_indices.len) return false;
 
     // `func_types` must span the full funcidx space (imports
     // first, then defined) — the validator's `call N` checks
@@ -193,14 +210,32 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
     }
 
     // Wasm spec §3.4.3 — each defined global's init-expr result type must
-    // be a subtype of its declared type (GC iso-recursive identity per
-    // ADR-0126). The native-API validate path (this fn) previously skipped
-    // this, letting type-subtyping invalid fixtures with a rec-group-
-    // distinct `ref.func` init (e.g. `(global (ref 4) (ref.func 0))` where
-    // func 0's type ≢ type 4) slip through. Conservative: undeterminable
-    // const-expr shapes pass (an incomplete evaluator must not reject valid
-    // modules).
+    // be a subtype of its declared type, under GC iso-recursive identity
+    // (ADR-0126). Rec-group identity is what makes this more than a tag
+    // comparison: `(global (ref 4) (ref.func 0))` is invalid when func 0's
+    // type is not identical to type 4, however similar their shapes.
     if (globals_owned) |g| {
+        // §3.3.13.1 — a defined global's init expr sees the imported globals
+        // plus the globals declared BEFORE it, never itself or a later one
+        // (the reference interpreter extends the context one global at a time
+        // in `check_global`). `validateGlobalInits` below runs over every
+        // global regardless of the verdict here; the two are complementary,
+        // not a primary and a fallback.
+        for (g.items, 0..) |gd, i| {
+            const scope: validator.ConstExprScope = .{
+                .globals = global_entries[0 .. imp_global_count + i],
+                .func_type_indices = func_type_indices,
+                .types = &types_owned,
+            };
+            switch (validator.validateConstExpr(gd.init_expr, gd.valtype, scope)) {
+                .ok => {},
+                .invalid => {
+                    diagnostic.setDiag(.validate, .other, .unknown, "global init-expr is not a valid constant expression (§3.3.13.1)", .{});
+                    return false;
+                },
+                .undeterminable => {},
+            }
+        }
         if (!validator.validateGlobalInits(g.items, global_entries, func_type_indices, &types_owned)) {
             diagnostic.setDiag(.validate, .other, .unknown, "global init-expr type mismatch (§3.4.3)", .{});
             return false;
@@ -219,16 +254,51 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
         var cursor: usize = 0;
         if (imports_decoded) |im| for (im.items) |it| {
             if (it.kind != .table) continue;
-            // Imported table descriptions come kind-only via §A10;
-            // synthesise a permissive funcref so `table.*` ops
-            // don't trip bounds checks during validation.
-            table_entries[cursor] = .{ .elem_type = .funcref, .min = 0 };
+            // The import payload carries the table's real element type and
+            // index width. Both are load-bearing downstream: an imported
+            // table64's elem offset is typed `i64`, and an imported
+            // `externref` table accepts only `externref` segments.
+            table_entries[cursor] = .{
+                .elem_type = it.payload.table.elem_type,
+                .idx_type = it.payload.table.idx_type,
+                .min = it.payload.table.min,
+                .max = it.payload.table.max,
+            };
             cursor += 1;
         };
         if (tables_owned) |t| for (t.items) |entry| {
             table_entries[cursor] = entry;
             cursor += 1;
         };
+    }
+
+    // §3.4.5 `check_table` — a table's init expr is a constant expression of
+    // the table's element type, and it runs BEFORE the globals are folded into
+    // the context (`check_module` order: … memories → tables → globals), so it
+    // may read only IMPORTED globals. A defined global is out of scope here
+    // even though it is in scope for a data or elem offset further down.
+    if (tables_owned) |t| {
+        for (t.items) |entry| {
+            // An omitted init expr means the element type must be defaultable.
+            // That rule is not checked on this path yet — see #285, which
+            // tracks the `check_module` remainder — so skip rather than judge.
+            if (entry.init_expr.len == 0) continue;
+            const scope: validator.ConstExprScope = .{
+                .globals = global_entries[0..imp_global_count],
+                .func_type_indices = func_type_indices,
+                .types = &types_owned,
+            };
+            switch (validator.validateConstExpr(entry.init_expr, entry.elem_type, scope)) {
+                .ok => {},
+                .invalid => {
+                    diagnostic.setDiag(.validate, .other, .unknown, "table init expr is not a valid constant expression (§3.3.13.1)", .{});
+                    return false;
+                },
+                // The GC type algebra this walker declines to enter; an
+                // untypeable shape must not be reported as invalid.
+                .undeterminable => {},
+            }
+        }
     }
 
     // Memory0's idx_type drives the validator's memory-op address
@@ -330,6 +400,11 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
     // type-check array.init_elem (segment <: array element) and
     // table.init (segment == table elem_type). Empty = legacy callers.
     var elem_types_validate: []zir.ValType = &.{};
+    // Registered at the declaration, not after the block below: the segment
+    // `frontendValidate` returns `bool`, not an error union, so the early
+    // `return false`s below are ordinary returns and only a `defer` reaching
+    // back to the declaration frees this.
+    defer if (elem_types_validate.len != 0) alloc.free(elem_types_validate);
     if (module.find(.element)) |elem_section| {
         var elems = sections.decodeElement(alloc, elem_section.body) catch return false;
         defer elems.deinit();
@@ -337,6 +412,44 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
         elem_types_validate = alloc.alloc(zir.ValType, elems.items.len) catch return false;
         for (elems.items, 0..) |seg, i| {
             elem_types_validate[i] = seg.elem_type;
+            // `check_elemmode` constrains the active mode only: a passive or
+            // declarative segment names no table and carries no offset, so
+            // there is nothing at this level to check for it.
+            if (seg.kind == .active) {
+                // §3.4.9 `check_elemmode` — the named table must exist, the
+                // segment's element type must be a SUBTYPE of the table's
+                // (not merely equal: a `funcref` segment does not fit a
+                // non-nullable `(ref func)` table), and the offset is a
+                // constant expression at the table's index type. By this point
+                // the context holds every global, which is the window
+                // `check_elem` sees.
+                if (seg.tableidx >= table_entries.len) {
+                    diagnostic.setDiag(.validate, .other, .unknown, "elem segment names a table that does not exist (§3.4.9)", .{});
+                    return false;
+                }
+                const tbl = table_entries[seg.tableidx];
+                if (!gc_subtype.gcValTypeSubtype(seg.elem_type, tbl.elem_type, &types_owned)) {
+                    diagnostic.setDiag(.validate, .other, .unknown, "elem segment type is not a subtype of the table's element type (§3.4.9)", .{});
+                    return false;
+                }
+                if (seg.offset_expr.len != 0) {
+                    const want: zir.ValType = if (tbl.idx_type == .i64) .i64 else .i32;
+                    const scope: validator.ConstExprScope = .{
+                        .globals = global_entries,
+                        .func_type_indices = func_type_indices,
+                        .types = &types_owned,
+                    };
+                    switch (validator.validateConstExpr(seg.offset_expr, want, scope)) {
+                        .ok => {},
+                        .invalid => {
+                            diagnostic.setDiag(.validate, .other, .unknown, "elem segment offset is not a valid constant expression (§3.3.13.1)", .{});
+                            return false;
+                        },
+                        // Untypeable by this walker, so not judged here.
+                        .undeterminable => {},
+                    }
+                }
+            }
             for (seg.funcidxs) |fidx| {
                 // ref.null entries encoded as maxInt(u32) per the
                 // element decoder; skip those.
@@ -346,7 +459,6 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
             }
         }
     }
-    defer if (elem_types_validate.len != 0) alloc.free(elem_types_validate);
     if (module.find(.@"export")) |exp_section| {
         // Manual export scan tolerant of Wasm 3.0 export-kind
         // extensions (e.g., `tag = 4` from the EH proposal which
@@ -399,6 +511,35 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
         null;
     defer if (datas_owned) |*d| d.deinit();
     const data_count_validate: u32 = if (datas_owned) |d| @intCast(d.items.len) else 0;
+    // §3.4.8 `check_datamode` — an active segment names a memory that must
+    // exist, and its offset is a constant expression at THAT memory's index
+    // type (a memory64 offset is `i64`; typing it as `i32` would reject valid
+    // modules). `memory_idx_types` already spans imports-then-defined.
+    if (datas_owned) |d| {
+        for (d.items) |seg| {
+            if (seg.kind != .active) continue;
+            if (seg.memidx >= total_memory_count) {
+                diagnostic.setDiag(.validate, .other, .unknown, "data segment names a memory that does not exist (§3.4.8)", .{});
+                return false;
+            }
+            if (seg.offset_expr.len == 0) continue;
+            const want: zir.ValType = if (memory_idx_types[seg.memidx] == .i64) .i64 else .i32;
+            const scope: validator.ConstExprScope = .{
+                .globals = global_entries,
+                .func_type_indices = func_type_indices,
+                .types = &types_owned,
+            };
+            switch (validator.validateConstExpr(seg.offset_expr, want, scope)) {
+                .ok => {},
+                .invalid => {
+                    diagnostic.setDiag(.validate, .other, .unknown, "data segment offset is not a valid constant expression (§3.3.13.1)", .{});
+                    return false;
+                },
+                // Untypeable by this walker, so not judged here.
+                .undeterminable => {},
+            }
+        }
+    }
     // `data_count_section_present` defaults to `true` on the
     // Validator struct; `validateFunctionWithMemIdxAndTags` doesn't
     // override it. Modules using memory.init MUST declare a
@@ -408,7 +549,7 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
     // `data_count_section_present` boolean if a fixture surfaces a
     // miscompile around its absence.
 
-    for (codes_owned.items, defined_func_indices, 0..) |code, type_idx, def_idx| {
+    for (code_items, defined_func_indices, 0..) |code, type_idx, def_idx| {
         const sig = types_owned.items[type_idx];
         validator.validateFunctionWithMemIdxAndTags(
             sig,
@@ -458,16 +599,6 @@ fn initExprRefFuncLocal(expr: []const u8) ?u32 {
     const idx = leb128.readUleb128(u32, expr, &pos) catch return null;
     if (pos >= expr.len or expr[pos] != 0x0B) return null;
     return idx;
-}
-
-pub fn validateNoCode(_: std.mem.Allocator, _: *Module) bool {
-    // No code section: nothing per-function to validate. The
-    // module's section-id ordering was already checked by
-    // parser.parse; section-body structural integrity is checked
-    // separately by `preDecodeSectionBodies` (called from
-    // `frontendValidate`'s top), so this helper is genuinely a
-    // no-op for modules with no code.
-    return true;
 }
 
 /// D-188 — pre-validation pass that decodes the body of each
@@ -535,7 +666,23 @@ fn preDecodeSectionBodies(alloc: std.mem.Allocator, module: *Module) bool {
     }
     if (module.find(.import)) |s| {
         var im = sections.decodeImports(alloc, s.body) catch return false;
-        im.deinit();
+        defer im.deinit();
+        // An imported entity's declared type is carried through to the checks
+        // that read it — an imported table's element type reaches the elem
+        // segment subtype check, an imported global's valtype reaches the
+        // const-expr scope — so a concrete head naming a type that does not
+        // exist has to be rejected here. Out of range, `gcValTypeSubtype`
+        // reads the head as `.any` and the mistyped entity is accepted.
+        const ntypes: usize = if (module.find(.type)) |ts| blk: {
+            var ty = sections.decodeTypes(alloc, ts.body) catch break :blk 0;
+            defer ty.deinit();
+            break :blk ty.items.len;
+        } else 0;
+        for (im.items) |it| switch (it.kind) {
+            .table => if (!validRefTypeIdx(it.payload.table.elem_type, ntypes)) return false,
+            .global => if (!validRefTypeIdx(it.payload.global.valtype, ntypes)) return false,
+            else => {},
+        };
     }
     if (module.find(.table)) |s| {
         var t = sections.decodeTables(alloc, s.body) catch return false;
@@ -1609,6 +1756,76 @@ test "frontendValidate: imported tag occupies the tag index space (10.E-xmodule-
         0x0a, 0x06, 0x01, 0x04, 0x00, 0x08, 0x00, 0x0b, // code: (throw 0) end
     };
     try testing.expect(frontendValidate(testing.allocator, &m));
+}
+
+test "frontendValidate: a module with no type and no code section is still validated" {
+    const H = [_]u8{ 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00 };
+
+    // global i32 = (f32.const 1.0) — the init-expr type does not match the
+    // declared type. There is no type section and no code section, so this is
+    // the shape whose only checks are the section-level ones.
+    const bad = H ++ [_]u8{
+        0x06, 0x09, 0x01, 0x7f, 0x00, // global: count 1, i32, immutable
+        0x43, 0x00, 0x00, 0x80, 0x3f, 0x0b, // f32.const 1.0; end
+    };
+    try testing.expect(!frontendValidate(testing.allocator, &bad));
+
+    // The same shape with a well-typed init must still pass — a check that
+    // only ever rejects is indistinguishable from one that rejects everything.
+    const good = H ++ [_]u8{
+        0x06, 0x06, 0x01, 0x7f, 0x00, // global: count 1, i32, immutable
+        0x41, 0x01, 0x0b, // i32.const 1; end
+    };
+    try testing.expect(frontendValidate(testing.allocator, &good));
+}
+
+test "frontendValidate: an imported table's concrete element type is bounds-checked" {
+    // `(import "m" "t" (table 0 (ref null 1)))` in a module with no type
+    // section. The concrete head names type 1, which does not exist. Defined
+    // tables have always been bounds-checked here; an imported one reaches the
+    // same checks now that its declared element type is carried through.
+    const m = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x02, 0x0a, 0x01, // import: count 1
+        0x01, 0x6d, 0x01, 0x74, // "m" "t"
+        0x01, // kind: table
+        0x63, 0x01, // reftype (ref null 1)
+        0x00, 0x00, // limits: min 0, no max
+    };
+    try testing.expect(!frontendValidate(testing.allocator, &m));
+}
+
+test "frontendValidate: a function section with no code section is rejected" {
+    // §5.5.13 — one code entry per function entry. An absent code section
+    // means zero entries, which cannot agree with a function section of one.
+    const m = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type: () -> ()
+        0x03, 0x02, 0x01, 0x00, // function: 1 func, type 0
+    };
+    try testing.expect(!frontendValidate(testing.allocator, &m));
+}
+
+test "frontendValidate: a segment naming a table or memory that does not exist is rejected" {
+    const H = [_]u8{ 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00 };
+
+    // elem form 2 (explicit tableidx) pointing at table 5 of a module with no
+    // table section at all.
+    const elem = H ++ [_]u8{
+        0x09, 0x08, 0x01, 0x02, 0x05, // elem: count 1, flag 2, tableidx 5
+        0x41, 0x00, 0x0b, // offset: i32.const 0; end
+        0x00, 0x00, // elemkind funcref, 0 funcidxs
+    };
+    try testing.expect(!frontendValidate(testing.allocator, &elem));
+
+    // data form 2 (explicit memidx) pointing at memory 3 of a module with no
+    // memory section.
+    const data = H ++ [_]u8{
+        0x0b, 0x07, 0x01, 0x02, 0x03, // data: count 1, flag 2, memidx 3
+        0x41, 0x00, 0x0b, // offset: i32.const 0; end
+        0x00, // 0 bytes
+    };
+    try testing.expect(!frontendValidate(testing.allocator, &data));
 }
 
 test "evalConstExprValue: i32.const N; ref.i31; end produces an i31 ref (10.G cycle 130)" {

@@ -639,10 +639,9 @@ pub const Import = struct {
     /// Module name and field name borrowed from the input.
     module: []const u8,
     name: []const u8,
-    /// Discriminator + payload (typeidx for func, valtype+mut for global,
-    /// limits-only for memory/table — only typeidx and global payloads
-    /// are decoded structurally; the runner reads them, the others are
-    /// recorded as kind only).
+    /// Discriminator + payload. Every kind is decoded structurally: a
+    /// typeidx for func and tag, valtype+mutability for global, and the
+    /// full element type / index type / limits for table and memory.
     kind: ImportKind,
     payload: ImportPayload,
 };
@@ -668,10 +667,11 @@ pub const Imports = struct {
 /// Decode the body of an import section (`SectionId.import`):
 ///   vec(import), import = mod:name nm:name desc
 ///   desc = 0x00 typeidx | 0x01 tabletype | 0x02 memtype | 0x03 globaltype
-/// Table and memory descriptions are recorded as kind-only — their
-/// limits payload is consumed but not surfaced (Phase-1 validators
-/// do not need it). Function and global imports are decoded
-/// structurally so the validator can index them.
+/// Every description is decoded structurally and surfaced on the payload,
+/// so a validator can index imported entities by their real types. An
+/// imported table's element type and index type are load-bearing: a
+/// table64's element offset is typed `i64`, and an `externref` table
+/// accepts only `externref` segments.
 pub fn decodeImports(parent_alloc: Allocator, body: []const u8) Error!Imports {
     var arena = std.heap.ArenaAllocator.init(parent_alloc);
     errdefer arena.deinit();

@@ -113,6 +113,9 @@ pub const GlobalEntry = helpers.GlobalEntry;
 pub const typeDefIsSubtype = helpers.typeDefIsSubtype;
 pub const constExprResultType = helpers.constExprResultType;
 pub const validateGlobalInits = helpers.validateGlobalInits;
+pub const ConstExprVerdict = helpers.ConstExprVerdict;
+pub const ConstExprScope = helpers.ConstExprScope;
+pub const validateConstExpr = helpers.validateConstExpr;
 pub const funcTypeImportCompatible = helpers.funcTypeImportCompatible;
 pub const validateTypeSection = helpers.validateTypeSection;
 

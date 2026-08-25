@@ -17,6 +17,20 @@ const ValType = zir.ValType;
 
 pub const ElementKind = enum { active, passive, declarative };
 
+/// Wasm 3.0 §5.5.12 — an element segment's element type depends on its FORM,
+/// and the two forms disagree on nullability:
+///
+///   flags 0x00-0x03  funcidx vector  -> NON-NULLABLE `(ref func)`
+///   flags 0x04       expr vector     -> nullable `funcref`
+///   flags 0x05-0x07  expr vector     -> the declared reftype
+///
+/// which is exactly what the reference decoder assigns — `(NoNull, FuncHT)`
+/// for the first group via `elem`/`elem_kind`, `(Null, FuncHT)` for 0x04
+/// (`interpreter/binary/decode.ml`). The nullability is load-bearing in both
+/// directions: a `(ref func)` table accepts the funcidx form and rejects an
+/// 0x04 segment, and only the per-form type tells those apart.
+const FUNCIDX_ELEM_TYPE: ValType = .{ .ref = zir.RefType.abs(.func, false) };
+
 pub const ElementSegment = struct {
     kind: ElementKind,
     tableidx: u32 = 0,
@@ -111,7 +125,7 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
                     .kind = .active,
                     .tableidx = 0,
                     .offset_expr = expr,
-                    .elem_type = .funcref,
+                    .elem_type = FUNCIDX_ELEM_TYPE,
                     .funcidxs = funcs,
                 };
             },
@@ -124,7 +138,7 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
                 try sections.checkVecCount(n, body, pos); // ≥1 byte/elem — reject oversized count pre-alloc
                 const funcs = try alloc.alloc(u32, n);
                 for (funcs) |*f| f.* = try leb128.readUleb128(u32, body, &pos);
-                e.* = .{ .kind = .passive, .elem_type = .funcref, .funcidxs = funcs };
+                e.* = .{ .kind = .passive, .elem_type = FUNCIDX_ELEM_TYPE, .funcidxs = funcs };
             },
             3 => {
                 if (pos >= body.len) return sections.Error.UnexpectedEnd;
@@ -135,7 +149,7 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
                 try sections.checkVecCount(n, body, pos); // ≥1 byte/elem — reject oversized count pre-alloc
                 const funcs = try alloc.alloc(u32, n);
                 for (funcs) |*f| f.* = try leb128.readUleb128(u32, body, &pos);
-                e.* = .{ .kind = .declarative, .elem_type = .funcref, .funcidxs = funcs };
+                e.* = .{ .kind = .declarative, .elem_type = FUNCIDX_ELEM_TYPE, .funcidxs = funcs };
             },
             4 => {
                 // active, table 0, offset expr, vec(reftype-expr).
@@ -179,7 +193,7 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
                     .kind = .active,
                     .tableidx = tableidx,
                     .offset_expr = expr,
-                    .elem_type = .funcref,
+                    .elem_type = FUNCIDX_ELEM_TYPE,
                     .funcidxs = funcs,
                 };
             },
@@ -378,6 +392,10 @@ test "decodeElement: single active form 0 with two funcidxs" {
     try testing.expectEqual(ElementKind.active, e.items[0].kind);
     try testing.expectEqual(@as(u32, 0), e.items[0].tableidx);
     try testing.expectEqualSlices(u32, &[_]u32{ 0, 1 }, e.items[0].funcidxs);
+    // The funcidx form's items are `ref.func`, so its element type is the
+    // NON-NULLABLE `(ref func)`. A `(ref func)` table accepts this segment
+    // precisely because of the nullability here.
+    try testing.expect(e.items[0].elem_type.eql(.{ .ref = zir.RefType.abs(.func, false) }));
 }
 
 test "decodeElement: form 6 typed-ref (ref 0) elem with ref.func init expr" {
@@ -402,6 +420,8 @@ test "decodeElement: passive form 1 with elemkind=funcref" {
     defer e.deinit();
     try testing.expectEqual(ElementKind.passive, e.items[0].kind);
     try testing.expectEqualSlices(u32, &[_]u32{3}, e.items[0].funcidxs);
+    // Every funcidx form carries the non-nullable `(ref func)`; see FUNCIDX_ELEM_TYPE.
+    try testing.expect(e.items[0].elem_type.eql(.{ .ref = zir.RefType.abs(.func, false) }));
 }
 
 test "decodeElement: declarative form 3" {
@@ -410,6 +430,8 @@ test "decodeElement: declarative form 3" {
     defer e.deinit();
     try testing.expectEqual(ElementKind.declarative, e.items[0].kind);
     try testing.expectEqual(@as(usize, 0), e.items[0].funcidxs.len);
+    // Every funcidx form carries the non-nullable `(ref func)`; see FUNCIDX_ELEM_TYPE.
+    try testing.expect(e.items[0].elem_type.eql(.{ .ref = zir.RefType.abs(.func, false) }));
 }
 
 test "decodeElement: active form 2 with explicit tableidx" {
@@ -434,6 +456,22 @@ test "decodeElement: active form 2 with explicit tableidx" {
     try testing.expectEqual(ElementKind.active, e.items[0].kind);
     try testing.expectEqual(@as(u32, 1), e.items[0].tableidx);
     try testing.expectEqualSlices(u32, &[_]u32{ 0, 1 }, e.items[0].funcidxs);
+    // Every funcidx form carries the non-nullable `(ref func)`; see FUNCIDX_ELEM_TYPE.
+    try testing.expect(e.items[0].elem_type.eql(.{ .ref = zir.RefType.abs(.func, false) }));
+}
+
+test "decodeElement: active form 4 (expr-vec) keeps the nullable funcref" {
+    // flag=4 is the expr-vector twin of form 0: same active-table-0 shape, but
+    // its items are expressions, so the spec assigns the NULLABLE `funcref`.
+    // The asymmetry with forms 0x00-0x03 is the whole reason the type is
+    // per-form; pinning only one side would let the other drift.
+    // count=1; flag=4; offset = i32.const 0; end; n=1; expr = ref.func 0; end
+    const body = [_]u8{ 0x01, 0x04, 0x41, 0x00, 0x0B, 0x01, 0xD2, 0x00, 0x0B };
+    var e = try decodeElement(testing.allocator, &body);
+    defer e.deinit();
+    try testing.expectEqual(ElementKind.active, e.items[0].kind);
+    try testing.expectEqual(@as(u32, 0), e.items[0].tableidx);
+    try testing.expect(e.items[0].elem_type.eql(ValType.funcref));
 }
 
 test "decodeElement: passive form 5 (reftype + expr-vec)" {
