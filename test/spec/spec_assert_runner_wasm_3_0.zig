@@ -748,16 +748,13 @@ pub fn main(init: std.process.Init) !void {
                             if (inst_ptr.memory()) |mem| {
                                 cur_linker.defineMemory("spectest", "memory", mem) catch {};
                             }
-                            // A fixture importing `(import "spectest" "table" …)`
-                            // could not instantiate at all while this was absent,
-                            // and the runner reported its own missing host surface
-                            // as the module failing to instantiate.
-                            {
-                                if (inst_ptr.handle.runtime) |rt| {
-                                    for (inst_ptr.handle.exports_storage) |exp| {
-                                        if (exp.kind == .table) {
-                                            cur_linker.defineTable("spectest", "table", rt.tables[exp.idx]) catch {};
-                                        }
+                            // Bound so `(import "spectest" "table" …)` resolves.
+                            // Without it the runner reports its own missing host
+                            // surface as the module failing to instantiate.
+                            if (inst_ptr.handle.runtime) |rt| {
+                                for (inst_ptr.handle.exports_storage) |exp| {
+                                    if (exp.kind == .table) {
+                                        cur_linker.defineTable("spectest", "table", rt.tables[exp.idx]) catch {};
                                     }
                                 }
                             }
