@@ -76,12 +76,14 @@ fixtures from source (emcc / TinyGo / Rust) is a maintainer task using the Nix
 | `zig build lint -- --max-warnings 0` | project linter |
 
 `test-wasi-p1-official` is the one layer `test-all` does not carry. The corpus
-currently reports 14 engine-independent failures (D-583), so CI runs it as an
-**advisory step** in the `gate` job — the red is visible in the run without
-blocking the merge. It is not part of the local `gate_commit.sh` /
-`gate_merge.sh` flow either, so run it directly when touching WASI preview1.
-When D-583 discharges, the step joins `test-all` and the advisory goes away
-(ADR-0208 D2/D3).
+is not green (D-583 carries the live count — no copy of it here, that is what
+went stale last time), so CI runs it as an **advisory step** in the `gate`
+job: the red shows in the run without blocking the merge. Because it cannot
+block either way, it runs **only on the merge to `main`**, like the extended
+checks below — your PR will not show it. It is not part of the local
+`gate_commit.sh` / `gate_merge.sh` flow either, so run it directly when
+touching WASI preview1. When D-583 discharges, the step joins `test-all` and
+the advisory goes away (ADR-0208 D2/D3).
 
 ## The merge gate — CI is authoritative
 
