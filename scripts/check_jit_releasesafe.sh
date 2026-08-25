@@ -10,6 +10,14 @@
 # Build ReleaseSafe + run a SIMD `_start` via `--engine=jit` (the interp has no
 # SIMD, so this forces the JIT execute path). A non-zero exit = the
 # callee-saved-clobber SEGV regressed. Cheap to read, ~minutes to build.
+#
+# Where this runs: `ci_gate.sh` invokes it inside the ZWASM_CI_EXTENDED leg,
+# which fires on the push to `main` and NOT on a pull request. A regression in
+# this class therefore reaches `main` before any lane reports it — the same
+# shape of gap that let the original defect ship. The cost is the reason: this
+# is a full cold ReleaseSafe build, and the PR gate is already the slowest
+# thing in the loop. Promoting it to the core leg is the fix if that cost ever
+# becomes affordable.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

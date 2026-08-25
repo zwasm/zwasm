@@ -871,8 +871,10 @@ any `Frame` field the emit's `Label` has but liveness pins to a constant
 ## Recipe 23 — Debug-passes / optimised-fails in a host→JIT thunk
 
 **Trigger.** A lane is green at the default optimize level and fails at
-`-Doptimize=Release*`. CI runs `test-all` without an optimize flag, so this
-whole class is invisible to it while releases are built ReleaseSafe.
+`-Doptimize=Release*`. `ci_gate.sh` runs `test-all` at the default optimize
+level; the one ReleaseSafe build it does run, `check_jit_releasesafe.sh`, sits
+in the `ZWASM_CI_EXTENDED` leg, which fires on the push to `main` and not on a
+PR. So this class reaches `main` before any lane sees it.
 
 **First: settle whether it is the optimizer or the mode.** Run all four.
 Debug-only-green with every Release mode failing identically points at the
@@ -910,8 +912,9 @@ mixed multi-result thunks (`entry.zig` `callI32f64NoArgs` and siblings):
 
 2. **The JIT's register cohort not saved.** The JIT allocates from the host's
    callee-saved registers and its prologue saves only one, so every host→JIT
-   call must bracket the branch. `invokeAndCheckVoid` carries the canonical
-   save on each target; a thunk added later can silently omit it. Symptom: a
+   call must bracket the branch. `invokeAndCheckVoid` carries the save for
+   aarch64 and SysV; it has no Windows branch and falls through to
+   `jitTrampolineVoid`. A thunk added later can silently omit the save. Symptom: a
    result comes back holding a pointer, or the host faults after returning.
 
 **Verify a new gate leg is a guard, not a passing command.** Revert the fix,
