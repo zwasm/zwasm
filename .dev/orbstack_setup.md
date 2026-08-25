@@ -69,7 +69,7 @@ From Mac, in `zwasm_from_scratch/`:
 
 ```bash
 orb run -m my-ubuntu-amd64 bash -c '
-  cd /Users/shota.508/Documents/MyProducts/zwasm_from_scratch &&
+  cd ~/Documents/MyProducts/zwasm_from_scratch &&
   zig build &&
   zig build test
 '
