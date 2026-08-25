@@ -10,6 +10,14 @@
 # Build ReleaseSafe + run a SIMD `_start` via `--engine=jit` (the interp has no
 # SIMD, so this forces the JIT execute path). A non-zero exit = the
 # callee-saved-clobber SEGV regressed. Cheap to read, ~minutes to build.
+#
+# Where this runs: `ci_gate.sh` invokes it inside the ZWASM_CI_EXTENDED leg,
+# which fires on the push to `main` and NOT on a pull request. A regression in
+# this class therefore reaches `main` before any lane reports it — the same
+# shape of gap that let the original defect ship. The cost is the reason: this
+# is a full cold ReleaseSafe build, and the PR gate is already the slowest
+# thing in the loop. Promoting it to the core leg is the fix if that cost ever
+# becomes affordable.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -37,5 +45,31 @@ if zig build jit-result-probe-releasesafe >/dev/null 2>&1; then
 else
     rc=$?
     echo "[check_jit_releasesafe] FAIL (exit $rc) — runI32Export crashed/mismatched in ReleaseSafe; D-245 RESULT-path preservation regressed (see src/engine/codegen/shared/entry.zig jitTrampoline / invokeAndCheck)." >&2
+    exit 1
+fi
+
+# 2026-08-25 — the two legs above cover the VOID path and the i32 RESULT path.
+# They do not reach the MIXED multi-result thunks (`(i32, f64)`, `(f64, i32)`,
+# `(f64, f32)`), which have their own hand-written asm and had the same defect
+# this gate exists for: they never bracketed the JIT call with a save of
+# X19-X28, so an optimised host lost live values there. They also named x0 as
+# both an untied input and an output of the same asm, which lets the allocator
+# place the output's def ahead of the input's use.
+#
+# The corpus that reaches them is `call_indirect`, whose `type-all-i32-f64` and
+# siblings return mixed pairs. Debug passes it either way — the whole point is
+# that only an optimised build shows the fault — so this runs the real runner
+# against the real corpus at ReleaseSafe. Every optimisation mode failed
+# identically when the defect was live, so ReleaseSafe alone is a faithful
+# probe.
+echo "[check_jit_releasesafe] mixed multi-result thunks at ReleaseSafe ..."
+MIXED_DIR=$(mktemp -d)
+trap 'rm -rf "$MIXED_DIR"' EXIT
+cp -r test/spec/wasm-2.0-assert/call_indirect "$MIXED_DIR/"
+if zig-out/bin/zwasm-spec-wasm-2-0-assert "$MIXED_DIR" >/dev/null 2>&1; then
+    echo "[check_jit_releasesafe] OK — mixed int/float multi-result returns survive optimisation."
+else
+    rc=$?
+    echo "[check_jit_releasesafe] FAIL (exit $rc) — the mixed-result thunks regressed in ReleaseSafe (this leg runs on whichever host builds it — aarch64 and x86_64 alike); see src/engine/codegen/shared/entry.zig callI32f64NoArgs / callF64i32NoArgs / callF64f32NoArgs (x0 must not be both an input and an output of the asm; X19-X28 must be saved around the BLR)." >&2
     exit 1
 fi

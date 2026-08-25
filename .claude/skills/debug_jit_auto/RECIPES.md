@@ -867,3 +867,67 @@ enclosing frame's vreg.
 `sim_len >= <arity>` that should be `sim_len >= entry_depth + <arity>`, and
 any `Frame` field the emit's `Label` has but liveness pins to a constant
 (`param_arity = 0` was pinned for block/loop frames).
+
+## Recipe 23 — Debug-passes / optimised-fails in a host→JIT thunk
+
+**Trigger.** A lane is green at the default optimize level and fails at
+`-Doptimize=Release*`. `ci_gate.sh` runs `test-all` at the default optimize
+level; the one ReleaseSafe build it does run, `check_jit_releasesafe.sh`, sits
+in the `ZWASM_CI_EXTENDED` leg, which fires on the push to `main` and not on a
+PR. So this class reaches `main` before any lane sees it.
+
+**First: settle whether it is the optimizer or the mode.** Run all four.
+Debug-only-green with every Release mode failing identically points at the
+host↔JIT boundary, not at a Release-specific miscompile.
+
+```sh
+for m in Debug ReleaseSafe ReleaseFast ReleaseSmall; do
+  zig build install ${m:+-Doptimize=$m} >/dev/null 2>&1
+  ./zig-out/bin/<runner> <corpus> >/dev/null 2>&1; echo "$m exit=$?"
+done
+```
+
+**Then bisect the manifest, not the code.** Truncating a manifest is far
+cheaper than reading codegen, and lands on the directive:
+
+```sh
+lo=1; hi=$(wc -l < full.txt)
+while [ $lo -lt $hi ]; do
+  mid=$(( (lo + hi) / 2 )); head -$mid full.txt > manifest.txt
+  ./zig-out/bin/<runner> <corpus> >/dev/null 2>&1
+  if [ $? -ne 0 ]; then hi=$mid; else lo=$((mid+1)); fi
+done
+```
+
+**Two failure modes live at this boundary.** Both were found together in the
+mixed multi-result thunks (`entry.zig` `callI32f64NoArgs` and siblings):
+
+1. **An operand named as both input and output of one `asm`.** `"{x0}"` in and
+   `"={x0}"` out are untied, so the allocator may place the output's def before
+   the input's use. Debug happened to allocate elsewhere. Symptom: the callee
+   runs with a garbage first argument, faulting at a small constant address (a
+   field offset off that garbage). Fix: take the value in a different register
+   and `mov` it into place inside the asm; pin every operand to a named
+   register — `"r"` is free to pick the one a neighbouring line just wrote.
+
+2. **The JIT's register cohort not saved.** The JIT allocates from the host's
+   callee-saved registers and its prologue saves only one, so every host→JIT
+   call must bracket the branch. `invokeAndCheckVoid` carries the save for
+   aarch64 and SysV; it has no Windows branch and falls through to
+   `jitTrampolineVoid`. A thunk added later can silently omit the save. Symptom: a
+   result comes back holding a pointer, or the host faults after returning.
+
+**Verify a new gate leg is a guard, not a passing command.** Revert the fix,
+rebuild at the optimised level, confirm the leg fails, restore, confirm it
+passes. Check the restore by content (`git status --porcelain`, or an md5), not
+by trusting that the revert command did what was asked — a `git stash` that
+silently matched nothing once produced a confident "the guard does not work".
+
+**Do not trust an inline-asm comment about the ABI without checking it.** The
+first explanation written for this bug claimed x0 held an sret pointer for a
+16-byte struct return. The callee was declared to return `void`, so there was
+no struct return in the call at all; and AAPCS64 returns a 16-byte non-HFA
+composite in x0+x1 directly, putting the indirect-return pointer in x8 when it
+uses one — cross-checked against cranelift's aarch64 ABI lowering
+(`cranelift/codegen/src/isa/aarch64/abi.rs` in `bytecodealliance/wasmtime`).
+Read the callee's declared type first, then the ABI, then the disassembly.

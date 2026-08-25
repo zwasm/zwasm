@@ -103,6 +103,7 @@ to the heading.
 | 20 | **Operand-stack-pressure sweep** | any | JIT-only wrong result/trap where each op passes in isolation → spilled operand |
 | 21 | **Differential probe by re-exporting a guest's internals** | any | **A toolchain-built `.wasm` aborts under `--engine jit` only** — too big to read |
 | 22 | **liveness sim vs emit `pushed_vregs` drift** | any | Stale block/if result AND `regverify` reports no overlap |
+| 23 | **Debug-passes / optimised-fails in a host→JIT thunk** | any | **A lane is green at the default optimize level and fails at `-Doptimize=Release*`** — CI never runs the optimised build, releases do |
 
 
 ## When to invoke each recipe (decision tree)

@@ -12,12 +12,10 @@
 # impl rows). The schema below is the canonical shape; populated
 # entries get added as fixtures and skip-reasons are discovered.
 
-# === Phase 10 toolchain skeleton (no fixtures landed yet) ===
-# When dart/hello_world.dart.wasm lands:
-#   p10/dart/hello_world.dart.wasm:
-#     reason: SKIP-P10-GC-GAP
-#     adr: ADR-0115
-#     unblock: ROADMAP §10 / 10.G [x]
+# === Phase 10 toolchain skeleton ===
+# The dart / hoot reservations that used to sit here are gone with those
+# directories: GC is reached by p10/moonbit/, tail calls by p10/clang_musttail/,
+# so neither added coverage (#226).
 #
 # When wasm_of_ocaml/list_fold.ml.wasm lands:
 #   p10/wasm_of_ocaml/list_fold.ml.wasm:

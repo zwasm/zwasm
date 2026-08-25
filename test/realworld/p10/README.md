@@ -1,54 +1,41 @@
 # `test/realworld/p10/` — Wasm 3.0 realworld fixtures
 
-Per Phase 10 design plan §4.3. 6 toolchains × planned-fixture
-count covers the 4 proposal axes:
+Output from real toolchains, committed as `.wasm` and run on every host by the
+edge runner. `EXPECTED.txt` beside this file states which directories are
+supposed to yield fixtures and which are knowingly empty; the runner fails if
+the corpus and that statement disagree, including for a directory the file does
+not mention at all. Without it an empty directory and a fully-passing one are
+the same verdict (#226).
 
-| Toolchain | Sub | Planned fixtures |
+| Directory | Proposal reached | Fixture |
 |---|---|---|
-| `dart/` | GC + EH | HelloWorld / collection ops / async error |
-| `wasm_of_ocaml/` | GC + EH + TC | List.fold (TC) / exception raise / record alloc |
-| `hoot/` | GC + TC | Scheme tail-call factorial / list manipulation |
-| `emscripten_eh/` | EH | C++ exception throw / catch (`try_table` output) |
-| `clang_musttail/` | TC | C continuation-passing style (musttail attribute) |
-| `clang_wasm64/` | memory64 | > 4 GiB allocate + memcpy (host 64-bit only) |
+| `moonbit/` | GC | MoonBit `--target wasm-gc` structs / nullable walk |
+| `clang_musttail/` | tail calls | C continuation-passing style (`musttail`) |
+| `clang_wasm64/` | memory64 | i64-indexed memory load / store |
+| `clang_O0_arr_sum/`, `clang_O0_fp_sum/` | — | unoptimised C scalar / FP loops |
+| `rust_fib/`, `rust_data/`, `rust_loop_sum/`, `rust_bubble_sort/` | — | rustc wasm32 |
+| `emscripten_eh/` | EH | built, not yet wired — see below |
+| `wasm_of_ocaml/` | GC × EH × TC | not provisioned — see below |
 
-Per-fixture skip-list managed via per-file header (wasmtime
-shape adopted per §4.4). `.wasm` artifacts land cycle-by-cycle as
-the corresponding impl rows (10.M / 10.TC / 10.E / 10.G) exercise
-each toolchain.
+## The two that do not run
 
-10.T-5 deliverable: directory skeleton + per-toolchain PROVENANCE
-stubs. Artifact landing happens later (post-Accept of the 7 ADRs
-in 10.D).
+`emscripten_eh/` — the fixture exists (`../src/emscripten_eh/`, source and
+built `.wasm` together) and reaches `try_table`, which nothing else here does.
+It is registered as a skip because the JIT miscompiles it while the interpreter
+and wasmtime agree on the result (#280); this lane runs fixtures through the
+JIT. It flips to `expect=fixtures` when that closes.
 
-`moonbit/` is **not** one of those six and claims none of their exit
-criteria. It is a MoonBit `--target wasm-gc` fixture added because the GC
-row above is still unfilled and the lane had no wasm-gc-emitting toolchain
-walking it at all (#226). The four empty exit-criteria directories stay
-empty and stay #226's to account for. `moonbit/PROVENANCE.md` records what
-the fixture covers and the three engine defects that bound it.
+`wasm_of_ocaml/` — the only fixture that would reach GC, EH and TC in one
+module, which is the cross-check ADR-0117 asks for. The toolchain is not
+provisioned; the implementation rows it used to wait on all shipped.
 
-## Skip-list
+`dart/` and `hoot/` were removed rather than left as unfillable skips: GC is
+reached by `moonbit/` and tail calls by `clang_musttail/`, so neither added
+coverage the corpus lacks.
 
-Per-file header convention (wasmtime model, adopted per §4.4):
+## Adding a fixture
 
-```wat
-;; ZWASM-SKIP: SKIP-P10-GC-GAP (10.G impl pending)
-(module
-  ...)
-```
-
-The runner reads the first 10 lines of each fixture's `.wat`
-source (when bundled) or a sidecar `.skip` file (for `.wasm`-only
-fixtures). Reasons:
-
-- `SKIP-P10-PARSER-GAP` — parser doesn't yet handle the Wasm 3.0
-  feature in question
-- `SKIP-P10-GC-GAP` — needs `feature/gc/` (10.G impl row)
-- `SKIP-P10-EH-GAP` — needs `feature/exception_handling/` (10.E)
-- `SKIP-P10-TC-GAP` — needs tail-call codegen (10.TC)
-- `SKIP-P10-MEM64-GAP` — needs memory64 codegen (10.M)
-- `SKIP-P10-CROSS-GAP` — needs cross-subsystem invariants (10.E + 10.G + 10.TC)
-
-Per ADR-0078 SKIP-* taxonomy + ADR-0050 D-5 ratchet — new
-SKIP-P10-* tokens get added to ADR-0078 when first emitted.
+Generate on the Mac host via `nix develop .#gen` (see
+`.dev/toolchain_provisioning.md`), commit the `.wasm` with an `<name>.expect`
+sidecar (`i32: <value>` or `trap:`), and add the directory to `EXPECTED.txt`.
+A directory missing from that file fails the lane, which is the point.
