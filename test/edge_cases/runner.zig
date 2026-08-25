@@ -46,7 +46,13 @@ pub fn main(init: std.process.Init) !void {
     // directory whose fixtures were never produced reads as green forever.
     const unmet = try checkExpected(io, gpa, stdout, corpus_dir_arg);
 
-    try stdout.print("\nedge-case runner: {d} passed, {d} failed\n", .{ passed, failed });
+    // `unmet` belongs on this line: a ledger violation exits 1, and a summary
+    // reading "0 failed" next to that exit is what a CI log tail would show.
+    if (unmet) {
+        try stdout.print("\nedge-case runner: {d} passed, {d} failed, corpus does not match EXPECTED.txt\n", .{ passed, failed });
+    } else {
+        try stdout.print("\nedge-case runner: {d} passed, {d} failed\n", .{ passed, failed });
+    }
     try stdout.flush();
     if (failed != 0 or unmet) std.process.exit(1);
 }
@@ -80,7 +86,12 @@ fn checkExpected(
     root_path: []const u8,
 ) !bool {
     const cwd = std.Io.Dir.cwd();
-    var root = cwd.openDir(io, root_path, .{ .iterate = true }) catch return false;
+    var root = cwd.openDir(io, root_path, .{ .iterate = true }) catch |err| {
+        // Reverting to the plain walk on an unreadable root would report green
+        // for a corpus nothing examined — the same silence the ledger removes.
+        stdout.print("EXPECTED  cannot open the corpus root: {s}\n", .{@errorName(err)}) catch {};
+        return true;
+    };
     defer root.close(io);
 
     const text = root.readFileAlloc(io, "EXPECTED.txt", gpa, .limited(64 << 10)) catch |err| {
@@ -107,7 +118,10 @@ fn checkExpected(
         while (try it.next(io)) |entry| {
             if (entry.kind != .directory) continue;
             const owned = try gpa.dupe(u8, entry.name);
-            seen.put(owned, {}) catch gpa.free(owned);
+            errdefer gpa.free(owned);
+            // Dropping this entry would remove it from the leftover sweep, so
+            // the directory would never be reported as unmentioned.
+            try seen.put(owned, {});
         }
     }
 
@@ -154,7 +168,13 @@ fn checkExpected(
             continue;
         }
         if (want_skip) {
-            const shown = if (std.mem.startsWith(u8, reason, "reason=")) reason["reason=".len..] else reason;
+            const after_prefix = if (std.mem.startsWith(u8, reason, "reason=")) reason["reason=".len..] else reason;
+            const shown = std.mem.trim(u8, after_prefix, " \t");
+            if (shown.len == 0) {
+                try stdout.print("EXPECTED  {s}: expect=skip needs a reason\n", .{dir_name});
+                unmet = true;
+                continue;
+            }
             try stdout.print("SKIP      {s}: {s}\n", .{ dir_name, shown });
             continue;
         }
@@ -184,10 +204,10 @@ fn checkExpected(
 /// `.wasm` whose sibling `.expect` states an expectation this runner
 /// understands.
 ///
-/// The `.expect` must PARSE, not merely exist. A file the runner cannot read
-/// an expectation out of is skipped at run time, so counting it here would
-/// let a directory satisfy `expect=fixtures` while contributing no verdict —
-/// the same hole in a smaller place.
+/// The `.expect` must PARSE, not merely exist. A sidecar the runner cannot
+/// read an expectation out of fails the lane at run time, so counting it here
+/// would let a directory satisfy `expect=fixtures` on the strength of a
+/// fixture that is about to be reported broken.
 fn countResultChecked(io: std.Io, gpa: std.mem.Allocator, dir: *std.Io.Dir) !u32 {
     var walker = try dir.walk(gpa);
     defer walker.deinit();
@@ -200,7 +220,13 @@ fn countResultChecked(io: std.Io, gpa: std.mem.Allocator, dir: *std.Io.Dir) !u32
             ".expect",
         });
         defer gpa.free(expect_path);
-        const bytes = dir.readFileAlloc(io, expect_path, gpa, .limited(4096)) catch continue;
+        // An unreadable sidecar is propagated rather than skipped: silently
+        // not counting it lets a sibling that does parse satisfy
+        // `expect=fixtures` on the directory's behalf.
+        const bytes = dir.readFileAlloc(io, expect_path, gpa, .limited(4096)) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
         defer gpa.free(bytes);
         if (parseExpect(bytes) != .unsupported) n += 1;
     }
@@ -306,7 +332,11 @@ fn runOne(
             }
         },
         .unsupported => {
-            try stdout.print("SKIP  {s}: unsupported expectation format\n", .{name});
+            // A sidecar the runner cannot parse is a broken fixture, not a
+            // skip. Counting it as neither would drop it from the denominator
+            // — #226 one level down, at file rather than directory grain.
+            try stdout.print("FAIL  {s}: unsupported expectation format\n", .{name});
+            failed.* += 1;
         },
     }
 }

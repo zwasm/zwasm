@@ -8,8 +8,16 @@
 #   <dir> expect=fixtures            must yield at least one checked fixture
 #   <dir> expect=skip reason=<text>  announced with its reason, does not fail
 #
-# A directory not named here is left alone, so adding fixtures does not require
-# editing this file first.
+# This is a ledger, not a roster: every directory in the corpus must appear
+# here, and one that does not fails the lane. Listing only what someone
+# remembered to list would close today's silent green and leave the next one
+# open — a new directory holding nothing but a README would pass unmentioned,
+# which is the defect this file exists to remove.
+#
+# So adding a directory means adding a line here.
+#
+# The enumeration is top-level only. Fixtures are counted recursively, so
+# an empty directory nested inside a listed one is not caught here.
 
 clang_O0_arr_sum   expect=fixtures
 clang_O0_fp_sum    expect=fixtures
