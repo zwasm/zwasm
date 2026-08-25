@@ -1,4 +1,4 @@
-// FILE-SIZE-EXEMPT: uniform-pattern catalog (127 callXX_yy per-shape entry helpers; monotonic growth with Wasm signature shapes — +8 D-467 multi-scalar→v128 + 2 D-467 load/store-lane (i32,v128)→v128/i64) (cap=3200) (per ADR-0063 + ADR-0099 Revision 2026-05-24)
+// FILE-SIZE-EXEMPT: uniform-pattern catalog (125 callXX_yy per-shape entry helpers; monotonic growth with Wasm signature shapes — +8 D-467 multi-scalar→v128 + 2 D-467 load/store-lane (i32,v128)→v128/i64; 2026-08-25 +175 for the host→JIT register-cohort save every mixed multi-result thunk needs on all three targets — the sequence is pasted per call site because Zig inline asm takes a single string, so it cannot be folded into a shared constant) (cap=3450) (per ADR-0063 + ADR-0099 Revision 2026-05-24)
 // Comptime generation is a follow-up; see ADR-0063 Alternative B + debt ledger.
 
 //! JIT entry frame (ADR-0017).
@@ -116,8 +116,12 @@ const x86_64_sysv_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and buil
 /// via hidden RCX pointer when > 8 bytes). The thunk performs the
 /// CALL in inline-asm, passes rt in RCX (Win64 first int arg), and
 /// captures the result registers directly. Lists every Win64
-/// caller-saved (volatile) GPR + XMM0–XMM5 (XMM6–XMM15 are
-/// non-volatile under Win64 and the JIT prologue preserves them).
+/// caller-saved (volatile) GPR + XMM0–XMM5. XMM6–XMM15 are non-volatile
+/// under Win64 and the JIT does NOT preserve them: its pool takes xmm8-xmm13
+/// with xmm14/xmm15 as the spill stage (`x86_64/abi.zig`), and
+/// `x86_64/prologue.zig` emits no XMM save at all. Listing them here is what
+/// would make the compiler preserve a host value held in one across the asm;
+/// they are omitted, so that exposure is open. Tracked in #286.
 const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) std.builtin.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) .{
         .rax = true,
@@ -141,13 +145,15 @@ const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and bui
 
 /// D-245 — the callee-saved GPRs the JIT prologue clobbers.
 /// The prologue MOV-installs the pinned cohort (arm64 X19/X24-X28; x86_64
-/// RBX/R12-R15) from `rt` WITHOUT stack-saving the caller's values, so a plain
+/// RBX/R12-R14 plus the reserved R15) from `rt` WITHOUT stack-saving the caller's values, so a plain
 /// host→JIT `@call` lets ReleaseSafe's optimized host lose any live value it
 /// kept there → heap-corruption SEGV. `jitTrampoline` clobber-lists this set
 /// so ITS prologue/epilogue saves & restores the cohort around the call,
-/// masking the JIT's clobber. XMM/FP is omitted — the JIT already preserves
-/// win64 XMM6-15, and the SysV/AAPCS64 FP cohort is caller-saved. The x86_64
-/// arm is identical for SysV and Windows (same JIT regalloc pool).
+/// masking the JIT's clobber. Two exposures this list does not cover: Win64
+/// XMM6-15 are non-volatile and the JIT saves none of them (#286), and
+/// `win64.allocatable_gprs` also holds RDI and RSI, which this list omits
+/// (#287). The SysV/AAPCS64 FP cohort is caller-saved, so it needs nothing
+/// here.
 pub const jit_cohort_clobbers: if (builtin.target.cpu.arch == .aarch64 or builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .aarch64) .{
         .x19 = true,
@@ -271,6 +277,7 @@ inline fn invokeAndCheckVoid(
             \\ stp x23, x24, [sp, #32]
             \\ stp x25, x26, [sp, #48]
             \\ stp x27, x28, [sp, #64]
+            \\ mov x0, x10
             \\ blr %[callee]
             \\ ldp x21, x22, [sp, #16]
             \\ ldp x23, x24, [sp, #32]
@@ -278,14 +285,18 @@ inline fn invokeAndCheckVoid(
             \\ ldp x27, x28, [sp, #64]
             \\ ldp x19, x20, [sp], #80
             :
-            : [callee] "r" (f),
-              [rt_arg] "{x0}" (rt),
+            // rt arrives in x10 and is moved to x0 inside the asm, so x0 is not
+            // an operand of this block.
+            // Every operand is pinned to a named register: `"r"` is free to pick
+            // x0, or the register a neighbouring line has just written.
+            : [callee] "{x9}" (f),
+              [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
     } else if (comptime builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag != .windows and args.len == 0) {
-        // D-245 (x86_64 SysV): the JIT uses an all-callee-saved regalloc pool
-        // (RBX/R12-R15) and only the prologue's PUSH R15 is saved — R12-R14/RBX
-        // are clobbered without restore, so a plain `@call` lets ReleaseSafe's
-        // host lose its live values there → SEGV. Save/restore them around the
+        // D-245 (x86_64 SysV): the JIT's pool is RBX/R12-R14 and R15 is reserved
+        // for the runtime pointer the prologue installs. The epilogue restores
+        // none of them, so a plain `@call` lets ReleaseSafe's host lose its live
+        // values there → SEGV. Save/restore them around the
         // CALL (callee in RAX, rt in RDI). 5 pushes (40B) + sub $8 keep the
         // pre-CALL RSP 16-aligned (callee sees %16==8 per SysV), assuming the
         // inlined call site's incoming RSP is 16-aligned (as `@call` would need).
@@ -1368,32 +1379,95 @@ pub fn callI32f64NoArgs(
         var r0_raw: u64 = undefined;
         var r1_raw: u64 = undefined;
         asm volatile (
+            \\ stp x19, x20, [sp, #-80]!
+            \\ stp x21, x22, [sp, #16]
+            \\ stp x23, x24, [sp, #32]
+            \\ stp x25, x26, [sp, #48]
+            \\ stp x27, x28, [sp, #64]
+            \\ mov x0, x10
             \\ blr %[callee]
-            \\ fmov %[r1_bits], d0
-            : [r0_out] "={x0}" (r0_raw),
-              [r1_bits] "=r" (r1_raw),
-            : [callee] "r" (f),
-              [rt_arg] "{x0}" (rt),
+            \\ mov x11, x0
+            \\ ldp x21, x22, [sp, #16]
+            \\ ldp x23, x24, [sp, #32]
+            \\ ldp x25, x26, [sp, #48]
+            \\ ldp x27, x28, [sp, #64]
+            \\ ldp x19, x20, [sp], #80
+            \\ fmov x12, d0
+            : [r0_out] "={x11}" (r0_raw),
+              [r1_bits] "={x12}" (r1_raw),
+              // rt arrives in x10 and is moved to x0 inside the asm, so x0 is not
+              // an operand of this block.
+              // Results are pinned to x11/x12/x13.
+              // Every operand is pinned to a named register: `"r"` is free to pick
+              // x0, or the register a neighbouring line has just written.
+            : [callee] "{x9}" (f),
+              [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
         if (rt.trap_flag != 0) return Error.Trap;
         return .{ .r0 = r0_raw, .r1 = @bitCast(r1_raw) };
     } else if (comptime builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag != .windows) {
-        const Fn = *const fn (rt: *const JitRuntime) callconv(.c) FuncRet_i32f64;
-        const f = module.entry(func_idx, Fn);
-        const result = f(rt);
-        if (rt.trap_flag != 0) return Error.Trap;
-        return result;
-    } else if (comptime builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) {
-        // Win64 (D-161): rt in RCX, 32 B shadow + 8 B alignment via
-        // `sub $40`, CALL, capture RAX (i32) + XMM0 (f64).
+        // The JIT's pool is RBX/R12-R14 (`x86_64/abi.zig`); R15 is reserved as
+        // the runtime pointer, which the prologue overwrites. Its epilogue
+        // restores none of them, so a plain Zig call lets an optimised host lose
+        // whatever it had live in all five — the D-245 defect class. Measured on
+        // x86_64-linux at ReleaseSafe: the corpus that exercises these shapes
+        // faulted without this bracket.
+        // rt in RDI; the callee register is left to the allocator, which is
+        // safe here because `push` does not destroy it. 5 pushes + `sub $8`
+        // keep the pre-CALL RSP 16-aligned the way SysV wants it.
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
         var r0_raw: u64 = undefined;
         var r1_raw: f64 = undefined;
         asm volatile (
+            \\ pushq %%rbx
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
+            \\ subq $8, %%rsp
+            \\ callq *%[callee]
+            \\ addq $8, %%rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rbx
+            : [r0_out] "={rax}" (r0_raw),
+              [r1_out] "={xmm0}" (r1_raw),
+            : [callee] "r" (f),
+              [rt_arg] "{rdi}" (rt),
+            : x86_64_sysv_call_clobbers);
+        if (rt.trap_flag != 0) return Error.Trap;
+        return .{ .r0 = r0_raw, .r1 = r1_raw };
+    } else if (comptime builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) {
+        // Win64 (D-161): rt in RCX, CALL, capture RAX (i32) + XMM0 (f64).
+        // `sub $40` reserves the 32 B shadow space contiguously at rsp+0..31
+        // — the pushes precede it, so they do not split it. Alignment: 7
+        // pushes (56 B) + 40 = 96 ≡ 0 mod 16, so the incoming parity is
+        // preserved and the pre-CALL RSP stays where the ABI wants it.
+        const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
+        const f = module.entry(func_idx, Fn);
+        var r0_raw: u64 = undefined;
+        var r1_raw: f64 = undefined;
+        asm volatile (
+            \\ pushq %%rbx
+            \\ pushq %%rsi
+            \\ pushq %%rdi
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
             \\ subq $40, %rsp
             \\ callq *%[callee]
             \\ addq $40, %rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rdi
+            \\ popq %%rsi
+            \\ popq %%rbx
             : [r0_out] "={rax}" (r0_raw),
               [r1_out] "={xmm0}" (r1_raw),
             : [callee] "r" (f),
@@ -1427,21 +1501,67 @@ pub fn callF64i32NoArgs(
         var r0_raw: u64 = undefined;
         var r1_raw: u64 = undefined;
         asm volatile (
+            \\ stp x19, x20, [sp, #-80]!
+            \\ stp x21, x22, [sp, #16]
+            \\ stp x23, x24, [sp, #32]
+            \\ stp x25, x26, [sp, #48]
+            \\ stp x27, x28, [sp, #64]
+            \\ mov x0, x10
             \\ blr %[callee]
-            \\ fmov %[r0_bits], d0
-            : [r0_bits] "=r" (r0_raw),
-              [r1_out] "={x0}" (r1_raw),
-            : [callee] "r" (f),
-              [rt_arg] "{x0}" (rt),
+            \\ mov x11, x0
+            \\ ldp x21, x22, [sp, #16]
+            \\ ldp x23, x24, [sp, #32]
+            \\ ldp x25, x26, [sp, #48]
+            \\ ldp x27, x28, [sp, #64]
+            \\ ldp x19, x20, [sp], #80
+            \\ fmov x12, d0
+            : [r0_bits] "={x12}" (r0_raw),
+              [r1_out] "={x11}" (r1_raw),
+              // rt arrives in x10 and is moved to x0 inside the asm, so x0 is not
+              // an operand of this block.
+              // Results are pinned to x11/x12/x13.
+              // Every operand is pinned to a named register: `"r"` is free to pick
+              // x0, or the register a neighbouring line has just written.
+            : [callee] "{x9}" (f),
+              [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
         if (rt.trap_flag != 0) return Error.Trap;
         return .{ .r0 = @bitCast(r0_raw), .r1 = r1_raw };
     } else if (comptime builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag != .windows) {
-        const Fn = *const fn (rt: *const JitRuntime) callconv(.c) FuncRet_f64i32;
+        // The JIT's pool is RBX/R12-R14 (`x86_64/abi.zig`); R15 is reserved as
+        // the runtime pointer, which the prologue overwrites. Its epilogue
+        // restores none of them, so a plain Zig call lets an optimised host lose
+        // whatever it had live in all five — the D-245 defect class. Measured on
+        // x86_64-linux at ReleaseSafe: the corpus that exercises these shapes
+        // faulted without this bracket.
+        // rt in RDI; the callee register is left to the allocator, which is
+        // safe here because `push` does not destroy it. 5 pushes + `sub $8`
+        // keep the pre-CALL RSP 16-aligned the way SysV wants it.
+        const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
-        const result = f(rt);
+        var r0_raw: f64 = undefined;
+        var r1_raw: u64 = undefined;
+        asm volatile (
+            \\ pushq %%rbx
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
+            \\ subq $8, %%rsp
+            \\ callq *%[callee]
+            \\ addq $8, %%rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rbx
+            : [r0_out] "={xmm0}" (r0_raw),
+              [r1_out] "={rax}" (r1_raw),
+            : [callee] "r" (f),
+              [rt_arg] "{rdi}" (rt),
+            : x86_64_sysv_call_clobbers);
         if (rt.trap_flag != 0) return Error.Trap;
-        return result;
+        return .{ .r0 = r0_raw, .r1 = r1_raw };
     } else if (comptime builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) {
         // Win64 (D-161): same shadow-space pattern as
         // `callI32f64NoArgs`; capture XMM0 (f64) + RAX (i32).
@@ -1450,9 +1570,23 @@ pub fn callF64i32NoArgs(
         var r0_raw: f64 = undefined;
         var r1_raw: u64 = undefined;
         asm volatile (
+            \\ pushq %%rbx
+            \\ pushq %%rsi
+            \\ pushq %%rdi
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
             \\ subq $40, %rsp
             \\ callq *%[callee]
             \\ addq $40, %rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rdi
+            \\ popq %%rsi
+            \\ popq %%rbx
             : [r0_out] "={xmm0}" (r0_raw),
               [r1_out] "={rax}" (r1_raw),
             : [callee] "r" (f),
@@ -1494,13 +1628,29 @@ pub fn callF64f32NoArgs(
         var r0_raw: u64 = undefined;
         var r1_raw: u64 = undefined;
         asm volatile (
+            \\ stp x19, x20, [sp, #-80]!
+            \\ stp x21, x22, [sp, #16]
+            \\ stp x23, x24, [sp, #32]
+            \\ stp x25, x26, [sp, #48]
+            \\ stp x27, x28, [sp, #64]
+            \\ mov x0, x10
             \\ blr %[callee]
-            \\ fmov %[r0_bits], d0
-            \\ fmov %[r1_bits], d1
-            : [r0_bits] "=r" (r0_raw),
-              [r1_bits] "=r" (r1_raw),
-            : [callee] "r" (f),
-              [rt_arg] "{x0}" (rt),
+            \\ fmov x12, d0
+            \\ fmov x13, d1
+            \\ ldp x21, x22, [sp, #16]
+            \\ ldp x23, x24, [sp, #32]
+            \\ ldp x25, x26, [sp, #48]
+            \\ ldp x27, x28, [sp, #64]
+            \\ ldp x19, x20, [sp], #80
+            : [r0_bits] "={x12}" (r0_raw),
+              [r1_bits] "={x13}" (r1_raw),
+              // rt arrives in x10 and is moved to x0 inside the asm, so x0 is not
+              // an operand of this block.
+              // Results are pinned to x11/x12/x13.
+              // Every operand is pinned to a named register: `"r"` is free to pick
+              // x0, or the register a neighbouring line has just written.
+            : [callee] "{x9}" (f),
+              [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
         if (rt.trap_flag != 0) return Error.Trap;
         const r1_f32: f32 = @bitCast(@as(u32, @truncate(r1_raw)));
@@ -1510,8 +1660,22 @@ pub fn callF64f32NoArgs(
         const f = module.entry(func_idx, Fn);
         var r0_raw: f64 = undefined;
         var r1_raw: f32 = undefined;
+        // Same cohort save as the sibling SysV thunks: pool RBX/R12-R14 plus the
+        // reserved runtime-pointer R15, none of them restored by the epilogue.
         asm volatile (
+            \\ pushq %%rbx
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
+            \\ subq $8, %%rsp
             \\ callq *%[callee]
+            \\ addq $8, %%rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rbx
             : [r0_out] "={xmm0}" (r0_raw),
               [r1_out] "={xmm1}" (r1_raw),
             : [callee] "r" (f),
@@ -1527,9 +1691,23 @@ pub fn callF64f32NoArgs(
         var r0_raw: f64 = undefined;
         var r1_raw: f32 = undefined;
         asm volatile (
+            \\ pushq %%rbx
+            \\ pushq %%rsi
+            \\ pushq %%rdi
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
             \\ subq $40, %rsp
             \\ callq *%[callee]
             \\ addq $40, %rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rdi
+            \\ popq %%rsi
+            \\ popq %%rbx
             : [r0_out] "={xmm0}" (r0_raw),
               [r1_out] "={xmm1}" (r1_raw),
             : [callee] "r" (f),
