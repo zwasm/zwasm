@@ -666,7 +666,23 @@ fn preDecodeSectionBodies(alloc: std.mem.Allocator, module: *Module) bool {
     }
     if (module.find(.import)) |s| {
         var im = sections.decodeImports(alloc, s.body) catch return false;
-        im.deinit();
+        defer im.deinit();
+        // An imported entity's declared type is carried through to the checks
+        // that read it — an imported table's element type reaches the elem
+        // segment subtype check, an imported global's valtype reaches the
+        // const-expr scope — so a concrete head naming a type that does not
+        // exist has to be rejected here. Out of range, `gcValTypeSubtype`
+        // reads the head as `.any` and the mistyped entity is accepted.
+        const ntypes: usize = if (module.find(.type)) |ts| blk: {
+            var ty = sections.decodeTypes(alloc, ts.body) catch break :blk 0;
+            defer ty.deinit();
+            break :blk ty.items.len;
+        } else 0;
+        for (im.items) |it| switch (it.kind) {
+            .table => if (!validRefTypeIdx(it.payload.table.elem_type, ntypes)) return false,
+            .global => if (!validRefTypeIdx(it.payload.global.valtype, ntypes)) return false,
+            else => {},
+        };
     }
     if (module.find(.table)) |s| {
         var t = sections.decodeTables(alloc, s.body) catch return false;
@@ -1761,6 +1777,22 @@ test "frontendValidate: a module with no type and no code section is still valid
         0x41, 0x01, 0x0b, // i32.const 1; end
     };
     try testing.expect(frontendValidate(testing.allocator, &good));
+}
+
+test "frontendValidate: an imported table's concrete element type is bounds-checked" {
+    // `(import "m" "t" (table 0 (ref null 1)))` in a module with no type
+    // section. The concrete head names type 1, which does not exist. Defined
+    // tables have always been bounds-checked here; an imported one reaches the
+    // same checks now that its declared element type is carried through.
+    const m = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x02, 0x0a, 0x01, // import: count 1
+        0x01, 0x6d, 0x01, 0x74, // "m" "t"
+        0x01, // kind: table
+        0x63, 0x01, // reftype (ref null 1)
+        0x00, 0x00, // limits: min 0, no max
+    };
+    try testing.expect(!frontendValidate(testing.allocator, &m));
 }
 
 test "frontendValidate: a function section with no code section is rejected" {
