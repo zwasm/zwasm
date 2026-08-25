@@ -39,4 +39,4 @@ emscripten_eh      expect=skip reason=#280 JIT miscompiles the emitted try_table
 
 # The GC x EH x TC cross-check ADR-0117 asks for. No other fixture reaches all
 # three proposals in one module, so this stays named rather than deleted.
-wasm_of_ocaml      expect=skip reason=#226 toolchain not provisioned
+wasm_of_ocaml      expect=skip reason=#301 toolchain not provisioned
