@@ -34,7 +34,13 @@ zig fmt --check bench/latency/
 zig fmt --check --exclude tools/lint/zig-pkg tools/
 
 echo "[ci_gate] (2/3) zig build test-all"
-zig build test-all
+# `--summary all` prints each step's own wall time (zig records
+# `result_duration_ns` and reports it in the summary tree). Without it a CI log
+# gives no step-level timing at all, and `test-all` is ~98% of the macOS leg —
+# so every question about where that leg's time goes had to be answered by
+# inferring from gaps between log lines, which produced a wrong answer twice.
+# Costs no runtime and ~200 lines on a ~58k-line log (measured 0.36%).
+zig build test-all --summary all
 
 # ADR-0209 — compile-only. `bench-latency` is a measurement and stays out of
 # test-all, but without SOMETHING building it, public-API drift would break the
