@@ -821,3 +821,45 @@ test "path_rename: a dotted final component is inval on every host (#265)" {
     writeGuestPath(&mem, 0, "a/../t2");
     try testing.expectEqual(p1.Errno.success, pathRename(&h, &mem, dirfd, 16, 1, dirfd, 0, 7));
 }
+
+test "path_unlink_file: a trailing slash is the POSIX errno on every host, not a host panic" {
+    // POSIX gives a trailing `/` the meaning "this path must resolve to a
+    // directory", so `unlink` on one is EISDIR, on anything else ENOTDIR, and
+    // never a delete. NT instead rejects the trailing backslash on the
+    // non-directory open `deleteFile` issues, with OBJECT_NAME_INVALID, which
+    // `std.Io` classifies as a programmer bug and panics on — so a guest with a
+    // preopen aborted the runtime with one `path_unlink_file("dir/", …)`, and
+    // the in-process official-corpus runner died with it. `deleteDir` takes the
+    // same NT call with DIRECTORY_FILE set and does NOT abort, which is why
+    // `path_remove_directory` needs no guard of this shape.
+    //
+    // As in the `#265` probe above, the load-bearing part is that the call
+    // RETURNS at all: a host that panics takes its whole CI leg down.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    const dirfd = try h.addPreopen(tmp.dir.handle, "/sandbox");
+    const root: std.Io.Dir = .{ .handle = tmp.dir.handle };
+    try root.createDir(testing.io, "d", std.Io.File.Permissions.default_dir);
+    try root.writeFile(testing.io, .{ .sub_path = "f", .data = "x" });
+
+    const unlinkFile = @import("fd.zig").pathUnlinkFile;
+    var mem: [64]u8 = @splat(0);
+    for ([_]struct { p: []const u8, want: p1.Errno }{
+        .{ .p = "d/", .want = .isdir },
+        .{ .p = "d//", .want = .isdir },
+        .{ .p = "f/", .want = .notdir },
+        .{ .p = "./", .want = .isdir },
+    }) |c| {
+        @memset(mem[0..32], 0);
+        writeGuestPath(&mem, 0, c.p);
+        try testing.expectEqual(c.want, unlinkFile(&h, &mem, dirfd, 0, @intCast(c.p.len)));
+    }
+    // None of those deleted anything, and the same name without the trailing
+    // slash still does.
+    @memset(mem[0..32], 0);
+    writeGuestPath(&mem, 0, "f");
+    try testing.expectEqual(p1.Errno.success, unlinkFile(&h, &mem, dirfd, 0, 1));
+}
