@@ -203,6 +203,31 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // ADR-0177 (D-311) for the one runner it could not reach. That ADR put
+    // every INTEGRATION runner on the ReleaseSafe `core_rs` twin, but it did
+    // so by swapping a module import — and `test-aot-diff` consumes the
+    // engine as a SPAWNED BINARY, not as a module, so it kept running a
+    // Debug engine. It is the only lane in `test-all` that still does.
+    // The lane compiles each fixture three times per fixture, so the Debug
+    // tax lands 192 times: measured 531 s vs 19 s on the same 64 fixtures,
+    // same verdict (64/64 matched) on both. Safety checks are unchanged —
+    // ReleaseSafe keeps them all. Not installed; the shipped `zwasm` still
+    // honours `-Doptimize` exactly as before.
+    const exe_rs_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("src/cli/main.zig"),
+        .target = target,
+        .optimize = runner_optimize,
+        .strip = strip_opt,
+        .link_libc = true,
+    });
+    exe_rs_mod.addImport("build_options", build_options_mod);
+    exe_rs_mod.addIncludePath(b.path("include"));
+    exe_rs_mod.addImport("zwasm", core_rs);
+    const exe_rs = b.addExecutable(.{
+        .name = "zwasm-runner",
+        .root_module = exe_rs_mod,
+    });
+
     // `zig build run -- <args>` runs the CLI.
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -941,7 +966,7 @@ pub fn build(b: *std.Build) void {
         .root_module = aot_diff_mod,
     });
     const run_aot_diff = b.addRunArtifact(aot_diff_exe);
-    run_aot_diff.addArtifactArg(exe); // the zwasm CLI under test
+    run_aot_diff.addArtifactArg(exe_rs); // the zwasm CLI under test (ReleaseSafe twin, ADR-0177)
     run_aot_diff.addArg(b.pathFromRoot("test/realworld/wasm"));
     run_aot_diff.addArg(b.pathFromRoot("test/aot/corpus"));
     run_aot_diff.has_side_effects = true;

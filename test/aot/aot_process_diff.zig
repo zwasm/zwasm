@@ -124,16 +124,29 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(cli);
     // Scratch under .zig-cache (gitignored); artifact written per fixture
     // under the SAME basename as the source (argv[0] parity, magic-detected).
-    const tmp_dir = ".zig-cache/aot-diff-tmp";
-    cwd.deleteTree(io, tmp_dir) catch {};
+    //
+    // Every scratch root carries a per-RUN random tag. Fixed names let a
+    // second concurrent run of this harness delete the tree the first one is
+    // mid-way through: the loser either dies on the open (FileNotFound) or —
+    // worse — survives with `zwasm compile` failing WriteOutputFailed into
+    // the deleted dir, which lands in `skipped_refused` and still exits 0.
+    // Same generator as the cache writer's temp names (src/cli/cache.zig).
+    var tag_bytes: [8]u8 = undefined;
+    io.random(&tag_bytes);
+    var tag_buf: [16]u8 = undefined;
+    const tag = try std.fmt.bufPrint(&tag_buf, "{x:0>16}", .{std.mem.readInt(u64, &tag_bytes, .little)});
+
+    const tmp_dir = try std.fmt.allocPrint(gpa, ".zig-cache/aot-diff-tmp-{s}", .{tag});
+    defer gpa.free(tmp_dir);
     try cwd.createDirPath(io, tmp_dir);
     defer cwd.deleteTree(io, tmp_dir) catch {};
-    const preopen_scratch = ".zig-cache/aot-diff-preopen";
+    const preopen_scratch = try std.fmt.allocPrint(gpa, ".zig-cache/aot-diff-preopen-{s}", .{tag});
+    defer gpa.free(preopen_scratch);
     // Cache-lane scratch (ADR-0203 D6 stage-5 ratchet): one root shared
     // across fixtures so hits exercise a real multi-entry directory;
     // absolutized because the lanes run with per-fixture cwds.
-    const cache_root_rel = ".zig-cache/aot-diff-cache";
-    cwd.deleteTree(io, cache_root_rel) catch {};
+    const cache_root_rel = try std.fmt.allocPrint(gpa, ".zig-cache/aot-diff-cache-{s}", .{tag});
+    defer gpa.free(cache_root_rel);
     try cwd.createDirPath(io, cache_root_rel);
     defer cwd.deleteTree(io, cache_root_rel) catch {};
     const cache_root = try cwd.realPathFileAlloc(io, cache_root_rel, gpa);
@@ -263,8 +276,8 @@ pub fn main(init: std.process.Init) !void {
             // explicit interp choice wins; the artifact is JIT code). Probe
             // once: interp+cache == plain interp, and NOTHING is stored.
             if (std.mem.eql(u8, entry.name, "compute_add.wasm")) {
-                const iroot_rel = ".zig-cache/aot-diff-cache-interp";
-                cwd.deleteTree(io, iroot_rel) catch {};
+                const iroot_rel = try std.fmt.allocPrint(gpa, ".zig-cache/aot-diff-cache-interp-{s}", .{tag});
+                defer gpa.free(iroot_rel);
                 try cwd.createDirPath(io, iroot_rel);
                 defer cwd.deleteTree(io, iroot_rel) catch {};
                 const iroot_abs = try cwd.realPathFileAlloc(io, iroot_rel, gpa);
