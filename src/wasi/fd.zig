@@ -1401,7 +1401,7 @@ test "fdSeek / fdTell: stdio returns spipe" {
     try testing.expectEqual(p1.Errno.spipe, fdTell(&h, &mem, 0, 0));
 }
 
-test "fdFdstatGet: stdout writes 24-byte block (character_device, RIGHTS_FD_WRITE)" {
+test "fdFdstatGet: stdout writes 24-byte block (character_device, the stdio write rights)" {
     var h = try Host.init(testing.allocator);
     defer h.deinit();
     var mem: [32]u8 = @splat(0xAB);
@@ -1413,8 +1413,8 @@ test "fdFdstatGet: stdout writes 24-byte block (character_device, RIGHTS_FD_WRIT
     try testing.expectEqual(@as(u8, 0), mem[1]);
     // fs_flags = 0
     try testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, mem[2..4], .little));
-    // rights_base = RIGHTS_FD_WRITE (default for fd 1)
-    try testing.expectEqual(p1.RIGHTS_FD_WRITE, std.mem.readInt(u64, mem[8..16], .little));
+    // rights_base = the fd 1 default: write + poll
+    try testing.expectEqual(p1.RIGHTS_FD_WRITE | p1.RIGHTS_POLL_FD_READWRITE, std.mem.readInt(u64, mem[8..16], .little));
     // rights_inheriting = 0
     try testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, mem[16..24], .little));
     // The 25th byte should be untouched.

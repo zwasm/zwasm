@@ -61,7 +61,7 @@ Bit N = `1 << N`, in witx declaration order.
 | 24 | `path_symlink` | `path_symlink` | `path.pathSymlink` |
 | 25 | `path_remove_directory` | `path_remove_directory` | `path.pathRemoveDirectory` |
 | 26 | `path_unlink_file` | `path_unlink_file` | `fd.pathUnlinkFile` |
-| 27 | `poll_fd_readwrite` | `poll_oneoff` subscriptions to `fd_read`/`fd_write` | — (not modelled; see below) |
+| 27 | `poll_fd_readwrite` | `poll_oneoff` subscriptions to `fd_read`/`fd_write` | `clocks.fdReadiness` |
 | 28 | `sock_shutdown` | `sock_shutdown` | — (not gated; see below) |
 | 29 | `sock_accept` | `sock_accept` | — (not gated; see below) |
 
@@ -93,10 +93,8 @@ Two consequences worth naming:
   it first. Both are answers `directory_seek` accepts; `notsup`, which this
   used to give, is not.
 
-Three rows stay ungated even once the checks land:
+Two rows stay ungated even once the checks land:
 
-- **`poll_fd_readwrite`** — `poll_oneoff` fd-readiness is `notsup` in zwasm
-  (`clocks.zig`), so there is nothing to gate. It becomes live with that work.
 - **`sock_shutdown` / `sock_accept`** — preview1 sockets are stubs that return
   `notsock` for every fd, and the official corpus asserts exactly that
   (`sock_shutdown-not_sock`). A rights check would answer `notcapable` to a
