@@ -199,6 +199,13 @@ pub const EventType = enum(u8) {
     _,
 };
 
+/// `eventrwflags` — the flag set on an `fd_read` / `fd_write` event.
+/// Bit 0 is the only one witx defines: the peer of the stream hung up, so no
+/// further data will arrive. `poll_oneoff` sets it on a read that is ready
+/// with nothing left to read (EOF), which is what stops a guest looping
+/// "poll until readable, then read" from spinning.
+pub const EVENTRWFLAGS_FD_READWRITE_HANGUP: u16 = 1 << 0;
+
 pub const Signal = enum(u8) {
     none = 0,
     hup = 1,

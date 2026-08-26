@@ -104,8 +104,8 @@ pub const PendingPreopen = struct {
 /// Default rights granted to inherited stdio fds. Mirrors the
 /// witx `fdflags` defaults a `wasi-libc`-compiled guest expects
 /// from a vanilla preopen-style stdin / stdout / stderr.
-const STDIO_READ_RIGHTS: p1.Rights = p1.RIGHTS_FD_READ;
-const STDIO_WRITE_RIGHTS: p1.Rights = p1.RIGHTS_FD_WRITE;
+const STDIO_READ_RIGHTS: p1.Rights = p1.RIGHTS_FD_READ | p1.RIGHTS_POLL_FD_READWRITE;
+const STDIO_WRITE_RIGHTS: p1.Rights = p1.RIGHTS_FD_WRITE | p1.RIGHTS_POLL_FD_READWRITE;
 
 pub const Host = struct {
     alloc: Allocator,
@@ -335,8 +335,10 @@ test "Host.init: stdio fds pre-populated at 0/1/2 with default rights" {
     try testing.expectEqual(FdKind.stdin, h.fd_table.items[0].kind);
     try testing.expectEqual(FdKind.stdout, h.fd_table.items[1].kind);
     try testing.expectEqual(FdKind.stderr, h.fd_table.items[2].kind);
-    try testing.expectEqual(p1.RIGHTS_FD_READ, h.fd_table.items[0].rights_base);
-    try testing.expectEqual(p1.RIGHTS_FD_WRITE, h.fd_table.items[1].rights_base);
+    // Stdio carries POLL_FD_READWRITE alongside its read/write right: a guest
+    // that polls stdin/stdout/stderr is the ordinary case, not a privilege.
+    try testing.expectEqual(p1.RIGHTS_FD_READ | p1.RIGHTS_POLL_FD_READWRITE, h.fd_table.items[0].rights_base);
+    try testing.expectEqual(p1.RIGHTS_FD_WRITE | p1.RIGHTS_POLL_FD_READWRITE, h.fd_table.items[1].rights_base);
 }
 
 test "Host.translateFd: stdio resolves; out-of-range returns null" {
