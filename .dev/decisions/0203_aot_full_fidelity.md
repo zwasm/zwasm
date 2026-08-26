@@ -122,6 +122,12 @@ refusal stays (soundness over coverage).
 
 - `test-aot-diff` expectation table may only SHRINK (RATCHET-FLIP enforces);
   any new `.wrong_result`/`.unsound` entry requires a new D-row + ADR note.
+- `test-aot-diff` accounts for its own denominator (ADR-0210 applied to this
+  lane): a fixture that is skipped is not a fixture that passed. `skipped_spawn`
+  (the harness could not launch a process) and `refused_produce` (`zwasm
+  compile` declined the module) both gate. Deliberately narrowing the produce
+  envelope therefore updates this gate in the same PR, the way a new divergence
+  adds a `known_table` row. Added 2026-08-26 — see the Revision row.
 - `fuzz-diff` (interp oracle, D-510) stays green at every stage.
 - Stage 1 bench guard on both arches (call_indirect/GC-heavy shootout).
 - No new libc sites (ADR-0070); zone layering unchanged (loader stays in
@@ -165,3 +171,16 @@ load via `buildAndRegisterTrapEntries`, stage 4).
   (cljw pins zwasm by git tag and ships `.wasm`).
 - The D-513 optimising-tier decision is untouched — this campaign changes
   where compiled code is STORED, not how it is generated.
+
+## Revision 2026-08-26 — D6 anti-regression invariants: the lane gates its denominator
+
+`test-aot-diff` counted skipped fixtures and printed them, but gated only on
+divergence, so a run that differentiated half its corpus still exited 0 — the
+shape ADR-0210 exists to forbid, in a lane ADR-0210's Decision text does not
+reach. The D6 invariant list gains a third entry: `skipped_spawn` and
+`refused_produce` both gate, separately, so that a machine failure and a
+produce-envelope refusal cannot be read as each other. Ratchet at the state of
+this revision: the expectation table is empty and all three OS legs report zero
+of both. The same change gave each run its own scratch roots — shared fixed
+roots let two overlapping runs delete each other's working directories, which
+is how a run came to be half-empty and green in the first place (issue #284).

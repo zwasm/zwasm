@@ -103,6 +103,15 @@ fn runLane(
 }
 
 pub fn main(init: std.process.Init) !void {
+    // `std.process.exit` does not run `defer`, and the scratch roots below are
+    // named per run, so nothing else would ever reclaim them. Every exit path
+    // returns a code from `run` instead; its defers have completed by the time
+    // the code reaches here.
+    const code = try run(init);
+    if (code != 0) std.process.exit(code);
+}
+
+fn run(init: std.process.Init) !u8 {
     const io = init.io;
     const gpa = init.gpa;
 
@@ -116,7 +125,7 @@ pub fn main(init: std.process.Init) !void {
     const cli_arg = arg_it.next() orelse {
         try stdout.print("usage: zwasm-aot-process-diff <zwasm-cli> <corpus-dir> [corpus-dir...]\n", .{});
         try stdout.flush();
-        std.process.exit(2);
+        return 2;
     };
     const cwd = std.Io.Dir.cwd();
     // Lanes run with per-fixture cwds — the CLI path must survive them.
@@ -125,12 +134,11 @@ pub fn main(init: std.process.Init) !void {
     // Scratch under .zig-cache (gitignored); artifact written per fixture
     // under the SAME basename as the source (argv[0] parity, magic-detected).
     //
-    // Every scratch root carries a per-RUN random tag. Fixed names let a
-    // second concurrent run of this harness delete the tree the first one is
-    // mid-way through: the loser either dies on the open (FileNotFound) or —
-    // worse — survives with `zwasm compile` failing WriteOutputFailed into
-    // the deleted dir, which lands in `skipped_refused` and still exits 0.
-    // Same generator as the cache writer's temp names (src/cli/cache.zig).
+    // Every scratch root carries a per-RUN random tag, because two runs of
+    // this harness can overlap in one checkout (`test-all` in one shell,
+    // `test-aot-diff` in another) and a shared root means the second run
+    // deletes the tree the first is working in. Same generator as the cache
+    // writer's temp names (src/cli/cache.zig).
     var tag_bytes: [8]u8 = undefined;
     io.random(&tag_bytes);
     var tag_buf: [16]u8 = undefined;
@@ -156,7 +164,12 @@ pub fn main(init: std.process.Init) !void {
 
     var total: u32 = 0;
     var matched: u32 = 0;
-    var skipped_refused: u32 = 0;
+    // Both gate, separately: a spawn failure is the harness or the machine
+    // (the CLI path, fds, memory) and says nothing about the product, while a
+    // refusal is the produce envelope declining a module. One counter for
+    // both is how an environment failure once got read as a characterisation.
+    var skipped_spawn: u32 = 0; // gate
+    var refused_produce: u32 = 0; // gate
     var expected_diverged: u32 = 0;
     var unsound_reported: u32 = 0;
     var unexpected: u32 = 0; // gate
@@ -171,7 +184,7 @@ pub fn main(init: std.process.Init) !void {
         var dir = cwd.openDir(io, corpus_dir, .{ .iterate = true }) catch |err| {
             try stdout.print("error: cannot open '{s}': {s}\n", .{ corpus_dir, @errorName(err) });
             try stdout.flush();
-            std.process.exit(1);
+            return 1;
         };
         defer dir.close(io);
 
@@ -188,7 +201,10 @@ pub fn main(init: std.process.Init) !void {
 
             const needs_preopen = fixtureNeedsPreopen(entry.name);
             if (needs_preopen) {
-                cwd.deleteTree(io, preopen_scratch) catch {};
+                // Setup, not cleanup: both lanes must see the same empty
+                // preopen, so a delete that fails is a real failure rather
+                // than something to skip past.
+                try cwd.deleteTree(io, preopen_scratch);
                 try cwd.createDirPath(io, preopen_scratch);
             }
             defer if (needs_preopen) cwd.deleteTree(io, preopen_scratch) catch {};
@@ -210,7 +226,7 @@ pub fn main(init: std.process.Init) !void {
                 &.{ cli, "run", entry.name };
             var lane_a = runLane(gpa, io, lane_a_argv, corpus_dir) catch |err| {
                 try stdout.print("SKIP-SPAWN  {s}: lane A: {s}\n", .{ entry.name, @errorName(err) });
-                skipped_refused += 1;
+                skipped_spawn += 1;
                 continue;
             };
             defer lane_a.deinit(gpa);
@@ -221,7 +237,7 @@ pub fn main(init: std.process.Init) !void {
                 .argv = &.{ cli, "compile", fixture_path, "-o", artifact_path },
             }) catch |err| {
                 try stdout.print("SKIP-SPAWN  {s}: compile: {s}\n", .{ entry.name, @errorName(err) });
-                skipped_refused += 1;
+                skipped_spawn += 1;
                 continue;
             };
             defer gpa.free(compile_result.stdout);
@@ -230,7 +246,7 @@ pub fn main(init: std.process.Init) !void {
             if (!compile_ok) {
                 const first_line = std.mem.sliceTo(compile_result.stderr, '\n');
                 try stdout.print("SKIP-REFUSED  {s}: {s}\n", .{ entry.name, first_line });
-                skipped_refused += 1;
+                refused_produce += 1;
                 continue;
             }
 
@@ -241,7 +257,7 @@ pub fn main(init: std.process.Init) !void {
                 &.{ cli, "run", entry.name };
             var lane_b = runLane(gpa, io, lane_b_argv, tmp_dir) catch |err| {
                 try stdout.print("SKIP-SPAWN  {s}: lane B: {s}\n", .{ entry.name, @errorName(err) });
-                skipped_refused += 1;
+                skipped_spawn += 1;
                 continue;
             };
             defer lane_b.deinit(gpa);
@@ -255,13 +271,13 @@ pub fn main(init: std.process.Init) !void {
                 &.{ cli, "run", cache_flag, entry.name };
             var lane_miss = runLane(gpa, io, lane_c_argv, corpus_dir) catch |err| {
                 try stdout.print("SKIP-SPAWN  {s}: lane C miss: {s}\n", .{ entry.name, @errorName(err) });
-                skipped_refused += 1;
+                skipped_spawn += 1;
                 continue;
             };
             defer lane_miss.deinit(gpa);
             var lane_hit = runLane(gpa, io, lane_c_argv, corpus_dir) catch |err| {
                 try stdout.print("SKIP-SPAWN  {s}: lane C hit: {s}\n", .{ entry.name, @errorName(err) });
-                skipped_refused += 1;
+                skipped_spawn += 1;
                 continue;
             };
             defer lane_hit.deinit(gpa);
@@ -366,7 +382,7 @@ pub fn main(init: std.process.Init) !void {
     if (n_dirs == 0) {
         try stdout.print("usage: zwasm-aot-process-diff <zwasm-cli> <corpus-dir> [corpus-dir...]\n", .{});
         try stdout.flush();
-        std.process.exit(2);
+        return 2;
     }
 
     // The cache lanes must have actually STORED entries — a silently-broken
@@ -392,34 +408,38 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try stdout.print(
-        "\naot_process_diff: {d} fixtures — {d} matched, {d} refused(skip), {d} expected-diverge, {d} unsound-reported, {d} UNEXPECTED, {d} ratchet-flips — GATING\n",
-        .{ total, matched, skipped_refused, expected_diverged, unsound_reported, unexpected, ratchet_flips },
+        "\naot_process_diff: {d} fixtures — {d} matched, {d} spawn-skip, {d} refused, {d} expected-diverge, {d} unsound-reported, {d} UNEXPECTED, {d} ratchet-flips — GATING\n",
+        .{ total, matched, skipped_spawn, refused_produce, expected_diverged, unsound_reported, unexpected, ratchet_flips },
     );
     try stdout.flush();
 
     if (total == 0) {
         try stdout.print("error: empty corpus\n", .{});
         try stdout.flush();
-        std.process.exit(1);
+        return 1;
     }
-    // A skip is not a pass. Every fixture the producer accepts has matched
-    // its source since ADR-0203 stage 3 (the expectation table is empty), and
-    // all three OS legs report 0 refused — so a nonzero count is a real
-    // change, not noise. Ungated it read as green, which is how a corrupted
-    // run stayed silent: 32 of 64 fixtures landed here as
-    // `SKIP-REFUSED ... WriteOutputFailed` and the process still exited 0,
-    // leaving half the corpus undifferentiated under a passing result. A
-    // deliberate narrowing of the produce envelope updates this gate in the
-    // same PR, the way a new divergence adds a `known_table` row.
-    if (skipped_refused != 0) {
+    // A skipped fixture is not a differentiated one, so neither counter may
+    // pass quietly: the lane's whole claim is the size of its denominator.
+    const differentiated = total - skipped_spawn - refused_produce;
+    if (skipped_spawn != 0) {
         try stdout.print(
-            "SKIP-GATE-FAIL: {d} of {d} fixtures skipped (spawn failure or produce refusal) — only {d} were differentiated\n",
-            .{ skipped_refused, total, matched },
+            "SPAWN-GATE-FAIL: {d} of {d} fixtures could not be launched — {d} differentiated. The harness or the machine failed, not the product.\n",
+            .{ skipped_spawn, total, differentiated },
         );
-        try stdout.flush();
     }
+    // A refusal is the produce envelope declining a module. Deliberately
+    // narrowing that envelope updates this gate in the same PR, the way a new
+    // divergence adds a `known_table` row.
+    if (refused_produce != 0) {
+        try stdout.print(
+            "REFUSE-GATE-FAIL: {d} of {d} fixtures were refused by `zwasm compile` — {d} differentiated.\n",
+            .{ refused_produce, total, differentiated },
+        );
+    }
+    try stdout.flush();
     // Gate: an unexpected divergence is a fidelity regression (or a new
     // finding to triage into the table with a D-NNN); a ratchet flip means a
     // known gap was fixed and the table must be updated in the same PR.
-    if (unexpected != 0 or ratchet_flips != 0 or skipped_refused != 0) std.process.exit(1);
+    if (unexpected != 0 or ratchet_flips != 0 or skipped_spawn != 0 or refused_produce != 0) return 1;
+    return 0;
 }

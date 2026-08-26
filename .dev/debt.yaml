@@ -2,6 +2,38 @@
 # Query/edit discipline: .claude/rules/yaml_ssot_yq.md. yq = mikefarah Go v4.
 
 entries:
+  - id: "D-598"
+    layer: "process"
+    status: "note"
+    description: |-
+      **A guard written over `build.zig` sees only the consumption channel its
+      author had in mind.** `check_releasesafe_runners.sh` enforces the
+      ADR-0177 ReleaseSafe floor by matching `addImport("zwasm", core)` — the
+      channel by which a runner reaches the engine as a MODULE. A runner that
+      reaches it as a SPAWNED BINARY imports nothing, so the guard had no
+      opinion about it and reported OK while `test-aot-diff` ran its whole
+      cross-process corpus on the Debug CLI. The guard now also matches the
+      spawn channel, and the lesson's audit recipe covers both — but the
+      condition is structural, not spent: a third channel (a run step invoking
+      an installed `zig-out` path, `addSystemCommand`, a shell script that
+      calls the CLI) is invisible again, and the guard would again say OK.
+      Same family as D-597 (`check_libc_boundary.sh` classifies by symbol, so
+      a path axis is unexamined) and the #266 / #268 pair: in each case the
+      mechanization covers one axis of a rule stated over all of them.
+      Discharge: assert the property on the ARTIFACT rather than on build.zig's
+      spelling — publish the build mode in `zwasm --version` and have each
+      spawning runner check it once before its corpus loop. That is what cljw
+      does (ADR-0132 there) and it survives any spelling of the wiring. Until
+      then the grep is a tripwire, not a proof.
+    first_raised: "2026-08-26"
+    last_reviewed: "2026-08-26"
+    refs: |-
+      scripts/check_releasesafe_runners.sh (case (a) import channel, case (a2) spawn channel);
+      .dev/decisions/0177_test_runners_releasesafe.md (Revision 2026-06-14, Revision 2026-08-26);
+      .dev/lessons/2026-06-14-releasesafe-runner-floor-audit.md (audit recipe, steps 1a/1b);
+      D-597 (same family: one axis mechanized, the rule stated over several);
+      issue #284 / PR #306 (the defect this condition produced).
+
   - id: "D-597"
     layer: "code"
     status: "note"

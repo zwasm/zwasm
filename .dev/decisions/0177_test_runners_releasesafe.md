@@ -83,3 +83,25 @@ JIT smoke).
   Remaining Debug-by-design (verified intentional): `core_tests` (leak-detecting
   DebugAllocator), `exe` (production CLI honours `-Doptimize`), the light unit-test
   mods, and the trivial `zig_host`/`c_host` single-wasm examples.
+  **Scope of that enumeration (clarified 2026-08-26):** it was taken over the
+  MODULE-IMPORT channel only. `exe` is Debug-by-design as the *installed*
+  artifact; it was simultaneously the engine of a spawned-binary corpus lane,
+  which this pass never examined. See the 2026-08-26 row.
+
+- 2026-08-26 — **Gap closed: the spawn channel.** The floor is enforced by
+  swapping a module import, so it reaches a runner only if the runner imports a
+  zwasm module. `test-aot-diff` (`test/aot/aot_process_diff.zig`) takes the
+  engine as a **spawned binary** — `build.zig` hands it the CLI artifact — so
+  no module swap could reach it and it ran its whole cross-process corpus on
+  Debug, at a cost of one Debug compile per lane per fixture. Both the audit
+  recipe and `check_releasesafe_runners.sh` were blind to it for the same
+  reason: both walk `addImport` sites. Fix: `exe_rs` / `zwasm-releasesafe`, a
+  ReleaseSafe twin of the CLI built from `core_rs`, handed to that lane;
+  `exe` keeps `-Doptimize` as the shipped binary and still backs `zig build
+  run` and the single-shot fault/oob-trap lanes. Guard extended with case (a2)
+  (any `add*Arg` handing `exe` to a runner, plus `exe.getEmittedBin()`), and
+  moved into `scripts/ci_gate.sh` core — it had run only in `gate_commit.sh`,
+  which is optional pre-flight and fires only when `build.zig` is staged, so
+  the floor was never checked on the merge path. **Generalised rule: the floor
+  is a property of the ENGINE a runner executes, not of the modules it
+  imports.** Lesson `releasesafe-runner-floor-audit` updated for both channels.
