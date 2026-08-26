@@ -37,6 +37,23 @@ while IFS= read -r mod; do
   fi
 done < <(grep -oE '[a-z_0-9]+\.addImport\("zwasm", core\)' "$BUILD" | sed -E 's/\.addImport.*//')
 
+# (a2) The SPAWN channel. (a) sees a runner only if it imports a zwasm module.
+#      `test-aot-diff` consumes the engine as a spawned BINARY — the CLI is
+#      handed to the runner via `addArtifactArg` — so it was invisible to (a)
+#      and to the lesson's grep recipe, and ran its 64-fixture corpus on the
+#      Debug `exe` for two months (531 s vs 19 s ReleaseSafe, same verdict).
+#      `exe` is correctly on (a)'s allowlist: the SHIPPED binary must honour
+#      -Doptimize. What is not correct is feeding that binary to a corpus
+#      runner. Pass `exe_rs` (the ReleaseSafe twin) instead.
+#      Not flagged: `addRunArtifact(exe)` — running the Debug CLI directly is
+#      `zig build run` and the single-shot fault/oob-trap lanes, not a corpus.
+while IFS= read -r site; do
+  echo "[check_releasesafe_runners] BLOCK — '$site' hands the Debug \`exe\` to a runner."
+  echo "  A runner spawning the Debug CLI compiles its whole corpus ~30-100× slower (ADR-0177)."
+  echo "  Fix: pass \`exe_rs\` (the ReleaseSafe CLI twin) instead."
+  fail=1
+done < <(grep -oE '[a-z_0-9]+\.addArtifactArg\(exe\)' "$BUILD" | sed -E 's/\.addArtifactArg.*//')
+
 # (b) core_comp must stay floored at runner_optimize (the 2026-06-14 fix).
 #     Inspect the `const core_comp = b.createModule({...})` block.
 core_comp_block=$(awk '/const core_comp = b\.createModule/{f=1} f{print} /\}\);/{if(f) exit}' "$BUILD")
@@ -48,6 +65,6 @@ if ! grep -qE '\.optimize = runner_optimize' <<<"$core_comp_block"; then
 fi
 
 if [ "$fail" -eq 0 ]; then
-  echo "[check_releasesafe_runners] OK — all e2e runners ReleaseSafe-floored; core_comp floored."
+  echo "[check_releasesafe_runners] OK — all e2e runners ReleaseSafe-floored (imports + spawns); core_comp floored."
 fi
 exit "$fail"
