@@ -402,8 +402,24 @@ pub fn main(init: std.process.Init) !void {
         try stdout.flush();
         std.process.exit(1);
     }
+    // A skip is not a pass. Every fixture the producer accepts has matched
+    // its source since ADR-0203 stage 3 (the expectation table is empty), and
+    // all three OS legs report 0 refused — so a nonzero count is a real
+    // change, not noise. Ungated it read as green, which is how a corrupted
+    // run stayed silent: 32 of 64 fixtures landed here as
+    // `SKIP-REFUSED ... WriteOutputFailed` and the process still exited 0,
+    // leaving half the corpus undifferentiated under a passing result. A
+    // deliberate narrowing of the produce envelope updates this gate in the
+    // same PR, the way a new divergence adds a `known_table` row.
+    if (skipped_refused != 0) {
+        try stdout.print(
+            "SKIP-GATE-FAIL: {d} of {d} fixtures skipped (spawn failure or produce refusal) — only {d} were differentiated\n",
+            .{ skipped_refused, total, matched },
+        );
+        try stdout.flush();
+    }
     // Gate: an unexpected divergence is a fidelity regression (or a new
     // finding to triage into the table with a D-NNN); a ratchet flip means a
     // known gap was fixed and the table must be updated in the same PR.
-    if (unexpected != 0 or ratchet_flips != 0) std.process.exit(1);
+    if (unexpected != 0 or ratchet_flips != 0 or skipped_refused != 0) std.process.exit(1);
 }

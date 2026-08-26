@@ -88,6 +88,15 @@ echo "[ci_gate] spec-manifest shape guard (check_spec_manifest_shape --gate)"
 # above.
 bash scripts/check_spec_manifest_shape.sh --gate
 
+# ReleaseSafe-runner floor (ADR-0177). Until now this guard ran only in
+# `gate_commit.sh`, which is optional pre-flight and fires only when build.zig
+# is staged — so the floor was never checked on the merge path, and the
+# `test-aot-diff` lane spent two months spawning a Debug engine (531 s vs 19 s)
+# with every gate green. It is a grep over build.zig, so it costs nothing and
+# belongs in the core gate rather than behind ZWASM_CI_EXTENDED.
+echo "[ci_gate] ReleaseSafe-runner floor (check_releasesafe_runners)"
+bash scripts/check_releasesafe_runners.sh
+
 if [ "${ZWASM_CI_EXTENDED:-0}" = "1" ]; then
     echo "[ci_gate] extended: zig build lint"
     zig build lint

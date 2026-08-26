@@ -224,7 +224,7 @@ pub fn build(b: *std.Build) void {
     exe_rs_mod.addIncludePath(b.path("include"));
     exe_rs_mod.addImport("zwasm", core_rs);
     const exe_rs = b.addExecutable(.{
-        .name = "zwasm-runner",
+        .name = "zwasm-releasesafe",
         .root_module = exe_rs_mod,
     });
 
