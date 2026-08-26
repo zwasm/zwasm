@@ -91,7 +91,8 @@ the advisory goes away (ADR-0208 D2/D3).
 required **`ci-required`** status check. CI runs
 [`scripts/ci_gate.sh`](../scripts/ci_gate.sh) on **all three supported OSes** —
 macOS aarch64, Linux x86_64, Windows x86_64. Your PR gets the *core* gate: fmt
-+ `test-all` + the rust-host consumer + the test-discovery guard. The extended
++ `test-all` + the rust-host consumer + the test-discovery guard + the
+ReleaseSafe-runner floor guard (ADR-0177). The extended
 static/build checks (lint, the build-option DCE matrix, AOT cross-compile,
 `zone_check`) run on the merge to `main`, not per PR — they are up to ~20
 cold-cache builds and would dominate every PR's wall-clock. All three legs are

@@ -8,13 +8,16 @@
 # `.optimize = runner_optimize`. This check fails when:
 #   (a) a NEW module imports the Debug `core` module as "zwasm" outside the
 #       justified allowlist (a new runner that forgot the floor), OR
+#   (a2) a runner is handed the Debug `exe` as a SPAWNED BINARY — the channel
+#       (a) cannot see, because the runner imports no zwasm module at all.
 #   (b) `core_comp` (the Component Model spec runner's module, 158-manifest
 #       corpus in test-all) regresses from `runner_optimize` back to raw
 #       `optimize` (= Debug) — the 2026-06-14 gap.
 #
 # Debug-by-design allowlist (verified intentional): `core` itself (self-import),
-# `core_tests`/`exe` (leak-detecting DebugAllocator + production CLI honours
-# -Doptimize), the light unit-test mods, the trivial single-wasm examples.
+# `core_tests` (leak-detecting DebugAllocator), `exe` AS THE INSTALLED ARTIFACT
+# (the shipped CLI honours -Doptimize) — but NOT as a runner's engine, which is
+# what (a2) checks — the light unit-test mods, the trivial single-wasm examples.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -37,6 +40,29 @@ while IFS= read -r mod; do
   fi
 done < <(grep -oE '[a-z_0-9]+\.addImport\("zwasm", core\)' "$BUILD" | sed -E 's/\.addImport.*//')
 
+# (a2) The SPAWN channel. (a) sees a runner only if it imports a zwasm module.
+#      `test-aot-diff` consumes the engine as a spawned BINARY — the CLI is
+#      handed to the runner via `addArtifactArg` — so it was invisible to (a)
+#      and to the lesson's grep recipe, and ran its 64-fixture corpus on the
+#      Debug `exe` for two months (531 s vs 19 s ReleaseSafe, same verdict).
+#      `exe` is correctly on (a)'s allowlist: the SHIPPED binary must honour
+#      -Doptimize. What is not correct is feeding that binary to a corpus
+#      runner. Pass `exe_rs` (the ReleaseSafe twin) instead.
+#      Not flagged: `addRunArtifact(exe)` — running the Debug CLI directly is
+#      `zig build run` and the single-shot fault/oob-trap lanes, not a corpus.
+# Matches the whole `add*Arg` family and `getEmittedBin`, not just
+# `addArtifactArg(exe)`: build.zig already uses the prefixed-arg spelling
+# elsewhere, so a narrower pattern would report OK on the same regression
+# written a different way. `\bexe\b` so `exe_rs` does not match.
+while IFS= read -r site; do
+  echo "[check_releasesafe_runners] BLOCK — a runner is handed the Debug \`exe\`:"
+  echo "    $site"
+  echo "  A runner spawning the Debug CLI compiles its whole corpus far slower (ADR-0177)."
+  echo "  Fix: pass \`exe_rs\` (the ReleaseSafe CLI twin) instead."
+  fail=1
+done < <(grep -nE 'add[A-Za-z]*Arg\([^)]*\bexe\b[^)]*\)|\bexe\.getEmittedBin\(' "$BUILD" \
+         | grep -vE 'addRunArtifact')
+
 # (b) core_comp must stay floored at runner_optimize (the 2026-06-14 fix).
 #     Inspect the `const core_comp = b.createModule({...})` block.
 core_comp_block=$(awk '/const core_comp = b\.createModule/{f=1} f{print} /\}\);/{if(f) exit}' "$BUILD")
@@ -48,6 +74,6 @@ if ! grep -qE '\.optimize = runner_optimize' <<<"$core_comp_block"; then
 fi
 
 if [ "$fail" -eq 0 ]; then
-  echo "[check_releasesafe_runners] OK — all e2e runners ReleaseSafe-floored; core_comp floored."
+  echo "[check_releasesafe_runners] OK — all e2e runners ReleaseSafe-floored (imports + spawns); core_comp floored."
 fi
 exit "$fail"

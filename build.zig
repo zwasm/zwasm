@@ -203,6 +203,28 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // The ReleaseSafe floor of ADR-0177 (D-311), reaching the one channel a
+    // module swap cannot: `test-aot-diff` consumes the engine as a SPAWNED
+    // BINARY, so `core_rs` never reaches it and it would otherwise run the
+    // whole corpus on a Debug engine — three compiles and five CLI spawns per
+    // fixture, so the Debug tax lands once per compile rather than once per
+    // run. ReleaseSafe keeps every safety check. Deliberately not installed:
+    // the shipped `zwasm` is `exe`, which honours `-Doptimize`.
+    const exe_rs_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("src/cli/main.zig"),
+        .target = target,
+        .optimize = runner_optimize,
+        .strip = strip_opt,
+        .link_libc = true,
+    });
+    exe_rs_mod.addImport("build_options", build_options_mod);
+    exe_rs_mod.addIncludePath(b.path("include"));
+    exe_rs_mod.addImport("zwasm", core_rs);
+    const exe_rs = b.addExecutable(.{
+        .name = "zwasm-releasesafe",
+        .root_module = exe_rs_mod,
+    });
+
     // `zig build run -- <args>` runs the CLI.
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -941,7 +963,7 @@ pub fn build(b: *std.Build) void {
         .root_module = aot_diff_mod,
     });
     const run_aot_diff = b.addRunArtifact(aot_diff_exe);
-    run_aot_diff.addArtifactArg(exe); // the zwasm CLI under test
+    run_aot_diff.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
     run_aot_diff.addArg(b.pathFromRoot("test/realworld/wasm"));
     run_aot_diff.addArg(b.pathFromRoot("test/aot/corpus"));
     run_aot_diff.has_side_effects = true;
