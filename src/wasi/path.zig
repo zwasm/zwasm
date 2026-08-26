@@ -124,6 +124,23 @@ fn finalComponentIs(path: []const u8, which: DottedFinal) bool {
     return which == .dot_or_dotdot and std.mem.eql(u8, last, "..");
 }
 
+/// The errno POSIX gives `unlink` for a guest path written with a trailing
+/// separator, or `.success` when the call must reach the host unchanged.
+///
+/// A trailing `/` means "this must resolve to a directory", so `unlink` on one
+/// is EISDIR and on anything else ENOTDIR — never a delete. Linux and macOS
+/// answer that themselves. NT does not: it rejects the trailing backslash on
+/// the non-directory open `deleteFile` issues, with STATUS_OBJECT_NAME_INVALID,
+/// which `std.Io` classifies as a programmer bug and panics on. So on Windows
+/// the errno is decided here and the host is never asked.
+pub fn unlinkTrailingSlashErrno(dir: std.Io.Dir, io: std.Io, path: []const u8) p1.Errno {
+    if (comptime builtin.os.tag != .windows) return .success;
+    if (path.len == 0 or path[path.len - 1] != '/') return .success;
+    const named = std.mem.trimEnd(u8, path, "/");
+    const st = dir.statFile(io, named, .{}) catch |err| return mapDirErr(err);
+    return if (st.kind == .directory) .isdir else .notdir;
+}
+
 const Resolved = struct { dir: std.Io.Dir, sub: []const u8 };
 
 /// Resolve `(dirfd, path_ptr, path_len)` to a host `Dir` + bounded guest path,
