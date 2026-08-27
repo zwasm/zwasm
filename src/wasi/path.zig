@@ -907,7 +907,10 @@ test "path_unlink_file: a trailing slash is the POSIX errno on every host, not a
             _ = root.statFile(testing.io, link, .{ .follow_symlinks = false }) catch
                 return error.SymlinkWasUnlinked;
         }
-    } else |_| {}
+    } else |_| {
+        // The host denies unprivileged symlink creation (Windows without
+        // Developer Mode); nothing above depends on these two shapes.
+    }
     // None of those deleted anything, and the same name without the trailing
     // slash still does.
     @memset(mem[0..32], 0);
