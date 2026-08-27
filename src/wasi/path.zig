@@ -850,6 +850,10 @@ test "path_unlink_file: a trailing slash is the POSIX errno on every host, not a
     // same NT call with DIRECTORY_FILE set and does NOT abort, which is why
     // `path_remove_directory` needs no guard of this shape.
     //
+    // macOS is not the Windows case and is deliberately left to the host: its
+    // `unlink` answers EPERM for a trailing slash on a directory, which
+    // `dirDeleteFilePosix` re-stats into `error.IsDir`, and ENOTDIR otherwise.
+    //
     // As in the `#265` probe above, the load-bearing part is that the call
     // RETURNS at all: a host that panics takes its whole CI leg down.
     var tmp = std.testing.tmpDir(.{});
