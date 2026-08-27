@@ -129,15 +129,21 @@ fn finalComponentIs(path: []const u8, which: DottedFinal) bool {
 ///
 /// A trailing `/` means "this must resolve to a directory", so `unlink` on one
 /// is EISDIR and on anything else ENOTDIR — never a delete. Linux and macOS
-/// answer that themselves. NT does not: it rejects the trailing backslash on
-/// the non-directory open `deleteFile` issues, with STATUS_OBJECT_NAME_INVALID,
-/// which `std.Io` classifies as a programmer bug and panics on. So on Windows
-/// the errno is decided here and the host is never asked.
+/// answer that themselves and are left to: macOS returns EPERM for a directory,
+/// which `dirDeleteFilePosix` re-stats into `error.IsDir`, so neither host
+/// reaches the EINVAL arm that panics. NT does not answer it at all — it
+/// rejects the trailing backslash on the non-directory open `deleteFile`
+/// issues, with STATUS_OBJECT_NAME_INVALID, which `std.Io` classifies as a
+/// programmer bug and panics on. So on Windows the errno is decided here.
+///
+/// The classifying stat does NOT follow the final symlink, because `unlink`
+/// does not: a trailing slash on a symlink is ENOTDIR whatever the link points
+/// at, and ENOTDIR rather than ENOENT when it dangles.
 pub fn unlinkTrailingSlashErrno(dir: std.Io.Dir, io: std.Io, path: []const u8) p1.Errno {
     if (comptime builtin.os.tag != .windows) return .success;
     if (path.len == 0 or path[path.len - 1] != '/') return .success;
     const named = std.mem.trimEnd(u8, path, "/");
-    const st = dir.statFile(io, named, .{}) catch |err| return mapDirErr(err);
+    const st = dir.statFile(io, named, .{ .follow_symlinks = false }) catch |err| return mapDirErr(err);
     return if (st.kind == .directory) .isdir else .notdir;
 }
 
@@ -873,11 +879,30 @@ test "path_unlink_file: a trailing slash is the POSIX errno on every host, not a
         .{ .p = "d//", .want = .isdir },
         .{ .p = "f/", .want = .notdir },
         .{ .p = "./", .want = .isdir },
+        .{ .p = "gone/", .want = .noent },
     }) |c| {
         @memset(mem[0..32], 0);
         writeGuestPath(&mem, 0, c.p);
         try testing.expectEqual(c.want, unlinkFile(&h, &mem, dirfd, 0, @intCast(c.p.len)));
     }
+
+    // A trailing slash does NOT follow the final symlink: the last component is
+    // a symlink, not a directory, so it is `notdir` even when the link points at
+    // one, and `notdir` rather than `noent` when it dangles. Measured on
+    // x86_64-linux; a guard that classifies with a following stat answers
+    // `isdir` and `noent` here instead. Skipped where the host denies
+    // unprivileged symlink creation — nothing above depends on these.
+    if (root.symLink(testing.io, "d", "ld", .{})) |_| {
+        try root.symLink(testing.io, "nowhere", "ln", .{});
+        for ([_]struct { p: []const u8, want: p1.Errno }{
+            .{ .p = "ld/", .want = .notdir },
+            .{ .p = "ln/", .want = .notdir },
+        }) |c| {
+            @memset(mem[0..32], 0);
+            writeGuestPath(&mem, 0, c.p);
+            try testing.expectEqual(c.want, unlinkFile(&h, &mem, dirfd, 0, @intCast(c.p.len)));
+        }
+    } else |_| {}
     // None of those deleted anything, and the same name without the trailing
     // slash still does.
     @memset(mem[0..32], 0);
