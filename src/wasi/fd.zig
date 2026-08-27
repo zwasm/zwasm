@@ -1204,6 +1204,8 @@ pub fn pathUnlinkFile(host: *Host, mem: []u8, dirfd: p1.Fd, path_ptr: u32, path_
     const dir_handle = dir_slot.host_handle orelse return .notdir;
     const io = host.io orelse return .nosys;
     const dir: std.Io.Dir = .{ .handle = dir_handle };
+    const trailing = path_mod.unlinkTrailingSlashErrno(dir, io, path);
+    if (trailing != .success) return trailing;
     dir.deleteFile(io, path) catch |err| return mapOpenError(err);
     return .success;
 }
