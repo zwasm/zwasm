@@ -124,6 +124,32 @@ fn finalComponentIs(path: []const u8, which: DottedFinal) bool {
     return which == .dot_or_dotdot and std.mem.eql(u8, last, "..");
 }
 
+/// The errno POSIX gives `unlink` for a guest path written with a trailing
+/// separator, or `.success` when the call must reach the host unchanged.
+///
+/// A trailing `/` means "this must resolve to a directory", so `unlink` on one
+/// is EISDIR and on anything else ENOTDIR — never a delete. Linux and macOS
+/// answer that themselves and are left to: macOS returns EPERM for a directory,
+/// which `dirDeleteFilePosix` re-stats into `error.IsDir`, so neither host
+/// reaches the EINVAL arm that panics. NT does not answer it at all — it
+/// rejects the trailing backslash on the non-directory open `deleteFile`
+/// issues, with STATUS_OBJECT_NAME_INVALID, which `std.Io` classifies as a
+/// programmer bug and panics on. So on Windows the errno is decided here.
+///
+/// The classifying stat does NOT follow the final symlink. The two POSIX hosts
+/// disagree about a trailing slash over one — Linux does not follow it and
+/// answers ENOTDIR, macOS follows and answers EPERM, which maps to `isdir` —
+/// and the official corpus never unlinks a symlink with a trailing slash, so
+/// there is no host answer to match. Not following keeps the guard from
+/// resolving a link it is about to refuse.
+pub fn unlinkTrailingSlashErrno(dir: std.Io.Dir, io: std.Io, path: []const u8) p1.Errno {
+    if (comptime builtin.os.tag != .windows) return .success;
+    if (path.len == 0 or path[path.len - 1] != '/') return .success;
+    const named = std.mem.trimEnd(u8, path, "/");
+    const st = dir.statFile(io, named, .{ .follow_symlinks = false }) catch |err| return mapDirErr(err);
+    return if (st.kind == .directory) .isdir else .notdir;
+}
+
 const Resolved = struct { dir: std.Io.Dir, sub: []const u8 };
 
 /// Resolve `(dirfd, path_ptr, path_len)` to a host `Dir` + bounded guest path,
@@ -820,4 +846,71 @@ test "path_rename: a dotted final component is inval on every host (#265)" {
     @memset(mem[0..16], 0);
     writeGuestPath(&mem, 0, "a/../t2");
     try testing.expectEqual(p1.Errno.success, pathRename(&h, &mem, dirfd, 16, 1, dirfd, 0, 7));
+}
+
+test "path_unlink_file: a trailing slash is the POSIX errno on every host, not a host panic" {
+    // POSIX gives a trailing `/` the meaning "this path must resolve to a
+    // directory", so `unlink` on one is EISDIR, on anything else ENOTDIR, and
+    // never a delete. NT instead rejects the trailing backslash on the
+    // non-directory open `deleteFile` issues, with OBJECT_NAME_INVALID, which
+    // `std.Io` classifies as a programmer bug and panics on — so a guest with a
+    // preopen aborted the runtime with one `path_unlink_file("dir/", …)`, and
+    // the in-process official-corpus runner died with it. `deleteDir` takes the
+    // same NT call with DIRECTORY_FILE set and does NOT abort, which is why
+    // `path_remove_directory` needs no guard of this shape.
+    //
+    // macOS is not the Windows case and is deliberately left to the host: its
+    // `unlink` answers EPERM for a trailing slash on a directory, which
+    // `dirDeleteFilePosix` re-stats into `error.IsDir`, and ENOTDIR otherwise.
+    //
+    // As in the `#265` probe above, the load-bearing part is that the call
+    // RETURNS at all: a host that panics takes its whole CI leg down.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    const dirfd = try h.addPreopen(tmp.dir.handle, "/sandbox");
+    const root: std.Io.Dir = .{ .handle = tmp.dir.handle };
+    try root.createDir(testing.io, "d", std.Io.File.Permissions.default_dir);
+    try root.writeFile(testing.io, .{ .sub_path = "f", .data = "x" });
+
+    const unlinkFile = @import("fd.zig").pathUnlinkFile;
+    var mem: [64]u8 = @splat(0);
+    for ([_]struct { p: []const u8, want: p1.Errno }{
+        .{ .p = "d/", .want = .isdir },
+        .{ .p = "d//", .want = .isdir },
+        .{ .p = "f/", .want = .notdir },
+        .{ .p = "./", .want = .isdir },
+        .{ .p = "gone/", .want = .noent },
+    }) |c| {
+        @memset(mem[0..32], 0);
+        writeGuestPath(&mem, 0, c.p);
+        try testing.expectEqual(c.want, unlinkFile(&h, &mem, dirfd, 0, @intCast(c.p.len)));
+    }
+
+    // A trailing slash over a symlink is the one shape the two POSIX hosts do not
+    // agree on: Linux does not follow the final link and answers `notdir`, macOS
+    // follows it and answers `isdir`. Both were measured, and the official corpus
+    // never unlinks a symlink with a trailing slash, so no single errno is
+    // pinnable — only the invariant is: the call fails, and the link survives.
+    // Skipped where the host denies unprivileged symlink creation; nothing above
+    // depends on these.
+    if (root.symLink(testing.io, "d", "ld", .{})) |_| {
+        try root.symLink(testing.io, "nowhere", "ln", .{});
+        for ([_][]const u8{ "ld/", "ln/" }) |p| {
+            @memset(mem[0..32], 0);
+            writeGuestPath(&mem, 0, p);
+            try testing.expect(unlinkFile(&h, &mem, dirfd, 0, @intCast(p.len)) != .success);
+        }
+        for ([_][]const u8{ "ld", "ln" }) |link| {
+            _ = root.statFile(testing.io, link, .{ .follow_symlinks = false }) catch
+                return error.SymlinkWasUnlinked;
+        }
+    } else |_| {}
+    // None of those deleted anything, and the same name without the trailing
+    // slash still does.
+    @memset(mem[0..32], 0);
+    writeGuestPath(&mem, 0, "f");
+    try testing.expectEqual(p1.Errno.success, unlinkFile(&h, &mem, dirfd, 0, 1));
 }
