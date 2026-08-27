@@ -1,4 +1,4 @@
-// FILE-SIZE-EXEMPT: validator unit-test catalog; P2 pure-data dominance (test blocks sharing empty_sig/validateFunction fixtures — splitting would dup them per N4) (per ADR-0099)
+// FILE-SIZE-EXEMPT: validator unit-test catalog; P2 pure-data dominance (test blocks sharing empty_sig/validateFunction fixtures — splitting would dup them per N4) (per ADR-0099; 2026-08-27 +77 lines: call_ref/return_call_ref callee-typing regression tests, same shared-fixture catalog so N4 unchanged)
 //! Tests for `src/frontend/validator.zig` (§9.5 / 5.2 carve-out
 //! to keep the validator under §A2's 1000-line soft cap while
 //! the per-feature handler split per ROADMAP §A12 stays queued
@@ -2544,4 +2544,81 @@ test "validateTypeSection: accepts conformant sub, rejects finality/structural/b
         const t: sections.Types = .{ .arena = undefined, .items = &items, .kinds = &kinds, .struct_defs = &sdefs, .array_defs = &adefs, .supertypes = &sup, .finals = &fin };
         try testing.expect(!validator.validateTypeSection(&t));
     }
+}
+
+// ---------------------------------------------------------------------------
+// call_ref / return_call_ref callee typing (#249)
+// ---------------------------------------------------------------------------
+
+test "validate: call_ref / return_call_ref reject an externref callee (#249)" {
+    // Wasm 3.0 §3.3.10.4-5: the callee operand must be a subtype of
+    // `(ref null typeidx)`. externref is a different hierarchy entirely
+    // (wasm-tools: "type mismatch: expected (ref null $type), found
+    // (ref extern)"). Accepting it let a non-null externref be read as
+    // a function entity at runtime, killing both engines (#249).
+    const one_type = [_]FuncType{i32_result_sig};
+    const params = [_]ValType{ValType.externref};
+    const call_sig: FuncType = .{ .params = &params, .results = &.{} };
+    //   0x20 0x00 — local.get 0 (externref)
+    //   0x14 0x00 — call_ref (type 0)
+    //   0x1A 0x0B — drop ; end
+    const body_call = [_]u8{ 0x20, 0x00, 0x14, 0x00, 0x1A, 0x0B };
+    const r_call = validateFunction(call_sig, &.{}, &body_call, &.{}, &.{}, &one_type, 0, &.{}, 0);
+    try testing.expectError(Error.StackTypeMismatch, r_call);
+    //   0x15 0x00 — return_call_ref (type 0); enclosing result matches
+    //   the callee's i32, so only the callee typing can reject.
+    const tail_sig: FuncType = .{ .params = &params, .results = &i32_arr };
+    const body_tail = [_]u8{ 0x20, 0x00, 0x15, 0x00, 0x0B };
+    const r_tail = validateFunction(tail_sig, &.{}, &body_tail, &.{}, &.{}, &one_type, 0, &.{}, 0);
+    try testing.expectError(Error.StackTypeMismatch, r_tail);
+}
+
+test "validate: call_ref / return_call_ref accept a typed (ref null $t) callee" {
+    // The exact declared type — a `(ref null $ft)` param — must keep
+    // validating after the #249 narrowing (reflexive subtype).
+    const one_type = [_]FuncType{i32_result_sig};
+    const params = [_]ValType{.{ .ref = .{ .nullable = true, .heap_type = .{ .concrete = 0 } } }};
+    const sig: FuncType = .{ .params = &params, .results = &i32_arr };
+    const body_call = [_]u8{ 0x20, 0x00, 0x14, 0x00, 0x0B };
+    try validateFunction(sig, &.{}, &body_call, &.{}, &.{}, &one_type, 0, &.{}, 0);
+    const body_tail = [_]u8{ 0x20, 0x00, 0x15, 0x00, 0x0B };
+    try validateFunction(sig, &.{}, &body_tail, &.{}, &.{}, &one_type, 0, &.{}, 0);
+}
+
+test "validate: call_ref / return_call_ref callee stays polymorphic through br_on_null (#249 guard)" {
+    // `(call_ref $t (br_on_null $l (unreachable)))` is spec-valid: the
+    // popped operand is `.bot`, and br_on_null's fall-through push must
+    // keep it `.bot`. Materialising it as `.funcref` makes the
+    // `(ref null $t)` callee check reject this shape (funcref is the
+    // SUPERtype of `(ref null $t)`) — the regression the 2026-08-22
+    // prototype hit on function-references/br_on_null.
+    const one_type = [_]FuncType{empty_sig};
+    //   0x00      — unreachable
+    //   0xD5 0x00 — br_on_null (depth 0, empty label types)
+    //   0x14 0x00 — call_ref (type 0, () -> ())
+    //   0x0B      — end
+    const body_call = [_]u8{ 0x00, 0xD5, 0x00, 0x14, 0x00, 0x0B };
+    try validateFunction(empty_sig, &.{}, &body_call, &.{}, &.{}, &one_type, 0, &.{}, 0);
+    const body_tail = [_]u8{ 0x00, 0xD5, 0x00, 0x15, 0x00, 0x0B };
+    try validateFunction(empty_sig, &.{}, &body_tail, &.{}, &.{}, &one_type, 0, &.{}, 0);
+}
+
+test "validate: call_ref / return_call_ref reject a non-func type immediate (#249)" {
+    // `call_ref $s` where $s is a struct typedef: `module_types[$s]`
+    // holds only the decode placeholder (an empty sig; see
+    // sections.zig `TypeKind` — `items[idx]` is consulted only when
+    // `kinds[idx] == .func`). The operand `(ref null $s)` is a subtype
+    // of itself, so the callee check alone cannot catch this; the
+    // immediate's kind has to be gated (wasm-tools: "expected func
+    // type at index 0, found (struct i32)").
+    const items = [_]FuncType{empty_sig}; // decodeTypes' struct placeholder
+    const kinds = [_]sections.TypeKind{.structdef};
+    const params = [_]ValType{.{ .ref = .{ .nullable = true, .heap_type = .{ .concrete = 0 } } }};
+    const sig: FuncType = .{ .params = &params, .results = &.{} };
+    const body_call = [_]u8{ 0x20, 0x00, 0x14, 0x00, 0x0B };
+    const r_call = validateFunctionWithGcTypes(sig, &.{}, &body_call, &.{}, &.{}, &items, &kinds, &.{}, &.{}, 0, &.{}, 0);
+    try testing.expectError(Error.InvalidFuncIndex, r_call);
+    const body_tail = [_]u8{ 0x20, 0x00, 0x15, 0x00, 0x0B };
+    const r_tail = validateFunctionWithGcTypes(sig, &.{}, &body_tail, &.{}, &.{}, &items, &kinds, &.{}, &.{}, 0, &.{}, 0);
+    try testing.expectError(Error.InvalidFuncIndex, r_tail);
 }

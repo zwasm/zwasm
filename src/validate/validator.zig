@@ -2503,10 +2503,17 @@ pub const Validator = struct {
     fn opBrOnNull(self: *Validator) Error!void {
         const depth = try leb128.readUleb128(u32, self.body, &self.pos);
         // Pop reftype first (it's the topmost value, the null-test
-        // condition that the branch consumes).
+        // condition that the branch consumes). A `.bot` operand
+        // (unreachable region) must STAY `.bot` through the
+        // fall-through push below: materialising it as `.funcref`
+        // plants a concrete ref the region never had, which a
+        // downstream consumer with a real expectation — call_ref's
+        // `(ref null typeidx)` callee — then rejects
+        // (`(call_ref $t (br_on_null $l (unreachable)))`,
+        // function-references/br_on_null).
         const top = try self.popAny();
-        const reftype: ValType = switch (top) {
-            .bot => .funcref, // polymorphic; pick any reftype
+        const reftype: ?ValType = switch (top) {
+            .bot => null,
             .known => |t| blk: {
                 if (!t.isRef()) {
                     self.mismatch = .{ .expected_ref = t };
@@ -2530,11 +2537,14 @@ pub const Validator = struct {
         // non-null (the branch only fires when the ref IS null, so
         // post-branch the value must be non-null). Branch-target
         // path still receives the original ref kind via label_types.
-        const narrowed: ValType = if (reftype.isRef()) .{ .ref = .{
-            .nullable = false,
-            .heap_type = reftype.ref.heap_type,
-        } } else reftype;
-        try self.pushType(narrowed);
+        if (reftype) |rt| {
+            try self.pushType(.{ .ref = .{
+                .nullable = false,
+                .heap_type = rt.ref.heap_type,
+            } });
+        } else {
+            try self.pushBot();
+        }
     }
 
     /// Wasm spec 3.0 §3.3.8.7 (function-references proposal):
@@ -2598,33 +2608,30 @@ pub const Validator = struct {
         }
     }
 
-    /// Wasm spec 3.0 §3.3.8.10 (function-references proposal):
-    /// `call_ref typeidx` — pop a funcref (whose typed signature
-    /// must match `module_types[typeidx]`); pop the args matching
-    /// that signature's params; push the signature's results.
-    /// Runtime separately traps if the funcref is null
-    /// (Trap.NullReference) or its actual sig mismatches
+    /// Wasm spec 3.0 §3.3.10.4 (function-references proposal):
+    /// `call_ref typeidx` — `typeidx` must name a func type, and the
+    /// callee operand must be a subtype of `(ref null typeidx)`: the
+    /// non-null `(ref typeidx)`, a concrete type reaching it through
+    /// the declared supertype chain, or a func-hierarchy bottom. Pop
+    /// the args matching that signature's params; push the
+    /// signature's results. Runtime separately traps if the funcref
+    /// is null (Trap.NullReference) or its actual sig mismatches
     /// (Trap.IndirectCallTypeMismatch).
-    ///
-    /// v2.0 reftype catalogue can't express the per-funcref typed
-    /// signature, so the validator only checks that the topmost
-    /// stack entry is a reftype (funcref / externref / .bot). The
-    /// runtime side enforces the sig-equality. Typed `(ref $sig)`
-    /// validation arrives with 10.G.
     fn opCallRef(self: *Validator) Error!void {
         const type_idx = try leb128.readUleb128(u32, self.body, &self.pos);
         if (type_idx >= self.module_types.len) return Error.InvalidFuncIndex;
+        // `module_types[idx]` is meaningful only when `kinds[idx] ==
+        // .func` (sections.zig TypeKind): a struct/array typedef holds
+        // an empty placeholder sig there, so without this gate
+        // `call_ref $s (struct.new $s ...)` validates — the operand IS
+        // `(ref null $s)` — and the struct is read as a func entity at
+        // runtime. Empty kinds = pre-GC caller (func types only).
+        if (type_idx < self.module_types_kinds.len and self.module_types_kinds[type_idx] != .func) return Error.InvalidFuncIndex;
         const callee = self.module_types[type_idx];
-        // Pop topmost funcref (polymorphic over funcref/externref/.bot
-        // per the v2.0 catalogue limitation).
-        const top = try self.popAny();
-        switch (top) {
-            .bot => {},
-            .known => |t| if (!t.isRef()) {
-                self.mismatch = .{ .expected_ref = t };
-                return Error.StackTypeMismatch;
-            },
-        }
+        // The callee must sit in `(ref null typeidx)`'s hierarchy — an
+        // externref/anyref/struct ref here was previously accepted and
+        // then read as a function entity by both engines.
+        try self.popExpect(.{ .ref = .{ .nullable = true, .heap_type = .{ .concrete = type_idx } } });
         // Pop args in reverse, then push results.
         var i: usize = callee.params.len;
         while (i > 0) {
@@ -2635,30 +2642,23 @@ pub const Validator = struct {
     }
 
     /// Wasm spec 3.0 §3.3.10.5 (function-references + tail-call):
-    /// `return_call_ref typeidx` — tail-call variant of call_ref.
-    /// Pop a funcref + the typeidx-determined params; verify that
-    /// the callee's results match the **enclosing function's**
-    /// return type (else the tail call would lose values); mark
-    /// the stack polymorphic-from-here (= unreachable) per spec.
-    /// Runtime trap semantics inherit call_ref's null + sig-mismatch
-    /// behaviour.
-    ///
-    /// Same v2.0 catalogue limitation as call_ref: the validator
-    /// can't enforce typed `(ref $sig)` precision; the runtime sig
-    /// check supplies that strictness.
+    /// `return_call_ref typeidx` — tail-call variant of call_ref,
+    /// with call_ref's callee typing: `typeidx` must name a func
+    /// type and the popped callee must be a subtype of
+    /// `(ref null typeidx)`. Pop the typeidx-determined params;
+    /// verify that the callee's results match the **enclosing
+    /// function's** return type (else the tail call would lose
+    /// values); mark the stack polymorphic-from-here (= unreachable)
+    /// per spec. Runtime trap semantics inherit call_ref's null +
+    /// sig-mismatch behaviour.
     fn opReturnCallRef(self: *Validator) Error!void {
         const type_idx = try leb128.readUleb128(u32, self.body, &self.pos);
         if (type_idx >= self.module_types.len) return Error.InvalidFuncIndex;
+        // Same kind gate as call_ref: a struct/array typedef holds only
+        // a placeholder sig in `module_types`.
+        if (type_idx < self.module_types_kinds.len and self.module_types_kinds[type_idx] != .func) return Error.InvalidFuncIndex;
         const callee = self.module_types[type_idx];
-        // Pop topmost funcref (polymorphic over funcref/externref/.bot).
-        const top = try self.popAny();
-        switch (top) {
-            .bot => {},
-            .known => |t| if (!t.isRef()) {
-                self.mismatch = .{ .expected_ref = t };
-                return Error.StackTypeMismatch;
-            },
-        }
+        try self.popExpect(.{ .ref = .{ .nullable = true, .heap_type = .{ .concrete = type_idx } } });
         // Pop callee params in reverse (the tail-call args).
         var i: usize = callee.params.len;
         while (i > 0) {
