@@ -136,9 +136,12 @@ fn finalComponentIs(path: []const u8, which: DottedFinal) bool {
 /// issues, with STATUS_OBJECT_NAME_INVALID, which `std.Io` classifies as a
 /// programmer bug and panics on. So on Windows the errno is decided here.
 ///
-/// The classifying stat does NOT follow the final symlink, because `unlink`
-/// does not: a trailing slash on a symlink is ENOTDIR whatever the link points
-/// at, and ENOTDIR rather than ENOENT when it dangles.
+/// The classifying stat does NOT follow the final symlink. The two POSIX hosts
+/// disagree about a trailing slash over one — Linux does not follow it and
+/// answers ENOTDIR, macOS follows and answers EPERM, which maps to `isdir` —
+/// and the official corpus never unlinks a symlink with a trailing slash, so
+/// there is no host answer to match. Not following keeps the guard from
+/// resolving a link it is about to refuse.
 pub fn unlinkTrailingSlashErrno(dir: std.Io.Dir, io: std.Io, path: []const u8) p1.Errno {
     if (comptime builtin.os.tag != .windows) return .success;
     if (path.len == 0 or path[path.len - 1] != '/') return .success;
@@ -886,21 +889,23 @@ test "path_unlink_file: a trailing slash is the POSIX errno on every host, not a
         try testing.expectEqual(c.want, unlinkFile(&h, &mem, dirfd, 0, @intCast(c.p.len)));
     }
 
-    // A trailing slash does NOT follow the final symlink: the last component is
-    // a symlink, not a directory, so it is `notdir` even when the link points at
-    // one, and `notdir` rather than `noent` when it dangles. Measured on
-    // x86_64-linux; a guard that classifies with a following stat answers
-    // `isdir` and `noent` here instead. Skipped where the host denies
-    // unprivileged symlink creation — nothing above depends on these.
+    // A trailing slash over a symlink is the one shape the two POSIX hosts do not
+    // agree on: Linux does not follow the final link and answers `notdir`, macOS
+    // follows it and answers `isdir`. Both were measured, and the official corpus
+    // never unlinks a symlink with a trailing slash, so no single errno is
+    // pinnable — only the invariant is: the call fails, and the link survives.
+    // Skipped where the host denies unprivileged symlink creation; nothing above
+    // depends on these.
     if (root.symLink(testing.io, "d", "ld", .{})) |_| {
         try root.symLink(testing.io, "nowhere", "ln", .{});
-        for ([_]struct { p: []const u8, want: p1.Errno }{
-            .{ .p = "ld/", .want = .notdir },
-            .{ .p = "ln/", .want = .notdir },
-        }) |c| {
+        for ([_][]const u8{ "ld/", "ln/" }) |p| {
             @memset(mem[0..32], 0);
-            writeGuestPath(&mem, 0, c.p);
-            try testing.expectEqual(c.want, unlinkFile(&h, &mem, dirfd, 0, @intCast(c.p.len)));
+            writeGuestPath(&mem, 0, p);
+            try testing.expect(unlinkFile(&h, &mem, dirfd, 0, @intCast(p.len)) != .success);
+        }
+        for ([_][]const u8{ "ld", "ln" }) |link| {
+            _ = root.statFile(testing.io, link, .{ .follow_symlinks = false }) catch
+                return error.SymlinkWasUnlinked;
         }
     } else |_| {}
     // None of those deleted anything, and the same name without the trailing
