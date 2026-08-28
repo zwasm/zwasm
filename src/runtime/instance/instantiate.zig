@@ -681,7 +681,11 @@ fn preDecodeSectionBodies(alloc: std.mem.Allocator, module: *Module) bool {
         for (im.items) |it| switch (it.kind) {
             .table => if (!validRefTypeIdx(it.payload.table.elem_type, ntypes)) return false,
             .global => if (!validRefTypeIdx(it.payload.global.valtype, ntypes)) return false,
-            else => {},
+            // A memory import carries no type index at all; a func or tag
+            // import carries a typeidx, not a reftype, so this reftype-bounds
+            // rule has nothing to read on it. Bounding those typeidxs is a
+            // separate check_module rule this path still lacks (issue #285).
+            .func, .memory, .tag => {},
         };
     }
     if (module.find(.table)) |s| {

@@ -146,36 +146,90 @@ const win_impl = if (builtin.os.tag == .windows) struct {
     }
 } else struct {};
 
-/// Install the diagnostic-only internal-fault handler. Call once at CLI startup
-/// (production entry). No-op on wasi. NOT installed by the test harness — the spec
-/// runners own their own (recovery) handler; this is the production last-resort
-/// disposition.
-/// Set once SOME fault handler owns SIGSEGV/SIGBUS for this process —
-/// either this production handler OR the spec runner's recovery
-/// handler (which classifies guard faults first, then siglongjmp-
-/// recovers). `ensureInstalled` skips when set so the engine's
-/// auto-install (needed for elided JIT execution under plain
-/// `zig build test`) never clobbers a recovery handler.
-var handler_installed = std.atomic.Value(bool).init(false);
+/// Install protocol for the process-wide fault handler, folded into ONE
+/// atomic so the transient `installing` value doubles as the mutual-
+/// exclusion token (Zone 0: `std.atomic` only, no mutex dependency).
+///
+/// Ordering invariant (issue #320; enforced by the signal-install-order
+/// runner): a terminal value (`installed` / `external`) is published
+/// with a `.release` store only AFTER the install it describes is
+/// complete, and every reader loads with `.acquire` — so a caller that
+/// observes a terminal state and returns is guaranteed a complete
+/// install happened-before. A caller that observes `installing` waits
+/// it out (bounded by the installer's few syscalls) instead of
+/// returning handler-less into JIT code.
+const InstallState = enum(u8) {
+    /// No owner yet; the next `ensureInstalled` elects an installer.
+    uninstalled,
+    /// An install is in flight; other callers spin until terminal.
+    installing,
+    /// Our production handler is armed.
+    installed,
+    /// SOME external handler owns SIGSEGV/SIGBUS — the spec runner's
+    /// recovery handler (classifies guard faults first, then
+    /// siglongjmp-recovers) — so the engine's auto-install (needed for
+    /// elided JIT execution under plain `zig build test`) stands down
+    /// and never clobbers it.
+    external,
+};
+var install_state = std.atomic.Value(InstallState).init(.uninstalled);
 
 /// Idempotent auto-install for the JIT invoke path (ADR-0202 D4):
 /// guard-page elision REQUIRES a fault handler, so any JIT execution
 /// must have one armed. No-op if a handler is already installed
-/// (production CLI init, embedding init, or the spec runner).
+/// (production CLI init, embedding init, or the spec runner); briefly
+/// spin-waits while another thread's install is in flight, so a
+/// handler is ALWAYS armed by the time this returns.
 pub fn ensureInstalled() void {
-    if (handler_installed.swap(true, .monotonic)) return;
-    installInternalFaultHandler();
+    switch (install_state.load(.acquire)) {
+        .installed, .external => return,
+        .uninstalled => {
+            if (install_state.cmpxchgStrong(.uninstalled, .installing, .acquire, .monotonic) == null) {
+                installNow();
+                install_state.store(.installed, .release);
+                return;
+            }
+            // Lost the election — fall through and wait out the winner.
+        },
+        .installing => {},
+    }
+    while (install_state.load(.acquire) == .installing) std.atomic.spinLoopHint();
 }
 
 /// Mark SIGSEGV/SIGBUS as owned by an externally-installed handler
 /// (the spec runner's recovery handler) so `ensureInstalled` stands
-/// down. Called from `spec_assert_runner_base.installSigsegvHandler`.
+/// down. Call AFTER that handler is in place and before concurrent
+/// `ensureInstalled` traffic starts. Called from
+/// `spec_assert_runner_base.installSigsegvHandler`.
 pub fn markInstalled() void {
-    handler_installed.store(true, .monotonic);
+    install_state.store(.external, .release);
 }
 
+/// FORCE-install the diagnostic-only internal-fault handler NOW — the
+/// production last-resort disposition (ADR-0166). Called once at CLI
+/// startup (`cli/main.zig`) + embedding init + the fork-recovery
+/// tests; installs regardless of prior state, including a marked
+/// external owner. No-op install body on wasi. Serializes with any
+/// in-flight install and publishes `installed` only after its OWN
+/// complete install.
 pub fn installInternalFaultHandler() void {
-    handler_installed.store(true, .monotonic);
+    while (true) {
+        const s = install_state.load(.acquire);
+        if (s == .installing) {
+            std.atomic.spinLoopHint();
+            continue;
+        }
+        if (install_state.cmpxchgWeak(s, .installing, .acquire, .monotonic) == null) break;
+    }
+    installNow();
+    install_state.store(.installed, .release);
+}
+
+/// The platform install body — sigaltstack + sigaction (POSIX) or the
+/// VEH registration (Windows). Writes NO install state: the two pub
+/// installers above own the state machine and publish only after this
+/// returns.
+fn installNow() void {
     if (comptime builtin.os.tag == .windows) {
         win_impl.install();
         return;
