@@ -47,6 +47,7 @@ const entry = zwasm.engine.codegen.shared.entry;
 const base = @import("spec_assert_runner_base.zig");
 
 pub fn main(init: std.process.Init) !void {
+    zwasm.support.dbg.initFromEnv(init.environ_map.get("ZWASM_DEBUG"));
     base.initHostDispatchStubs();
     // ADR-0202 D5 — JIT-executes against the bespoke non-guarded
     // `base.growable_memory` array → explicit bounds checks mandatory

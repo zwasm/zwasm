@@ -415,6 +415,7 @@ fn recordJitRunErr(
 }
 
 pub fn main(init: std.process.Init) !void {
+    zwasm.support.dbg.initFromEnv(init.environ_map.get("ZWASM_DEBUG"));
     // ADR-0202 D5 — JIT-executes via base's bespoke non-guarded memory →
     // explicit bounds checks mandatory (binding-time soundness). D-515.
     zwasm.engine.runner.setBoundsChecks(.explicit);

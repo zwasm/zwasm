@@ -26,6 +26,7 @@ const runner_mod = zwasm.engine.runner;
 const entry = zwasm.engine.codegen.shared.entry;
 
 pub fn main(init: std.process.Init) !void {
+    zwasm.support.dbg.initFromEnv(init.environ_map.get("ZWASM_DEBUG"));
     // ADR-0202 D5 — this runner JIT-executes against a bespoke non-guarded
     // `scratch_memory` buffer, so it MUST compile with explicit bounds checks
     // (guard-page elision would read past the buffer instead of faulting,

@@ -32,6 +32,7 @@ const parser = zwasm.parse.parser;
 const engine_runner = zwasm.engine.runner;
 
 pub fn main(init: std.process.Init) !void {
+    zwasm.support.dbg.initFromEnv(init.environ_map.get("ZWASM_DEBUG"));
     const io = init.io;
     const gpa = init.gpa;
 
