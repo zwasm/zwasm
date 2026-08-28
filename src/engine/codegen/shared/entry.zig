@@ -232,7 +232,7 @@ inline fn invokeAndCheck(
     // hardware fault the production handler redirects to the oob stub. Any
     // JIT execution must therefore have a fault handler armed; this is the
     // single chokepoint (idempotent, skips when the CLI/embedding/spec-runner
-    // already installed one). Cheap atomic-bool fast path after the once.
+    // already installed one). Cheap atomic fast path after the once.
     signal.ensureInstalled();
     // ADR-0105 D1 — populate stack_limit per call for the prologue probe.
     rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);

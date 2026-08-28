@@ -158,7 +158,8 @@ pub fn main() u8 {
     };
     const stand_down = runOne(.stand_down);
     const force_install = runOne(.force_install);
-    if (stand_down == .infra or force_install == .infra) infra += 1;
+    if (stand_down == .infra) infra += 1;
+    if (force_install == .infra) infra += 1;
 
     std.debug.print(
         "signal-install-order: ensure-race {d}/{d} mixed-race {d}/{d} stand-down {s} force-install {s} infra {d}\n",
