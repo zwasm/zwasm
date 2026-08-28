@@ -1467,6 +1467,27 @@ pub fn build(b: *std.Build) void {
     const test_oob_trap_step = b.step("test-oob-elision", "Verify guard-page bounds elision traps oob (ADR-0202 D4/D5 / D-507)");
     test_oob_trap_step.dependOn(&run_oob_trap.step);
 
+    // Issue #320 — regression-run the fault-handler install/publish
+    // protocol (`signal.ensureInstalled` ordering + `markInstalled`
+    // stand-down). A standalone exe because the scenarios need a virgin
+    // process-global install flag per iteration, which no test inside a
+    // shared test binary can guarantee (any earlier in-process JIT
+    // invoke arms it); the runner forks one pristine child per
+    // scenario. Self-skips on Windows (fork).
+    const signal_install_runner_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/runners/signal_install_order_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    signal_install_runner_mod.addImport("zwasm", zwasm_lib_mod);
+    const signal_install_runner_exe = b.addExecutable(.{
+        .name = "zwasm-signal-install-order",
+        .root_module = signal_install_runner_mod,
+    });
+    const run_signal_install = b.addRunArtifact(signal_install_runner_exe);
+    const test_signal_install_step = b.step("test-signal-install-order", "Regression-run the fault-handler install/publish ordering (issue #320; skips on Windows)");
+    test_signal_install_step.dependOn(&run_signal_install.step);
+
     // `zig build test-all` — aggregate all enabled test layers.
     // Phase 0: only `test`. Phase 1+ adds spec / e2e / realworld /
     // c_api / fuzz steps as they land. Each layer registers itself
@@ -1474,6 +1495,7 @@ pub fn build(b: *std.Build) void {
     const test_all_step = b.step("test-all", "Run all enabled test layers");
     test_all_step.dependOn(&run_internal_fault.step); // ADR-0166 B-core
     test_all_step.dependOn(&run_oob_trap.step); // ADR-0202 D4/D5 (D-507) guard-page elision
+    test_all_step.dependOn(&run_signal_install.step); // issue #320 install/publish ordering
     test_all_step.dependOn(&run_core_tests.step);
     test_all_step.dependOn(&run_cli_tests.step);
     test_all_step.dependOn(&run_spec_smoke.step);
