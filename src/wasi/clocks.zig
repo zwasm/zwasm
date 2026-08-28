@@ -234,7 +234,10 @@ fn fdReadiness(
             const size = (f.stat(io) catch return error.Io).size;
             break :blk if (size > slot.pos) size - slot.pos else 0;
         },
-        else => unreachable, // .stdout/.stderr/.dir/.closed rejected above
+        // Unreachable by the kind switch above: it fails the call for a
+        // closed slot, a directory and a read of stdout/stderr, so the only
+        // kinds that reach a read here are stdin and file.
+        .stdout, .stderr, .dir, .closed => unreachable,
     };
     // witx: nbytes is "the number of bytes available for reading". We know it
     // exactly for both readable kinds, so we report it. (wasmtime 47 computes
