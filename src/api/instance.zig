@@ -368,9 +368,10 @@ pub export fn zwasm_store_set_wasi(s: ?*Store, h: ?*wasi_host.Host) callconv(.c)
 /// `zwasm_store_wasi_exit_code(*Store, *u32)` — read the exit status
 /// a WASI guest requested through `proc_exit`. Returns false, leaving
 /// `out` untouched, when the Store has no WASI host or the guest never
-/// called `proc_exit`. `src/cli/run.zig` applies the same rule: a trap
-/// that carries an exit code is a guest that ended itself, and a trap
-/// without one is a fault.
+/// called `proc_exit`. The status is per call: `wasm_func_call` clears
+/// it before running, so what this reports is the call just made.
+/// `src/cli/run.zig` applies the same rule: a trap that carries an exit
+/// code is a guest that ended itself, and a trap without one is a fault.
 pub export fn zwasm_store_wasi_exit_code(s: ?*const Store, out: ?*u32) callconv(.c) bool {
     const store = s orelse return false;
     const host_opaque = store.wasi_host orelse return false;
@@ -2037,6 +2038,17 @@ pub export fn wasm_func_call(
     if (handle.host) |hp| return hostFuncCallDirect(handle, hp, args, results);
     const inst = handle.instance orelse return null;
     const store = inst.store orelse return null;
+    // #341 — the WASI exit status describes THIS call, not an earlier guest's.
+    // A WASI command exits through `proc_exit` even when it succeeds, so a Store
+    // that has run one command carries a `0` — and `0` is what
+    // `zwasm_store_wasi_exit_code` reports as a clean exit. Clearing here, above
+    // the engine branch, covers the interp and the JIT/AOT arms in one place.
+    // The `wasm_func_new` host-func path returned above, so a direct callback
+    // call cannot wipe a status the embedder has not read yet.
+    if (store.wasi_host) |host_opaque| {
+        const host: *wasi_host.Host = @ptrCast(@alignCast(host_opaque));
+        host.exit_code = null;
+    }
     const alloc = storeAllocator(store) orelse return null;
     // ADR-0200 — JIT-backed instance: route to the native engine. JIT invoke is
     // by-NAME, so reverse-map func_idx → export name via exports_storage (a

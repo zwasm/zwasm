@@ -149,8 +149,10 @@ WASM_API_EXTERN void zwasm_store_set_wasi(wasm_store_t*, zwasm_wasi_config_t*);
  * `proc_exit` trap carries differs between engines and is not part
  * of this contract.
  *
- * The status belongs to the Store, not to an instance, and it
- * persists until the Store's WASI setup is replaced.
+ * The status is per call: each `wasm_func_call` into this Store
+ * clears it before running, so a `true` return describes the call
+ * you just made, never an earlier guest's. Read it before calling
+ * into the Store again.
  */
 WASM_API_EXTERN bool zwasm_store_wasi_exit_code(const wasm_store_t*, uint32_t* out);
 
