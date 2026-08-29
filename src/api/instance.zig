@@ -290,6 +290,15 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
         host.deinit();
         alloc.destroy(host);
     }
+    // Hosts a `zwasm_store_set_wasi` could not free because an instance
+    // had captured them. Nothing can reach them now: every runtime that
+    // held one is gone with the instances + zombies reaped above.
+    for (handle.retired_wasi_hosts.items) |host_opaque| {
+        const host: *wasi_host.Host = @ptrCast(@alignCast(host_opaque));
+        host.deinit();
+        std.heap.c_allocator.destroy(host);
+    }
+    handle.retired_wasi_hosts.deinit(std.heap.c_allocator);
     alloc.destroy(handle);
 }
 
@@ -323,15 +332,27 @@ fn parkAsZombie(
 /// host on a Store. Ownership of the Host transfers to the
 /// Store; the C host must not call `zwasm_wasi_config_delete`
 /// on the same pointer afterwards. Calling twice on the same
-/// Store frees the previous Host first. Pass `null` to detach
-/// + free the existing Host.
+/// Store frees the previous Host first — UNLESS an instantiation
+/// has already captured it, in which case it retires and is freed
+/// by `wasm_store_delete` (a live instance, or a zombie's parked
+/// bindings, still holds its address). Pass `null` to detach the
+/// existing Host under the same rule.
 pub export fn zwasm_store_set_wasi(s: ?*Store, h: ?*wasi_host.Host) callconv(.c) void {
     const store = s orelse return;
     if (store.wasi_host) |old_opaque| {
-        const old: *wasi_host.Host = @ptrCast(@alignCast(old_opaque));
-        old.deinit();
-        std.heap.c_allocator.destroy(old);
+        if (store.wasi_host_captured) {
+            // EXEMPT-FALLBACK: an append OOM accepts the leak over the
+            // UAF, mirroring parkAsZombie. `c_allocator` is what
+            // `zwasm_wasi_config_new` used for every host this list can
+            // hold, and what `wasm_store_delete` frees them with.
+            store.retired_wasi_hosts.append(std.heap.c_allocator, old_opaque) catch {};
+        } else {
+            const old: *wasi_host.Host = @ptrCast(@alignCast(old_opaque));
+            old.deinit();
+            std.heap.c_allocator.destroy(old);
+        }
     }
+    store.wasi_host_captured = false;
     if (h) |hp| {
         // ADR-0184: hand the engine-owned io to the host so fs
         // syscalls (path_open, preopen materialization) work from
@@ -466,6 +487,12 @@ fn buildBindings(
             if (it.kind != .func) return error.UnsupportedWasiImport;
             const thunk = wasi.lookupWasiThunk(it.name) orelse return error.UnsupportedWasiImport;
             const wasi_host_ptr = store.wasi_host orelse return error.WasiNotConfigured;
+            // The binding outlives this call — and outlives the instance
+            // too, since `wasm_instance_delete` parks the arena holding it
+            // on `store.zombies`. May over-mark (this also runs on the
+            // throwaway arena in `collectHostFuncTargets`); over-marking
+            // only defers a free, so nothing compensates for it.
+            store.wasi_host_captured = true;
             bindings[idx] = .{ .func = .{
                 .host_call = .{ .fn_ptr = thunk, .ctx = wasi_host_ptr },
                 .source = .wasi,
@@ -778,6 +805,9 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
         };
     }
     jit.owned.rt.wasi_host = store.wasi_host;
+    // Captured for the JitInstance's life. May over-mark (this runs before
+    // `runStart`, which can still fail the instantiation) — see buildBindings.
+    if (store.wasi_host != null) store.wasi_host_captured = true;
 
     // Wasm §4.5.4 — run the `(start)` function AFTER setup initialised globals /
     // memory / tables, BEFORE the instance is surfaced. A start trap fails
