@@ -59,19 +59,16 @@ alone cannot separate a clean termination from a fault, and
 
 The status is **per call** — each `wasm_func_call` into the Store clears it
 before running, so a `true` describes the call just made and never an earlier
-guest's (#341). Read it before calling into the Store again.
+guest's (#341). Read it before calling into the Store again, or creating
+another instance in it — either one clears it.
 
-One exception is open: an instance binds its WASI host at instantiation, so
-after `zwasm_store_set_wasi` replaces or detaches the Store's setup, an
-older instance's `proc_exit` writes where this accessor no longer reads. Its
-clean exit then reads back as a fault on every engine (#350). A host that
-reconfigures WASI under a live instance cannot rely on the `false` rule until
-that closes.
+Which of a Store's WASI setups a `true` is read from — when it has held more
+than one, or had one replaced or detached mid-run — is contract, stated once in
+[`include/wasi.h`](../../include/wasi.h) (#345) and not restated here.
 
 `zwasm_trap_kind` answers a different question and does not replace this one:
 since ADR-0218 it reports `ZWASM_TRAP_WASI_EXIT` for a `proc_exit` on every
-engine, so it does say *that* the guest terminated itself — but it never
-carries the status, which is what an embedder needs.
+engine, but it never carries the status, which is what an embedder needs.
 
 ## `zwasm.h` extensions
 
