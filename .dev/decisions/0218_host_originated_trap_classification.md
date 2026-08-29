@@ -1,6 +1,6 @@
 # 0218 — Classify host-originated traps apart from guest faults
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-29
 - **Author**: Junji Takakura
 - **Tags**: c-abi, trap-surface, wasi, jit
