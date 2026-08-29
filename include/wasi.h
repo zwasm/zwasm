@@ -113,9 +113,17 @@ WASM_API_EXTERN bool zwasm_wasi_config_preopen_dir(
  * config — the C host must not call `zwasm_wasi_config_delete`
  * on the same pointer afterwards.
  *
- * Calling twice on the same Store replaces the previous setup
- * (the old config is freed by the binding). Pass `NULL` to
- * uninstall WASI hosting on a Store.
+ * Calling twice on the same Store replaces the previous setup.
+ * Pass `NULL` to uninstall WASI hosting on a Store.
+ *
+ * An instance created while a config was installed keeps using
+ * THAT config for the rest of its life — instantiation records
+ * the config's address. Replacing or removing the config
+ * therefore does not free it once any instance has been created
+ * since it was installed; it is freed with the Store instead.
+ * Directories it preopened stay open until then, so a long-lived
+ * Store that preopens per run should take a new Store per
+ * configuration rather than re-setting the config.
  */
 WASM_API_EXTERN void zwasm_store_set_wasi(wasm_store_t*, zwasm_wasi_config_t*);
 
