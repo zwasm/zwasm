@@ -111,9 +111,9 @@ pub export fn zwasm_instance_clear_interrupt(i: ?*Instance) callconv(.c) void {
 /// ADR-0200 — per-instance engine selection for the C ABI. Stock
 /// `wasm_instance_new` has no engine param; this extension mirrors it with a
 /// trailing `engine_kind` (`ZWASM_ENGINE_AUTO=0` / `JIT=1` / `INTERP=2`; unknown
-/// → auto). `auto` resolves to interp until the JIT host-import/WASI bridge lands
-/// (documented to change without an API break). An explicit `jit` on a JIT-less
-/// arch fails instantiation (returns null) rather than silently downgrading.
+/// → auto). D-496: `auto` compiles with the JIT and instantiates the interp only
+/// for a module the JIT declines. An explicit `jit` on a module the JIT declines
+/// fails instantiation (returns null) rather than silently downgrading.
 pub export fn zwasm_instance_new_ex(
     s: ?*capi.Store,
     m: ?*const capi.Module,
