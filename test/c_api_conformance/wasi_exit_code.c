@@ -115,6 +115,54 @@ static const uint8_t kReentrantStartWasm[] = {
     0x0a, 0x0a, 0x01, 0x08, 0x00, 0x10, 0x00, 0x41, 0x07, 0x10, 0x01, 0x0b,
 };
 
+/* (module
+ *   (import "m1" "_start" (func $f))
+ *   (func (export "_start") (call $f)))
+ * Calls another instance's export and nothing else. Paired with `kExitWasm`
+ * patched to 7 as the exporter, so the guest that reaches `proc_exit` is the
+ * IMPORTED instance, not the one `wasm_func_call` was handed. */
+static const uint8_t kCrossFuncCallerWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+    0x02, 0x0d, 0x01,
+    0x02, 0x6d, 0x31,
+    0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74,
+    0x00, 0x00,
+    0x03, 0x02, 0x01, 0x00,
+    0x07, 0x0a, 0x01, 0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x01,
+    0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+};
+
+/* (module
+ *   (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
+ *   (func $run (call $exit (i32.const 7)))
+ *   (table (export "t") 1 funcref)
+ *   (elem (i32.const 0) $run))
+ * The same exit-7 guest as `kExitWasm`, reached through an exported TABLE
+ * rather than an exported func — the wit-bindgen shim shape (D-325). */
+static const uint8_t kCrossTableExporterWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
+    0x00, 0x00, 0x02, 0x24, 0x01, 0x16, 0x77, 0x61, 0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73,
+    0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x31, 0x09, 0x70, 0x72, 0x6f,
+    0x63, 0x5f, 0x65, 0x78, 0x69, 0x74, 0x00, 0x00, 0x03, 0x02, 0x01, 0x01, 0x04, 0x04, 0x01, 0x70,
+    0x00, 0x01, 0x07, 0x05, 0x01, 0x01, 0x74, 0x01, 0x00, 0x09, 0x07, 0x01, 0x00, 0x41, 0x00, 0x0b,
+    0x01, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x07, 0x10, 0x00, 0x0b,
+};
+
+/* (module
+ *   (type $v (func))
+ *   (import "m1" "t" (table 1 funcref))
+ *   (func (export "_start") (i32.const 0) (call_indirect (type $v))))
+ * Reaches the other instance through `call_indirect` on an imported table.
+ * That dispatch never touches `cross_module.CallCtx`, so a fix confined to the
+ * imported-func thunk leaves this case red. */
+static const uint8_t kCrossTableCallerWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x02, 0x0a,
+    0x01, 0x02, 0x6d, 0x31, 0x01, 0x74, 0x01, 0x70, 0x00, 0x01, 0x03, 0x02, 0x01, 0x00, 0x07, 0x0a,
+    0x01, 0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x41,
+    0x00, 0x11, 0x00, 0x00, 0x0b,
+};
+
 static const uint8_t kEngines[] = { ZWASM_ENGINE_AUTO, ZWASM_ENGINE_JIT, ZWASM_ENGINE_INTERP };
 
 static const char* engine_name(uint8_t kind) {
@@ -647,6 +695,175 @@ cleanup:
     return rc;
 }
 
+/* How the caller reaches the other instance's guest code. Both shapes leave
+ * the called instance and run the SOURCE instance's body with the SOURCE
+ * instance's WASI binding; they share nothing else. */
+typedef enum {
+    kViaImportedFunc,  /* `call` on an imported func — src/api/cross_module.zig */
+    kViaImportedTable, /* `call_indirect` on an imported table — src/interp/mvp.zig */
+} cross_kind;
+
+static const char* cross_name(cross_kind k) {
+    return k == kViaImportedTable ? "cross-module via imported table"
+                                  : "cross-module via imported func";
+}
+
+/* #352 — a `proc_exit` reached through another instance writes the SOURCE
+ * instance's WASI host, while the record ADR-0222 keeps names the instance
+ * `wasm_func_call` was handed.
+ *
+ * `I1` is built under config A and exits 7. The Store's config then moves on,
+ * and `I2` — built under config B, doing nothing but reaching into `I1` — is
+ * built and called. Dispatch enters `I1`'s body with `I1`'s WASI binding, so
+ * `proc_exit` writes host A; the record names `I2`, which captured nothing. A
+ * clean exit of 7 reads back as a fault.
+ *
+ * The granularity the status needs is the runtime that actually RAN
+ * `proc_exit`, not the instance that was called. Nothing here contradicts
+ * ADR-0222: for every call that does not leave the called instance the two are
+ * the same runtime.
+ *
+ * BOTH shapes are asserted because they share no dispatch code. The imported
+ * func goes through `cross_module.CallCtx`; the imported table goes through
+ * `call_indirect`'s foreign-`fe.runtime` branch, which has no `CallCtx` and no
+ * Store in scope. A fix confined to the first leaves the second red, so the
+ * record cannot be repaired by retargeting at the dispatch sites one by one.
+ *
+ * The assertion is on the code, not on `has_code`, for #345's reason — a
+ * `has_code`-only check passes on another guest's status.
+ *
+ * The JIT-backed engines cannot build `I2` in either shape: `buildBindings`
+ * resolves a cross-module import through the source instance's interpreter
+ * runtime, and a JIT-backed instance has none, so the instantiation fails.
+ * That is a separate defect with its own fix, NOT this one. It is reported
+ * here rather than skipped, and these assertions run in full as soon as the
+ * instantiation starts succeeding. */
+static int expect_status_follows_the_executing_runtime(uint8_t engine, cross_kind kind) {
+    int rc = 1;
+    uint8_t exit7[sizeof(kExitWasm)];
+    const uint8_t* exporter_wasm;
+    size_t exporter_len;
+    const uint8_t* caller_wasm;
+    size_t caller_len;
+    wasm_module_t* exporter_module = NULL;
+    wasm_instance_t* exporter = NULL;
+    wasm_extern_vec_t exporter_exports = { 0, NULL };
+    wasm_module_t* caller_module = NULL;
+    wasm_instance_t* caller = NULL;
+    wasm_extern_vec_t caller_exports = { 0, NULL };
+    const char* what = cross_name(kind);
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+
+    memcpy(exit7, kExitWasm, sizeof(kExitWasm));
+    exit7[kRvalOffset] = 7;
+    if (kind == kViaImportedTable) {
+        exporter_wasm = kCrossTableExporterWasm;
+        exporter_len = sizeof(kCrossTableExporterWasm);
+        caller_wasm = kCrossTableCallerWasm;
+        caller_len = sizeof(kCrossTableCallerWasm);
+    } else {
+        exporter_wasm = exit7;
+        exporter_len = sizeof(exit7);
+        caller_wasm = kCrossFuncCallerWasm;
+        caller_len = sizeof(kCrossFuncCallerWasm);
+    }
+
+    /* Config A, and the exporter built under it. */
+    zwasm_wasi_config_t* cfg_a = zwasm_wasi_config_new();
+    if (!cfg_a) { fputs("wasi config new failed\n", stderr); goto cleanup; }
+    zwasm_store_set_wasi(store, cfg_a); /* takes ownership */
+
+    wasm_byte_vec_t exporter_binary = { exporter_len, (wasm_byte_t*) exporter_wasm };
+    exporter_module = wasm_module_new(store, &exporter_binary);
+    if (!exporter_module) { fputs("exporter module failed to parse\n", stderr); goto cleanup; }
+    wasm_extern_vec_t no_imports = { 0, NULL };
+    wasm_trap_t* etrap = NULL;
+    exporter = zwasm_instance_new_ex(store, exporter_module, &no_imports, &etrap, engine);
+    if (etrap) wasm_trap_delete(etrap);
+    if (!exporter) {
+        fprintf(stderr, "[%s] %s: the exporter failed to instantiate\n", engine_name(engine), what);
+        goto cleanup;
+    }
+    wasm_instance_exports(exporter, &exporter_exports);
+    if (exporter_exports.size < 1 || !exporter_exports.data[0]) {
+        fprintf(stderr, "[%s] %s: the exporter exposed nothing\n", engine_name(engine), what);
+        goto cleanup;
+    }
+
+    /* The config moves on. A retires rather than being freed — the exporter
+     * captured it — which is what keeps its status readable at all. */
+    zwasm_wasi_config_t* cfg_b = zwasm_wasi_config_new();
+    if (!cfg_b) { fputs("wasi config new failed\n", stderr); goto cleanup; }
+    zwasm_store_set_wasi(store, cfg_b); /* takes ownership */
+
+    /* The caller, built under B, importing the exporter's func or table. */
+    wasm_byte_vec_t caller_binary = { caller_len, (wasm_byte_t*) caller_wasm };
+    caller_module = wasm_module_new(store, &caller_binary);
+    if (!caller_module) { fputs("caller module failed to parse\n", stderr); goto cleanup; }
+    wasm_extern_t* caller_import_externs[1] = { exporter_exports.data[0] };
+    wasm_extern_vec_t caller_imports = { 1, caller_import_externs };
+    wasm_trap_t* ctrap = NULL;
+    caller = zwasm_instance_new_ex(store, caller_module, &caller_imports, &ctrap, engine);
+    if (ctrap) wasm_trap_delete(ctrap);
+    if (!caller) {
+        if (engine == ZWASM_ENGINE_INTERP) {
+            fprintf(stderr, "[interp] %s: the caller failed to instantiate\n", what);
+            goto cleanup;
+        }
+        /* The separate defect named above. Not this case's subject, and not
+         * silently passed over: it is why this engine contributes no evidence
+         * here. */
+        fprintf(stderr,
+                "[%s] %s: a cross-module import cannot be built against a JIT-backed "
+                "instance, so this engine is unmeasured\n",
+                engine_name(engine), what);
+        rc = 0;
+        goto cleanup;
+    }
+    wasm_instance_exports(caller, &caller_exports);
+    if (caller_exports.size < 1 || !caller_exports.data[0] ||
+        wasm_extern_kind(caller_exports.data[0]) != WASM_EXTERN_FUNC) {
+        fprintf(stderr, "[%s] %s: the caller is missing its _start export\n", engine_name(engine), what);
+        goto cleanup;
+    }
+
+    wasm_val_vec_t no_args = { 0, NULL };
+    wasm_val_vec_t no_res = { 0, NULL };
+    wasm_trap_t* trap = wasm_func_call(wasm_extern_as_func(caller_exports.data[0]), &no_args, &no_res);
+    if (!trap) {
+        fprintf(stderr, "[%s] %s: expected a trap, got none\n", engine_name(engine), what);
+        goto cleanup;
+    }
+    wasm_trap_delete(trap);
+
+    uint32_t code = 0xdeadbeefu;
+    if (!zwasm_store_wasi_exit_code(store, &code)) {
+        fprintf(stderr,
+                "[%s] %s: proc_exit(7) reported no status — the write went to the host the "
+                "exporting instance captured and the read followed the called one\n",
+                engine_name(engine), what);
+        goto cleanup;
+    }
+    if (code != 7) {
+        fprintf(stderr, "[%s] %s: proc_exit(7) read back %u\n", engine_name(engine), what, code);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (caller_exports.data) wasm_extern_vec_delete(&caller_exports);
+    if (caller) wasm_instance_delete(caller);
+    if (caller_module) wasm_module_delete(caller_module);
+    if (exporter_exports.data) wasm_extern_vec_delete(&exporter_exports);
+    if (exporter) wasm_instance_delete(exporter);
+    if (exporter_module) wasm_module_delete(exporter_module);
+    if (store) wasm_store_delete(store);
+    if (eng) wasm_engine_delete(eng);
+    return rc;
+}
+
 /* A host callback that calls back into the Store must not retarget the status.
  * The embedder made ONE call; the guest behind it exits 7. A nested
  * `wasm_func_call` from inside the callback has no guest of its own — it is a
@@ -907,6 +1124,8 @@ int main(void) {
         if (expect_non_wasi_instantiate_invalidates(e, true)) return 1;
         if (expect_nested_call_keeps_the_outer_host(e)) return 1;
         if (expect_reentrant_start_keeps_its_status(e)) return 1;
+        if (expect_status_follows_the_executing_runtime(e, kViaImportedFunc)) return 1;
+        if (expect_status_follows_the_executing_runtime(e, kViaImportedTable)) return 1;
     }
 
     /* Null-arg discipline, matching the rest of the extension surface. */

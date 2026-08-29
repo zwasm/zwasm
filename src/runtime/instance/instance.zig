@@ -102,16 +102,6 @@ pub const Instance = struct {
     /// only flattens the sig + finality; the supertype chain + nested concrete
     /// refs need the whole `Types`. Null when the module has no type section.
     export_src_types: ?sections.Types = null,
-    /// The WASI host this instance captured at instantiate time — the
-    /// same address the interpreter bakes into each WASI binding's
-    /// `host_call.ctx` and the JIT into `jit.owned.rt.wasi_host`.
-    /// `wasi.h` promises an instance keeps using the config it was
-    /// built with, so its exit status has to be read from here and not
-    /// from `Store.wasi_host`. Set only when the instantiation really
-    /// captured the host, so the pointer is one the Store retires
-    /// rather than frees. Erased to `?*anyopaque` for the Zone-1 reason
-    /// `jit` and `module` already carry.
-    wasi_host: ?*anyopaque = null,
     /// C-API host_info slot (wasm.h `WASM_DECLARE_REF_BASE`): an opaque pointer
     /// + finalizer the Zone-3 binding attaches via `wasm_instance_set_host_info`;
     /// the runtime never reads it (fired in `wasm_instance_delete`, Zone 3).

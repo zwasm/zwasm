@@ -155,11 +155,13 @@ WASM_API_EXTERN void zwasm_store_set_wasi(wasm_store_t*, zwasm_wasi_config_t*);
  * into the Store again, or creating another instance in it —
  * either one clears it.
  *
- * It is read from the WASI setup the CALLED instance was built
- * with, which is the setup that instance keeps using. Replacing
- * that setup with `zwasm_store_set_wasi`, or removing it with
- * `NULL`, therefore neither hides an older instance's exit
- * status nor lets a newer instance's stand in for it.
+ * It is read from whichever of this Store's WASI setups the guest
+ * that exited actually used — you do not have to know which
+ * instance ran. A call that reaches another instance's export
+ * therefore reports that instance's status, and replacing the
+ * Store's setup with `zwasm_store_set_wasi`, or removing it with
+ * `NULL`, neither hides an older instance's exit status nor lets
+ * a newer instance's stand in for it.
  */
 WASM_API_EXTERN bool zwasm_store_wasi_exit_code(const wasm_store_t*, uint32_t* out);
 
