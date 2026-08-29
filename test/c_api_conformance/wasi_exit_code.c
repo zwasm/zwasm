@@ -223,6 +223,80 @@ cleanup:
     return rc;
 }
 
+/* A `wasm_func_new` func called directly has no guest behind it, so its trap
+ * carries no exit status — and must not read back as the last guest's. The
+ * clear sits above the direct-callback branch for exactly this: without it the
+ * trap reports a clean exit of 0 that no guest ever requested. */
+static const char kRefusal[] = "host refused";
+static wasm_store_t* g_refuse_store = NULL;
+
+static wasm_trap_t* refuse(const wasm_val_vec_t* args, wasm_val_vec_t* results) {
+    (void) args;
+    (void) results;
+    wasm_byte_vec_t msg = { sizeof(kRefusal) - 1, (wasm_byte_t*) kRefusal };
+    return wasm_trap_new(g_refuse_store, &msg);
+}
+
+static int expect_direct_call_clears(uint8_t engine) {
+    int rc = 1;
+    bool trapped = false, has_code = false;
+    uint32_t code = 0;
+    wasm_functype_t* ft = NULL;
+    wasm_func_t* fn = NULL;
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+    g_refuse_store = store;
+
+    zwasm_wasi_config_t* cfg = zwasm_wasi_config_new();
+    if (!cfg) { fputs("wasi config new failed\n", stderr); goto cleanup; }
+    zwasm_store_set_wasi(store, cfg); /* takes ownership */
+
+    /* A guest exits cleanly, leaving a status on the Store. */
+    kExitWasm[kRvalOffset] = 0;
+    if (run_in_store(store, kExitWasm, sizeof(kExitWasm), engine, &trapped, &has_code, &code)) goto cleanup;
+    if (!trapped || !has_code || code != 0) {
+        fprintf(stderr, "[%s] direct-call setup: proc_exit(0) read back trapped=%d has_code=%d code=%u\n",
+                engine_name(engine), (int) trapped, (int) has_code, code);
+        goto cleanup;
+    }
+
+    /* A host func of our own, called with no instance in between, traps. */
+    ft = wasm_functype_new_0_0();
+    fn = ft ? wasm_func_new(store, ft, refuse) : NULL;
+    if (!fn) { fputs("wasm_func_new failed\n", stderr); goto cleanup; }
+
+    wasm_val_vec_t no_args = { 0, NULL };
+    wasm_val_vec_t no_res = { 0, NULL };
+    wasm_trap_t* trap = wasm_func_call(fn, &no_args, &no_res);
+    if (!trap) {
+        fprintf(stderr, "[%s] direct call: expected the callback's trap, got none\n", engine_name(engine));
+        goto cleanup;
+    }
+    wasm_trap_delete(trap);
+
+    code = 0xdeadbeefu;
+    has_code = zwasm_store_wasi_exit_code(store, &code);
+    if (has_code) {
+        fprintf(stderr, "[%s] direct call: host-func trap reported exit code %u — no guest ran\n",
+                engine_name(engine), code);
+        goto cleanup;
+    }
+    if (code != 0xdeadbeefu) {
+        fprintf(stderr, "[%s] direct call: wrote through `out` while returning false\n", engine_name(engine));
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (fn) wasm_func_delete(fn);
+    if (ft) wasm_functype_delete(ft);
+    if (store) wasm_store_delete(store);
+    if (eng) wasm_engine_delete(eng);
+    g_refuse_store = NULL;
+    return rc;
+}
+
 int main(void) {
     for (size_t i = 0; i < sizeof(kEngines) / sizeof(kEngines[0]); i++) {
         const uint8_t e = kEngines[i];
@@ -234,6 +308,7 @@ int main(void) {
         if (expect_no_exit(e, true, "unreachable with a WASI host")) return 1;
         if (expect_no_exit(e, false, "unreachable with no WASI host")) return 1;
         if (expect_per_call(e)) return 1;
+        if (expect_direct_call_clears(e)) return 1;
     }
 
     /* Null-arg discipline, matching the rest of the extension surface. */
