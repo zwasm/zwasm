@@ -1375,10 +1375,13 @@ fn hostFuncThunk(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     @memset(res_data, .{ .kind = .i32, .of = .{ .i32 = 0 } });
     var args_vec: ValVec = .{ .size = p.params.len, .data = if (p.params.len > 0) args_data.ptr else null };
     var res_vec: ValVec = .{ .size = nr, .data = if (nr > 0) res_data.ptr else null };
-    const trap: ?*Trap = if (p.callback_env) |cb| cb(p.env, &args_vec, &res_vec) else if (p.callback) |cb| cb(&args_vec, &res_vec) else return runtime.Trap.Unreachable;
+    const trap: ?*Trap = if (p.callback_env) |cb| cb(p.env, &args_vec, &res_vec) else if (p.callback) |cb| cb(&args_vec, &res_vec) else return runtime.Trap.HostTrap;
     if (trap) |tr| {
         trap_surface.wasm_trap_delete(tr); // consume the callback's owned trap
-        return runtime.Trap.Unreachable; // surface as a guest trap
+        // #331: host-originated, so NOT `Unreachable` — a C host must be able to
+        // tell its own callback's failure from a guest fault. The interp twin of
+        // `jit_host_bridge.zig`'s trapResult; both surface `binding_error`.
+        return runtime.Trap.HostTrap;
     }
     // A ref-kind result's `of.ref` is owned by the callback/host (it may
     // be a borrowed view, e.g. `wasm_func_as_ref`); read the payload only,

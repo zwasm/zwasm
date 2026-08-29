@@ -989,6 +989,10 @@ fn trapKindName(k: wasm_c_api.TrapKind) []const u8 {
         .expected_shared_memory => "ExpectedSharedMemory", // Wasm threads (ADR-0168)
         .interrupted => "Interrupted", // sandboxing host cancel/timeout (ADR-0179 #3a)
         .out_of_fuel => "OutOfFuel", // sandboxing fuel budget (ADR-0179 #3b)
+        // #331 — host-originated WASI termination. No spec corpus reaches it
+        // (the testsuite imports no WASI), so this name only ever appears in a
+        // mismatch message, where naming the kind beats naming nothing.
+        .wasi_exit => "WasiExit",
     };
 }
 
