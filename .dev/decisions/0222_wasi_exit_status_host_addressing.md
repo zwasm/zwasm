@@ -135,14 +135,22 @@ through `wasm_func_call`. That makes instantiation a read point of its own, so
 it has to invalidate the previous status exactly as a call does, and it clears
 the host it is making active before running the start function.
 
-Clearing unconditionally rather than only when the config moved is what makes
-the rule statable. Without it, `wasm_instance_new` invalidates the status when
+Clearing whenever an instantiation happens — not only when the config moved,
+and not only when this instance captures a host — is what makes the rule
+statable. Without it, `wasm_instance_new` invalidates the status when
 `zwasm_store_set_wasi` happened to move the setup and preserves it when it did
 not, and two readings measured on `62d9452d5` and unchanged by the addressing
 fix alone are wrong: a second guest built on the SAME config leaves the first
 guest's status readable as if it were the new one's, and a `(start)` that faults
 WITHOUT calling `proc_exit` reads back as the earlier guest's exit. The second
 is #341's exact failure shape at the read point this decision introduces.
+
+The clear cannot hang off the capture branch either: `zwasm_store_set_wasi`
+resets `wasi_host_captured` and leaves `wasi_host` null on a detach, so a module
+with no WASI imports built after a replace or a detach skips that branch. It
+would then leave the previous guest's status readable across the boundary the
+header says closes it — measured on all three engines before the clear was
+lifted out.
 
 The cost is that a status left unread across `wasm_func_call` →
 `wasm_instance_new` is gone. It is accepted: the alternative — not writing at
@@ -152,6 +160,23 @@ is the worse failure because nothing signals it. What moves instead is the rule
 into the Store again, or creating another instance in it — either one clears
 it." Two regression cases pin it, because no other case in that file asks a
 Store anything after building a second instance.
+
+**Only the outermost call owns the status.** A host callback can call back
+into the Store, and a nested `wasm_func_call` would otherwise retarget
+`active_wasi_host` to its own callee — to null, for a `wasm_func_new` one,
+which is the common shape. The outer guest's later `proc_exit` then writes a
+host nothing points at, and a clean termination reads back as a fault:
+`has_code=0` where `62d9452d5` answered `code=7`, on all three engines. That is
+a regression this addressing introduces and the flat `store.wasi_host` read did
+not have, because a single global cannot be retargeted.
+
+`Store.wasi_call_depth` guards it: the outermost `wasm_func_call` records and
+clears, nested ones only count. Instantiation is guarded by the same depth for
+the same reason — an instance created from inside a callback must not close a
+window the call in progress still owns. The counter is decremented in a `defer`,
+so a trap that unwinds through the Zig frame still balances it; the conformance
+suite is what would catch a leak, since a stuck depth makes every later call
+skip the record and report no status.
 
 **Trap classification is untouched, and measured to be.**
 `ZWASM_TRAP_WASI_EXIT` is raised from the engine's own unwind —

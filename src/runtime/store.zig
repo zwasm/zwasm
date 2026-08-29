@@ -68,6 +68,14 @@ pub const Store = struct {
     /// the first such instantiation. Erased to `*anyopaque` for the
     /// same Zone-1 reason as `wasi_host`.
     active_wasi_host: ?*anyopaque = null,
+    /// Re-entrancy depth of `wasm_func_call` on this Store. Only the
+    /// OUTERMOST call decides which host the exit status is read from and
+    /// which one is cleared: a host callback that calls back in — a nested
+    /// `wasm_func_call`, or a `wasm_instance_new` — must not retarget the
+    /// status away from the guest the embedder actually called. Without it a
+    /// nested call to a `wasm_func_new` func drops `active_wasi_host` to null
+    /// and the outer guest's `proc_exit` becomes unreadable.
+    wasi_call_depth: u32 = 0,
     /// Hosts displaced by `zwasm_store_set_wasi` while captured.
     /// `wasm_store_delete` frees each one exactly like `wasi_host`.
     /// Erased to `*anyopaque` for the same Zone-1 reason.

@@ -65,6 +65,35 @@ static const uint8_t kBadStartWasm[] = {
     0x0a, 0x05, 0x01, 0x03, 0x00, 0x00, 0x0b,
 };
 
+/* (module (func (export "_start") nop)) — imports nothing at all, so
+ * instantiating it captures no WASI host. */
+static const uint8_t kNoWasiWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+    0x03, 0x02, 0x01, 0x00,
+    0x07, 0x0a, 0x01, 0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x00,
+    0x0a, 0x05, 0x01, 0x03, 0x00, 0x01, 0x0b,
+};
+
+/* (module
+ *   (import "m" "h" (func $h))
+ *   (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
+ *   (func (export "_start") (call $h) (i32.const 7) (call $exit)))
+ * The host func runs FIRST, so it can call back into the Store before the
+ * guest exits. */
+static const uint8_t kHostThenExitWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x08, 0x02, 0x60, 0x00, 0x00, 0x60, 0x01, 0x7f, 0x00,
+    0x02, 0x2a, 0x02,
+    0x01, 0x6d, 0x01, 0x68, 0x00, 0x00,
+    0x16, 0x77, 0x61, 0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x31,
+    0x09, 0x70, 0x72, 0x6f, 0x63, 0x5f, 0x65, 0x78, 0x69, 0x74,
+    0x00, 0x01,
+    0x03, 0x02, 0x01, 0x00,
+    0x07, 0x0a, 0x01, 0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x02,
+    0x0a, 0x0a, 0x01, 0x08, 0x00, 0x10, 0x00, 0x41, 0x07, 0x10, 0x01, 0x0b,
+};
+
 static const uint8_t kEngines[] = { ZWASM_ENGINE_AUTO, ZWASM_ENGINE_JIT, ZWASM_ENGINE_INTERP };
 
 static const char* engine_name(uint8_t kind) {
@@ -535,6 +564,165 @@ cleanup:
     return rc;
 }
 
+/* A module that captures no WASI host still closes the read window.
+ * `zwasm_store_set_wasi` clears `wasi_host_captured`, so the capture branch is
+ * skipped for a module with no WASI imports built after a replace or a detach.
+ * `wasi.h` states the rule without that qualifier — creating an instance
+ * clears the status — so the clear cannot hang off the capture. */
+static int expect_non_wasi_instantiate_invalidates(uint8_t engine, bool detach) {
+    int rc = 1;
+    bool trapped = false, has_code = false;
+    uint32_t code = 0;
+    uint8_t exit7[sizeof(kExitWasm)];
+    guest_t first = { NULL, NULL, { 0, NULL } };
+    guest_t plain = { NULL, NULL, { 0, NULL } };
+    const char* what = detach ? "no-WASI instantiate after detach" : "no-WASI instantiate after replace";
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+
+    memcpy(exit7, kExitWasm, sizeof(kExitWasm));
+    exit7[kRvalOffset] = 7;
+
+    zwasm_wasi_config_t* cfg = zwasm_wasi_config_new();
+    if (!cfg) { fputs("wasi config new failed\n", stderr); goto cleanup; }
+    zwasm_store_set_wasi(store, cfg); /* takes ownership */
+
+    if (guest_open(store, exit7, sizeof(exit7), engine, &first)) goto cleanup;
+    if (guest_call_start(store, &first, &trapped, &has_code, &code)) goto cleanup;
+    if (!has_code || code != 7) {
+        fprintf(stderr, "[%s] %s: proc_exit(7) read back has_code=%d code=%u\n",
+                engine_name(engine), what, (int) has_code, code);
+        goto cleanup;
+    }
+
+    if (detach) {
+        zwasm_store_set_wasi(store, NULL);
+    } else {
+        zwasm_wasi_config_t* cfg2 = zwasm_wasi_config_new();
+        if (!cfg2) { fputs("wasi config new failed\n", stderr); goto cleanup; }
+        zwasm_store_set_wasi(store, cfg2); /* takes ownership */
+    }
+
+    if (guest_open(store, kNoWasiWasm, sizeof(kNoWasiWasm), engine, &plain)) goto cleanup;
+    code = 0xdeadbeefu;
+    has_code = zwasm_store_wasi_exit_code(store, &code);
+    if (has_code) {
+        fprintf(stderr, "[%s] %s: the earlier status stayed readable (%u)\n",
+                engine_name(engine), what, code);
+        goto cleanup;
+    }
+    if (code != 0xdeadbeefu) {
+        fprintf(stderr, "[%s] %s: wrote through `out` while returning false\n", engine_name(engine), what);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    guest_close(&plain);
+    guest_close(&first);
+    if (store) wasm_store_delete(store);
+    if (eng) wasm_engine_delete(eng);
+    return rc;
+}
+
+/* A host callback that calls back into the Store must not retarget the status.
+ * The embedder made ONE call; the guest behind it exits 7. A nested
+ * `wasm_func_call` from inside the callback has no guest of its own — it is a
+ * `wasm_func_new` func — so recording it would leave the outer guest's exit
+ * unreadable, reporting a clean termination as a fault. */
+static wasm_func_t* g_nested_target = NULL;
+
+static wasm_trap_t* call_back_in(const wasm_val_vec_t* args, wasm_val_vec_t* results) {
+    (void) args;
+    (void) results;
+    if (g_nested_target) {
+        wasm_val_vec_t no_args = { 0, NULL };
+        wasm_val_vec_t no_res = { 0, NULL };
+        wasm_trap_t* t = wasm_func_call(g_nested_target, &no_args, &no_res);
+        if (t) wasm_trap_delete(t);
+    }
+    return NULL;
+}
+
+static wasm_trap_t* do_nothing(const wasm_val_vec_t* args, wasm_val_vec_t* results) {
+    (void) args;
+    (void) results;
+    return NULL;
+}
+
+static int expect_nested_call_keeps_the_outer_host(uint8_t engine) {
+    int rc = 1;
+    uint32_t code = 0;
+    wasm_functype_t* inner_ft = NULL;
+    wasm_functype_t* outer_ft = NULL;
+    wasm_func_t* outer_host = NULL;
+    wasm_module_t* module = NULL;
+    wasm_instance_t* instance = NULL;
+    wasm_extern_vec_t exports = { 0, NULL };
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+
+    zwasm_wasi_config_t* cfg = zwasm_wasi_config_new();
+    if (!cfg) { fputs("wasi config new failed\n", stderr); goto cleanup; }
+    zwasm_store_set_wasi(store, cfg); /* takes ownership */
+
+    inner_ft = wasm_functype_new_0_0();
+    g_nested_target = inner_ft ? wasm_func_new(store, inner_ft, do_nothing) : NULL;
+    outer_ft = wasm_functype_new_0_0();
+    outer_host = outer_ft ? wasm_func_new(store, outer_ft, call_back_in) : NULL;
+    if (!g_nested_target || !outer_host) { fputs("wasm_func_new failed\n", stderr); goto cleanup; }
+
+    wasm_byte_vec_t binary = { sizeof(kHostThenExitWasm), (wasm_byte_t*) kHostThenExitWasm };
+    module = wasm_module_new(store, &binary);
+    if (!module) { fputs("host-then-exit module failed\n", stderr); goto cleanup; }
+
+    wasm_extern_t* import_externs[1] = { wasm_func_as_extern(outer_host) };
+    wasm_extern_vec_t imports = { 1, import_externs };
+    wasm_trap_t* itrap = NULL;
+    instance = zwasm_instance_new_ex(store, module, &imports, &itrap, engine);
+    if (itrap) wasm_trap_delete(itrap);
+    if (!instance) { fputs("host-then-exit instantiate failed\n", stderr); goto cleanup; }
+
+    wasm_instance_exports(instance, &exports);
+    if (exports.size < 1 || !exports.data[0]) { fputs("missing _start export\n", stderr); goto cleanup; }
+
+    wasm_val_vec_t no_args = { 0, NULL };
+    wasm_val_vec_t no_res = { 0, NULL };
+    wasm_trap_t* trap = wasm_func_call(wasm_extern_as_func(exports.data[0]), &no_args, &no_res);
+    if (!trap) {
+        fprintf(stderr, "[%s] nested call: expected a trap from proc_exit, got none\n", engine_name(engine));
+        goto cleanup;
+    }
+    wasm_trap_delete(trap);
+
+    code = 0xdeadbeefu;
+    if (!zwasm_store_wasi_exit_code(store, &code)) {
+        fprintf(stderr, "[%s] nested call: proc_exit(7) reported no status — the nested call took the host\n",
+                engine_name(engine));
+        goto cleanup;
+    }
+    if (code != 7) {
+        fprintf(stderr, "[%s] nested call: proc_exit(7) read back %u\n", engine_name(engine), code);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (exports.data) wasm_extern_vec_delete(&exports);
+    if (instance) wasm_instance_delete(instance);
+    if (module) wasm_module_delete(module);
+    if (outer_host) wasm_func_delete(outer_host);
+    if (g_nested_target) wasm_func_delete(g_nested_target);
+    g_nested_target = NULL;
+    if (outer_ft) wasm_functype_delete(outer_ft);
+    if (inner_ft) wasm_functype_delete(inner_ft);
+    if (store) wasm_store_delete(store);
+    if (eng) wasm_engine_delete(eng);
+    return rc;
+}
+
 /* A `wasm_func_new` func called directly has no guest behind it, so its trap
  * carries no exit status — and must not read back as the last guest's. The
  * clear sits above the direct-callback branch for exactly this: without it the
@@ -626,6 +814,9 @@ int main(void) {
         if (expect_status_follows_captured_host(e, kDetached)) return 1;
         if (expect_read_window_closes_at_instantiate(e)) return 1;
         if (expect_instantiate_invalidates(e)) return 1;
+        if (expect_non_wasi_instantiate_invalidates(e, false)) return 1;
+        if (expect_non_wasi_instantiate_invalidates(e, true)) return 1;
+        if (expect_nested_call_keeps_the_outer_host(e)) return 1;
     }
 
     /* Null-arg discipline, matching the rest of the extension surface. */
