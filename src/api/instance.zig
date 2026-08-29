@@ -368,9 +368,10 @@ pub export fn zwasm_store_set_wasi(s: ?*Store, h: ?*wasi_host.Host) callconv(.c)
 /// `zwasm_store_wasi_exit_code(*Store, *u32)` — read the exit status
 /// a WASI guest requested through `proc_exit`. Returns false, leaving
 /// `out` untouched, when the Store has no WASI host or the guest never
-/// called `proc_exit`. `src/cli/run.zig` applies the same rule: a trap
-/// that carries an exit code is a guest that ended itself, and a trap
-/// without one is a fault.
+/// called `proc_exit`. The status is per call: `wasm_func_call` clears
+/// it before running, so what this reports is the call just made.
+/// `src/cli/run.zig` applies the same rule: a trap that carries an exit
+/// code is a guest that ended itself, and a trap without one is a fault.
 pub export fn zwasm_store_wasi_exit_code(s: ?*const Store, out: ?*u32) callconv(.c) bool {
     const store = s orelse return false;
     const host_opaque = store.wasi_host orelse return false;
@@ -2032,6 +2033,21 @@ pub export fn wasm_func_call(
     results: ?*ValVec,
 ) callconv(.c) ?*Trap {
     const handle = f orelse return null;
+    // #341 — the WASI exit status describes THIS call, not an earlier guest's.
+    // A WASI command exits through `proc_exit` even when it succeeds, so a Store
+    // that has run one command carries a `0` — and `0` is what
+    // `zwasm_store_wasi_exit_code` reports as a clean exit. Clearing above every
+    // branch below covers the interp and JIT/AOT arms and the direct-callback
+    // path in one place. A `wasm_func_new` func has no guest at all, so the
+    // clear is what makes its trap read back as "not an exit" rather than as
+    // the last guest's status. Instance-derived handles carry `.instance`,
+    // `wasm_func_new` ones carry `.store`.
+    if (if (handle.instance) |i| i.store else handle.store) |store| {
+        if (store.wasi_host) |host_opaque| {
+            const host: *wasi_host.Host = @ptrCast(@alignCast(host_opaque));
+            host.exit_code = null;
+        }
+    }
     // #315: a `wasm_func_new[_with_env]` func has no instance — the C callback
     // IS its body, so invoke it here rather than reporting a silent success.
     if (handle.host) |hp| return hostFuncCallDirect(handle, hp, args, results);

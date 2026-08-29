@@ -220,9 +220,15 @@ zig build              # compile the zwasm binary
 zig build test         # unit tests
 zig build test-all     # all enabled test layers
 
+# Embedding from C or Rust: libzwasm.a + the three public headers into zig-out/
+zig build static-lib -Doptimize=ReleaseSafe -Dcompiler-rt=true
+
 # Cross-compile sanity check (catches, e.g., Win64 compile errors in ~3s)
 zig build -Dtarget=x86_64-windows-gnu
 ```
+
+The link line that goes with `static-lib`, and what each of its flags is for,
+is in [`docs/tutorial.md`](docs/tutorial.md) §5.
 
 **You need Zig 0.16.0 and [`wasm-tools`](https://github.com/bytecodealliance/wasm-tools)**
 (pinned in [`.github/versions.lock`](.github/versions.lock); the build
