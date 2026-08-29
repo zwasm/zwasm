@@ -515,10 +515,13 @@ fn resolveLenientEntryIdx(allocator: Allocator, wasm_bytes: []const u8) Error!?u
 /// → `main` → first func export, else INSTANTIATE-ONLY (exit 0, wasmtime-aligned)
 /// — instead of strict `_start`-only → ExportNotFound on no-`_start` modules
 /// (D-284 nbody). A void entry runs via `callVoidNoArgs` (proc_exit code flows
-/// through the host); a no-arg `() -> i32` entry runs via `callI32NoArgs` (i32 →
-/// exit, AOT-aligned). Other default-entry shapes (params / non-i32 result) have
-/// no args to supply → instantiate-only. `--invoke` of an unsupported sig keeps
-/// the existing UnsupportedEntrySignature contract.
+/// through the host); a no-arg `() -> i32` entry runs via `callI32NoArgs` and its
+/// i32 lands in `result_out` — it is NOT an exit status. The returned u32 is
+/// `JitRuntime.jit_executed_flag` on every path, so the process exit code comes
+/// from `proc_exit` (or 0), never from the entry's result (#220 (c)). Other
+/// default-entry shapes (params / non-i32 result) have no args to supply →
+/// instantiate-only. `--invoke` of an unsupported sig keeps the existing
+/// UnsupportedEntrySignature contract.
 /// ADR-0179 #3a-4 / D-314 — sandboxing limits the CLI threads into the JIT
 /// run path (the facade stays interp-only by design, so the JIT runner arms
 /// its JitRuntime directly). All optional; defaults = unmetered/uncapped.
