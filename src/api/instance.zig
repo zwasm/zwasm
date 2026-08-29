@@ -341,10 +341,10 @@ pub export fn zwasm_store_set_wasi(s: ?*Store, h: ?*wasi_host.Host) callconv(.c)
     const store = s orelse return;
     if (store.wasi_host) |old_opaque| {
         if (store.wasi_host_captured) {
-            // EXEMPT-FALLBACK: an append OOM accepts the leak over the
-            // UAF, mirroring parkAsZombie. `c_allocator` is what
-            // `zwasm_wasi_config_new` used for every host this list can
-            // hold, and what `wasm_store_delete` frees them with.
+            // `c_allocator` is what `zwasm_wasi_config_new` used for every
+            // host this list can hold, and what `wasm_store_delete` frees
+            // them with.
+            // EXEMPT-FALLBACK: ADR-0014 — an append OOM accepts the leak over the UAF, mirroring parkAsZombie.
             store.retired_wasi_hosts.append(std.heap.c_allocator, old_opaque) catch {};
         } else {
             const old: *wasi_host.Host = @ptrCast(@alignCast(old_opaque));
