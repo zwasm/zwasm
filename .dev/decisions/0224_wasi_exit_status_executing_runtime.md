@@ -146,6 +146,19 @@ unchanged: the set is `wasi_host` plus `retired_wasi_hosts`, and
 `wasm_store_delete` frees the latter after the instance and zombie cascade.
 This decision reads more of that list than ADR-0222 did but adds nothing to it.
 
+**The retirement slot is reserved at capture, which is new here.** ADR-0219
+made the retirement append tolerate its own OOM — the host leaks rather than
+dangling. That was sufficient while ADR-0222 held the address on
+`Instance.wasi_host` as well: a host missing from the list was still findable.
+It is not sufficient once the list IS the addressing, because a host that fails
+to reach it is unreadable while its instances stay callable, and their exits
+report nothing. So a capture reserves the one retirement slot it can cause
+(`retired_wasi_hosts.ensureUnusedCapacity(1)` at both sites that set
+`wasi_host_captured`), which moves the failure onto the instantiation, where
+the C surface already reports it by returning NULL. The append itself stays
+fallible rather than assuming the capacity: a library that panics on a violated
+internal invariant is worse than one that degrades to ADR-0219's behaviour.
+
 **The clear and the read are O(number of setups this Store has held).** One for
 an embedder that installs a config and leaves it, one more per
 `zwasm_store_set_wasi` that displaced a captured host. It is the same list

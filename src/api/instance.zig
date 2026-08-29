@@ -343,7 +343,11 @@ pub export fn zwasm_store_set_wasi(s: ?*Store, h: ?*wasi_host.Host) callconv(.c)
         if (store.wasi_host_captured) {
             // `c_allocator` is what `zwasm_wasi_config_new` used for every
             // host this list can hold, and what `wasm_store_delete` frees
-            // them with.
+            // them with. The slot is already reserved: whatever set
+            // `wasi_host_captured` reserved one and the flag is cleared below,
+            // so each capture funds exactly the one retirement it can cause
+            // (ADR-0224). Kept fallible rather than assuming the capacity so a
+            // violated reservation degrades instead of panicking in a library.
             // EXEMPT-FALLBACK: ADR-0014 — an append OOM accepts the leak over the UAF, mirroring parkAsZombie.
             store.retired_wasi_hosts.append(std.heap.c_allocator, old_opaque) catch {};
         } else {
@@ -403,10 +407,12 @@ pub fn clearWasiExitStatus(store: *const Store) void {
 /// since the last entry into guest code.
 ///
 /// The set walked here is every host a guest in this Store can write, and it
-/// is closed: an instance's host always came from `store.wasi_host` at capture
-/// time, and `zwasm_store_set_wasi` frees a host nothing captured on the spot
-/// rather than retiring it, so that one can never be written afterwards. It is
-/// the same set `wasm_store_delete` frees.
+/// is closed on both sides: an instance's host always came from
+/// `store.wasi_host` at capture time, `zwasm_store_set_wasi` frees a host
+/// nothing captured on the spot rather than retiring it, and a capture
+/// reserves the retirement slot it may later need — so a displaced host cannot
+/// fall out of the list and become unreadable while its instances stay
+/// callable. It is the same set `wasm_store_delete` frees.
 ///
 /// Scanning is sound because AT MOST ONE host in it carries a status at any
 /// read point. A `proc_exit` unwinds the whole call, so the guest that wrote
@@ -542,6 +548,15 @@ fn buildBindings(
             // on `store.zombies`. May over-mark (this also runs on the
             // throwaway arena in `collectHostFuncTargets`); over-marking
             // only defers a free, so nothing compensates for it.
+            //
+            // ADR-0224 — reserve the retirement slot HERE, at capture, not at
+            // the swap. `activeWasiHost` finds a displaced host only through
+            // `retired_wasi_hosts`, so a host that fails to reach that list is
+            // not merely leaked (the pre-ADR-0224 cost) but unreadable: its
+            // instances stay callable and their exits report nothing.
+            // Reserving at capture puts the allocation failure on the
+            // instantiation, which can and does report it.
+            try store.retired_wasi_hosts.ensureUnusedCapacity(std.heap.c_allocator, 1);
             store.wasi_host_captured = true;
             bindings[idx] = .{ .func = .{
                 .host_call = .{ .fn_ptr = thunk, .ctx = wasi_host_ptr },
@@ -857,8 +872,16 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     }
     jit.owned.rt.wasi_host = store.wasi_host;
     // Captured for the JitInstance's life. May over-mark (this runs before
-    // `runStart`, which can still fail the instantiation) — see buildBindings.
-    if (store.wasi_host != null) store.wasi_host_captured = true;
+    // `runStart`, which can still fail the instantiation) — see buildBindings,
+    // including why the retirement slot is reserved at capture.
+    if (store.wasi_host != null) {
+        store.retired_wasi_hosts.ensureUnusedCapacity(std.heap.c_allocator, 1) catch {
+            jit.deinit(alloc);
+            alloc.destroy(jit);
+            return null;
+        };
+        store.wasi_host_captured = true;
+    }
     // #352 / ADR-0224 — instantiating is an entry into guest code: a `(start)`
     // can call `proc_exit`. Clear before `runStart`, so the start's own status
     // is what reads back and an earlier call's cannot stand in for it.
