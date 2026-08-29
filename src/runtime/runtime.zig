@@ -401,8 +401,10 @@ pub const Runtime = struct {
     /// fuel, decremented once per executed interp instruction; trap `OutOfFuel`
     /// at 0. `null` = unmetered (zero hot-path cost: one predictable optional
     /// unwrap per instruction). Set/read via the facade `Instance.setFuel`/
-    /// `fuelRemaining`. Interp-engine only (the default engine); JIT-engine
-    /// fuel is a documented post-v0.1 enhancement (handover).
+    /// `fuelRemaining`. This field is the INTERP engine's cell; the JIT keeps
+    /// its own (`JitRuntime.fuel_cell`, armed via `JitInstance.setFuel`, units =
+    /// poll-site crossings). The facade and `zwasm_instance_set_fuel` route to
+    /// whichever engine backs the instance, so both are reachable from a host.
     fuel: ?u64 = null,
 
     /// Optional per-instruction trace hook (Phase 6 / §9.6 / 6.A

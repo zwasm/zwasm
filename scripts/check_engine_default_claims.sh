@@ -8,11 +8,16 @@
 # rots, and this one rotted twice. Same class as the D-312 compiler-rt lie
 # (lesson 2026-08-03-ungated-negative-doc-claim-rotted-into-a-lie.md).
 #
-# Two assertions:
+# Three assertions:
 #   1. ANCHOR — the CLI usage text still says the default is `auto`. If the
 #      default legitimately changes, this fires first and forces the sweep
 #      below to be redone rather than silently inverted.
-#   2. SWEEP — no live tracked file claims the interpreter is the default.
+#   2. SWEEP — no live tracked file claims the interpreter is the default, on
+#      any single line.
+#   3. SPAN SWEEP — the same claim spread across two comment lines. #309 was
+#      missed because `include/zwasm.h` wrapped "interpreter-backed instances"
+#      and "(the hardened default engine)" onto separate lines, and a
+#      line-oriented grep cannot see a claim that straddles the wrap.
 #
 # Modes:
 #   bash scripts/check_engine_default_claims.sh          # informational, exit 0
@@ -37,7 +42,22 @@ EXEMPT_RE='^(bench/|CHANGELOG\.md$|\.dev/archive/|\.dev/lessons/|\.dev/decisions
 # always carry. Kept literal and narrow — a loose pattern here produces false
 # positives on true statements about comparator runtimes, which is how a gate
 # gets disabled.
-CLAIM_RE='interp(reter)?[`*]*[[:space:]]*\((the )?default[,)]|interpreter by default|default[[:space:]]+engine[[:space:]]+is[[:space:]]+(the[[:space:]]+)?[`*]*interp|interp(reter)?/default engine'
+#
+# The `currently|for now` and `auto (= interp` / `auto resolves to interp` arms
+# were added for #309: both phrasings assert the interpreter is what you get
+# today without ever writing "interpreter is the default".
+CLAIM_RE='interp(reter)?[`*]*[[:space:]]*\((the )?default[,)]|interpreter by default|default[[:space:]]+engine[[:space:]]+is[[:space:]]+(the[[:space:]]+)?[`*]*interp|interp(reter)?/default engine|(currently|for now)[[:space:]]+(the[[:space:]]+)?[`*]*interp(reter)?\b|auto[`*.]*[[:space:]]*(\(=[[:space:]]*|resolves to[[:space:]]+)[`*]*(the[[:space:]]+)?interp(reter)?\b'
+
+# Pass 3 operates on the file with comment leaders and newlines flattened to
+# spaces, so a claim that wraps is one string. Necessarily broader than
+# CLAIM_RE, so each match is re-tested against TRUE_MARKER_RE: a window that
+# also names `auto` / the JIT / a fallback is describing the real default
+# ("auto — prefers the JIT, interpreter fallback — is the default engine") and
+# is not a claim that the interpreter is it. A match that the file wraps in
+# quotation marks is likewise skipped: a quoted claim is being cited (as
+# ci.yml cites the #163 one), not made.
+SPAN_CLAIM_RE='interp(reter)?[a-z-]*[^.]{0,60}default engine'
+TRUE_MARKER_RE='auto|jit|fallback|not the default|no longer the default'
 
 fail=0
 
@@ -64,6 +84,23 @@ while IFS= read -r f; do
     printf '%s' "$line" | grep -qiE 'wasmedge|wasmer|wazero|wasmtime|zwasm v1|\bv1\b' && continue
     hits+=("$f: $line")
   done < <(grep -niE "$CLAIM_RE" "$f" 2>/dev/null || true)
+done < <(git ls-files -- '*.md' '*.yml' '*.yaml' '*.zig' '*.sh' '*.h' '*.c' '*.rs' 2>/dev/null)
+
+# --- 3. span sweep (claims that wrap across comment lines) -----------------
+while IFS= read -r f; do
+  [[ -f "$f" ]] || continue
+  [[ "$f" =~ $EXEMPT_RE ]] && continue
+  joined="$(sed -E 's#^[[:space:]]*(///|//|\*/|/\*|\*|\#)[[:space:]]*##' "$f" | tr '\n' ' ')"
+  # Pre-filter AFTER joining: the phrase itself may straddle the wrap, and a
+  # raw-file filter would then skip the file this pass exists to catch.
+  printf '%s' "$joined" | grep -qiE 'default[[:space:]]+engine' || continue
+  while IFS= read -r m; do
+    [[ -n "$m" ]] || continue
+    printf '%s' "$m" | grep -qiE "$TRUE_MARKER_RE" && continue
+    printf '%s' "$m" | grep -qiE 'wasmedge|wasmer|wazero|wasmtime|zwasm v1|\bv1\b' && continue
+    printf '%s' "$joined" | grep -qF "\"$m\"" && continue
+    hits+=("$f: (spans lines) $m")
+  done < <(printf '%s' "$joined" | grep -oiE "$SPAN_CLAIM_RE" 2>/dev/null || true)
 done < <(git ls-files -- '*.md' '*.yml' '*.yaml' '*.zig' '*.sh' '*.h' '*.c' '*.rs' 2>/dev/null)
 
 if [[ ${#hits[@]} -gt 0 ]]; then
