@@ -629,8 +629,8 @@ pub export fn wasm_instance_new(
     imports: ?*const anyopaque,
     trap_out: ?*?*Trap,
 ) callconv(.c) ?*Instance {
-    // Stock wasm-c-api: engine is `.auto` (= interp until the JIT host-import
-    // bridge lands). The `zwasm_instance_new_ex` extension selects per-instance.
+    // Stock wasm-c-api: engine is `.auto` — JIT-first, interp only for a module
+    // the JIT declines (D-496). `zwasm_instance_new_ex` selects per-instance.
     return instanceNewWithEngine(s, m, imports, trap_out, .auto);
 }
 
@@ -665,10 +665,11 @@ pub fn instanceNewWithEngine(
 /// that threads per-instance runtime budgets (ADR-0179). Mirrors
 /// `wasm_instance_new` with a null imports vector but accepts `limits` so fuel /
 /// memory caps are armed before the start function and the initial allocation.
-/// ADR-0200 — per-instance engine selection. `auto` lets the runtime pick
-/// (eventually JIT-default, interp fallback on a JIT-less arch); `jit` /
-/// `interp` force one. The fork is centralised in `instantiateInternal` so
-/// every entry point (facade / `wasm_instance_new` / linker) honours it.
+/// ADR-0200 / D-496 — per-instance engine selection. `auto` tries the JIT and
+/// falls back to the interp for a module the JIT declines; `jit` / `interp`
+/// force one (a forced `jit` fails rather than downgrading). The fork is
+/// centralised in `instantiateInternal` so every entry point (facade /
+/// `wasm_instance_new` / linker) honours it.
 pub const EngineKind = enum { auto, jit, interp };
 
 pub fn instantiateFacade(store: *Store, module: *const Module, trap_out: ?*?*Trap, limits: InstantiateLimits, engine: EngineKind) ?*Instance {
@@ -2774,7 +2775,7 @@ test "ADR-0200 C-path JIT: wasm_instance_exports + wasm_func_call on a JIT insta
     const m = wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
     defer wasm_module_delete(m);
     // Force the JIT engine via the facade entry; stock `wasm_instance_new`
-    // hardcodes `.auto` (= interp) — the C `zwasm_instance_new_ex` knob is next.
+    // hardcodes `.auto` — the C `zwasm_instance_new_ex` knob is next.
     const inst = instantiateFacade(s, m, null, .{}, .jit) orelse return error.InstanceAllocFailed;
     defer wasm_instance_delete(inst);
 

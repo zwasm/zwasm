@@ -5,10 +5,12 @@
  * surface follows the upstream wasm-c-api interface.
  *
  * Instance-level sandboxing setters: per-instance budgets are set
- * post-instantiate and are mutable mid-workload (fuel, memory/table
- * ceilings, interrupt). The C API creates interpreter-backed instances
- * (the hardened default engine); JIT budgets are driven via the CLI.
- * All functions are null-tolerant (a null instance is a no-op).
+ * post-instantiate and are mutable mid-workload (fuel, memory ceiling,
+ * interrupt). wasm_instance_new compiles the module with the JIT and
+ * instantiates the interpreter only when the JIT declines it, so each
+ * setter routes to whichever engine ended up backing the instance —
+ * see ZWASM_ENGINE_AUTO below. All functions are null-tolerant (a null
+ * instance is a no-op).
  *
  * The WASI config family (zwasm_wasi_config_*, zwasm_store_set_wasi) is
  * declared in wasi.h; zwasm_instance_get_func is declared below.
@@ -25,7 +27,13 @@
 extern "C" {
 #endif
 
-/* ── Fuel (deterministic budget; interp units = instructions) ────────── */
+/* ── Fuel (deterministic budget) ─────────────────────────────────────── */
+
+/* Fuel units are engine-specific: interpreter = instructions executed;
+ * JIT = poll-site crossings (function entry + loop back-edges). A budget
+ * armed on an instance whose engine you did not force therefore has no
+ * portable unit — pin the engine with zwasm_instance_new_ex when the
+ * exact count matters. */
 
 /* Arm (or re-arm) the fuel budget. Exhaustion traps with kind
  * ZWASM_TRAP_OUT_OF_FUEL ("all fuel consumed"). */
@@ -90,11 +98,14 @@ WASM_API_EXTERN wasm_func_t* zwasm_instance_get_func(wasm_instance_t*, uint32_t 
 
 /* ── Engine selection ────────────────────────────────────────────────── */
 
-/* Per-instance engine kind for zwasm_instance_new_ex. AUTO resolves to the
- * runtime's choice (currently the interpreter until the JIT host-import/WASI
- * bridge lands; documented to change without an API break). JIT forces the
- * native JIT (an explicit JIT on a JIT-less arch fails instantiation, returning
- * NULL — no silent downgrade). INTERP forces the interpreter. */
+/* Per-instance engine kind for zwasm_instance_new_ex. AUTO — what stock
+ * wasm_instance_new passes — compiles the module with the JIT and instantiates
+ * the interpreter only for a module the JIT declines (an import outside the
+ * JIT's host-func bridge, or a body it cannot compile). JIT forces the native
+ * JIT: a declined module fails instantiation, returning NULL — no silent
+ * downgrade. INTERP forces the interpreter, which unlike the other two rejects
+ * a module importing wasi_snapshot_preview1 when no WASI host is configured on
+ * the store. */
 #define ZWASM_ENGINE_AUTO 0
 #define ZWASM_ENGINE_JIT 1
 #define ZWASM_ENGINE_INTERP 2
