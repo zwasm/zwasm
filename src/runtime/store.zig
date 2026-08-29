@@ -41,9 +41,25 @@ pub const Store = struct {
     /// Zone 1 (`runtime/`) does not need to import Zone 2
     /// (`wasi/`). The C ABI binding casts back to `*wasi.Host`.
     /// Set via `zwasm_store_set_wasi`; ownership transfers to
-    /// the Store and is freed in `wasm_store_delete`. Null when
-    /// the store has no WASI hosting configured.
+    /// the Store. Freed by `wasm_store_delete`, or by the next
+    /// `zwasm_store_set_wasi` while no instantiation has captured
+    /// it (see `wasi_host_captured`). Null when the store has no
+    /// WASI hosting configured.
     wasi_host: ?*anyopaque = null,
+    /// Set once an instantiation baked `wasi_host`'s address into
+    /// something that outlives the call: the interpreter's per-import
+    /// `host_call.ctx`, or the JIT runtime's own `wasi_host`. A
+    /// captured host can no longer be freed by the next
+    /// `zwasm_store_set_wasi` — it retires onto `retired_wasi_hosts`
+    /// instead. Deliberately NOT cleared when an instance is deleted:
+    /// the interp bindings are parked with the instance's arena on
+    /// `zombies` and stay callable until store teardown. Cleared only
+    /// when a different host is installed.
+    wasi_host_captured: bool = false,
+    /// Hosts displaced by `zwasm_store_set_wasi` while captured.
+    /// `wasm_store_delete` frees each one exactly like `wasi_host`.
+    /// Erased to `*anyopaque` for the same Zone-1 reason.
+    retired_wasi_hosts: std.ArrayList(*anyopaque) = .empty,
     /// Per-Store zombie-instance list (ADR-0014 §2.1 / 6.K.2
     /// sub-change 4). When `instantiateRuntime` traps mid-
     /// element-segment processing, prior writes into a foreign
