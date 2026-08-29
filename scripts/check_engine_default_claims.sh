@@ -90,9 +90,10 @@ done < <(git ls-files -- '*.md' '*.yml' '*.yaml' '*.zig' '*.sh' '*.h' '*.c' '*.r
 while IFS= read -r f; do
   [[ -f "$f" ]] || continue
   [[ "$f" =~ $EXEMPT_RE ]] && continue
-  # Cheap pre-filter: the span pattern always ends in "default engine".
-  grep -qiF 'default engine' "$f" || continue
   joined="$(sed -E 's#^[[:space:]]*(///|//|\*/|/\*|\*|\#)[[:space:]]*##' "$f" | tr '\n' ' ')"
+  # Pre-filter AFTER joining: the phrase itself may straddle the wrap, and a
+  # raw-file filter would then skip the file this pass exists to catch.
+  printf '%s' "$joined" | grep -qiE 'default[[:space:]]+engine' || continue
   while IFS= read -r m; do
     [[ -n "$m" ]] || continue
     printf '%s' "$m" | grep -qiE "$TRUE_MARKER_RE" && continue
