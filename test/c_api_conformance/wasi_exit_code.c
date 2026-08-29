@@ -54,6 +54,17 @@ static const uint8_t kFaultWasm[] = {
     0x0a, 0x05, 0x01, 0x03, 0x00, 0x00, 0x0b,
 };
 
+/* (module (func (export "_start") unreachable) (start 0)) — the start function
+ * faults, so `wasm_instance_new` fails. It never calls `proc_exit`. */
+static const uint8_t kBadStartWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+    0x03, 0x02, 0x01, 0x00,
+    0x07, 0x0a, 0x01, 0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x00,
+    0x08, 0x01, 0x00,
+    0x0a, 0x05, 0x01, 0x03, 0x00, 0x00, 0x0b,
+};
+
 static const uint8_t kEngines[] = { ZWASM_ENGINE_AUTO, ZWASM_ENGINE_JIT, ZWASM_ENGINE_INTERP };
 
 static const char* engine_name(uint8_t kind) {
@@ -430,6 +441,100 @@ cleanup:
     return rc;
 }
 
+/* Instantiating invalidates the status, whether or not the config moved.
+ * `wasi.h` names instantiation alongside the next call as the point to read
+ * before, and instantiation IS a read point of its own — a `(start)` can call
+ * `proc_exit`. Both halves have to hold, or the sentence is only true when the
+ * config happens to change:
+ *
+ *   - a second guest built on the SAME config must not leave the first's
+ *     status readable
+ *   - a `(start)` that faults WITHOUT exiting must not read back as the
+ *     earlier guest's exit — that is #341's failure shape at this read point
+ */
+static int expect_instantiate_invalidates(uint8_t engine) {
+    int rc = 1;
+    bool trapped = false, has_code = false;
+    uint32_t code = 0;
+    uint8_t exit7[sizeof(kExitWasm)];
+    guest_t first = { NULL, NULL, { 0, NULL } };
+    guest_t second = { NULL, NULL, { 0, NULL } };
+    wasm_module_t* bad_module = NULL;
+    wasm_instance_t* bad_instance = NULL;
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+
+    memcpy(exit7, kExitWasm, sizeof(kExitWasm));
+    exit7[kRvalOffset] = 7;
+
+    zwasm_wasi_config_t* cfg = zwasm_wasi_config_new();
+    if (!cfg) { fputs("wasi config new failed\n", stderr); goto cleanup; }
+    zwasm_store_set_wasi(store, cfg); /* takes ownership */
+
+    if (guest_open(store, exit7, sizeof(exit7), engine, &first)) goto cleanup;
+    if (guest_call_start(store, &first, &trapped, &has_code, &code)) goto cleanup;
+    if (!trapped || !has_code || code != 7) {
+        fprintf(stderr, "[%s] instantiate-invalidates: proc_exit(7) read back trapped=%d has_code=%d code=%u\n",
+                engine_name(engine), (int) trapped, (int) has_code, code);
+        goto cleanup;
+    }
+
+    /* A second guest on the SAME config — nothing replaced, nothing detached. */
+    if (guest_open(store, exit7, sizeof(exit7), engine, &second)) goto cleanup;
+    code = 0xdeadbeefu;
+    has_code = zwasm_store_wasi_exit_code(store, &code);
+    if (has_code) {
+        fprintf(stderr, "[%s] instantiate-invalidates: same-config instantiate left the earlier status readable (%u)\n",
+                engine_name(engine), code);
+        goto cleanup;
+    }
+    if (code != 0xdeadbeefu) {
+        fprintf(stderr, "[%s] instantiate-invalidates: wrote through `out` while returning false\n", engine_name(engine));
+        goto cleanup;
+    }
+
+    /* Now leave a status behind again, then fail an instantiation whose start
+     * function faults without calling proc_exit. */
+    if (guest_call_start(store, &second, &trapped, &has_code, &code)) goto cleanup;
+    if (!has_code || code != 7) {
+        fprintf(stderr, "[%s] instantiate-invalidates: second guest read back has_code=%d code=%u\n",
+                engine_name(engine), (int) has_code, code);
+        goto cleanup;
+    }
+
+    wasm_byte_vec_t bad_binary = { sizeof(kBadStartWasm), (wasm_byte_t*) kBadStartWasm };
+    bad_module = wasm_module_new(store, &bad_binary);
+    if (!bad_module) { fputs("bad-start module failed to parse\n", stderr); goto cleanup; }
+    wasm_extern_vec_t no_imports = { 0, NULL };
+    wasm_trap_t* itrap = NULL;
+    bad_instance = zwasm_instance_new_ex(store, bad_module, &no_imports, &itrap, engine);
+    if (itrap) wasm_trap_delete(itrap);
+    if (bad_instance) {
+        fprintf(stderr, "[%s] instantiate-invalidates: a faulting start function instantiated\n",
+                engine_name(engine));
+        goto cleanup;
+    }
+
+    code = 0xdeadbeefu;
+    has_code = zwasm_store_wasi_exit_code(store, &code);
+    if (has_code) {
+        fprintf(stderr, "[%s] instantiate-invalidates: a faulting start read back as exit %u\n",
+                engine_name(engine), code);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (bad_instance) wasm_instance_delete(bad_instance);
+    if (bad_module) wasm_module_delete(bad_module);
+    guest_close(&second);
+    guest_close(&first);
+    if (store) wasm_store_delete(store);
+    if (eng) wasm_engine_delete(eng);
+    return rc;
+}
+
 /* A `wasm_func_new` func called directly has no guest behind it, so its trap
  * carries no exit status — and must not read back as the last guest's. The
  * clear sits above the direct-callback branch for exactly this: without it the
@@ -520,6 +625,7 @@ int main(void) {
         if (expect_status_follows_captured_host(e, kReplacedCarries5)) return 1;
         if (expect_status_follows_captured_host(e, kDetached)) return 1;
         if (expect_read_window_closes_at_instantiate(e)) return 1;
+        if (expect_instantiate_invalidates(e)) return 1;
     }
 
     /* Null-arg discipline, matching the rest of the extension surface. */

@@ -130,21 +130,28 @@ would have dropped it silently.
 
 **The read window closes at the next instantiation, not only at the next
 call.** Writing `active_wasi_host` at capture time is what keeps a `(start)`'s
-`proc_exit` readable, and the same write makes a later `wasm_instance_new` move
-the setup the status is read from. A status left unread across
-`call → set_wasi → wasm_instance_new` is therefore gone — and gone as `false`,
-which the header's two bullets classify as a genuine fault. That is the #341
-failure shape reached through a different door, so it is named rather than left
-to be discovered.
+`proc_exit` readable — a `(start)` runs inside `wasm_instance_new`, never
+through `wasm_func_call`. That makes instantiation a read point of its own, so
+it has to invalidate the previous status exactly as a call does, and it clears
+the host it is making active before running the start function.
 
-It is accepted, not removed. Narrowing the write to `wasm_func_call` would
-trade it for silently dropping the start-function status, which is the worse
-failure because nothing signals it. What moves instead is the invalidation rule
-`include/wasi.h` states: it now names both events — "read it before calling
-into the Store again, or creating another instance in it". A regression case
-pins both halves, that the swap alone does not hide the status and that the
-instantiation after it does, because no other case in that file builds a second
-instance after a swap.
+Clearing unconditionally rather than only when the config moved is what makes
+the rule statable. Without it, `wasm_instance_new` invalidates the status when
+`zwasm_store_set_wasi` happened to move the setup and preserves it when it did
+not, and two readings measured on `62d9452d5` and unchanged by the addressing
+fix alone are wrong: a second guest built on the SAME config leaves the first
+guest's status readable as if it were the new one's, and a `(start)` that faults
+WITHOUT calling `proc_exit` reads back as the earlier guest's exit. The second
+is #341's exact failure shape at the read point this decision introduces.
+
+The cost is that a status left unread across `wasm_func_call` →
+`wasm_instance_new` is gone. It is accepted: the alternative — not writing at
+capture time — trades it for silently dropping the start-function status, which
+is the worse failure because nothing signals it. What moves instead is the rule
+`include/wasi.h` states, which now names both events: "read it before calling
+into the Store again, or creating another instance in it — either one clears
+it." Two regression cases pin it, because no other case in that file asks a
+Store anything after building a second instance.
 
 **Trap classification is untouched, and measured to be.**
 `ZWASM_TRAP_WASI_EXIT` is raised from the engine's own unwind —
@@ -155,6 +162,16 @@ measured on `b3d031525` as `kind=18` for control, replaced and detached alike,
 on all three engines (#350). This is the boundary of the change — nothing about
 how a `proc_exit` trap is recognised had to move, only which host the read and
 the clear address.
+
+**A cross-module call still writes a host this record does not name.** When an
+instance imports another instance's export, dispatch enters the SOURCE
+instance's body with the SOURCE instance's WASI binding, so `proc_exit` writes
+the host that instance captured while the record names the called instance's.
+Measured on `interp`, identical before and after this change (`auto` and `jit`
+cannot instantiate a cross-module func import at all). It is #352, not this
+decision: keying on the called instance is right for every call that does not
+leave it, and following the executing runtime instead is a different mechanism
+with its own question.
 
 **`src/cli/run.zig`'s divergence was unreachable and is fixed anyway.** The CLI
 installs one config and never swaps, so the two addressings agreed there. It is
@@ -190,9 +207,13 @@ the first and sufficient check there.
   installed host, and now aims at the captured one.
 - #344 — the third reader of `host.exit_code`, on the component path, out of
   scope here.
+- #352 — a `proc_exit` reached through a cross-module func import writes the
+  SOURCE instance's host, so the guest that exits is not the called instance
+  this decision keys on. Measured identical before and after, on `interp`;
+  fixing it needs the record to follow the runtime that runs `proc_exit`.
 - #348 — `wasi.h`'s "do not branch on the trap kind" paragraph, stale since
   #331. Untouched here; the read-window consequence above is what gives it a
   cost, and is recorded on that issue.
 - `test/c_api_conformance/wasi_exit_code.c` — three regression cases, one per
-  way the config can move on, asserting the code on auto / jit / interp, plus a
-  fourth pinning where the read window closes.
+  way the config can move on, asserting the code on auto / jit / interp, plus
+  two pinning where the read window closes and what instantiation clears.

@@ -153,7 +153,7 @@ WASM_API_EXTERN void zwasm_store_set_wasi(wasm_store_t*, zwasm_wasi_config_t*);
  * clears it before running, so a `true` return describes the call
  * you just made, never an earlier guest's. Read it before calling
  * into the Store again, or creating another instance in it —
- * either one moves the setup the status is read from.
+ * either one clears it.
  *
  * It is read from the WASI setup the CALLED instance was built
  * with, which is the setup that instance keeps using. Replacing

@@ -826,6 +826,13 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     if (store.wasi_host != null) {
         store.wasi_host_captured = true;
         store.active_wasi_host = store.wasi_host;
+        // Instantiating is a read point for the status (a `(start)` can call
+        // `proc_exit`), so it has to invalidate the previous one like a call
+        // does — otherwise a Store whose config did NOT move reports an
+        // earlier call's status as this instantiation's, and a `(start)` that
+        // faults without exiting reads back as that earlier exit. Cleared
+        // before `runStart` so the start's own status survives.
+        if (activeWasiHost(store)) |h| h.exit_code = null;
     }
 
     // Wasm §4.5.4 — run the `(start)` function AFTER setup initialised globals /
@@ -1105,6 +1112,10 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
     if (store.wasi_host_captured) {
         inst.wasi_host = store.wasi_host;
         store.active_wasi_host = store.wasi_host;
+        // Same invalidation as the JIT arm above, and for the same reason:
+        // instantiating moves the setup the status is read from, so it must
+        // clear what was there. Before the start function runs below.
+        if (activeWasiHost(store)) |h| h.exit_code = null;
     }
 
     // D-174 defensive fix: register inst in the store's live-instance
