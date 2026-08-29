@@ -17,15 +17,35 @@
 //! would be a sandbox-bypass footgun (set_fuel doing nothing). Null
 //! instance/no-engine = no-op, matching wasm.h's null-tolerant style.
 //!
+//! `zwasm_version` is the one member here that is not instance-scoped: it
+//! answers for the library as a whole (ADR-0221).
+//!
 //! Zone 3 (`src/api/`).
 
 const std = @import("std");
+const build_options = @import("build_options");
 
 const capi = @import("instance.zig");
 const trap_surface = @import("trap_surface.zig");
 const vec = @import("vec.zig");
 
 const Instance = capi.Instance;
+
+/// The semantic version of the *linked library* — `build.zig.zon`'s
+/// `.version`, threaded through `build_options` — NUL-terminated, in static
+/// storage. Never null; the caller must not free it.
+///
+/// Semver ALONE, not build identity: `-Dwasm` / `-Dwasi` / `-Dengine` are
+/// compile-time and change what the library can do, yet two builds of this
+/// commit differing in all three return the same string. Per-axis identity
+/// accessors are deferred until a consumer needs them (ADR-0221).
+pub export fn zwasm_version() callconv(.c) [*:0]const u8 {
+    // `build_options.version` is a plain `[]const u8` with no terminator, so
+    // returning its `.ptr` would hand C an unterminated pointer.
+    // `comptimePrint` re-materialises the same comptime bytes as a
+    // sentinel-terminated array in the binary's constant data.
+    return std.fmt.comptimePrint("{s}", .{build_options.version});
+}
 
 /// Arm (or re-arm) the deterministic fuel budget; the running guest traps
 /// "all fuel consumed" (kind `out_of_fuel` = 17) when it is exhausted.
@@ -511,4 +531,66 @@ test "#331: the three engines agree on every host-originated trap kind" {
     try testing.expectEqual(jit_cb, interp_cb);
     // …and the two host-originated classes stay distinct from each other.
     try testing.expect(jit_exit != jit_cb);
+}
+
+// ============================================================
+// Runtime version (issue #237)
+// ============================================================
+
+/// `.version` read straight out of `build.zig.zon`. This is not a tautology:
+/// the accessor's value is that field as `build.zig`'s
+/// `@import("build.zig.zon")` parsed it at build time, and this is the same
+/// field read off disk at test time — two readings, not one. Comparing
+/// against `build_options.version` would compare the injection with itself;
+/// transcribing `"2.5.0"` would be the dual maintenance ADR-0216 argues
+/// against. The reach is correspondingly narrow, and that is the whole claim:
+/// it catches a stale `build_options` and an accessor that later grows a
+/// hardcoded string.
+///
+/// **This test requires CWD = the repository root.** The manifest cannot be
+/// reached at comptime: `@embedFile("../../build.zig.zon")` is rejected with
+/// "embed of file outside package path", because the root module is
+/// `src/zwasm.zig` and the package root is therefore `src/` (measured on Zig
+/// 0.16.0). So the read is a runtime one, relative to the CWD that
+/// `zig build` passes down. A wrong CWD fails loudly and by name rather than
+/// silently skipping — the failure mode this file must not add to.
+fn manifestVersion(gpa: std.mem.Allocator) ![]u8 {
+    const manifest = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "build.zig.zon",
+        gpa,
+        .limited(64 << 10),
+    ) catch |err| switch (err) {
+        error.FileNotFound => return error.RunThisTestFromTheRepositoryRoot,
+        else => return err,
+    };
+    defer gpa.free(manifest);
+    const key = ".version = \"";
+    const start = (std.mem.find(u8, manifest, key) orelse return error.NoVersionField) + key.len;
+    const len = std.mem.find(u8, manifest[start..], "\"") orelse return error.UnterminatedVersion;
+    return gpa.dupe(u8, manifest[start..][0..len]);
+}
+
+test "#237: zwasm_version reports build.zig.zon's .version, NUL-terminated" {
+    const p = zwasm_version();
+
+    // Non-NULL. `[*:0]const u8` already forbids it, so this pins the
+    // C-visible contract against a future signature loosened to optional.
+    try testing.expect(@intFromPtr(p) != 0);
+
+    // The reported string is the manifest's value and stops there. The
+    // terminator itself is NOT what this proves: it is a compile-time
+    // guarantee of the `[*:0]const u8` return type — `return
+    // build_options.version.ptr;` is rejected with "destination pointer
+    // requires '0' sentinel" (measured, Zig 0.16.0), so only an explicit
+    // `@ptrCast` could defeat it. And a build that did would still read back
+    // correctly here, because the byte after the version in constant data
+    // happens to be 0 (also measured). Index from the manifest's length
+    // rather than `span(p)`'s so at least the length is not taken from the
+    // value under test.
+    const expected = try manifestVersion(testing.allocator);
+    defer testing.allocator.free(expected);
+    try testing.expectEqual(@as(u8, 0), p[expected.len]);
+    try testing.expectEqualStrings(expected, p[0..expected.len]);
+    try testing.expectEqualStrings(expected, std.mem.span(p));
 }

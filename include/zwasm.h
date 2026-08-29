@@ -27,6 +27,19 @@
 extern "C" {
 #endif
 
+/* ── Runtime version ─────────────────────────────────────────────────── */
+
+/* Semantic version of the LINKED LIBRARY (e.g. "2.5.0"). Static storage,
+ * never NULL; do not free.
+ *
+ * This is the semver ALONE, not the build identity. -Dwasm / -Dwasi /
+ * -Dengine are compile-time and change what the library can do, yet two
+ * builds of the same commit differing in all three return the same string:
+ * "2.5.0" does NOT promise this library holds everything that version can
+ * do. Per-axis identity accessors are deferred until a consumer needs one
+ * (ADR-0221). */
+WASM_API_EXTERN const char* zwasm_version(void);
+
 /* ── Fuel (deterministic budget) ─────────────────────────────────────── */
 
 /* Fuel units are engine-specific: interpreter = instructions executed;

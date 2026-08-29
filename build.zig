@@ -1311,6 +1311,7 @@ pub fn build(b: *std.Build) void {
         .{ .src = "test/c_api_conformance/wasi_exit_code.c", .name = "wasi_exit_code" }, // a C host reads a WASI exit status
         .{ .src = "test/c_api_conformance/wasi_host_lifetime.c", .name = "wasi_host_lifetime" }, // a captured WASI host outlives its instances
         .{ .src = "test/c_api_conformance/host_func_direct_call.c", .name = "host_func_direct_call" }, // #315 wasm_func_call on a wasm_func_new func
+        .{ .src = "test/c_api_conformance/version.c", .name = "version" }, // a C host reads the runtime's version
         .{
             .src = "test/c_api_conformance/wasi_preopen.c",
             .name = "wasi_preopen",
