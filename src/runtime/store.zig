@@ -56,25 +56,14 @@ pub const Store = struct {
     /// `zombies` and stay callable until store teardown. Cleared only
     /// when a different host is installed.
     wasi_host_captured: bool = false,
-    /// The WASI host the most recent call into this Store actually
-    /// reached — the one the called instance captured at instantiate
-    /// time, NOT whatever `wasi_host` now holds. `zwasm_store_set_wasi`
-    /// can move `wasi_host` on while an older instance keeps calling
-    /// through the host it was built with; this is the field that
-    /// addresses the same host the guest wrote. Only ever set to a host
-    /// an instantiation captured, which is exactly the condition under
-    /// which `zwasm_store_set_wasi` retires rather than frees it — so
-    /// the pointer stays valid until `wasm_store_delete`. Null until
-    /// the first such instantiation. Erased to `*anyopaque` for the
-    /// same Zone-1 reason as `wasi_host`.
-    active_wasi_host: ?*anyopaque = null,
-    /// Re-entrancy depth of `wasm_func_call` on this Store. Only the
-    /// OUTERMOST call decides which host the exit status is read from and
-    /// which one is cleared: a host callback that calls back in — a nested
-    /// `wasm_func_call`, or a `wasm_instance_new` — must not retarget the
-    /// status away from the guest the embedder actually called. Without it a
-    /// nested call to a `wasm_func_new` func drops `active_wasi_host` to null
-    /// and the outer guest's `proc_exit` becomes unreadable.
+    /// Re-entrancy depth of Store-mediated entry into guest code — a
+    /// `wasm_func_call`, or a `wasm_instance_new` whose `(start)` runs.
+    /// ADR-0224: every such entry clears the exit status across this Store's
+    /// hosts on the way in, and a NESTED one clears again on the way out.
+    /// That second clear is what keeps at most one host carrying a status: a
+    /// host callback can make a nested call, swallow the trap its guest
+    /// raised, and return to an outer guest that then exits on a different
+    /// host. Only the outermost entry's status is the embedder's to read.
     wasi_call_depth: u32 = 0,
     /// Hosts displaced by `zwasm_store_set_wasi` while captured.
     /// `wasm_store_delete` frees each one exactly like `wasi_host`.

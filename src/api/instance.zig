@@ -343,7 +343,11 @@ pub export fn zwasm_store_set_wasi(s: ?*Store, h: ?*wasi_host.Host) callconv(.c)
         if (store.wasi_host_captured) {
             // `c_allocator` is what `zwasm_wasi_config_new` used for every
             // host this list can hold, and what `wasm_store_delete` frees
-            // them with.
+            // them with. The slot is already reserved: whatever set
+            // `wasi_host_captured` reserved one and the flag is cleared below,
+            // so each capture funds exactly the one retirement it can cause
+            // (ADR-0224). Kept fallible rather than assuming the capacity so a
+            // violated reservation degrades instead of panicking in a library.
             // EXEMPT-FALLBACK: ADR-0014 — an append OOM accepts the leak over the UAF, mirroring parkAsZombie.
             store.retired_wasi_hosts.append(std.heap.c_allocator, old_opaque) catch {};
         } else {
@@ -380,16 +384,56 @@ pub export fn zwasm_store_wasi_exit_code(s: ?*const Store, out: ?*u32) callconv(
     return true;
 }
 
-/// #345 — the WASI host to read a call's exit status from: the one the called
-/// instance captured, which `zwasm_store_set_wasi` can have moved
-/// `store.wasi_host` off. Null when nothing has run in this Store yet, or when
-/// the last call was a `wasm_func_new` func with no guest behind it. The single
-/// resolution rule for every Store-mediated reader — the accessor above and
-/// `src/cli/run.zig`'s trap-vs-exit branch — so a second reader cannot drift
-/// back onto `wasi_host`.
+/// #352 / ADR-0224 — discard any recorded exit status across this Store, on
+/// the way into guest code, so what a reader sees afterwards describes that
+/// entry alone.
+///
+/// Clearing every host rather than one addressed host IS the decision: which
+/// host a call reaches is not knowable before it runs, because dispatch can
+/// leave the instance it entered and run another one's body with that
+/// instance's WASI binding.
+///
+/// Written as a drain of the accessor below so the SET has exactly one
+/// definition — a third source of hosts would otherwise have to be added to
+/// two walks and one of them would be missed. Each pass strictly reduces the
+/// number of hosts carrying a status, so it terminates; by the accessor's
+/// invariant it is normally one clear plus one confirming scan.
+pub fn clearWasiExitStatus(store: *const Store) void {
+    while (activeWasiHost(store)) |h| h.exit_code = null;
+}
+
+/// #352 / ADR-0224 — the WASI host to read an exit status from: whichever one
+/// a `proc_exit` actually wrote. Null when no guest in this Store has exited
+/// since the last entry into guest code.
+///
+/// The set walked here is every host a guest in this Store can write, and it
+/// is closed on both sides: an instance's host always came from
+/// `store.wasi_host` at capture time, `zwasm_store_set_wasi` frees a host
+/// nothing captured on the spot rather than retiring it, and a capture
+/// reserves the retirement slot it may later need — so a displaced host cannot
+/// fall out of the list and become unreadable while its instances stay
+/// callable. It is the same set `wasm_store_delete` frees.
+///
+/// Scanning is sound because AT MOST ONE host in it carries a status at any
+/// read point. A `proc_exit` unwinds the whole call, so the guest that wrote
+/// one cannot run again and nothing can write after it; the one way two could
+/// coexist — a host callback that swallows a nested call's exit trap and
+/// returns to an outer guest that exits on a different host — is removed by
+/// the nested entry clearing again on its way out.
+///
+/// The single resolution rule for every Store-mediated reader: this accessor
+/// and `src/cli/run.zig`'s trap-vs-exit branch, so a second reader cannot
+/// drift onto `wasi_host` alone.
 pub fn activeWasiHost(store: *const Store) ?*wasi_host.Host {
-    const host_opaque = store.active_wasi_host orelse return null;
-    return @ptrCast(@alignCast(host_opaque));
+    if (store.wasi_host) |h| {
+        const typed: *wasi_host.Host = @ptrCast(@alignCast(h));
+        if (typed.exit_code != null) return typed;
+    }
+    for (store.retired_wasi_hosts.items) |h| {
+        const typed: *wasi_host.Host = @ptrCast(@alignCast(h));
+        if (typed.exit_code != null) return typed;
+    }
+    return null;
 }
 
 // ============================================================
@@ -504,6 +548,15 @@ fn buildBindings(
             // on `store.zombies`. May over-mark (this also runs on the
             // throwaway arena in `collectHostFuncTargets`); over-marking
             // only defers a free, so nothing compensates for it.
+            //
+            // ADR-0224 — reserve the retirement slot HERE, at capture, not at
+            // the swap. `activeWasiHost` finds a displaced host only through
+            // `retired_wasi_hosts`, so a host that fails to reach that list is
+            // not merely leaked (the pre-ADR-0224 cost) but unreadable: its
+            // instances stay callable and their exits report nothing.
+            // Reserving at capture puts the allocation failure on the
+            // instantiation, which can and does report it.
+            try store.retired_wasi_hosts.ensureUnusedCapacity(std.heap.c_allocator, 1);
             store.wasi_host_captured = true;
             bindings[idx] = .{ .func = .{
                 .host_call = .{ .fn_ptr = thunk, .ctx = wasi_host_ptr },
@@ -819,27 +872,27 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     }
     jit.owned.rt.wasi_host = store.wasi_host;
     // Captured for the JitInstance's life. May over-mark (this runs before
-    // `runStart`, which can still fail the instantiation) — see buildBindings.
-    // #345 — record it as the host this Store's calls now reach, BEFORE
-    // `runStart`: a `(start)` that calls `proc_exit` records its status during
-    // `wasm_instance_new`, and that has always been readable.
-    // Instantiating is a read point for the status (a `(start)` can call
-    // `proc_exit`), so it invalidates the previous one like a call does —
-    // otherwise a Store whose config did NOT move reports an earlier call's
-    // status as this instantiation's, and a `(start)` that faults without
-    // exiting reads back as that earlier exit. Unconditional, because
-    // `zwasm_store_set_wasi` leaves `wasi_host` null on a detach: a module
-    // that captures nothing must still close the window. Cleared before
-    // `runStart` so the start's own status survives. Skipped inside a call in
-    // progress — that call owns the status until it returns.
-    if (store.wasi_call_depth == 0) {
-        if (activeWasiHost(store)) |h| h.exit_code = null;
-        store.active_wasi_host = null;
-    }
+    // `runStart`, which can still fail the instantiation) — see buildBindings,
+    // including why the retirement slot is reserved at capture.
     if (store.wasi_host != null) {
+        store.retired_wasi_hosts.ensureUnusedCapacity(std.heap.c_allocator, 1) catch {
+            jit.deinit(alloc);
+            alloc.destroy(jit);
+            return null;
+        };
         store.wasi_host_captured = true;
-        if (store.wasi_call_depth == 0) store.active_wasi_host = store.wasi_host;
     }
+    // #352 / ADR-0224 — instantiating is an entry into guest code: a `(start)`
+    // can call `proc_exit`. Clear before `runStart`, so the start's own status
+    // is what reads back and an earlier call's cannot stand in for it.
+    // Unconditional, because `zwasm_store_set_wasi` leaves `wasi_host` null on
+    // a detach: a module that captures nothing must still close the window.
+    // Clear again on the way out when this instantiation was itself nested
+    // inside a call in progress — that call owns the status, so a guest a host
+    // callback built must not leave one behind.
+    const nested_entry = store.wasi_call_depth > 0;
+    clearWasiExitStatus(store);
+    defer if (nested_entry) clearWasiExitStatus(store);
 
     // Wasm §4.5.4 — run the `(start)` function AFTER setup initialised globals /
     // memory / tables, BEFORE the instance is surfaced. A start trap fails
@@ -850,10 +903,9 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     {
         // #345 — while the start function runs it OWNS the status, exactly as
         // an outermost `wasm_func_call` does: it can reach `proc_exit`, and a
-        // host callback it invokes can call back into this Store. Without the
-        // depth that nested call would retarget `active_wasi_host` away from
-        // the host recorded just above, and the start's own exit would be
-        // unreadable.
+        // host callback it invokes can call back into this Store. The depth is
+        // what makes that callback's own call nested, so its guest's status is
+        // dropped on the way out instead of standing in for the start's.
         store.wasi_call_depth +|= 1;
         defer store.wasi_call_depth -|= 1;
         jit.runStart() catch |err| {
@@ -874,7 +926,6 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
         .module = module,
         .runtime = null,
         .jit = jit,
-        .wasi_host = store.wasi_host,
     };
 
     // ADR-0200 — surface the JIT's func exports through the C-API discovery path
@@ -1115,29 +1166,15 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
         return null;
     };
 
-    // #345 — `buildBindings` marks `wasi_host_captured` on the branch that
-    // bakes the host into a WASI binding's `host_call.ctx`. Record the same
-    // address on the instance, and as the host this Store's calls now reach,
-    // BEFORE the start function below can call `proc_exit`. Keyed on
-    // `wasi_host_captured` and not on `wasi_host != null`: the flag is what
-    // guarantees `zwasm_store_set_wasi` retires the host instead of freeing
-    // it, so an unkeyed write is the one that could dangle. It is sticky
-    // across instances, so this may over-mark an instance with no WASI
-    // imports — harmless, since such an instance cannot record a status and
-    // its calls only clear one.
-    // Same invalidation as the JIT arm above, and unconditional for the same
-    // reason: `wasi_host_captured` is reset by `zwasm_store_set_wasi`, so a
-    // module with no WASI imports built after a replace or a detach would
-    // otherwise leave the previous guest's status readable. Before the start
-    // function runs below.
-    if (store.wasi_call_depth == 0) {
-        if (activeWasiHost(store)) |h| h.exit_code = null;
-        store.active_wasi_host = null;
-    }
-    if (store.wasi_host_captured) {
-        inst.wasi_host = store.wasi_host;
-        if (store.wasi_call_depth == 0) store.active_wasi_host = store.wasi_host;
-    }
+    // #352 / ADR-0224 — same entry rule as the JIT arm above: instantiating
+    // enters guest code, because the start function below can call
+    // `proc_exit`. Clear on the way in, unconditionally — a module with no
+    // WASI imports, built after a replace or a detach, must still close the
+    // window — and again on the way out when this instantiation was itself
+    // nested inside a call in progress.
+    const nested_entry = store.wasi_call_depth > 0;
+    clearWasiExitStatus(store);
+    defer if (nested_entry) clearWasiExitStatus(store);
 
     // D-174 defensive fix: register inst in the store's live-instance
     // list so wasm_store_delete can cascade-cleanup on reverse-order
@@ -1164,6 +1201,8 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
         // #345 — the start function owns the status while it runs; see the
         // JIT arm's note. Covers both shapes below (imported start via
         // `host_calls`, and a defined one dispatched here).
+        // The depth is also what makes a `wasm_func_call` a host callback
+        // makes from inside the start a NESTED entry (ADR-0224).
         store.wasi_call_depth +|= 1;
         defer store.wasi_call_depth -|= 1;
         if (sfx < inst.func_ptrs_storage.len) {
@@ -2111,26 +2150,27 @@ pub export fn wasm_func_call(
     // direct-callback path in one place. Instance-derived handles carry
     // `.instance`, `wasm_func_new` ones carry `.store`.
     //
-    // #345 — the host this call reaches is the one its INSTANCE captured, which
-    // is what `zwasm_store_set_wasi` can move `store.wasi_host` off. A
-    // `wasm_func_new` func has no instance and so no guest: recording "no host"
-    // is what makes its trap read back as "not an exit" rather than as the last
+    // #352 / ADR-0224 — this call is an entry into guest code, so it discards
+    // any status still standing across this Store's hosts. Which host it will
+    // reach is not knowable here: dispatch can leave the instance it entered
+    // and run another one's body with that instance's WASI binding. A
+    // `wasm_func_new` func has no guest behind it at all, and the same clear is
+    // what makes its trap read back as "not an exit" rather than as the last
     // guest's status.
     //
-    // Only the OUTERMOST call decides this. A host callback can call back in,
-    // and a nested `wasm_func_call` would otherwise retarget the status to its
-    // own callee — to null, for a `wasm_func_new` one — leaving the outer
-    // guest's later `proc_exit` unreadable.
+    // A NESTED call clears again on the way out. A host callback can call back
+    // in, swallow the trap its guest raised, and return to an outer guest that
+    // then exits on a different host; without the second clear both would carry
+    // a status and the scan would have two answers.
     const call_store: ?*Store = if (handle.instance) |i| i.store else handle.store;
+    const nested_call = if (call_store) |store| store.wasi_call_depth > 0 else false;
     if (call_store) |store| {
-        if (store.wasi_call_depth == 0) {
-            store.active_wasi_host = if (handle.instance) |i| i.wasi_host else null;
-            if (activeWasiHost(store)) |host| host.exit_code = null;
-        }
+        clearWasiExitStatus(store);
         store.wasi_call_depth +|= 1;
     }
     defer if (call_store) |store| {
         store.wasi_call_depth -|= 1;
+        if (nested_call) clearWasiExitStatus(store);
     };
     // #315: a `wasm_func_new[_with_env]` func has no instance — the C callback
     // IS its body, so invoke it here rather than reporting a silent success.
