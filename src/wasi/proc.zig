@@ -13,11 +13,13 @@
 //! supplied bad pointers.
 //!
 //! `proc_exit` is the odd one out: it has no return value
-//! (witx `noreturn`). We model it by setting `host.exit_code`
-//! to the supplied code; the §9.4 / 4.7 import-resolution code
-//! checks this after every host-call return and short-circuits
-//! the dispatch loop when it's set, surfacing the exit code as
-//! a Trap variant in the C-API binding.
+//! (witx `noreturn`). We model it by recording `host.exit_code`
+//! and unwinding through a channel of the engine's own — the
+//! interp thunk returns `error.WasiExit` (`src/api/wasi.zig`),
+//! the JIT stub raises the trap flag (`jit_dispatch.zig`).
+//! Neither reads `host.exit_code` back: it is the recorded
+//! status, not the unwind signal. Both surface as a trap at the
+//! C-API binding.
 //!
 //! Zone 2 (`src/wasi/`) — same zone as `host.zig` and `p1.zig`.
 
@@ -49,10 +51,13 @@ fn writeBytes(mem: []u8, offset: u32, src: []const u8) p1.Errno {
 // ============================================================
 
 /// `proc_exit(rval) -> noreturn` — request termination of the
-/// instance with exit code `rval`. The handler sets
-/// `host.exit_code` and returns `Errno.success`; the dispatch
-/// surface checks `host.exit_code` after each host-call return
-/// and short-circuits accordingly.
+/// instance with exit code `rval`. The handler only records
+/// `host.exit_code` and returns `Errno.success`; unwinding is the
+/// caller's, per engine (`error.WasiExit` from the interp thunk,
+/// the trap flag from the JIT stub). The recorded status is what
+/// `zwasm_store_wasi_exit_code` and `src/cli/run.zig` read, and
+/// `wasm_func_call` clears it before each call so it describes
+/// that call alone (#341).
 pub fn procExit(host: *Host, rval: u32) p1.Errno {
     host.exit_code = rval;
     return .success;
