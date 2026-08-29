@@ -344,6 +344,21 @@ pub export fn zwasm_store_set_wasi(s: ?*Store, h: ?*wasi_host.Host) callconv(.c)
     store.wasi_host = if (h) |hp| @as(*anyopaque, @ptrCast(hp)) else null;
 }
 
+/// `zwasm_store_wasi_exit_code(*Store, *u32)` — read the exit status
+/// a WASI guest requested through `proc_exit`. Returns false, leaving
+/// `out` untouched, when the Store has no WASI host or the guest never
+/// called `proc_exit`. `src/cli/run.zig` applies the same rule: a trap
+/// that carries an exit code is a guest that ended itself, and a trap
+/// without one is a fault.
+pub export fn zwasm_store_wasi_exit_code(s: ?*const Store, out: ?*u32) callconv(.c) bool {
+    const store = s orelse return false;
+    const host_opaque = store.wasi_host orelse return false;
+    const host: *const wasi_host.Host = @ptrCast(@alignCast(host_opaque));
+    const code = host.exit_code orelse return false;
+    if (out) |p| p.* = code;
+    return true;
+}
+
 // ============================================================
 // Module constructors / validators / destructors (§9.3 / 3.4)
 // ============================================================

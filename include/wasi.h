@@ -119,6 +119,33 @@ WASM_API_EXTERN bool zwasm_wasi_config_preopen_dir(
  */
 WASM_API_EXTERN void zwasm_store_set_wasi(wasm_store_t*, zwasm_wasi_config_t*);
 
+/**
+ * Read the exit status a guest requested through WASI `proc_exit`
+ * into `*out`. Returns true only when this Store has a WASI setup
+ * AND the guest actually called `proc_exit`; otherwise returns
+ * false and leaves `*out` untouched.
+ *
+ * How an embedder reads a guest's termination:
+ *
+ *   - `wasm_func_call` returned a trap and this returns true — the
+ *     guest terminated itself and `*out` is its status. This is the
+ *     ordinary end of a WASI command, including a successful one: a
+ *     `wasi-libc` `_start` that returns normally calls
+ *     `proc_exit(0)`, so a status of 0 means success, not failure.
+ *   - `wasm_func_call` returned a trap and this returns false — a
+ *     genuine fault (unreachable, out of bounds, ...). Report it as
+ *     a failure; `wasm_trap_message` and `zwasm_trap_kind` describe
+ *     it.
+ *
+ * Do not branch on the trap kind to tell those two apart. The kind a
+ * `proc_exit` trap carries differs between engines and is not part
+ * of this contract.
+ *
+ * The status belongs to the Store, not to an instance, and it
+ * persists until the Store's WASI setup is replaced.
+ */
+WASM_API_EXTERN bool zwasm_store_wasi_exit_code(const wasm_store_t*, uint32_t* out);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
