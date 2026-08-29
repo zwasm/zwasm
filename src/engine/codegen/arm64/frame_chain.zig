@@ -17,10 +17,13 @@
 //! trampoline converts the LR through the per-function
 //! code-map lookup before calling `unwind.walk`).
 //!
-//! Top-of-Wasm-stack sentinel: the entry shim plants `fp == 0`
-//! when it enters the JIT body so the unwinder can detect "no
-//! more Wasm frames" deterministically. `loadFrame(0)` returns
-//! null; the trampoline interprets this as `.uncaught`.
+//! Unreadable frame pointer → null, which the trampoline
+//! interprets as `.uncaught`. Two cases produce it: `fp == 0`, the
+//! top-of-Wasm-stack sentinel the entry shim plants when it enters
+//! the JIT body so the unwinder can detect "no more Wasm frames"
+//! deterministically; and a non-zero `fp` that is not
+//! machine-word-aligned, which cannot be a frame pointer at all
+//! (see `readableFrame`).
 //!
 //! INVARIANT (paired with ADR-0114 D5 + ADR-0112 D7): this
 //! function performs only two pointer-relative loads, no
@@ -43,6 +46,16 @@ pub const RawFrameLink = struct {
     caller_lr: usize,
 };
 
+/// A frame prefix is only readable at a machine-word-aligned `fp`. `fp == 0` is
+/// the entry shim's top-of-Wasm-stack sentinel; a non-zero misaligned `fp` is
+/// not a frame pointer at all — the chain escaped into host frames and the read
+/// picked up a garbage stack word. Both mean "no caller frame this reader can
+/// trust": return null and let `unwind.walk` report `.uncaught`. Dereferencing
+/// instead panics ("incorrect alignment") in every safety-checked build.
+inline fn readableFrame(fp: usize) bool {
+    return fp != 0 and std.mem.isAligned(fp, @alignOf(usize));
+}
+
 /// Read the AAPCS64 frame prefix at `[fp, 0]` + `[fp, 8]`.
 /// Returns null for the top-of-Wasm-stack sentinel (`fp == 0`)
 /// planted by the entry shim.
@@ -52,7 +65,7 @@ pub const RawFrameLink = struct {
 /// the trampoline's captured throw-site X29 or a walk-traversed
 /// `caller_fp` from a prior step).
 pub fn loadFrame(fp: usize) ?RawFrameLink {
-    if (fp == 0) return null;
+    if (!readableFrame(fp)) return null;
     const slots: [*]const usize = @ptrFromInt(fp);
     return .{
         .caller_fp = slots[0],
@@ -108,4 +121,18 @@ test "loadFrame: chained read — outer frame points at inner frame's prefix" {
     const outer_link = loadFrame(inner_link.caller_fp).?;
     try testing.expectEqual(@as(usize, 0), outer_link.caller_fp);
     try testing.expectEqual(@as(usize, 0x1111), outer_link.caller_lr);
+}
+
+test "loadFrame: unaligned fp → null (never dereferenced)" {
+    // #323's twin on this arch. The x86_64 reader panicked ("incorrect
+    // alignment") on a garbage `caller_fp` picked up once the chain escaped
+    // into optimized host frames; AAPCS64 reaches the same reader through the
+    // same `unwind.walk` loop, so it declines a misaligned `fp` the same way it
+    // declines the `fp == 0` sentinel. Every misalignment 1..7 is covered: a
+    // guard written against a narrower alignment would let +2 / +4 through.
+    var frame: [2]usize = .{ 0xDEADBEEFCAFE, 0xFEEDFACE0001 };
+    const aligned_fp: usize = @intFromPtr(&frame);
+    for (1..@alignOf(usize)) |off| {
+        try testing.expectEqual(@as(?RawFrameLink, null), loadFrame(aligned_fp + off));
+    }
 }
