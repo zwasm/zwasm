@@ -116,6 +116,7 @@ fn isTestVerdict(err: anyerror) bool {
 }
 
 pub fn main(init: std.process.Init) !void {
+    zwasm.support.dbg.initFromEnv(init.environ_map.get("ZWASM_DEBUG"));
     const io = init.io;
     const gpa = init.gpa;
 
