@@ -66,6 +66,11 @@ pub const TrapKind = enum(u32) {
     // `error.OutOfFuel` (per-instruction units); JIT = poll-site-crossing
     // units (prologue + loop back-edges, stub code 17). Same kind either way.
     out_of_fuel = 17,
+    // Issue #331 — a WASI guest called `proc_exit`. Host-originated: the guest
+    // asked to terminate, it did not fault, so it is neither `unreachable_` nor
+    // an embedder failure. The status itself is read out-of-band with
+    // `zwasm_store_wasi_exit_code`; this kind only says which path ended the run.
+    wasi_exit = 18,
 };
 
 /// `wasm_trap_t` — runtime trap surface. Carries the trap kind +
@@ -111,6 +116,7 @@ pub fn trapMessageFor(kind: TrapKind) []const u8 {
         .expected_shared_memory => "expected shared memory",
         .interrupted => "interrupted",
         .out_of_fuel => "all fuel consumed",
+        .wasi_exit => "wasi proc_exit",
     };
 }
 
@@ -140,6 +146,11 @@ pub fn jitTrapCode(code: u32) ?TrapKind {
         15 => .expected_shared_memory, // ADR-0168 wait* on non-shared (callout)
         16 => .interrupted, // ADR-0179 #3a — JIT prologue/back-edge interruption poll stub
         17 => .out_of_fuel, // ADR-0179 #3b — JIT fuel poll stub (prologue/back-edge SUB → negative)
+        // #331 — the two host-originated paths carry their own codes so the
+        // generic bucket keeps meaning "the codegen has not split this yet"
+        // (D-292) rather than absorbing traps the codegen never emitted.
+        18 => .wasi_exit, // `wasi/jit_dispatch.zig` proc_exit
+        19 => .binding_error, // `api/jit_host_bridge.zig` trapResult
         else => null, // 0 unmarked / 1 generic — still-shared bounds kinds (D-293)
     };
 }
@@ -169,6 +180,13 @@ pub fn mapInterpTrap(err: anyerror) TrapKind {
         // Sandboxing (ADR-0179 #3b): interp fuel exhaustion (dispatch.zig
         // per-instruction decrement) — same kind as the JIT's code-17 stub.
         error.OutOfFuel => .out_of_fuel,
+        // #331 — a host callback trapped, or the binding could not complete.
+        error.HostTrap => .binding_error,
+        // #331 — the interp's preview1 `proc_exit` thunk unwinds with this; the
+        // JIT reaches the same kind through stub code 18. Without this arm the
+        // `else` below reports a clean exit as an embedder failure, which is how
+        // the two engines came to disagree (interp 0 vs JIT 1).
+        error.WasiExit => .wasi_exit,
         else => .binding_error,
     };
 }

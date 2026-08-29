@@ -121,7 +121,13 @@ fn argVal(comptime k: Kind, vt: zir.ValType, v: PT(k)) Val {
 /// returned sentinel is discarded.
 fn trapResult(rt: *JitRuntime, comptime r: RetKind) RT(r) {
     rt.trap_flag = 1;
-    rt.trap_kind = 1; // generic (the host callback's own trap detail is consumed)
+    // #331: a dedicated host-originated code, not the generic bucket (1) — the
+    // bucket means "the codegen has not split this trap yet", and this trap did
+    // not come from codegen at all. The callback's own trap object is still
+    // consumed: carrying its kind would need a JitRuntime field of its own,
+    // because this `trap_kind` is stub-code space while the callback's kind is
+    // public `ZWASM_TRAP_*` space, and the two collide at exactly 0 and 1.
+    rt.trap_kind = 19;
     return switch (r) {
         .void => {},
         .i32, .i64, .f32, .f64 => 0,

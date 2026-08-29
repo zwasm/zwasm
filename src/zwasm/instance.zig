@@ -506,10 +506,11 @@ fn mapJitErr(err: _runner.Error, jit: *_runner.JitInstance) Instance.InvokeError
     };
 }
 
-/// ADR-0200 — map the JIT runtime's numeric `trap_kind` (the stub-recorded code)
-/// to the facade `Trap` error. The generic bucket (codes the codegen does not
-/// yet distinguish, D-292) maps to `error.Unreachable` — honest pending the
-/// per-kind codegen widening; `oob_memory` collapses load/store (same D-292 gap).
+/// ADR-0200 — map the JIT runtime's numeric `trap_kind` (recorded by a trap
+/// stub or, for host-originated traps, by a host thunk) to the facade `Trap`
+/// error. The generic bucket (codes the codegen does not yet distinguish,
+/// D-292) maps to `error.Unreachable` — honest pending the per-kind codegen
+/// widening; `oob_memory` collapses load/store (same D-292 gap).
 fn jitTrapToError(code: u32) Instance.InvokeError {
     const kind = _trap_surface.jitTrapCode(code) orelse return error.Unreachable;
     return switch (kind) {
@@ -530,7 +531,8 @@ fn jitTrapToError(code: u32) Instance.InvokeError {
         .expected_shared_memory => error.ExpectedSharedMemory,
         .interrupted => error.Interrupted,
         .out_of_fuel => error.OutOfFuel,
-        .binding_error => error.Unreachable,
+        .wasi_exit => error.ProcExit, // #331 — a clean WASI termination, not a fault
+        .binding_error => error.HostTrap, // #331 — the embedder's own failure
     };
 }
 
@@ -559,6 +561,7 @@ fn mapDispatchErr(err: anyerror) Instance.InvokeError {
         error.ExpectedSharedMemory => error.ExpectedSharedMemory, // Wasm threads (ADR-0168)
         error.Interrupted => error.Interrupted, // host timeout/cancel (ADR-0179 #3a)
         error.OutOfFuel => error.OutOfFuel, // host fuel budget exhausted (ADR-0179 #3b)
+        error.HostTrap => error.HostTrap, // a host callback trapped (#331)
         error.OutOfMemory => error.OutOfMemory,
         // GC heap 4 GiB cap exceeded (huge array.new* / struct.new) — surfaces
         // as the OutOfMemory trap ("allocation size too large"; wasmtime

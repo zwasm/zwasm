@@ -83,6 +83,9 @@ WASM_API_EXTERN void zwasm_instance_clear_interrupt(wasm_instance_t*);
 #define ZWASM_TRAP_EXPECTED_SHARED_MEMORY 15
 #define ZWASM_TRAP_INTERRUPTED 16
 #define ZWASM_TRAP_OUT_OF_FUEL 17
+/* Host-originated, not a guest fault: the guest called WASI proc_exit. Read the
+ * status itself with zwasm_store_wasi_exit_code(). */
+#define ZWASM_TRAP_WASI_EXIT 18
 WASM_API_EXTERN int32_t zwasm_trap_kind(const wasm_trap_t*);
 
 /* ── Instance helpers ────────────────────────────────────────────────── */
