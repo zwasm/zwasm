@@ -131,6 +131,7 @@ const interp_deadline_ms: u64 = 120_000;
 const interp_all_deadline_ms: u64 = 480_000;
 
 pub fn main(init: std.process.Init) !void {
+    zwasm.support.dbg.initFromEnv(init.environ_map.get("ZWASM_DEBUG"));
     const io = init.io;
     const gpa = init.gpa;
 
