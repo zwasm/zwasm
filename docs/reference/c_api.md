@@ -68,8 +68,7 @@ than one, or had one replaced or detached mid-run — is contract, stated once i
 
 `zwasm_trap_kind` answers a different question and does not replace this one:
 since ADR-0218 it reports `ZWASM_TRAP_WASI_EXIT` for a `proc_exit` on every
-engine, so it does say *that* the guest terminated itself — but it never
-carries the status, which is what an embedder needs.
+engine, but it never carries the status, which is what an embedder needs.
 
 ## `zwasm.h` extensions
 
