@@ -14,9 +14,12 @@
 //! the trampoline composes both into a
 //! `unwind.FrameChainLoader` per host via a PC-normalization callback.
 //!
-//! Top-of-Wasm-stack sentinel: `fp == 0` returns null. The entry
-//! shim plants this sentinel so the unwinder terminates
-//! deterministically at the Wasm boundary.
+//! Unreadable frame pointer → null, which the unwinder reads as
+//! "no more Wasm frames" (`.uncaught`). Two cases produce it:
+//! `fp == 0`, the top-of-Wasm-stack sentinel the entry shim plants
+//! so the unwinder terminates deterministically at the Wasm
+//! boundary; and a non-zero `fp` that is not machine-word-aligned,
+//! which cannot be a frame pointer at all (see `readableFrame`).
 //!
 //! INVARIANT (paired with ADR-0114 D5 + ADR-0112 D7): two
 //! pointer-relative loads, no allocator calls, no host-call
@@ -38,10 +41,21 @@ pub const RawFrameLink = struct {
     caller_rip: usize,
 };
 
+/// A frame prefix is only readable at a machine-word-aligned `fp`. `fp == 0` is
+/// the entry shim's top-of-Wasm-stack sentinel; a non-zero misaligned `fp` is
+/// not a frame pointer at all — the chain escaped into host frames and the
+/// standard-layout default handed back whatever word sat in `slots[0]`.
+/// Both mean "no caller frame this reader can trust": return null and let
+/// `unwind.walk` report `.uncaught`. Dereferencing instead panics
+/// ("incorrect alignment") in every safety-checked build.
+inline fn readableFrame(fp: usize) bool {
+    return fp != 0 and std.mem.isAligned(fp, @alignOf(usize));
+}
+
 /// Read the x86_64 frame prefix at `[fp, 0]` + `[fp, 8]`.
 /// Returns null for the top-of-Wasm-stack sentinel (`fp == 0`).
 pub fn loadFrame(fp: usize) ?RawFrameLink {
-    if (fp == 0) return null;
+    if (!readableFrame(fp)) return null;
     const slots: [*]const usize = @ptrFromInt(fp);
     return .{
         .caller_fp = slots[0],
@@ -69,7 +83,7 @@ pub fn loadFrameSniffed(
     fp: usize,
     code_map: *const @import("../shared/code_map.zig").CodeMap,
 ) ?RawFrameLink {
-    if (fp == 0) return null;
+    if (!readableFrame(fp)) return null;
     const slots: [*]const usize = @ptrFromInt(fp);
     // Sniff standard layout first (most caller frames in EH chain
     // do NOT push R15 between RBP-save and MOV; non-throwing
@@ -109,7 +123,7 @@ pub fn loadFrameSniffedPred(
     local_code_map: ?*const @import("../shared/code_map.zig").CodeMap,
     is_code: *const fn (usize) bool,
 ) ?RawFrameLink {
-    if (fp == 0) return null;
+    if (!readableFrame(fp)) return null;
     const slots: [*]const usize = @ptrFromInt(fp);
     // Code membership = the THROWING instance's own CodeMap (always available
     // via the adapter's normalize_ctx, even for a single instance NOT
@@ -266,4 +280,51 @@ test "loadFrameSniffedPred x86_64: union prefers EITHER source — global-only s
     const link = loadFrameSniffedPred(fp, &cm, testIsCode5xxxx).?; // 0x50080 ∈ global
     try testing.expectEqual(@as(usize, 0x7FFF_2222_0000), link.caller_fp);
     try testing.expectEqual(@as(usize, 0x50080), link.caller_rip);
+}
+
+// ---------------------------------------------------------------------
+// #323 — an unaligned `fp` is not a frame pointer. It is reached when the
+// chain escapes into optimized host frames: the sniff finds code at neither
+// candidate slot and hands back the standard-layout default, whose `slots[0]`
+// is then whatever word that host frame happened to hold. Dereferencing it
+// panics ("incorrect alignment") in every safety-checked build. Each reader
+// must decline it exactly as it declines the `fp == 0` sentinel — null, which
+// `unwind.walk` turns into `.uncaught`.
+//
+// The loops cover every misalignment 1..7, not just +1: a guard written
+// against a narrower alignment (`fp & 1`, `fp & 3`) would let +2 / +4 through
+// and re-open the panic.
+// ---------------------------------------------------------------------
+
+test "loadFrame x86_64: unaligned fp → null (never dereferenced)" {
+    var frame: [3]usize = .{ 0xAAAA, 0xBBBB, 0xCCCC };
+    const aligned_fp: usize = @intFromPtr(&frame);
+    for (1..@alignOf(usize)) |off| {
+        try testing.expectEqual(@as(?RawFrameLink, null), loadFrame(aligned_fp + off));
+    }
+}
+
+test "loadFrameSniffed x86_64: unaligned fp → null (never dereferenced)" {
+    const code_map_mod = @import("../shared/code_map.zig");
+    var entries = [_]code_map_mod.Entry{.{ .start_addr = 0x50000, .len = 0x100, .func_idx = 0 }};
+    const cm = code_map_mod.CodeMap{ .entries = &entries };
+    var frame: [3]usize = .{ 0x7FFF_1111_0000, 0x7FFF_2222_0000, 0x50080 };
+    const aligned_fp: usize = @intFromPtr(&frame);
+    for (1..@alignOf(usize)) |off| {
+        try testing.expectEqual(@as(?RawFrameLink, null), loadFrameSniffed(aligned_fp + off, &cm));
+    }
+}
+
+test "loadFrameSniffedPred x86_64: unaligned fp → null (the #323 panic site)" {
+    // The stack trace in #323 names this function: engine.runner_test's two JIT
+    // EH end-to-end cases walk out of the JIT into the ReleaseSafe-optimized
+    // unit-test harness frames, and the next `caller_fp` comes back unaligned.
+    var frame: [3]usize = .{ 0x7FFF_1111_0000, 0x7FFF_2222_0000, 0x50080 };
+    const aligned_fp: usize = @intFromPtr(&frame);
+    for (1..@alignOf(usize)) |off| {
+        try testing.expectEqual(
+            @as(?RawFrameLink, null),
+            loadFrameSniffedPred(aligned_fp + off, null, testIsCode5xxxx),
+        );
+    }
 }
