@@ -1309,6 +1309,7 @@ pub fn build(b: *std.Build) void {
         .{ .src = "test/c_api_conformance/jit_start.c", .name = "jit_start" }, // D-478 start function under JIT
         .{ .src = "test/c_api_conformance/jit_wasi.c", .name = "jit_wasi" }, // ADR-0200/D-478 WASI host-fn under JIT
         .{ .src = "test/c_api_conformance/wasi_exit_code.c", .name = "wasi_exit_code" }, // a C host reads a WASI exit status
+        .{ .src = "test/c_api_conformance/host_func_direct_call.c", .name = "host_func_direct_call" }, // #315 wasm_func_call on a wasm_func_new func
         .{
             .src = "test/c_api_conformance/wasi_preopen.c",
             .name = "wasi_preopen",

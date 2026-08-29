@@ -2002,6 +2002,9 @@ pub export fn wasm_func_call(
     results: ?*ValVec,
 ) callconv(.c) ?*Trap {
     const handle = f orelse return null;
+    // #315: a `wasm_func_new[_with_env]` func has no instance — the C callback
+    // IS its body, so invoke it here rather than reporting a silent success.
+    if (handle.host) |hp| return hostFuncCallDirect(handle, hp, args, results);
     const inst = handle.instance orelse return null;
     const store = inst.store orelse return null;
     const alloc = storeAllocator(store) orelse return null;
@@ -2068,6 +2071,32 @@ pub export fn wasm_func_call(
     };
     rt.operand_len = op_base;
     return null;
+}
+
+/// #315 — `wasm_func_call` on a host func created by `wasm_func_new[_with_env]`
+/// (no instance, no guest frame). Nothing is marshalled: the callback's
+/// `(args, results)` ABI is the one `wasm_func_call` was handed, and neither
+/// vec nor any ref-kind `of.ref` inside one is owned by zwasm on this path —
+/// both sides are the same host. Two DIVERGENCES from `hostFuncThunk`, which
+/// serves the guest boundary: the callback's trap is returned to the caller
+/// unconsumed (there is no guest to fault), and no arg ref handle is minted or
+/// freed. Arity mismatch traps, matching the instance path.
+fn hostFuncCallDirect(
+    handle: *const Func,
+    hp: *HostFuncPayload,
+    args: ?*const ValVec,
+    results: ?*ValVec,
+) ?*Trap {
+    const store = handle.store;
+    const alloc = if (store) |s| storeAllocator(s) else null;
+    const args_size = if (args) |a| a.size else 0;
+    const results_size = if (results) |r| r.size else 0;
+    if (args_size != hp.params.len or results_size != hp.results.len) {
+        return if (alloc) |al| allocTrap(al, store, .binding_error) else null;
+    }
+    if (hp.callback_env) |cb| return cb(hp.env, args, results);
+    if (hp.callback) |cb| return cb(args, results);
+    return if (alloc) |al| allocTrap(al, store, .binding_error) else null;
 }
 
 /// ADR-0200 — cast the Zone-1 `Instance.jit` opaque slot to the engine type at
