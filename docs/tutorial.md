@@ -91,8 +91,38 @@ consumer, exercises the full surface) and
 
 zwasm implements the standard wasm-c-api ([`include/wasm.h`](../include/wasm.h)).
 A C host that drives any wasm-c-api runtime drives zwasm unchanged; WASI
-is configured via [`include/wasi.h`](../include/wasi.h). Runnable:
-[`docs/examples/c_host/`](examples/c_host/). Reference:
+is configured via [`include/wasi.h`](../include/wasi.h).
+
+Build the library and the headers yourself — a release tarball holds the
+`zwasm` executable and nothing else:
+
+```sh
+zig build static-lib -Doptimize=ReleaseSafe -Dcompiler-rt=true
+# → zig-out/lib/libzwasm.a
+#   zig-out/include/{wasm,wasi,zwasm}.h
+```
+
+Then compile a host against them (x86_64-linux shown):
+
+```sh
+cc -I zig-out/include docs/examples/c_host/hello.c zig-out/lib/libzwasm.a \
+   -lm -Wl,-z,noexecstack -o c_host
+./c_host      # → zwasm c_host: main() returned 42
+```
+
+The three extra flags are not decoration, and each has its own condition:
+
+| Flag | Why it is there |
+|---|---|
+| `-Dcompiler-rt=true` | Bundles Zig's compiler-rt into the archive. Without it a `-Doptimize=ReleaseSafe` build fails to link with `undefined reference to __zig_probe_stack`; at the default `Debug` it happens to link, which is what makes the omission easy to miss. |
+| `-lm` | zwasm calls `trunc` / `truncf`, which live in a separate library on glibc older than 2.34. |
+| `-Wl,-z,noexecstack` | Linux only. Zig-emitted objects carry no `.note.GNU-stack` section, so GNU ld assumes an executable stack and prints a deprecation warning (D-312). The link succeeds without it. |
+
+`zig build --help` describes the `static-lib` step and is authoritative for
+the other targets. Cross-compiling the archive works the same way — add
+`-Dtarget=<triple>`.
+
+Runnable: [`docs/examples/c_host/`](examples/c_host/). Reference:
 [`reference/c_api.md`](reference/c_api.md).
 
 ## 6. Coming from v1

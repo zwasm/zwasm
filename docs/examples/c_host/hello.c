@@ -9,12 +9,15 @@
  * — embedded as a byte array so the example stays import-free
  * (no WASI dependency, no external assembler / wabt step).
  *
- * Build wiring lands in §9.3 / 3.9 (`zig build test-c-api`).
- * For now this file is hand-compileable via:
+ * `zig build test-c-api` builds libzwasm.a and this example and runs it.
+ * To compile it the way an embedder would — against the installed archive
+ * and headers rather than through the build script:
  *
- *   zig cc -c -I include docs/examples/c_host/hello.c -o /tmp/hello.o
+ *   zig build static-lib -Doptimize=ReleaseSafe -Dcompiler-rt=true
+ *   cc -I zig-out/include docs/examples/c_host/hello.c \
+ *      zig-out/lib/libzwasm.a -lm -Wl,-z,noexecstack -o c_host
  *
- * which proves the wasm.h surface is consumable by a real C TU.
+ * What each flag is for: docs/tutorial.md section 5.
  */
 
 #include <stdio.h>
