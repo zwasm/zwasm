@@ -122,6 +122,27 @@ defect requires, because the store cannot see an instance's imports. Its own
 doc names this issue and says the refusal can go once zwasm defers the free.
 It now can. The SDK change is separate work.
 
+**The verification is asymmetric across the OS gate, by construction.** The
+direct evidence that a retained host is retained is a descriptor: a released
+host closes its preopen directory fd, so the conformance case compares the
+descriptor `open` hands out before and after the swap. Nothing about the
+allocator enters that check, and it is the only observation that speaks to
+this decision directly. Windows has no equivalent — zwasm's directory handles
+there are not CRT descriptors — so the Windows leg falls back to the probe
+check, whose `recycled` count is structurally `0/64` once the host is retained
+and was `0/64` for one of its four cases before the fix as well. The same
+number before and after means the Windows leg cannot detect a regression in
+this behaviour; Linux and macOS are what guard it. The case does not hide
+this: it prints `recycled` per case, and its header states how to read a zero
+on each platform. Closing the gap needs a Windows-side equivalent of the
+descriptor observation — counting process handles — which is not attempted
+here, because an OS-specific path added to the merge gate without a host to
+validate it trades a false pass for a false failure.
+
+This asymmetry is deliberately recorded here and not in `.dev/debt.yaml` or as
+an issue. The test declares it itself, and a second copy would drift from the
+first (ADR-0216).
+
 ## References
 
 - Issue #314.
