@@ -656,8 +656,8 @@ pub export fn wasm_instance_new(
     imports: ?*const anyopaque,
     trap_out: ?*?*Trap,
 ) callconv(.c) ?*Instance {
-    // Stock wasm-c-api: engine is `.auto` (= interp until the JIT host-import
-    // bridge lands). The `zwasm_instance_new_ex` extension selects per-instance.
+    // Stock wasm-c-api: engine is `.auto` — JIT-first, interp only for a module
+    // the JIT declines (D-496). `zwasm_instance_new_ex` selects per-instance.
     return instanceNewWithEngine(s, m, imports, trap_out, .auto);
 }
 
@@ -692,10 +692,11 @@ pub fn instanceNewWithEngine(
 /// that threads per-instance runtime budgets (ADR-0179). Mirrors
 /// `wasm_instance_new` with a null imports vector but accepts `limits` so fuel /
 /// memory caps are armed before the start function and the initial allocation.
-/// ADR-0200 — per-instance engine selection. `auto` lets the runtime pick
-/// (eventually JIT-default, interp fallback on a JIT-less arch); `jit` /
-/// `interp` force one. The fork is centralised in `instantiateInternal` so
-/// every entry point (facade / `wasm_instance_new` / linker) honours it.
+/// ADR-0200 / D-496 — per-instance engine selection. `auto` tries the JIT and
+/// falls back to the interp for a module the JIT declines; `jit` / `interp`
+/// force one (a forced `jit` fails rather than downgrading). The fork is
+/// centralised in `instantiateInternal` so every entry point (facade /
+/// `wasm_instance_new` / linker) honours it.
 pub const EngineKind = enum { auto, jit, interp };
 
 pub fn instantiateFacade(store: *Store, module: *const Module, trap_out: ?*?*Trap, limits: InstantiateLimits, engine: EngineKind) ?*Instance {
@@ -1405,10 +1406,13 @@ fn hostFuncThunk(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     @memset(res_data, .{ .kind = .i32, .of = .{ .i32 = 0 } });
     var args_vec: ValVec = .{ .size = p.params.len, .data = if (p.params.len > 0) args_data.ptr else null };
     var res_vec: ValVec = .{ .size = nr, .data = if (nr > 0) res_data.ptr else null };
-    const trap: ?*Trap = if (p.callback_env) |cb| cb(p.env, &args_vec, &res_vec) else if (p.callback) |cb| cb(&args_vec, &res_vec) else return runtime.Trap.Unreachable;
+    const trap: ?*Trap = if (p.callback_env) |cb| cb(p.env, &args_vec, &res_vec) else if (p.callback) |cb| cb(&args_vec, &res_vec) else return runtime.Trap.HostTrap;
     if (trap) |tr| {
         trap_surface.wasm_trap_delete(tr); // consume the callback's owned trap
-        return runtime.Trap.Unreachable; // surface as a guest trap
+        // #331: host-originated, so NOT `Unreachable` — a C host must be able to
+        // tell its own callback's failure from a guest fault. The interp twin of
+        // `jit_host_bridge.zig`'s trapResult; both surface `binding_error`.
+        return runtime.Trap.HostTrap;
     }
     // A ref-kind result's `of.ref` is owned by the callback/host (it may
     // be a borrowed view, e.g. `wasm_func_as_ref`); read the payload only,
@@ -2801,7 +2805,7 @@ test "ADR-0200 C-path JIT: wasm_instance_exports + wasm_func_call on a JIT insta
     const m = wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
     defer wasm_module_delete(m);
     // Force the JIT engine via the facade entry; stock `wasm_instance_new`
-    // hardcodes `.auto` (= interp) — the C `zwasm_instance_new_ex` knob is next.
+    // hardcodes `.auto` — the C `zwasm_instance_new_ex` knob is next.
     const inst = instantiateFacade(s, m, null, .{}, .jit) orelse return error.InstanceAllocFailed;
     defer wasm_instance_delete(inst);
 

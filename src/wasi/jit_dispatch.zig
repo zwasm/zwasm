@@ -334,6 +334,11 @@ pub fn proc_exit(rt: *JitRuntime, rval: i32) callconv(.c) void {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
         _ = wasi_proc.procExit(host, @bitCast(rval));
     }
+    // #331: mark the unwind host-originated so the C surface does not report a
+    // clean exit as a guest `unreachable`. 18 is the JIT stub-code space, which
+    // is NOT the public `ZWASM_TRAP_*` space — `trap_surface.jitTrapCode` is the
+    // only place the two are related.
+    rt.trap_kind = 18;
     rt.trap_flag = 1;
 }
 

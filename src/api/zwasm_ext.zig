@@ -111,9 +111,9 @@ pub export fn zwasm_instance_clear_interrupt(i: ?*Instance) callconv(.c) void {
 /// ADR-0200 — per-instance engine selection for the C ABI. Stock
 /// `wasm_instance_new` has no engine param; this extension mirrors it with a
 /// trailing `engine_kind` (`ZWASM_ENGINE_AUTO=0` / `JIT=1` / `INTERP=2`; unknown
-/// → auto). `auto` resolves to interp until the JIT host-import/WASI bridge lands
-/// (documented to change without an API break). An explicit `jit` on a JIT-less
-/// arch fails instantiation (returns null) rather than silently downgrading.
+/// → auto). D-496: `auto` compiles with the JIT and instantiates the interp only
+/// for a module the JIT declines. An explicit `jit` on a module the JIT declines
+/// fails instantiation (returns null) rather than silently downgrading.
 pub export fn zwasm_instance_new_ex(
     s: ?*capi.Store,
     m: ?*const capi.Module,
@@ -302,4 +302,213 @@ test "ADR-0200: zwasm_instance_new_ex(JIT) builds a JIT instance the C path can 
     var results: ValVec = .{ .size = 1, .data = &rdata };
     try testing.expect(capi.wasm_func_call(fc, &args, &results) == null);
     try testing.expectEqual(@as(i32, 5), rdata[0].of.i32);
+}
+
+// ============================================================
+// Host-originated traps vs. a guest fault (issue #331)
+//
+// Three sites raise a trap on the host's behalf rather than on the guest's:
+// WASI `proc_exit`, a `wasm_func_new` callback that returns a trap under the
+// JIT, and the same callback under the interp. All three used to land in the
+// JIT generic bucket / `Trap.Unreachable`, so `zwasm_trap_kind` could not tell
+// them from a guest `unreachable`. These tests pin the separation on every
+// engine, because the interp and the JIT disagreed about `proc_exit` (0 vs 1).
+// ============================================================
+
+const wasi_ext = @import("wasi.zig");
+const extern_new = @import("extern_new.zig");
+const types = @import("types.zig");
+
+/// `zwasm_instance_new_ex` engine selectors (`ZWASM_ENGINE_*` in zwasm.h).
+const engine_auto: u8 = 0;
+const engine_jit: u8 = 1;
+const engine_interp: u8 = 2;
+const all_engines = [_]u8{ engine_auto, engine_jit, engine_interp };
+
+// (module (func (export "f") unreachable)) — a genuine guest fault, the kind
+// every host-originated trap must stay distinguishable from.
+const guest_unreachable_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type ()->()
+    0x03, 0x02, 0x01, 0x00, // func[0]: type 0
+    0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, // export "f" → funcidx 0
+    0x0a, 0x05, 0x01, 0x03, 0x00, 0x00, 0x0b, // code: unreachable; end
+};
+
+// (module (import "wasi_snapshot_preview1" "proc_exit" (func (param i32)))
+//   (func (export "main") i32.const <code> call 0))
+// `code` is the single `i32.const` immediate, so a success exit (0) and a
+// failure exit (3) traverse byte-identical code — the point of the test is
+// that they are treated alike, and 0 is the case a naive fix drops.
+fn procExitWasm(comptime code: u8) [80]u8 {
+    return [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        // type: (i32)->() and ()->()
+        0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
+        0x00, 0x00,
+        // import "wasi_snapshot_preview1" "proc_exit" func type 0
+        0x02, 0x24, 0x01, 0x16, 0x77, 0x61,
+        0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73,
+        0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72, 0x65, 0x76,
+        0x69, 0x65, 0x77, 0x31, 0x09, 0x70, 0x72, 0x6f,
+        0x63, 0x5f, 0x65, 0x78, 0x69, 0x74, 0x00, 0x00,
+        0x03, 0x02, 0x01, 0x01, // func[1]: type 1
+        0x07, 0x08, 0x01, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x00, 0x01, // export "main"
+        0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, code, 0x10, 0x00, 0x0b, // i32.const code; call 0
+    };
+}
+
+// (module (import "env" "h" (func)) (func (export "f") call 0)) — the guest
+// calls a host callback that returns a trap.
+const host_callback_trap_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type ()->()
+    0x02, 0x09, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x01, 0x68, 0x00, 0x00, // import env.h
+    0x03, 0x02, 0x01, 0x00, // func[1]: type 0
+    0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x01, // export "f" → funcidx 1
+    0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b, // code: call 0; end
+};
+
+/// A `wasm_func_new_with_env` callback that always traps. `env` is the Store,
+/// which `wasm_trap_new` needs for the message allocation; the runtime takes
+/// ownership of the returned trap.
+fn alwaysTrapCallback(env: ?*anyopaque, args: ?*const ValVec, results: ?*ValVec) callconv(.c) ?*trap_surface.Trap {
+    _ = args;
+    _ = results;
+    var msg = "host callback refused".*;
+    const bv: ByteVec = .{ .size = msg.len, .data = &msg };
+    return trap_surface.wasm_trap_new(@ptrCast(@alignCast(env)), &bv);
+}
+
+/// Assert `engine` really produced the backend it names. Without this a JIT
+/// that silently fell back to the interp would make every cross-engine
+/// assertion below vacuously true. `auto`'s backend is deliberately unpinned —
+/// which engine it picks is documented to change without an API break.
+fn expectBackend(inst: *Instance, engine: u8) !void {
+    if (engine == engine_jit) try testing.expect(inst.jit != null);
+    if (engine == engine_interp) try testing.expect(inst.runtime != null);
+}
+
+/// Run export 0 of `bytes` on `engine` and return its trap kind. `-1` means it
+/// returned without trapping. `exit_out`, when given, receives the WASI exit
+/// status the store recorded (left untouched if none was).
+fn trapKindOfExport0(engine: u8, bytes: []const u8, wire_wasi: bool, exit_out: ?*u32) !i32 {
+    const e = capi.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer capi.wasm_engine_delete(e);
+    const s = capi.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer capi.wasm_store_delete(s);
+    if (wire_wasi) {
+        const cfg = wasi_ext.zwasm_wasi_config_new() orelse return error.ConfigAllocFailed;
+        capi.zwasm_store_set_wasi(s, cfg);
+    }
+    const bv: ByteVec = .{ .size = bytes.len, .data = @constCast(bytes.ptr) };
+    const m = capi.wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
+    defer capi.wasm_module_delete(m);
+    const inst = zwasm_instance_new_ex(s, m, null, null, engine) orelse return error.InstanceAllocFailed;
+    defer capi.wasm_instance_delete(inst);
+    try expectBackend(inst, engine);
+
+    var exports: vec.ExternVec = .{ .size = 0, .data = null };
+    capi.wasm_instance_exports(inst, &exports);
+    defer capi.wasm_extern_vec_delete(&exports);
+    const fc = capi.wasm_extern_as_func(exports.data.?[0].?) orelse return error.NotFunc;
+    const args: ValVec = .{ .size = 0, .data = null };
+    var results: ValVec = .{ .size = 0, .data = null };
+    const trap = capi.wasm_func_call(fc, &args, &results);
+    if (exit_out) |p| _ = capi.zwasm_store_wasi_exit_code(s, p);
+    const trap_ptr = trap orelse return -1;
+    defer trap_surface.wasm_trap_delete(trap_ptr);
+    return trap_surface.zwasm_trap_kind(trap_ptr);
+}
+
+/// As `trapKindOfExport0`, but imports a host callback that traps.
+fn trapKindOfHostCallback(engine: u8) !i32 {
+    const e = capi.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer capi.wasm_engine_delete(e);
+    const s = capi.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer capi.wasm_store_delete(s);
+
+    var pv: types.ValTypeVec = undefined;
+    var rv: types.ValTypeVec = undefined;
+    types.wasm_valtype_vec_new_empty(&pv);
+    types.wasm_valtype_vec_new_empty(&rv);
+    const ft = types.wasm_functype_new(&pv, &rv) orelse return error.FuncTypeAllocFailed;
+    defer types.wasm_functype_delete(ft);
+    const hf = extern_new.wasm_func_new_with_env(s, ft, alwaysTrapCallback, s, null) orelse return error.FuncNewFailed;
+    defer capi.wasm_func_delete(hf);
+
+    const bv: ByteVec = .{ .size = host_callback_trap_wasm.len, .data = @constCast(&host_callback_trap_wasm) };
+    const m = capi.wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
+    defer capi.wasm_module_delete(m);
+    var iarr = [_]?*capi.Extern{extern_new.wasm_func_as_extern(hf)};
+    var imports: vec.ExternVec = .{ .size = iarr.len, .data = &iarr };
+    const inst = zwasm_instance_new_ex(s, m, &imports, null, engine) orelse return error.InstanceAllocFailed;
+    defer capi.wasm_instance_delete(inst);
+    try expectBackend(inst, engine);
+
+    var exports: vec.ExternVec = .{ .size = 0, .data = null };
+    capi.wasm_instance_exports(inst, &exports);
+    defer capi.wasm_extern_vec_delete(&exports);
+    const fc = capi.wasm_extern_as_func(exports.data.?[0].?) orelse return error.NotFunc;
+    const args: ValVec = .{ .size = 0, .data = null };
+    var results: ValVec = .{ .size = 0, .data = null };
+    const trap = capi.wasm_func_call(fc, &args, &results);
+    const trap_ptr = trap orelse return -1;
+    defer trap_surface.wasm_trap_delete(trap_ptr);
+    return trap_surface.zwasm_trap_kind(trap_ptr);
+}
+
+test "#331: a guest `unreachable` reports unreachable_ on every engine" {
+    for (all_engines) |eng| {
+        const kind = try trapKindOfExport0(eng, &guest_unreachable_wasm, false, null);
+        try testing.expectEqual(@as(i32, @intFromEnum(TrapKind.unreachable_)), kind);
+    }
+}
+
+test "#331: proc_exit reports wasi_exit, not unreachable, and exit 0 is treated like exit 3" {
+    const success = procExitWasm(0x00);
+    const failure = procExitWasm(0x03);
+    for (all_engines) |eng| {
+        var code0: u32 = 0xFFFF_FFFF;
+        const kind0 = try trapKindOfExport0(eng, &success, true, &code0);
+        var code3: u32 = 0xFFFF_FFFF;
+        const kind3 = try trapKindOfExport0(eng, &failure, true, &code3);
+
+        // The case a fix that only chases "exit 3" would drop: a successful
+        // exit runs the same path and must classify the same way.
+        try testing.expectEqual(@as(i32, @intFromEnum(TrapKind.wasi_exit)), kind0);
+        try testing.expectEqual(kind0, kind3);
+        // Separable from a guest fault — the whole point of the issue.
+        try testing.expect(kind0 != @as(i32, @intFromEnum(TrapKind.unreachable_)));
+        // The kind carries no exit status; #330's accessor still does (both
+        // directions, so a 0 status is not confused with "nothing recorded").
+        try testing.expectEqual(@as(u32, 0), code0);
+        try testing.expectEqual(@as(u32, 3), code3);
+    }
+}
+
+test "#331: a host callback's trap reports binding_error, not unreachable" {
+    for (all_engines) |eng| {
+        const kind = try trapKindOfHostCallback(eng);
+        try testing.expectEqual(@as(i32, @intFromEnum(TrapKind.binding_error)), kind);
+        try testing.expect(kind != @as(i32, @intFromEnum(TrapKind.unreachable_)));
+    }
+}
+
+test "#331: the three engines agree on every host-originated trap kind" {
+    // The interp reported proc_exit as binding_error(0) while the JIT reported
+    // unreachable_(1); a C host switching on the kind saw a different program
+    // depending on which engine `auto` happened to pick.
+    const success = procExitWasm(0x00);
+    const auto_exit = try trapKindOfExport0(engine_auto, &success, true, null);
+    const jit_exit = try trapKindOfExport0(engine_jit, &success, true, null);
+    const interp_exit = try trapKindOfExport0(engine_interp, &success, true, null);
+    try testing.expectEqual(jit_exit, interp_exit);
+    try testing.expectEqual(jit_exit, auto_exit);
+
+    const jit_cb = try trapKindOfHostCallback(engine_jit);
+    const interp_cb = try trapKindOfHostCallback(engine_interp);
+    try testing.expectEqual(jit_cb, interp_cb);
+    // …and the two host-originated classes stay distinct from each other.
+    try testing.expect(jit_exit != jit_cb);
 }
