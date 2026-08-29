@@ -646,21 +646,22 @@ pub fn runWasmCapturedFull(
     // the requested exit code. Other traps map to 1.
     // For non-exit traps, print the kind + message on stderr so
     // the CLI / `runWasm` callers can see what hit.
-    if (store.wasi_host) |host_opaque| {
-        const host: *wasi_host.Host = @ptrCast(@alignCast(host_opaque));
+    // #345 — resolve the host through the same rule as
+    // `zwasm_store_wasi_exit_code`: the one the called instance captured, not
+    // whichever is installed now. Unreachable divergence here today (the CLI
+    // installs one config and never swaps), but a second reader keyed on
+    // `store.wasi_host` is how the two halves drifted apart in the first place.
+    if (@import("../api/instance.zig").activeWasiHost(store)) |host| {
         if (host.exit_code) |_| {
             // exit_code already carries the status; nothing else to surface.
         } else {
             surfaceTrap(io, trap.?);
         }
-    } else {
-        surfaceTrap(io, trap.?);
-    }
-    if (store.wasi_host) |host_opaque| {
-        const host: *wasi_host.Host = @ptrCast(@alignCast(host_opaque));
         if (host.exit_code) |code| {
             return @intCast(@min(code, std.math.maxInt(u8)));
         }
+    } else {
+        surfaceTrap(io, trap.?);
     }
     return 1;
 }

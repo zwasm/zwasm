@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include <wasm.h>
 #include <wasi.h>
@@ -63,46 +64,76 @@ static const char* engine_name(uint8_t kind) {
     }
 }
 
-/* One `_start` run inside a store the caller owns. Returns 0 on success; writes
- * the observed outcome into `*trapped` / `*has_code` / `*code`. The store
- * outlives the call, so the same store can be asked more than once. */
-static int run_in_store(wasm_store_t* store, const uint8_t* wasm, size_t wasm_len, uint8_t engine,
-                        bool* trapped, bool* has_code, uint32_t* code) {
-    int rc = 1;
-    wasm_module_t* module = NULL;
-    wasm_instance_t* instance = NULL;
-    wasm_extern_vec_t exports = { 0, NULL };
+/* An instantiated module the caller keeps: `_start` can be called on it later,
+ * after the Store's WASI config has moved on. */
+typedef struct {
+    wasm_module_t* module;
+    wasm_instance_t* instance;
+    wasm_extern_vec_t exports;
+} guest_t;
+
+static void guest_close(guest_t* g) {
+    if (g->exports.data) wasm_extern_vec_delete(&g->exports);
+    if (g->instance) wasm_instance_delete(g->instance);
+    if (g->module) wasm_module_delete(g->module);
+    g->exports.size = 0;
+    g->exports.data = NULL;
+    g->instance = NULL;
+    g->module = NULL;
+}
+
+/* Instantiate `wasm` in `store` under `engine`, leaving the handles with the
+ * caller. Returns 0 on success; `*out` is safe to `guest_close` either way. */
+static int guest_open(wasm_store_t* store, const uint8_t* wasm, size_t wasm_len, uint8_t engine,
+                      guest_t* out) {
+    out->module = NULL;
+    out->instance = NULL;
+    out->exports.size = 0;
+    out->exports.data = NULL;
 
     wasm_byte_vec_t binary = { wasm_len, (wasm_byte_t*) wasm };
-    module = wasm_module_new(store, &binary);
-    if (!module) { fputs("wasm_module_new failed\n", stderr); goto cleanup; }
+    out->module = wasm_module_new(store, &binary);
+    if (!out->module) { fputs("wasm_module_new failed\n", stderr); return 1; }
 
     wasm_extern_vec_t imports = { 0, NULL };
     wasm_trap_t* itrap = NULL;
-    instance = zwasm_instance_new_ex(store, module, &imports, &itrap, engine);
+    out->instance = zwasm_instance_new_ex(store, out->module, &imports, &itrap, engine);
     if (itrap) wasm_trap_delete(itrap);
-    if (!instance) { fputs("zwasm_instance_new_ex failed\n", stderr); goto cleanup; }
+    if (!out->instance) { fputs("zwasm_instance_new_ex failed\n", stderr); return 1; }
 
-    wasm_instance_exports(instance, &exports);
-    if (exports.size < 1 || !exports.data[0] || wasm_extern_kind(exports.data[0]) != WASM_EXTERN_FUNC) {
+    wasm_instance_exports(out->instance, &out->exports);
+    if (out->exports.size < 1 || !out->exports.data[0] ||
+        wasm_extern_kind(out->exports.data[0]) != WASM_EXTERN_FUNC) {
         fputs("missing _start export\n", stderr);
-        goto cleanup;
+        return 1;
     }
+    return 0;
+}
 
+/* Call `_start` on an already-built guest, then read the status back off
+ * `store`. Returns 0 on success. */
+static int guest_call_start(wasm_store_t* store, guest_t* g,
+                            bool* trapped, bool* has_code, uint32_t* code) {
     wasm_val_vec_t no_args = { 0, NULL };
     wasm_val_vec_t no_res = { 0, NULL };
-    wasm_trap_t* trap = wasm_func_call(wasm_extern_as_func(exports.data[0]), &no_args, &no_res);
+    wasm_trap_t* trap = wasm_func_call(wasm_extern_as_func(g->exports.data[0]), &no_args, &no_res);
     *trapped = trap != NULL;
     if (trap) wasm_trap_delete(trap);
 
     *code = 0xdeadbeefu; /* a false return must leave this untouched */
     *has_code = zwasm_store_wasi_exit_code(store, code);
-    rc = 0;
+    return 0;
+}
 
-cleanup:
-    if (exports.data) wasm_extern_vec_delete(&exports);
-    if (instance) wasm_instance_delete(instance);
-    if (module) wasm_module_delete(module);
+/* One `_start` run inside a store the caller owns. Returns 0 on success; writes
+ * the observed outcome into `*trapped` / `*has_code` / `*code`. The store
+ * outlives the call, so the same store can be asked more than once. */
+static int run_in_store(wasm_store_t* store, const uint8_t* wasm, size_t wasm_len, uint8_t engine,
+                        bool* trapped, bool* has_code, uint32_t* code) {
+    guest_t g;
+    int rc = guest_open(store, wasm, wasm_len, engine, &g);
+    if (rc == 0) rc = guest_call_start(store, &g, trapped, has_code, code);
+    guest_close(&g);
     return rc;
 }
 
@@ -223,6 +254,182 @@ cleanup:
     return rc;
 }
 
+/* What the Store's WASI setup looks like by the time the older instance is
+ * finally called. */
+typedef enum {
+    kReplacedIdle,     /* replaced; the new host has never run anything */
+    kReplacedCarries5, /* replaced; a guest of its own exited 5 on the new host */
+    kDetached,         /* removed with NULL — the Store has no WASI setup at all */
+} swap_kind;
+
+static const char* swap_name(swap_kind k) {
+    switch (k) {
+        case kReplacedCarries5: return "config replaced, installed host carries 5";
+        case kDetached: return "config detached with NULL";
+        default: return "config replaced, installed host never ran";
+    }
+}
+
+/* An instance reaches WASI through the host it captured when it was built —
+ * `wasi.h` states an instance keeps using the config it was built with.
+ * Moving the Store's config on must therefore not change which host that
+ * instance's exit status is read from. All three ways it can move are the same
+ * defect, and `zwasm_store_set_wasi`'s own comment documents all three.
+ *
+ * The assertion is on the code, not on `has_code`. `kReplacedCarries5` used to
+ * answer 5 — a `has_code`-only check passes on that, reporting the wrong
+ * guest's status as if it were right. */
+static int expect_status_follows_captured_host(uint8_t engine, swap_kind swap) {
+    int rc = 1;
+    bool trapped = false, has_code = false;
+    uint32_t code = 0;
+    uint8_t exit7[sizeof(kExitWasm)];
+    uint8_t exit5[sizeof(kExitWasm)];
+    guest_t old_guest = { NULL, NULL, { 0, NULL } };
+    guest_t new_guest = { NULL, NULL, { 0, NULL } };
+    const char* what = swap_name(swap);
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+
+    memcpy(exit7, kExitWasm, sizeof(kExitWasm));
+    exit7[kRvalOffset] = 7;
+    memcpy(exit5, kExitWasm, sizeof(kExitWasm));
+    exit5[kRvalOffset] = 5;
+
+    /* Config A, and an instance built under it. */
+    zwasm_wasi_config_t* cfg_a = zwasm_wasi_config_new();
+    if (!cfg_a) { fputs("wasi config new failed\n", stderr); goto cleanup; }
+    zwasm_store_set_wasi(store, cfg_a); /* takes ownership */
+    if (guest_open(store, exit7, sizeof(exit7), engine, &old_guest)) goto cleanup;
+
+    /* A moves off the Store. It retires rather than being freed, because an
+     * instantiation captured it (#314) — which is what keeps it readable. */
+    if (swap == kDetached) {
+        zwasm_store_set_wasi(store, NULL);
+    } else {
+        zwasm_wasi_config_t* cfg_b = zwasm_wasi_config_new();
+        if (!cfg_b) { fputs("wasi config new failed\n", stderr); goto cleanup; }
+        zwasm_store_set_wasi(store, cfg_b); /* takes ownership */
+    }
+
+    if (swap == kReplacedCarries5) {
+        if (guest_open(store, exit5, sizeof(exit5), engine, &new_guest)) goto cleanup;
+        if (guest_call_start(store, &new_guest, &trapped, &has_code, &code)) goto cleanup;
+        if (!trapped || !has_code || code != 5) {
+            fprintf(stderr, "[%s] %s: the new config's own guest read back trapped=%d has_code=%d code=%u\n",
+                    engine_name(engine), what, (int) trapped, (int) has_code, code);
+            goto cleanup;
+        }
+    }
+
+    /* The older instance runs now, and exits 7 through the host it captured. */
+    trapped = false;
+    has_code = false;
+    code = 0;
+    if (guest_call_start(store, &old_guest, &trapped, &has_code, &code)) goto cleanup;
+    if (!trapped) {
+        fprintf(stderr, "[%s] %s: expected a trap, got none\n", engine_name(engine), what);
+        goto cleanup;
+    }
+    if (!has_code) {
+        fprintf(stderr, "[%s] %s: proc_exit(7) reported no status — a clean exit reads back as a fault\n",
+                engine_name(engine), what);
+        goto cleanup;
+    }
+    if (code != 7) {
+        fprintf(stderr, "[%s] %s: proc_exit(7) read back %u\n", engine_name(engine), what, code);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    guest_close(&new_guest);
+    guest_close(&old_guest);
+    if (store) wasm_store_delete(store);
+    if (eng) wasm_engine_delete(eng);
+    return rc;
+}
+
+/* The read window closes at the next INSTANTIATION, not only at the next call.
+ * Instantiating records the setup the new instance will use — that is what
+ * makes a `(start)` calling `proc_exit` readable — and it moves the setup the
+ * status is read from, exactly as another `wasm_func_call` would. `wasi.h`
+ * states both halves, and this is the only case in this file that builds a
+ * second instance after a swap, so nothing else pins them.
+ *
+ * The middle read is the one that matters: replacing the config alone does NOT
+ * hide the status. The last read is the documented cost of writing the setup
+ * at capture time, asserted so it cannot change silently. */
+static int expect_read_window_closes_at_instantiate(uint8_t engine) {
+    int rc = 1;
+    bool trapped = false, has_code = false;
+    uint32_t code = 0;
+    uint8_t exit7[sizeof(kExitWasm)];
+    uint8_t exit5[sizeof(kExitWasm)];
+    guest_t old_guest = { NULL, NULL, { 0, NULL } };
+    guest_t new_guest = { NULL, NULL, { 0, NULL } };
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+
+    memcpy(exit7, kExitWasm, sizeof(kExitWasm));
+    exit7[kRvalOffset] = 7;
+    memcpy(exit5, kExitWasm, sizeof(kExitWasm));
+    exit5[kRvalOffset] = 5;
+
+    zwasm_wasi_config_t* cfg_a = zwasm_wasi_config_new();
+    if (!cfg_a) { fputs("wasi config new failed\n", stderr); goto cleanup; }
+    zwasm_store_set_wasi(store, cfg_a); /* takes ownership */
+
+    if (guest_open(store, exit7, sizeof(exit7), engine, &old_guest)) goto cleanup;
+    if (guest_call_start(store, &old_guest, &trapped, &has_code, &code)) goto cleanup;
+    if (!trapped || !has_code || code != 7) {
+        fprintf(stderr, "[%s] read window: proc_exit(7) read back trapped=%d has_code=%d code=%u\n",
+                engine_name(engine), (int) trapped, (int) has_code, code);
+        goto cleanup;
+    }
+
+    /* Replace the config WITHOUT calling or instantiating. The status the
+     * embedder has not read yet stays readable. */
+    zwasm_wasi_config_t* cfg_b = zwasm_wasi_config_new();
+    if (!cfg_b) { fputs("wasi config new failed\n", stderr); goto cleanup; }
+    zwasm_store_set_wasi(store, cfg_b); /* takes ownership */
+
+    code = 0xdeadbeefu;
+    has_code = zwasm_store_wasi_exit_code(store, &code);
+    if (!has_code || code != 7) {
+        fprintf(stderr, "[%s] read window: the swap alone hid the status (has_code=%d code=%u)\n",
+                engine_name(engine), (int) has_code, code);
+        goto cleanup;
+    }
+
+    /* Building another instance moves the setup the status is read from, so
+     * the unread status is gone. This is what `wasi.h` tells the embedder to
+     * read before doing. */
+    if (guest_open(store, exit5, sizeof(exit5), engine, &new_guest)) goto cleanup;
+
+    code = 0xdeadbeefu;
+    has_code = zwasm_store_wasi_exit_code(store, &code);
+    if (has_code) {
+        fprintf(stderr, "[%s] read window: a status survived a later instantiation (code=%u)\n",
+                engine_name(engine), code);
+        goto cleanup;
+    }
+    if (code != 0xdeadbeefu) {
+        fprintf(stderr, "[%s] read window: wrote through `out` while returning false\n", engine_name(engine));
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    guest_close(&new_guest);
+    guest_close(&old_guest);
+    if (store) wasm_store_delete(store);
+    if (eng) wasm_engine_delete(eng);
+    return rc;
+}
+
 /* A `wasm_func_new` func called directly has no guest behind it, so its trap
  * carries no exit status — and must not read back as the last guest's. The
  * clear sits above the direct-callback branch for exactly this: without it the
@@ -309,6 +516,10 @@ int main(void) {
         if (expect_no_exit(e, false, "unreachable with no WASI host")) return 1;
         if (expect_per_call(e)) return 1;
         if (expect_direct_call_clears(e)) return 1;
+        if (expect_status_follows_captured_host(e, kReplacedIdle)) return 1;
+        if (expect_status_follows_captured_host(e, kReplacedCarries5)) return 1;
+        if (expect_status_follows_captured_host(e, kDetached)) return 1;
+        if (expect_read_window_closes_at_instantiate(e)) return 1;
     }
 
     /* Null-arg discipline, matching the rest of the extension surface. */

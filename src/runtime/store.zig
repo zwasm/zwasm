@@ -56,6 +56,18 @@ pub const Store = struct {
     /// `zombies` and stay callable until store teardown. Cleared only
     /// when a different host is installed.
     wasi_host_captured: bool = false,
+    /// The WASI host the most recent call into this Store actually
+    /// reached — the one the called instance captured at instantiate
+    /// time, NOT whatever `wasi_host` now holds. `zwasm_store_set_wasi`
+    /// can move `wasi_host` on while an older instance keeps calling
+    /// through the host it was built with; this is the field that
+    /// addresses the same host the guest wrote. Only ever set to a host
+    /// an instantiation captured, which is exactly the condition under
+    /// which `zwasm_store_set_wasi` retires rather than frees it — so
+    /// the pointer stays valid until `wasm_store_delete`. Null until
+    /// the first such instantiation. Erased to `*anyopaque` for the
+    /// same Zone-1 reason as `wasi_host`.
+    active_wasi_host: ?*anyopaque = null,
     /// Hosts displaced by `zwasm_store_set_wasi` while captured.
     /// `wasm_store_delete` frees each one exactly like `wasi_host`.
     /// Erased to `*anyopaque` for the same Zone-1 reason.
