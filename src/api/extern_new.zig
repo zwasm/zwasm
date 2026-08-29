@@ -29,6 +29,7 @@ const runtime = @import("../runtime/runtime.zig");
 const memory_backing = @import("../runtime/instance/memory_backing.zig");
 const zir = @import("../ir/zir.zig");
 const trap_surface = @import("trap_surface.zig");
+const module_introspect = @import("module_introspect.zig");
 
 const Extern = instance.Extern;
 const Func = instance.Func;
@@ -1088,4 +1089,208 @@ test "wasm_foreign: new + host_info + as_ref/ref_as_foreign round-trip + finaliz
     wasm_foreign_set_host_info_with_finalizer(f2, &marker, markForeignFinalized);
     wasm_foreign_delete(f2);
     try testing.expect(foreign_test_finalized);
+}
+
+// ----------------------------------------------------------------
+// #315 — `wasm_func_call` on a `wasm_func_new` host func. Before the
+// fix `wasm_func_call` returned null (= success) without running the
+// callback, so the caller read an uninitialised `results` buffer as a
+// successful invocation. These pin that the direct-call path invokes
+// the callback for real, hands the callback's own trap back to the
+// caller unconsumed (UNLIKE the guest-boundary `hostFuncThunk`, which
+// converts it), and rejects an arity mismatch with a trap.
+// ----------------------------------------------------------------
+
+/// (i32) -> (i32) functype for the host-func direct-call tests. The
+/// returned FuncType owns the vecs (`wasm_functype_new` consumes them).
+fn hostFuncI32ToI32(_: void) ?*types.FuncType {
+    var p_arr = [_]?*types.ValType{types.wasm_valtype_new(0)};
+    var r_arr = [_]?*types.ValType{types.wasm_valtype_new(0)};
+    var pv: types.ValTypeVec = undefined;
+    var rv: types.ValTypeVec = undefined;
+    types.wasm_valtype_vec_new(&pv, 1, &p_arr);
+    types.wasm_valtype_vec_new(&rv, 1, &r_arr);
+    return types.wasm_functype_new(&pv, &rv);
+}
+
+var direct_call_env_seen: i32 = 0;
+
+fn addEnvCallback(env: ?*anyopaque, args: ?*const vec.ValVec, results: ?*vec.ValVec) callconv(.c) ?*trap_surface.Trap {
+    const a = args orelse return null;
+    const r = results orelse return null;
+    const bump: *i32 = @ptrCast(@alignCast(env.?));
+    direct_call_env_seen = bump.*;
+    r.data.?[0] = .{ .kind = .i32, .of = .{ .i32 = a.data.?[0].of.i32 + bump.* } };
+    return null;
+}
+
+var trapping_callback_store: ?*instance.Store = null;
+
+fn trappingCallback(args: ?*const vec.ValVec, results: ?*vec.ValVec) callconv(.c) ?*trap_surface.Trap {
+    _ = args;
+    _ = results;
+    var msg = [_]u8{ 'h', 'o', 's', 't', ' ', 's', 'a', 'i', 'd', ' ', 'n', 'o' };
+    const bv: vec.ByteVec = .{ .size = msg.len, .data = &msg };
+    return trap_surface.wasm_trap_new(trapping_callback_store, &bv);
+}
+
+test "#315 wasm_func_call: a wasm_func_new host func runs its callback" {
+    const e = instance.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer instance.wasm_engine_delete(e);
+    const s = instance.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer instance.wasm_store_delete(s);
+
+    const ft = hostFuncI32ToI32({}) orelse return error.FuncTypeAllocFailed;
+    defer types.wasm_functype_delete(ft);
+    const hf = wasm_func_new(s, ft, addOneCallback) orelse return error.FuncNewFailed;
+    defer instance.wasm_func_delete(hf);
+
+    // The arity surface already answers for a host func, so an embedder
+    // that pre-validates gets through cleanly — hence the silent zero.
+    try testing.expectEqual(@as(usize, 1), module_introspect.wasm_func_param_arity(hf));
+    try testing.expectEqual(@as(usize, 1), module_introspect.wasm_func_result_arity(hf));
+
+    var args_data = [_]instance.Val{.{ .kind = .i32, .of = .{ .i32 = 41 } }};
+    const args: vec.ValVec = .{ .size = 1, .data = &args_data };
+    // Poison the result slot: a silent success leaves this untouched.
+    var results_data = [_]instance.Val{.{ .kind = .i32, .of = .{ .i32 = -12345 } }};
+    var results: vec.ValVec = .{ .size = 1, .data = &results_data };
+
+    try testing.expect(instance.wasm_func_call(hf, &args, &results) == null);
+    try testing.expectEqual(@as(i32, 42), results_data[0].of.i32);
+}
+
+test "#315 wasm_func_call: the with_env host func gets its env" {
+    const e = instance.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer instance.wasm_engine_delete(e);
+    const s = instance.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer instance.wasm_store_delete(s);
+
+    const ft = hostFuncI32ToI32({}) orelse return error.FuncTypeAllocFailed;
+    defer types.wasm_functype_delete(ft);
+    var bump: i32 = 10;
+    const hf = wasm_func_new_with_env(s, ft, addEnvCallback, &bump, null) orelse return error.FuncNewFailed;
+    defer instance.wasm_func_delete(hf);
+
+    direct_call_env_seen = 0;
+    var args_data = [_]instance.Val{.{ .kind = .i32, .of = .{ .i32 = 5 } }};
+    const args: vec.ValVec = .{ .size = 1, .data = &args_data };
+    var results_data = [_]instance.Val{.{ .kind = .i32, .of = .{ .i32 = -12345 } }};
+    var results: vec.ValVec = .{ .size = 1, .data = &results_data };
+
+    try testing.expect(instance.wasm_func_call(hf, &args, &results) == null);
+    try testing.expectEqual(@as(i32, 10), direct_call_env_seen);
+    try testing.expectEqual(@as(i32, 15), results_data[0].of.i32);
+}
+
+test "#315 wasm_func_call: the callback's own trap reaches the caller unconsumed" {
+    const e = instance.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer instance.wasm_engine_delete(e);
+    const s = instance.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer instance.wasm_store_delete(s);
+
+    const ft = hostFuncI32ToI32({}) orelse return error.FuncTypeAllocFailed;
+    defer types.wasm_functype_delete(ft);
+    trapping_callback_store = s;
+    defer trapping_callback_store = null;
+    const hf = wasm_func_new(s, ft, trappingCallback) orelse return error.FuncNewFailed;
+    defer instance.wasm_func_delete(hf);
+
+    var args_data = [_]instance.Val{.{ .kind = .i32, .of = .{ .i32 = 1 } }};
+    const args: vec.ValVec = .{ .size = 1, .data = &args_data };
+    var results_data: [1]instance.Val = undefined;
+    var results: vec.ValVec = .{ .size = 1, .data = &results_data };
+
+    const trap = instance.wasm_func_call(hf, &args, &results) orelse return error.ExpectedTrap;
+    defer trap_surface.wasm_trap_delete(trap);
+    // The direct path hands the callback's own trap object back — it is
+    // NOT consumed and re-raised as a guest fault the way the guest-
+    // boundary thunk does, so the host's own message survives.
+    var msg: vec.ByteVec = .{ .size = 0, .data = null };
+    trap_surface.wasm_trap_message(trap, &msg);
+    defer vec.wasm_byte_vec_delete(&msg);
+    try testing.expectEqualStrings("host said no", msg.data.?[0..msg.size]);
+}
+
+test "#315 wasm_func_call: an arity mismatch on a host func traps" {
+    const e = instance.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer instance.wasm_engine_delete(e);
+    const s = instance.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer instance.wasm_store_delete(s);
+
+    const ft = hostFuncI32ToI32({}) orelse return error.FuncTypeAllocFailed;
+    defer types.wasm_functype_delete(ft);
+    const hf = wasm_func_new(s, ft, addOneCallback) orelse return error.FuncNewFailed;
+    defer instance.wasm_func_delete(hf);
+
+    // Two args for a one-param func.
+    var args_data = [_]instance.Val{
+        .{ .kind = .i32, .of = .{ .i32 = 1 } },
+        .{ .kind = .i32, .of = .{ .i32 = 2 } },
+    };
+    const args: vec.ValVec = .{ .size = 2, .data = &args_data };
+    var results_data: [1]instance.Val = undefined;
+    var results: vec.ValVec = .{ .size = 1, .data = &results_data };
+    const t1 = instance.wasm_func_call(hf, &args, &results) orelse return error.ExpectedTrap;
+    trap_surface.wasm_trap_delete(t1);
+
+    // Zero result slots for a one-result func.
+    var ok_args = [_]instance.Val{.{ .kind = .i32, .of = .{ .i32 = 1 } }};
+    const args1: vec.ValVec = .{ .size = 1, .data = &ok_args };
+    var no_results: vec.ValVec = .{ .size = 0, .data = null };
+    const t2 = instance.wasm_func_call(hf, &args1, &no_results) orelse return error.ExpectedTrap;
+    trap_surface.wasm_trap_delete(t2);
+}
+
+test "#315 wasm_func_call: a null func handle still returns null, not a trap" {
+    var results_data: [1]instance.Val = undefined;
+    var results: vec.ValVec = .{ .size = 1, .data = &results_data };
+    try testing.expect(instance.wasm_func_call(null, null, &results) == null);
+}
+
+var ref_passthrough_seen: ?*anyopaque = null;
+var ref_passthrough_out: u32 = 0;
+
+fn refEchoCallback(args: ?*const vec.ValVec, results: ?*vec.ValVec) callconv(.c) ?*trap_surface.Trap {
+    ref_passthrough_seen = args.?.data.?[0].of.ref;
+    results.?.data.?[0] = .{ .kind = .anyref, .of = .{ .ref = @ptrCast(&ref_passthrough_out) } };
+    return null;
+}
+
+test "#315 wasm_func_call: a ref-kind val is passed through, not owned" {
+    const e = instance.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer instance.wasm_engine_delete(e);
+    const s = instance.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer instance.wasm_store_delete(s);
+
+    // (externref) -> (externref)
+    var p_arr = [_]?*types.ValType{types.wasm_valtype_new(128)};
+    var r_arr = [_]?*types.ValType{types.wasm_valtype_new(128)};
+    var pv: types.ValTypeVec = undefined;
+    var rv: types.ValTypeVec = undefined;
+    types.wasm_valtype_vec_new(&pv, 1, &p_arr);
+    types.wasm_valtype_vec_new(&rv, 1, &r_arr);
+    const ft = types.wasm_functype_new(&pv, &rv) orelse return error.FuncTypeAllocFailed;
+    defer types.wasm_functype_delete(ft);
+    const hf = wasm_func_new(s, ft, refEchoCallback) orelse return error.FuncNewFailed;
+    defer instance.wasm_func_delete(hf);
+
+    // A host-owned object, NOT a zwasm handle. Both sides of a direct call
+    // are the same host, so the direct path mints no `*Ref` view for the
+    // callback and frees none afterwards — unlike the guest-boundary
+    // `hostFuncThunk`, which lends an owned handle and deletes it. If that
+    // discipline leaked into this path, this pointer would be freed here.
+    var host_owned: u64 = 0xfeed;
+    ref_passthrough_seen = null;
+    var args_data = [_]instance.Val{.{ .kind = .anyref, .of = .{ .ref = @ptrCast(&host_owned) } }};
+    const args: vec.ValVec = .{ .size = 1, .data = &args_data };
+    var results_data: [1]instance.Val = undefined;
+    var results: vec.ValVec = .{ .size = 1, .data = &results_data };
+
+    try testing.expect(instance.wasm_func_call(hf, &args, &results) == null);
+    // The callback saw the caller's own pointer, unwrapped.
+    try testing.expectEqual(@as(?*anyopaque, @ptrCast(&host_owned)), ref_passthrough_seen);
+    try testing.expectEqual(@as(u64, 0xfeed), host_owned);
+    // And the caller got the callback's pointer back, unwrapped.
+    try testing.expectEqual(@as(?*anyopaque, @ptrCast(&ref_passthrough_out)), results_data[0].of.ref);
 }
