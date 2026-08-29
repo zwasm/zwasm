@@ -145,9 +145,10 @@ WASM_API_EXTERN void zwasm_store_set_wasi(wasm_store_t*, zwasm_wasi_config_t*);
  *     a failure; `wasm_trap_message` and `zwasm_trap_kind` describe
  *     it.
  *
- * Do not branch on the trap kind to tell those two apart. The kind a
- * `proc_exit` trap carries differs between engines and is not part
- * of this contract.
+ * Prefer this function over the trap kind. `ZWASM_TRAP_WASI_EXIT`
+ * names this case but never carries the status — an exit of 0 and
+ * an exit of 3 are the same kind — so a host that needs the number
+ * reads it here anyway, and one read answers both questions.
  *
  * The status is per call: each `wasm_func_call` into this Store
  * clears it before running, so a `true` return describes the call
