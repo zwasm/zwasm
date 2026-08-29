@@ -94,6 +94,27 @@ static const uint8_t kHostThenExitWasm[] = {
     0x0a, 0x0a, 0x01, 0x08, 0x00, 0x10, 0x00, 0x41, 0x07, 0x10, 0x01, 0x0b,
 };
 
+/* (module
+ *   (import "m" "h" (func $h))
+ *   (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
+ *   (func (call $h) (i32.const 7) (call $exit))
+ *   (start 2))
+ * The start function calls the host func FIRST, so the callback can call back
+ * into the Store before the start exits. Instantiation fails — the start
+ * traps — but the status it requested is still the last thing that ran. */
+static const uint8_t kReentrantStartWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x08, 0x02, 0x60, 0x00, 0x00, 0x60, 0x01, 0x7f, 0x00,
+    0x02, 0x2a, 0x02,
+    0x01, 0x6d, 0x01, 0x68, 0x00, 0x00,
+    0x16, 0x77, 0x61, 0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x31,
+    0x09, 0x70, 0x72, 0x6f, 0x63, 0x5f, 0x65, 0x78, 0x69, 0x74,
+    0x00, 0x01,
+    0x03, 0x02, 0x01, 0x00,
+    0x08, 0x01, 0x02,
+    0x0a, 0x0a, 0x01, 0x08, 0x00, 0x10, 0x00, 0x41, 0x07, 0x10, 0x01, 0x0b,
+};
+
 static const uint8_t kEngines[] = { ZWASM_ENGINE_AUTO, ZWASM_ENGINE_JIT, ZWASM_ENGINE_INTERP };
 
 static const char* engine_name(uint8_t kind) {
@@ -723,6 +744,74 @@ cleanup:
     return rc;
 }
 
+/* A `(start)` that calls back into the Store keeps its own exit status.
+ * Instantiation is a read point — a `(start)` reaching `proc_exit` is why the
+ * host is recorded at capture time — so while the start runs it owns the
+ * status the same way an outermost `wasm_func_call` does. A host callback the
+ * start invokes can call `wasm_func_call`, and without that ownership the
+ * nested call retargets the record and the start's exit reads back as a
+ * fault. */
+static int expect_reentrant_start_keeps_its_status(uint8_t engine) {
+    int rc = 1;
+    uint32_t code = 0;
+    wasm_functype_t* inner_ft = NULL;
+    wasm_functype_t* outer_ft = NULL;
+    wasm_func_t* outer_host = NULL;
+    wasm_module_t* module = NULL;
+    wasm_instance_t* instance = NULL;
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+
+    zwasm_wasi_config_t* cfg = zwasm_wasi_config_new();
+    if (!cfg) { fputs("wasi config new failed\n", stderr); goto cleanup; }
+    zwasm_store_set_wasi(store, cfg); /* takes ownership */
+
+    inner_ft = wasm_functype_new_0_0();
+    g_nested_target = inner_ft ? wasm_func_new(store, inner_ft, do_nothing) : NULL;
+    outer_ft = wasm_functype_new_0_0();
+    outer_host = outer_ft ? wasm_func_new(store, outer_ft, call_back_in) : NULL;
+    if (!g_nested_target || !outer_host) { fputs("wasm_func_new failed\n", stderr); goto cleanup; }
+
+    wasm_byte_vec_t binary = { sizeof(kReentrantStartWasm), (wasm_byte_t*) kReentrantStartWasm };
+    module = wasm_module_new(store, &binary);
+    if (!module) { fputs("reentrant-start module failed\n", stderr); goto cleanup; }
+
+    wasm_extern_t* import_externs[1] = { wasm_func_as_extern(outer_host) };
+    wasm_extern_vec_t imports = { 1, import_externs };
+    wasm_trap_t* itrap = NULL;
+    instance = zwasm_instance_new_ex(store, module, &imports, &itrap, engine);
+    if (itrap) wasm_trap_delete(itrap);
+    if (instance) {
+        fprintf(stderr, "[%s] reentrant start: a start calling proc_exit instantiated\n", engine_name(engine));
+        goto cleanup;
+    }
+
+    code = 0xdeadbeefu;
+    if (!zwasm_store_wasi_exit_code(store, &code)) {
+        fprintf(stderr, "[%s] reentrant start: proc_exit(7) reported no status — the nested call took the host\n",
+                engine_name(engine));
+        goto cleanup;
+    }
+    if (code != 7) {
+        fprintf(stderr, "[%s] reentrant start: proc_exit(7) read back %u\n", engine_name(engine), code);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (instance) wasm_instance_delete(instance);
+    if (module) wasm_module_delete(module);
+    if (outer_host) wasm_func_delete(outer_host);
+    if (g_nested_target) wasm_func_delete(g_nested_target);
+    g_nested_target = NULL;
+    if (outer_ft) wasm_functype_delete(outer_ft);
+    if (inner_ft) wasm_functype_delete(inner_ft);
+    if (store) wasm_store_delete(store);
+    if (eng) wasm_engine_delete(eng);
+    return rc;
+}
+
 /* A `wasm_func_new` func called directly has no guest behind it, so its trap
  * carries no exit status — and must not read back as the last guest's. The
  * clear sits above the direct-callback branch for exactly this: without it the
@@ -817,6 +906,7 @@ int main(void) {
         if (expect_non_wasi_instantiate_invalidates(e, false)) return 1;
         if (expect_non_wasi_instantiate_invalidates(e, true)) return 1;
         if (expect_nested_call_keeps_the_outer_host(e)) return 1;
+        if (expect_reentrant_start_keeps_its_status(e)) return 1;
     }
 
     /* Null-arg discipline, matching the rest of the extension surface. */

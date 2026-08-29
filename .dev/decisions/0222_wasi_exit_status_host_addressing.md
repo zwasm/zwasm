@@ -170,13 +170,28 @@ host nothing points at, and a clean termination reads back as a fault:
 a regression this addressing introduces and the flat `store.wasi_host` read did
 not have, because a single global cannot be retargeted.
 
-`Store.wasi_call_depth` guards it: the outermost `wasm_func_call` records and
-clears, nested ones only count. Instantiation is guarded by the same depth for
-the same reason — an instance created from inside a callback must not close a
-window the call in progress still owns. The counter is decremented in a `defer`,
-so a trap that unwinds through the Zig frame still balances it; the conformance
-suite is what would catch a leak, since a stuck depth makes every later call
-skip the record and report no status.
+`Store.wasi_call_depth` guards it. The rule it encodes is one sentence: **while
+something is running guest code on this Store, that something owns the status.**
+Three writers observe it — the outermost `wasm_func_call` records and clears,
+nested ones only count; instantiation records only outside a call, so an
+instance built from inside a callback does not close a window the call in
+progress still owns; and the `(start)` function raises the depth while it runs,
+because it is itself guest code that can reach `proc_exit` and can invoke a host
+callback that calls back in.
+
+The start arm is the one that is easy to miss, and it was: instantiation records
+the host but is not itself a call, so before this the depth was still zero while
+the start ran, and a callback the start invoked could retarget the record before
+the start's own `proc_exit`. Both engine paths raise it around their start
+execution.
+
+Only two contexts on this Store can reach `proc_exit` — a `wasm_func_call` and
+a `(start)` — and both now raise the depth. Segment initialisation and global
+initialisers cannot call a function, so there is no third.
+
+The counter is decremented in a `defer`, so a trap that unwinds through the Zig
+frame still balances it; the conformance suite is what would catch a leak, since
+a stuck depth makes every later call skip the record and report no status.
 
 **Trap classification is untouched, and measured to be.**
 `ZWASM_TRAP_WASI_EXIT` is raised from the engine's own unwind —

@@ -847,12 +847,22 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     // imported start is unsupported here → fail so an `.auto` caller can retry on
     // interp rather than silently skip it. Run before `inst` exists so teardown
     // is just the jit (no registry/arena to unwind).
-    jit.runStart() catch |err| {
-        if (trap_out) |to| to.* = jitErrToTrap(err, jit, alloc, store);
-        jit.deinit(alloc);
-        alloc.destroy(jit);
-        return null;
-    };
+    {
+        // #345 — while the start function runs it OWNS the status, exactly as
+        // an outermost `wasm_func_call` does: it can reach `proc_exit`, and a
+        // host callback it invokes can call back into this Store. Without the
+        // depth that nested call would retarget `active_wasi_host` away from
+        // the host recorded just above, and the start's own exit would be
+        // unreadable.
+        store.wasi_call_depth +|= 1;
+        defer store.wasi_call_depth -|= 1;
+        jit.runStart() catch |err| {
+            if (trap_out) |to| to.* = jitErrToTrap(err, jit, alloc, store);
+            jit.deinit(alloc);
+            alloc.destroy(jit);
+            return null;
+        };
+    }
 
     const inst = alloc.create(Instance) catch {
         jit.deinit(alloc);
@@ -1151,6 +1161,11 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
     // (incl. data segments) are initialised. A trap fails instantiation.
     // The start funcidx was range/sig-validated at compile time.
     if (findStartFuncIdx(bytes)) |sfx| {
+        // #345 — the start function owns the status while it runs; see the
+        // JIT arm's note. Covers both shapes below (imported start via
+        // `host_calls`, and a defined one dispatched here).
+        store.wasi_call_depth +|= 1;
+        defer store.wasi_call_depth -|= 1;
         if (sfx < inst.func_ptrs_storage.len) {
             // The start function may be an IMPORTED func (wit-component's
             // start-shim wraps `_initialize` exactly this way); its
