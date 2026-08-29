@@ -5,8 +5,13 @@
 # never verify LESS than the per-host gate. It checks the CURRENT host only;
 # multi-host fan-out is the caller's job (the CI matrix / gate_merge's SSH legs).
 #
-#   Core (every OS):  zig fmt --check (src/ + bench/latency/) + zig build test-all
-#                     + bench-latency-build
+#   Core — every OS: zig fmt --check (src/ + bench/latency/ + tools/) +
+#     zig build test-all + bench-latency-build + test-discovery guard +
+#     spec-manifest shape guard + ReleaseSafe-runner floor
+#   Core — Linux only: run-rust-host (D-254). Still core — it runs on every
+#     PR — but only where the runner's gnu-target rustc is ABI-compatible
+#     with zig's native libzwasm.a. Listed separately because "every OS"
+#     above is load-bearing: anything added here is verified on ONE leg.
 #   Extended (ZWASM_CI_EXTENDED=1; Unix legs): lint + build-option DCE +
 #     ReleaseSafe JIT smoke (D-245) + AOT cross-compile portability +
 #     external system-linker consumer (test_extlink.sh) + zone_check +
