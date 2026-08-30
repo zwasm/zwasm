@@ -255,9 +255,15 @@ pub fn fdRead(
         const buf_len = readU32LE(mem, entry_off + 4) orelse return .fault;
         const dst = sliceMem(mem, buf, buf_len) orelse return .fault;
 
+        if (dst.len == 0) continue; // an empty iovec reads nothing and is not EOF
         const n = if (host.stdin_bytes == null and host.stdin_inherit) blk: {
             const io = host.io orelse return .nosys;
-            break :blk std.Io.File.stdin().readStreaming(io, &.{dst}) catch return .io;
+            // The host's stdin reports end-of-input as an error; to the guest
+            // it is a read of zero bytes.
+            break :blk std.Io.File.stdin().readStreaming(io, &.{dst}) catch |e| switch (e) {
+                error.EndOfStream => 0,
+                else => return .io,
+            };
         } else readStdinSlice(host, dst);
         if (n == 0) break; // EOF or no stdin source
         total += @intCast(n);

@@ -9,8 +9,10 @@
 //! Storage shape (per ADR-0114 D3): a sequence of `HandlerEntry`
 //! records, each capturing one catch clause within a try_table
 //! body. The table is consulted by the FP-walk unwinder using the
-//! `(throw_pc, throw_tag_idx)` pair as the key; the first matching
-//! entry (innermost-try_table-first by insertion order) wins.
+//! `(throw_pc, throw_tag_idx)` pair as the key; among the matching
+//! entries that cover the pc, the one with the smallest range wins
+//! (the innermost try_table — each emits a NOP so nested ranges are
+//! strictly nested), and among a try_table's own clauses the first.
 //!
 //! ADR-0114 D3 cites the eventual `*TagInstance` pointer-equality
 //! key (D7), but the interp already keys on `tag_idx` (the
@@ -119,8 +121,8 @@ pub const ExceptionTable = struct {
     }
 
     /// Lookup the handler for a `(throw_pc, throw_tag_idx)` pair.
-    /// Returns the first matching entry per the
-    /// innermost-try_table-first insertion order; null if no
+    /// Returns the matching entry with the smallest covering range
+    /// (innermost try_table; first clause within it); null if no
     /// catch clause matches (= unwind continues to caller frame
     /// per ADR-0114 D5).
     ///
@@ -404,9 +406,8 @@ test "exception_table: insertion-order wins (innermost try_table first)" {
 
     // Outer try_table: PC range [0, 1000), catch_all → landing 999.
     // Inner try_table: PC range [100, 200), catch_ tag=3 → landing 150.
-    // The INNER entry is added FIRST per the
-    // innermost-try_table-first insertion discipline (the per-arch
-    // emit walks try_table bodies depth-first).
+    // Insertion order does not decide the match: the inner entry
+    // wins because its range is the smaller one.
     try b.add(testing.allocator, .{
         .pc_start = 100,
         .pc_end = 200,

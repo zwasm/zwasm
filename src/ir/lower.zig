@@ -323,8 +323,17 @@ pub const Lowerer = struct {
             0x10 => try self.emitUlebPayload(.call),
             0x11 => try self.emitCallIndirect(),
             // Wasm 3.0 tail-call proposal (function-references + tail-call).
-            0x12 => try self.emitUlebPayload(.return_call),
-            0x13 => try self.emitReturnCallIndirect(),
+            // A tail call leaves the function like `return`, so what follows is
+            // dead and must be dropped here: emit's dead-code arm skips the
+            // try_table bookkeeping that liveness performs unconditionally.
+            0x12 => {
+                try self.emitUlebPayload(.return_call);
+                self.markUnreachable();
+            },
+            0x13 => {
+                try self.emitReturnCallIndirect();
+                self.markUnreachable();
+            },
 
             // Parametric
             0x1B => {
@@ -589,7 +598,10 @@ pub const Lowerer = struct {
             0xD5 => try self.emitUlebPayload(.br_on_null),
             0xD6 => try self.emitUlebPayload(.br_on_non_null),
             0x14 => try self.emitUlebPayload(.call_ref),
-            0x15 => try self.emitUlebPayload(.return_call_ref),
+            0x15 => {
+                try self.emitUlebPayload(.return_call_ref);
+                self.markUnreachable();
+            },
 
             // Wasm 2.0+ prefix opcodes (sat-trunc / bulk-memory / ...)
             0xFC => try self.emitPrefixFC(),

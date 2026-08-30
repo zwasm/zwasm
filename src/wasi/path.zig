@@ -43,10 +43,7 @@ fn sliceMemConst(mem: []const u8, ptr: u32, len: u32) ?[]const u8 {
 pub fn confine(path: []const u8) p1.Errno {
     if (path.len == 0) return .noent;
     if (isSep(path[0])) return .notcapable;
-    // `C:x` is drive-relative on NT and resolves against that drive's current
-    // directory, not the preopen; nothing the guest can name that way stays
-    // inside.
-    if (builtin.os.tag == .windows and path.len >= 2 and path[1] == ':' and std.ascii.isAlphabetic(path[0])) return .notcapable;
+    if (hasDrivePrefix(path)) return .notcapable;
     // An interior NUL would be truncated by the host's C path conversion, so
     // the guest would silently open a DIFFERENT path than the one it named.
     if (std.mem.findScalar(u8, path, 0) != null) return .inval;
@@ -76,6 +73,13 @@ fn isSep(c: u8) bool {
     return std.mem.findScalar(u8, separators, c) != null;
 }
 
+/// `C:x` is drive-relative on NT and resolves against that drive's current
+/// directory, not the preopen, and `C:\x` is absolute; nothing the guest can
+/// name that way stays inside. On POSIX a colon is an ordinary byte.
+fn hasDrivePrefix(path: []const u8) bool {
+    return builtin.os.tag == .windows and path.len >= 2 and path[1] == ':' and std.ascii.isAlphabetic(path[0]);
+}
+
 /// A symlink TARGET escapes the preopen root if, resolved relative to the
 /// directory that holds the link, it would ascend above the root (or is
 /// absolute). This is the PLANT-time half of cap-std-style confinement: it
@@ -90,6 +94,7 @@ fn isSep(c: u8) bool {
 /// this lexical check is sound and matches the WASI host policy for creation.
 fn symlinkTargetEscapes(link_sub: []const u8, target: []const u8) bool {
     if (target.len > 0 and isSep(target[0])) return true; // absolute target
+    if (hasDrivePrefix(target)) return true;
     // Depth of the directory containing the link, relative to the preopen root.
     var depth: usize = 0;
     var lit = std.mem.tokenizeAny(u8, link_sub, separators);
@@ -755,6 +760,8 @@ test "confine: a backslash is a separator on Windows and an opaque byte elsewher
         try std.testing.expectEqual(p1.Errno.success, confine("a\\..\\b"));
         try std.testing.expectEqual(p1.Errno.success, confine("a\\b\\..\\c"));
         try std.testing.expect(symlinkTargetEscapes("d\\link", "..\\..\\x"));
+        try std.testing.expect(symlinkTargetEscapes("d\\link", "C:\\x"));
+        try std.testing.expect(symlinkTargetEscapes("d\\link", "c:x"));
         try std.testing.expect(!symlinkTargetEscapes("d\\link", "..\\y"));
     } else {
         // One component named `..\..\x`: it neither ascends nor is absolute.
@@ -762,6 +769,7 @@ test "confine: a backslash is a separator on Windows and an opaque byte elsewher
         try std.testing.expectEqual(p1.Errno.success, confine("\\x"));
         try std.testing.expectEqual(p1.Errno.success, confine("C:\\x"));
         try std.testing.expect(!symlinkTargetEscapes("d/link", "..\\..\\x"));
+        try std.testing.expect(!symlinkTargetEscapes("d/link", "C:\\x"));
     }
 }
 
