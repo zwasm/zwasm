@@ -323,8 +323,17 @@ pub const Lowerer = struct {
             0x10 => try self.emitUlebPayload(.call),
             0x11 => try self.emitCallIndirect(),
             // Wasm 3.0 tail-call proposal (function-references + tail-call).
-            0x12 => try self.emitUlebPayload(.return_call),
-            0x13 => try self.emitReturnCallIndirect(),
+            // A tail call leaves the function like `return`, so what follows is
+            // dead and must be dropped here: emit's dead-code arm skips the
+            // try_table bookkeeping that liveness performs unconditionally.
+            0x12 => {
+                try self.emitUlebPayload(.return_call);
+                self.markUnreachable();
+            },
+            0x13 => {
+                try self.emitReturnCallIndirect();
+                self.markUnreachable();
+            },
 
             // Parametric
             0x1B => {
@@ -589,7 +598,10 @@ pub const Lowerer = struct {
             0xD5 => try self.emitUlebPayload(.br_on_null),
             0xD6 => try self.emitUlebPayload(.br_on_non_null),
             0x14 => try self.emitUlebPayload(.call_ref),
-            0x15 => try self.emitUlebPayload(.return_call_ref),
+            0x15 => {
+                try self.emitUlebPayload(.return_call_ref);
+                self.markUnreachable();
+            },
 
             // Wasm 2.0+ prefix opcodes (sat-trunc / bulk-memory / ...)
             0xFC => try self.emitPrefixFC(),
@@ -1115,7 +1127,6 @@ pub const Lowerer = struct {
             .kind = .try_table,
             .start_inst = start_inst,
             .end_inst = 0,
-            .result_arity = @intCast(arity & 0xFF),
         });
         try self.landing_pads.append(self.alloc, .{
             .block_idx = block_idx,
@@ -1126,29 +1137,6 @@ pub const Lowerer = struct {
 
         self.block_stack[self.block_stack_len] = block_idx;
         self.block_stack_len += 1;
-
-        // D-328: mark the BLOCK that each catch clause branches to as a
-        // catch-target (resolved from the clause's `label_idx`, a br-depth
-        // from the now-pushed try_table). Both the liveness pass and the JIT
-        // emit mint that block's result vregs at its `.end` (the caught
-        // values arrive via the unwinder, not a ZIR op). label_idx 0 = the
-        // try_table itself; 1 = the enclosing block; etc. Only `.block`-kind
-        // targets need it (a loop branches to its start, never its `.end`;
-        // function-level escapes have no in-function `.end`).
-        for (self.catch_entries.items[catches_start..catches_end]) |ce| {
-            // A try_table's catch labels resolve in the context OUTSIDE the
-            // try_table (it is transparent for its own catch labels): label_idx
-            // 0 = the enclosing block, 1 = next out, etc. The try_table itself
-            // was just pushed, so skip it (`-2`: -1 for 0-based, -1 for the
-            // try_table at top).
-            const si: i64 = @as(i64, @intCast(self.block_stack_len)) - 2 - @as(i64, ce.label_idx);
-            if (si < 0) continue; // function-level escape — no in-function `.end`
-            const tgt = self.block_stack[@intCast(si)];
-            if (tgt == unreachable_block_sentinel or tgt >= self.out.blocks.items.len) continue;
-            if (self.out.blocks.items[tgt].kind == .block) {
-                self.out.blocks.items[tgt].is_catch_target = true;
-            }
-        }
     }
 
     /// Decode the catch vec that follows `try_table`'s blocktype
@@ -1209,7 +1197,6 @@ pub const Lowerer = struct {
             .kind = kind,
             .start_inst = start_inst,
             .end_inst = 0,
-            .result_arity = @intCast(arity & 0xFF),
         });
         try self.emit(op, block_idx, arity);
 

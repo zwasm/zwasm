@@ -404,28 +404,6 @@ pub fn compute(
                     }
                 }
                 block_stack_len -= 1;
-                // D-328: a catch-target block's results are delivered by the
-                // unwinder, not produced by a ZIR op (the catch branches here
-                // with the caught values; the static body's fall-through is the
-                // throwing/unreachable path, leaving only dead vregs). Truncate
-                // those dead vregs back to the block's entry depth and mint
-                // `result_arity` fresh canonical result vregs so the regalloc
-                // sizes distinct slots. The JIT emit does the IDENTICAL truncate
-                // + mint at this same `.end`, keeping next_vreg in lockstep.
-                const bidx: u64 = instr.payload;
-                if (bidx < func.blocks.items.len and
-                    func.blocks.items[@intCast(bidx)].is_catch_target and
-                    fr.result_arity > 0)
-                {
-                    sim_len = fr.entry_depth;
-                    var ci: u32 = 0;
-                    while (ci < fr.result_arity) : (ci += 1) {
-                        const vreg: u32 = @intCast(ranges.items.len);
-                        try ranges.append(allocator, .{ .def_pc = pc, .last_use_pc = pc });
-                        sim_stack[sim_len] = vreg;
-                        sim_len += 1;
-                    }
-                }
             }
             // Mid-function `end` (block/loop/if frame closer) is
             // transparent at the liveness level — values produced
@@ -471,6 +449,33 @@ pub fn compute(
                 .merge_vregs = undefined,
             };
             block_stack_len += 1;
+            // A catch clause is one more forward edge into its target block,
+            // carrying values the unwinder delivers rather than any ZIR op. Give
+            // the target its canonical merge vregs now (fresh ones, since no
+            // operand exists yet) so the body's fall-through and any `br` merge
+            // into the same slots at `.end` — the landing pad writes into those
+            // slots too. Emit mints the same vregs here (lockstep).
+            if (instr.op == .try_table) {
+                const landing_pads = func.eh_landing_pads orelse &.{};
+                const catch_entries: []const zir.CatchEntry = func.eh_catch_entries orelse &.{};
+                for (landing_pads) |lp| {
+                    if (lp.block_idx != instr.payload) continue;
+                    for (catch_entries[lp.catches_start..lp.catches_end]) |ce| {
+                        // Catch labels resolve outside the try_table just pushed.
+                        const depth: usize = @as(usize, ce.label_idx) + 1;
+                        if (depth >= block_stack_len) continue;
+                        const fr = &block_stack[block_stack_len - 1 - depth];
+                        if (fr.is_if or fr.is_loop or fr.merge_captured or fr.result_arity == 0) continue;
+                        var i: u32 = 0;
+                        while (i < fr.result_arity) : (i += 1) {
+                            fr.merge_vregs[i] = @intCast(ranges.items.len);
+                            try ranges.append(allocator, .{ .def_pc = pc, .last_use_pc = pc });
+                        }
+                        fr.merge_captured = true;
+                    }
+                    break;
+                }
+            }
             continue;
         }
         // .else: restore the operand-stack shape the then-arm saw

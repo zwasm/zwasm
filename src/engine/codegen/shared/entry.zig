@@ -149,11 +149,12 @@ const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and bui
 /// host→JIT `@call` lets ReleaseSafe's optimized host lose any live value it
 /// kept there → heap-corruption SEGV. `jitTrampoline` clobber-lists this set
 /// so ITS prologue/epilogue saves & restores the cohort around the call,
-/// masking the JIT's clobber. Two exposures this list does not cover: Win64
-/// XMM6-15 are non-volatile and the JIT saves none of them (#286), and
-/// `win64.allocatable_gprs` also holds RDI and RSI, which this list omits
-/// (#287). The SysV/AAPCS64 FP cohort is caller-saved, so it needs nothing
-/// here.
+/// masking the JIT's clobber. On Win64 the regalloc pool also holds RDI and
+/// RSI, which that ABI makes callee-saved, so they join the list there
+/// (SysV treats them as caller-saved and needs nothing). One exposure this
+/// list does not cover: Win64 XMM6-15 are non-volatile and the JIT saves
+/// none of them (#286). The SysV/AAPCS64 FP cohort is caller-saved, so it
+/// needs nothing here.
 pub const jit_cohort_clobbers: if (builtin.target.cpu.arch == .aarch64 or builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .aarch64) .{
         .x19 = true,
@@ -166,6 +167,15 @@ pub const jit_cohort_clobbers: if (builtin.target.cpu.arch == .aarch64 or builti
         .x26 = true,
         .x27 = true,
         .x28 = true,
+        .memory = true,
+    } else if (builtin.target.cpu.arch == .x86_64 and builtin.os.tag == .windows) .{
+        .rbx = true,
+        .r12 = true,
+        .r13 = true,
+        .r14 = true,
+        .r15 = true,
+        .rdi = true,
+        .rsi = true,
         .memory = true,
     } else if (builtin.target.cpu.arch == .x86_64) .{
         .rbx = true,
@@ -237,6 +247,7 @@ inline fn invokeAndCheck(
     // ADR-0105 D1 — populate stack_limit per call for the prologue probe.
     rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
     rt.trap_flag = 0;
+    rt.trap_kind = 0;
     stack_limit_mod.diagOnceWithRt(rt, jit_abi.stack_limit_off, rt.stack_limit);
     // D-245: route through the non-inline clobber-trampoline
     // so the host's callee-saved cohort is preserved across the JIT call.
@@ -260,6 +271,7 @@ inline fn invokeAndCheckVoid(
     signal.ensureInstalled(); // ADR-0202 D4 — see invokeAndCheck
     rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
     rt.trap_flag = 0;
+    rt.trap_kind = 0;
     stack_limit_mod.diagOnceWithRt(rt, jit_abi.stack_limit_off, rt.stack_limit);
     if (comptime builtin.target.cpu.arch == .aarch64 and args.len == 0) {
         // D-245: the JIT prologue MOV-installs the pinned cohort (X19 +
@@ -1373,6 +1385,7 @@ pub fn callI32f64NoArgs(
     rt: *JitRuntime,
 ) Error!FuncRet_i32f64 {
     rt.trap_flag = 0;
+    rt.trap_kind = 0;
     if (comptime builtin.target.cpu.arch == .aarch64) {
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
@@ -1495,6 +1508,7 @@ pub fn callF64i32NoArgs(
     rt: *JitRuntime,
 ) Error!FuncRet_f64i32 {
     rt.trap_flag = 0;
+    rt.trap_kind = 0;
     if (comptime builtin.target.cpu.arch == .aarch64) {
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
@@ -1622,6 +1636,7 @@ pub fn callF64f32NoArgs(
     rt: *JitRuntime,
 ) Error!FuncRet_f64f32 {
     rt.trap_flag = 0;
+    rt.trap_kind = 0;
     if (comptime builtin.target.cpu.arch == .aarch64) {
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
@@ -3027,6 +3042,7 @@ test "entry: f32 local round-trip — local.get 0 of f32 param via V0" {
         .host_dispatch_count = 0,
     };
     rt.trap_flag = 0;
+    rt.trap_kind = 0;
     const Fn = *const fn (rt: *const JitRuntime, a0: f32) callconv(.c) f32;
     const f = module.entry(0, Fn);
     // D-311: route through the cohort-clobber trampoline (NOT a raw `f(&rt,…)`).
@@ -3344,4 +3360,14 @@ test "entry: br_on_cast matches i31 → branch carries the ref → i31.get_s = 7
         .host_dispatch_count = 0,
     };
     try testing.expectEqual(@as(u32, 7), try callI32NoArgs(module, 0, &rt));
+}
+
+test "jit_cohort_clobbers covers every GPR the x86_64 regalloc pool may hand out (#287)" {
+    // SIBLING-AT: src/engine/codegen/shared/entry.zig (jit_cohort_clobbers aarch64 arm — X19-X28 is the whole callee-saved pool by construction)
+    if (comptime builtin.target.cpu.arch != .x86_64) return;
+    const abi = @import("../x86_64/abi.zig");
+    const pool = if (builtin.os.tag == .windows) abi.win64.allocatable_gprs else abi.allocatable_gprs;
+    inline for (pool) |g| {
+        try std.testing.expect(@field(jit_cohort_clobbers, @tagName(g)));
+    }
 }

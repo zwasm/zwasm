@@ -222,7 +222,10 @@ fn fdReadiness(
 
     const remaining: u64 = switch (slot.kind) {
         .stdin => blk: {
-            const src = host.stdin_bytes orelse break :blk 0;
+            // An inherited stdin cannot be counted without blocking on it;
+            // report it readable with the same constant 1 wasmtime uses, so a
+            // guest that polls before reading does not see a hang-up.
+            const src = host.stdin_bytes orelse break :blk @as(u64, if (host.stdin_inherit) 1 else 0);
             break :blk if (src.len > host.stdin_pos) @intCast(src.len - host.stdin_pos) else 0;
         },
         .file => blk: {

@@ -3,9 +3,8 @@
 //! null sentinel (0), else leave it on the stack (identity).
 //!
 //! Implementation: pop src vreg, load into Xn, `CMP Xn, #0`,
-//! `B.EQ → bounds_fixups` (generic trap stub at function epilogue;
-//! the entry path maps `trap_flag != 0` to generic `Error.Trap` —
-//! see entry.zig:173/188 and ADR-0123 D2 for the design). Identity
+//! `B.EQ → null_ref_fixups` (the null_reference stub, code 10, at the
+//! function epilogue — D-293 slice-4b). Identity
 //! passthrough: push the SAME src vreg back (no new result vreg, no
 //! register-to-register MOV) — src's storage is unmodified, the
 //! next consumer reads it from the same slot.

@@ -115,18 +115,18 @@ fn homedSpillReload(ctx: *ctx_mod.EmitCtx, dir: SpillDir) Error!void {
     }
 }
 
-fn spillHomedCallerSaved(ctx: *ctx_mod.EmitCtx) Error!void {
+pub fn spillHomedCallerSaved(ctx: *ctx_mod.EmitCtx) Error!void {
     try homedSpillReload(ctx, .spill);
 }
 
-fn reloadHomedCallerSaved(ctx: *ctx_mod.EmitCtx) Error!void {
+pub fn reloadHomedCallerSaved(ctx: *ctx_mod.EmitCtx) Error!void {
     try homedSpillReload(ctx, .reload);
 }
 
 /// `(ctx, ins)` adapters for the call
 /// cohort (`call`, `call_indirect`). Two distinct adapters
 /// (heterogeneous — call uses func_sigs+num_imports;
-/// call_indirect uses module_types+bounds_fixups+ins.extra).
+/// call_indirect uses module_types+oobtable_fixups+ins.extra).
 pub fn emitCallCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!void {
     // ADR-0155 stage 4 — spill register-resident homes before the CALL (the
     // callee clobbers RBX/R12-R14), reload after (the result is already
@@ -157,7 +157,6 @@ pub fn emitCallIndirectCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Erro
         ctx.alloc,
         ctx.pushed_vregs,
         ctx.next_vreg,
-        ctx.bounds_fixups,
         ctx.oobtable_fixups,
         ctx.cind_sig_fixups,
         ctx.uninit_elem_fixups,
@@ -453,7 +452,6 @@ pub fn emitCallIndirect(
     alloc: regalloc.Allocation,
     pushed_vregs: *std.ArrayList(u32),
     next_vreg: *u32,
-    bounds_fixups: *std.ArrayList(u32),
     oobtable_fixups: *std.ArrayList(u32),
     cind_sig_fixups: *std.ArrayList(u32),
     uninit_elem_fixups: *std.ArrayList(u32),
@@ -509,12 +507,19 @@ pub fn emitCallIndirect(
             try buf.appendSlice(allocator, inst.encJccRel32(.e, 0).slice());
             try uninit_elem_fixups.append(allocator, fixup_at);
         }
-        // RAX = funcptr | 0. TEST RAX,RAX ; JE → shared trap stub.
+        // CMP RAX,2 ; JE → oob_table (code 2): index past the table (#357).
+        try buf.appendSlice(allocator, inst.encCmpRImm8(.q, .rax, 2).slice());
+        {
+            const fixup_at: u32 = @intCast(buf.items.len);
+            try buf.appendSlice(allocator, inst.encJccRel32(.e, 0).slice());
+            try oobtable_fixups.append(allocator, fixup_at);
+        }
+        // RAX = funcptr | 0 (subtype mismatch). TEST RAX,RAX ; JE → sig stub (code 3).
         try buf.appendSlice(allocator, inst.encTestRR(.q, .rax, .rax).slice());
         {
             const fixup_at: u32 = @intCast(buf.items.len);
             try buf.appendSlice(allocator, inst.encJccRel32(.e, 0).slice());
-            try bounds_fixups.append(allocator, fixup_at);
+            try cind_sig_fixups.append(allocator, fixup_at);
         }
     }
 

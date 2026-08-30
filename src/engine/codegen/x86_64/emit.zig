@@ -979,14 +979,6 @@ pub fn compile(
         // of the arm64 emit.zig logic, hoisted above the ctx
         // dispatcher because `.end` is in `collected_x86_64_ctx_ops`.
         const end_pre_pop_depth: u32 = if (ins.op == .end) @intCast(labels.items.len) else 0;
-        // D-328: capture the catch-target block's arity + entry depth BEFORE
-        // dispatch pops the label (mirror of arm64). Mint distinct result vregs
-        // after dispatch, below.
-        const ct_bidx: u64 = if (ins.op == .end) ins.payload else 0;
-        const ct_is_target = ins.op == .end and ct_bidx < func.blocks.items.len and
-            func.blocks.items[@intCast(ct_bidx)].is_catch_target;
-        const ct_arity: u32 = if (ins.op == .end and labels.items.len > 0) labels.items[labels.items.len - 1].result_arity else 0;
-        const ct_entry_depth: u32 = if (ins.op == .end and labels.items.len > 0) labels.items[labels.items.len - 1].entry_stack_depth else 0;
         if (ins.op == .end and labels.items.len > 0 and open_try_tables.items.len > 0) {
             const top = open_try_tables.items[open_try_tables.items.len - 1];
             if (top.labels_depth == labels.items.len) {
@@ -1000,32 +992,17 @@ pub fn compile(
             }
         }
         if (try dispatch_collector.dispatchX86_64Ctx(ins.op, &ctx, &ins)) {
-            // D-328: dead-fall-through catch landing pad — truncate dead body
-            // vregs to the block entry, then mint ct_arity DISTINCT result vregs
-            // (IDENTICAL to liveness + arm64, keeping next_vreg in lockstep) so a
-            // multi-value catch result occupies separate slots.
-            if (ct_is_target and ct_arity > 0) {
-                if (pushed_vregs.items.len > ct_entry_depth) {
-                    pushed_vregs.shrinkRetainingCapacity(ct_entry_depth);
-                }
-                var ci: u32 = 0;
-                while (ci < ct_arity) : (ci += 1) {
-                    const rv = next_vreg;
-                    next_vreg += 1;
-                    if (rv >= alloc.slots.len) {
-                        dbg.print("codegen", "x86_64/emit: catch-target .end SlotOverflow func[{d}] vreg={d} >= slots.len={d} ct_bidx={d} ct_arity={d} ct_entry_depth={d} labels.len={d}\n", .{ func.func_idx, rv, alloc.slots.len, ct_bidx, ct_arity, ct_entry_depth, labels.items.len });
-                        return Error.SlotOverflow;
-                    }
-                    try pushed_vregs.append(allocator, rv);
-                }
-            }
             // D-182 — post-dispatch
             // landing_pad_pc patch (mirror of arm64 emit.zig). See
             // arm64 sibling for the per-clause-prelude rationale;
             // x86_64 differs only in the encoders (MOV r64 ← [R15
             // + disp32] / MOV [RBP - off], r64 / JMP rel32).
             if (ins.op == .end and end_pre_pop_depth > 0 and landing_pad_fixups.items.len > 0) {
-                var any_payload = false;
+                // A catch lands here straight from the unwinder, bypassing the
+                // post-call reload of register-homed locals: their home registers
+                // hold whatever the unwound callees left. The prelude must reload
+                // them from their frame slots, so take the per-clause path.
+                var any_payload = ctx.homing.count > 0;
                 var probe_i: usize = 0;
                 while (probe_i < landing_pad_fixups.items.len) : (probe_i += 1) {
                     const fx = landing_pad_fixups.items[probe_i];
@@ -1062,6 +1039,11 @@ pub fn compile(
                 } else {
                     var jmp_placeholders: std.ArrayList(u32) = .empty;
                     defer jmp_placeholders.deinit(allocator);
+                    // The block's fall-through path arrives here too and must not run
+                    // the landing-pad preludes laid out inline below; jump it straight
+                    // to the common continuation.
+                    try jmp_placeholders.append(allocator, @intCast(buf.items.len));
+                    try buf.appendSlice(allocator, inst.encJmpRel32(0).slice());
 
                     var i: usize = 0;
                     while (i < landing_pad_fixups.items.len) {
@@ -1095,6 +1077,9 @@ pub fn compile(
                             try buf.appendSlice(allocator, inst.encMovRR(.q, dest_reg, abi.return_gpr).slice());
                             try gpr.gprStoreSpilled(allocator, &buf, alloc, spill_base_off, exnref_vreg, 0);
                         }
+                        // After the reify call (it clobbers caller-saved
+                        // homes) and before the payload loads.
+                        try op_call.reloadHomedCallerSaved(&ctx);
                         if (entry.kind == .catch_ or entry.kind == .catch_ref) {
                             const tag_idx = entry.tag_idx orelse return Error.UnsupportedOp;
                             const n_payload: u32 = if (ctx.tag_param_counts.len > tag_idx)

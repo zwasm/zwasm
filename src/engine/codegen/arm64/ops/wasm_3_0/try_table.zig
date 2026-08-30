@@ -2,8 +2,9 @@
 //! + ADR-0114 D2.
 //!
 //! Wasm spec 3.0 §3.3.10.6 (try_table). Per ADR-0114 D2 the
-//! try_table itself emits **zero JIT bytes** — it only
-//! registers handler entries into the per-Instance
+//! try_table itself emits no code of its own — one NOP that
+//! keeps nested handler ranges strictly nested — and registers
+//! handler entries into the per-Instance
 //! `ExceptionTable.Builder` so the FP-walk unwinder can find
 //! them at throw time. The body's PC range is recorded in the
 //! HandlerEntry; the JIT body for the inner block continues
@@ -15,6 +16,9 @@ const std = @import("std");
 
 const meta = @import("../../../../../instruction/wasm_3_0/try_table.zig");
 const ctx_mod = @import("../../ctx.zig");
+const gpr = @import("../../gpr.zig");
+const inst = @import("../../inst.zig");
+const exception_table = @import("../../../shared/exception_table.zig");
 const zir = @import("../../../../../ir/zir.zig");
 
 pub const op_tag = meta.op_tag;
@@ -71,6 +75,11 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     }
     const lp = lp_opt orelse return error.UnsupportedOp;
 
+    // One NOP so this try_table's PC range starts strictly inside any
+    // enclosing one: `ExceptionTable.lookup` picks the smallest covering
+    // range, and blocks / arity-0 `end`s emit no bytes, so without it a
+    // nested try_table could share its enclosing range exactly.
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encNop());
     const pc_start: u32 = @intCast(ctx.buf.items.len);
     const entry_start: u32 = @intCast(builder.entries.items.len);
     const range_start: usize = lp.catches_start;
@@ -137,6 +146,8 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
         });
     }
     const entry_count: u32 = @intCast(range_end - range_start);
+
+    try exception_table.captureCatchTargetMerge(ctx, catch_entries[range_start..range_end], labels_depth_outer);
 
     try ctx.open_try_tables.?.append(ctx.allocator, .{
         .labels_depth = labels_depth_after_push,

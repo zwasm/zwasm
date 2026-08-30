@@ -296,7 +296,7 @@ pub fn emitIndirectReturnCall(
         {
             const fixup_at: u32 = @intCast(ctx.buf.items.len);
             try ctx.buf.appendSlice(ctx.allocator, inst.encJccRel32(.ae, 0).slice());
-            try ctx.bounds_fixups.append(ctx.allocator, fixup_at);
+            try ctx.oobtable_fixups.append(ctx.allocator, fixup_at); // oob_table (code 2, #357)
         }
 
         // Sig: MOV RAX, [R15+typeidx_base_off] ; MOV EAX, [RAX + idx_r*4] ;
@@ -348,7 +348,7 @@ pub fn emitIndirectReturnCall(
         {
             const fixup_at: u32 = @intCast(ctx.buf.items.len);
             try ctx.buf.appendSlice(ctx.allocator, inst.encJccRel32(.ae, 0).slice());
-            try ctx.bounds_fixups.append(ctx.allocator, fixup_at);
+            try ctx.oobtable_fixups.append(ctx.allocator, fixup_at); // oob_table (code 2, #357)
         }
 
         // Sig: MOV RAX, [R15+tables_jit_ci_ptr_off] ; MOV RAX, [RAX+ci_typeidx_disp]
@@ -422,13 +422,13 @@ pub fn emitReturnCallRef(
     // Funcref ptr → reg (AFTER marshalCallArgs, D-097 d-18 mirror).
     const funcref_r = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, funcref_vreg, 0);
 
-    // Null check: OR funcref_r, funcref_r (ZF iff null) ; JZ trap.
-    // Reuses the shared bounds trap stub via bounds_fixups.
+    // Null check: OR funcref_r, funcref_r (ZF iff null) ; JZ → null_reference
+    // stub (code 10), the kind `call_ref` reports for the same null.
     try ctx.buf.appendSlice(ctx.allocator, inst.encOrRR(.q, funcref_r, funcref_r).slice());
     {
         const fixup_at: u32 = @intCast(ctx.buf.items.len);
         try ctx.buf.appendSlice(ctx.allocator, inst.encJccRel32(.e, 0).slice());
-        try ctx.bounds_fixups.append(ctx.allocator, fixup_at);
+        try ctx.null_ref_fixups.append(ctx.allocator, fixup_at);
     }
 
     // Native entry: MOV R11, [funcref_r + funcentity_funcptr_offset]

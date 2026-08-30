@@ -247,9 +247,14 @@ pub fn build(b: *std.Build) void {
     // where the test loader lives (per ADR-0024 D-2). The CLI
     // exe's tests come along too via the inline `test "..."`
     // blocks in `src/cli/main.zig`.
-    const core_tests = b.addTest(.{ .root_module = core });
+    // `-Dtest-filter=<substring>` narrows every unit suite to the tests whose
+    // name contains it — the way to prove one test ran on a given host
+    // instead of reading a total.
+    const test_filter = b.option([]const u8, "test-filter", "run only tests whose name contains this string");
+    const test_filters: []const []const u8 = if (test_filter) |f| b.dupeStrings(&.{f}) else &.{};
+    const core_tests = b.addTest(.{ .root_module = core, .filters = test_filters });
     const run_core_tests = b.addRunArtifact(core_tests);
-    const cli_tests = b.addTest(.{ .root_module = exe_mod });
+    const cli_tests = b.addTest(.{ .root_module = exe_mod, .filters = test_filters });
     const run_cli_tests = b.addRunArtifact(cli_tests);
     // Close-plan §6 (j) D-153 / direct-implementation route
     // (2026-05-21). spectest is the standard Wasm host module
@@ -546,10 +551,7 @@ pub fn build(b: *std.Build) void {
     const test_list_step = b.step("test-list", "List every discovered test name (S5 test-discovery guard input)");
     test_list_step.dependOn(&run_list_tests.step);
 
-    const p3_tests = b.addTest(.{
-        .root_module = core_p3,
-        .filters = if (b.option([]const u8, "test-filter", "run only tests whose name contains this string (test-wasi-p3)")) |f| b.dupeStrings(&.{f}) else &.{},
-    });
+    const p3_tests = b.addTest(.{ .root_module = core_p3, .filters = test_filters });
     const run_p3_tests = b.addRunArtifact(p3_tests);
     const test_wasi_p3_step = b.step("test-wasi-p3", "Run the WASI Preview-3 (async) unit tests under a forced -Dwasi=p3 module (ADR-0193 P3)");
     test_wasi_p3_step.dependOn(&run_p3_tests.step);
@@ -1202,6 +1204,27 @@ pub fn build(b: *std.Build) void {
     const test_wasi_p1_step = b.step("test-wasi-p1", "Run the WASI 0.1 fixture suite");
     test_wasi_p1_step.dependOn(&run_wasi_p1.step);
 
+    // `zig build test-cli-stdin` — issue #257: the REAL CLI must hand a core
+    // module the process stdin (piped bytes reach the guest's fd 0 on every
+    // engine; a null-device stdin reads as EOF). Subprocess by necessity:
+    // only `main.zig` decides what fd 0 is; the in-process runners never
+    // see it.
+    const cli_stdin_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/wasi/stdin_pipe_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const cli_stdin_exe = b.addExecutable(.{
+        .name = "zwasm-cli-stdin",
+        .root_module = cli_stdin_mod,
+    });
+    const run_cli_stdin = b.addRunArtifact(cli_stdin_exe);
+    run_cli_stdin.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
+    run_cli_stdin.addArg(b.pathFromRoot("test/wasi/stdin_echo.wasm"));
+    run_cli_stdin.has_side_effects = true;
+    const test_cli_stdin_step = b.step("test-cli-stdin", "Pipe bytes through `zwasm run` and check the guest reads them on fd 0 (issue #257)");
+    test_cli_stdin_step.dependOn(&run_cli_stdin.step);
+
     // `zig build test-wasi-p1-official` — the OFFICIAL wasi-testsuite
     // wasm32-wasip1 corpus (D-582). Deliberately NOT in `test-all` yet: the
     // corpus reports 14 engine-independent failures (D-583), so folding it
@@ -1314,6 +1337,8 @@ pub fn build(b: *std.Build) void {
         .{ .src = "test/c_api_conformance/wasi_host_lifetime.c", .name = "wasi_host_lifetime" }, // a captured WASI host outlives its instances
         .{ .src = "test/c_api_conformance/host_func_direct_call.c", .name = "host_func_direct_call" }, // #315 wasm_func_call on a wasm_func_new func
         .{ .src = "test/c_api_conformance/version.c", .name = "version" }, // a C host reads the runtime's version
+        .{ .src = "test/c_api_conformance/trap_kind_per_call.c", .name = "trap_kind_per_call" }, // #336 the kind describes the call just made
+        .{ .src = "test/c_api_conformance/gc_heap_cap_trap.c", .name = "gc_heap_cap_trap" }, // #361 GC heap cap is OUT_OF_MEMORY
         .{
             .src = "test/c_api_conformance/wasi_preopen.c",
             .name = "wasi_preopen",
@@ -1544,6 +1569,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_fuzz.step); // §14.3 / D-256 fuzz smoke (seed corpus)
     test_all_step.dependOn(&run_fuzz_exec.step); // D-469 interp-vs-JIT exec differential (exec_seed; toolchain-free, 3-host)
     test_all_step.dependOn(&run_aot_diff.step); // AOT campaign Phase II cross-process .wasm-vs-.cwasm differential (toolchain-free, 3-host)
+    test_all_step.dependOn(&run_cli_stdin.step); // issue #257 CLI stdin → guest fd 0
     test_all_step.dependOn(&run_wasi_p1.step);
     // §9.7 / 7.8 row close (D-045 chunks 1-14 fully discharged):
     // wire test-spec-assert into test-all on ALL hosts. Three-host

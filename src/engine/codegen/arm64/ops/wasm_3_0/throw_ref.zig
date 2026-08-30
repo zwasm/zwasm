@@ -16,6 +16,7 @@ const abi = @import("../../abi.zig");
 const gpr = @import("../../gpr.zig");
 const inst = @import("../../inst.zig");
 const jit_abi = @import("../../../shared/jit_abi.zig");
+const op_call = @import("../../op_call.zig");
 const throw_op = @import("throw.zig");
 const zir = @import("../../../../../ir/zir.zig");
 
@@ -41,6 +42,10 @@ fn emitSlotCall(ctx: *ctx_mod.EmitCtx, slot_off: u12) ctx_mod.Error!void {
 
 pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void {
     _ = ins;
+    // A throw leaves this frame through the trampoline, never returning to
+    // the post-call reload; the landing pad reloads register-homed locals
+    // from their frame slots, so their current values must be there.
+    try op_call.spillHomedCallerSaved(ctx);
     // Pop the exnref operand (= *Exception). Marshal into X1 (arg1).
     if (ctx.pushed_vregs.items.len < 1) return ctx_mod.Error.AllocationMissing;
     const exn_vreg = ctx.pushed_vregs.pop().?;
