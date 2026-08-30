@@ -31,7 +31,10 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   status reads it through the accessor either way.
 
 - **WASI 0.1 is 72/72 on the official wasi-testsuite** for both engines on
-  macOS and Linux, up from 58/72 when the corpus was first gated (ADR-0208).
+  macOS and Linux, up from 58/72 on the interpreter and 54/72 on the JIT when
+  the corpus was first measured (ADR-0208). The step is advisory and runs on
+  the merge rather than on a PR, so nothing blocking holds that number yet —
+  D-583's discharge is what moves it into `test-all`.
   A preopen now advertises the whole preview1 rights table and each call
   enforces the rights its witx doc comment names (#251, #260, ADR-0215) —
   wasmtime advertises these and does not enforce them; zwasm enforces, which is
