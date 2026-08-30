@@ -23,7 +23,9 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   never an earlier guest's (#341) — and it follows **the runtime that actually
   ran `proc_exit`**, including when a call reaches another instance's export
   through an imported func or an imported table (#345, #352, ADR-0222 /
-  ADR-0224). `zwasm_store_set_wasi` retires the host it replaces instead of
+  ADR-0224) — measured on the interpreter, which is where a cross-instance
+  call binds at all until #360.
+  `zwasm_store_set_wasi` retires the host it replaces instead of
   freeing it, so an instance built under the old configuration keeps working
   (#314, ADR-0219). A `proc_exit` trap is also classified apart from a guest
   fault as `ZWASM_TRAP_WASI_EXIT`, identically on every engine (#331,
@@ -32,13 +34,15 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 - **WASI 0.1 is 72/72 on the official wasi-testsuite** for both engines on
   macOS and Linux, up from 58/72 on the interpreter and 54/72 on the JIT when
-  the corpus was first measured (ADR-0208). The step is advisory and runs on
-  the merge rather than on a PR, so nothing blocking holds that number yet —
-  D-583's discharge is what moves it into `test-all`.
-  A preopen now advertises the whole preview1 rights table and each call
-  enforces the rights its witx doc comment names (#251, #260, ADR-0215) —
-  wasmtime advertises these and does not enforce them; zwasm enforces, which is
-  what the witx text describes. `poll_oneoff` answers `fd_read` / `fd_write`
+  the corpus was first measured on x86_64-linux (ADR-0208, D-583). The step is
+  advisory and runs on the merge rather than on a PR, so nothing blocking holds
+  that number yet — D-583's discharge is what moves it into `test-all`.
+  A preopen now advertises the rights wasmtime does plus
+  `PATH_FILESTAT_SET_SIZE` (ADR-0215 D2), and each call checks the right its
+  witx doc comment names, answering `notcapable` when it is absent (#251,
+  #260). wasmtime reports rights but only reads `FD_READ` / `FD_WRITE`; zwasm
+  enforces them, as WasmEdge, WAMR and wasmer do. `poll_oneoff` answers
+  `fd_read` / `fd_write`
   subscriptions rather than only clock ones (#263, ADR-0217). Path handling
   lost four host aborts and two wrong answers along the way: a trailing slash
   on `path_unlink_file` and a dotted final component on `path_rename` no longer
@@ -55,7 +59,7 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
-- **Five JIT liveness divergences that desynced vreg numbering into silent
+- **Four JIT liveness divergences that desynced vreg numbering into silent
   miscompiles** (#250, #252, #258, #272, D-596). Liveness simulates the operand
   stack and must agree with what emit actually pushes; where they disagreed the
   numbering slid and the JIT produced a wrong answer with no trap. The shapes:
@@ -74,10 +78,18 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   answer. wasmtime permits the direct call, so ported code compiled, ran and
   was wrong. The callback now runs.
 
-- **The EH frame sniffer dereferenced an unaligned frame pointer** (#323), and
-  the fault handler was marked installed before it was installed (#320). Both
-  are ReleaseSafe-only, which is the configuration every release binary is
-  built in.
+- **The EH frame sniffer dereferenced an unaligned frame pointer** (#323).
+  ReleaseSafe-only, which is the configuration every release binary is built
+  in. Separately, `signal.ensureInstalled` marked the fault handler installed
+  before installing it, so a second thread entering JIT code inside that window
+  ran with no handler and died on the first guard fault — a race, in any build
+  mode (#320).
+
+- **Three JIT codegen faults on paths a real toolchain reaches.** The mixed
+  multi-result thunks did not survive optimisation on Win64 (#288);
+  `table.get`'s index was read after the descriptor loads rather than
+  snapshotted before them (#212); and a null funcptr in a table was executed
+  rather than trapped (D-586).
 
 - **Validation accepted modules the specification rejects.** `call_ref` and
   `return_call_ref` checked their callee with a bare `isRef`, so a non-null
@@ -107,7 +119,9 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   trap-kind advice catches up with ADR-0218 (#348). The tutorial and README
   name `zig build static-lib` as the step that produces `libzwasm.a` and the
   public headers, which nothing in the reader's path said before (#325).
-  `docs/development.md` records how a release is cut (#241).
+  `docs/development.md` records how a release is cut (#241). The Homebrew
+  install points at `zwasm/homebrew-tap`, the last live `clojurewasm`
+  reference in the tree.
 
 ### Known limitations
 
@@ -118,12 +132,17 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   but that is a zwasm extension rather than the portable wasm-c-api path.
 - **Instantiation failures return NULL without setting the trap
   out-parameter** (#353), so a failed link reports no reason.
-- **The official preview1 corpus is 65/72 on Windows** — seven symlink,
-  hardlink and readdir cases (#290). Measurable there for the first time in
-  this release; the runner previously died mid-corpus and the advisory step
-  reported the leg green.
-- A GC heap-cap trap reaches the C API as `ZWASM_TRAP_BINDING_ERROR` on the
-  interpreter where the Zig API reports `OutOfMemory` (#361).
+- **The official preview1 corpus is host-dependent on Windows** — 65/72 on
+  CI's `windows-2022`, 64/72 on a Windows 11 host, which also fails
+  `path_symlink_trailing_slashes` (#290). Symlink, hardlink and readdir cases.
+  Measurable there for the first time in this release; the runner previously
+  died mid-corpus and the advisory step reported the leg green.
+- **A GC heap-cap trap is not reported as one on either engine** (#361). On
+  the interpreter it reaches the C API as `ZWASM_TRAP_BINDING_ERROR` where the
+  Zig API reports `OutOfMemory`; on the JIT the cap does not trap at all — an
+  `array.new_default` of `0x7fffffff` returns a value and the guest exits 0.
+- An out-of-bounds `return_call_indirect` traps `unreachable` on the JIT where
+  the interpreter traps `oob_table` (#357) — the same class as #361.
 
 ## [2.5.0] - 2026-08-11
 
