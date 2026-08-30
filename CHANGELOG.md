@@ -10,6 +10,79 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-08-30
+
+### Added
+
+- **A C host can read a WASI guest's exit status** (#234).
+  `zwasm_store_wasi_exit_code` (`wasi.h`) returns the value the guest passed to
+  `proc_exit`, and false when the Store has no WASI host or the guest never
+  called it. The contract took four passes to settle and the final shape is
+  what ships: the status is **per call** — each `wasm_func_call` into a Store
+  clears it before running, so a `true` return describes the call just made and
+  never an earlier guest's (#341) — and it follows **the runtime that actually
+  ran `proc_exit`**, including when a call reaches another instance's export
+  through an imported func or an imported table (#345, #352, ADR-0222 /
+  ADR-0224). `zwasm_store_set_wasi` retires the host it replaces instead of
+  freeing it, so an instance built under the old configuration keeps working
+  (#314, ADR-0219). A `proc_exit` trap is also classified apart from a guest
+  fault as `ZWASM_TRAP_WASI_EXIT`, identically on every engine (#331,
+  ADR-0218) — but the kind never carries the number, so a host that needs the
+  status reads it through the accessor either way.
+
+- **WASI 0.1 is 72/72 on the official wasi-testsuite** for both engines on
+  macOS and Linux, up from 58/72 when the corpus was first gated (ADR-0208).
+  A preopen now advertises the whole preview1 rights table and each call
+  enforces the rights its witx doc comment names (#251, #260, ADR-0215) —
+  wasmtime advertises these and does not enforce them; zwasm enforces, which is
+  what the witx text describes. `poll_oneoff` answers `fd_read` / `fd_write`
+  subscriptions rather than only clock ones (#263, ADR-0217). Path handling
+  lost four host aborts and two wrong answers along the way: a trailing slash
+  on `path_unlink_file` and a dotted final component on `path_rename` no longer
+  panic the process (#310, #267), `path_open` honours `LOOKUP_SYMLINK_FOLLOW`
+  on the final component (#276), four `fd_*` calls honour state the slot
+  already carries (#274), and a `..` that stays inside the preopen is an
+  ordinary path (#261).
+
+- **`zwasm_version`** (`zwasm.h`) — the linked library reports its own semver
+  (#237, ADR-0221). Only the accessor: macros, numeric fields and build
+  identity are deferred with named triggers, because `libzwasm.a` and the
+  headers are installed from one checkout by `zig build static-lib`, so the
+  header/library mismatch a version macro detects cannot occur.
+
+### Fixed
+
+- **Five JIT liveness divergences that desynced vreg numbering into silent
+  miscompiles** (#250, #252, #258, #272, D-596). Liveness simulates the operand
+  stack and must agree with what emit actually pushes; where they disagreed the
+  numbering slid and the JIT produced a wrong answer with no trap. The shapes:
+  a block reached only by `br` losing its result vreg past `.end`,
+  `ref.as_non_null` treated as 1→1 rather than transparent, the if-merge and
+  terminator drains indexing from the wrong base, and the `else` arm's
+  `param_arity` run one level deeper than emit. `ZWASM_DEBUG=liveverify` now
+  checks the two against each other by vreg (#269), which is how the last of
+  them was found.
+
+- **`wasm_func_call` on a func created by `wasm_func_new` reported success
+  without running the callback** (#315, ADR-0220). It returned NULL — the
+  wasm-c-api's "no trap" — leaving the caller's result vector untouched;
+  `wasm_func_param_arity` answers for host funcs, so an embedder that
+  validated its argument shape first got a clean pass and then an unwritten
+  answer. wasmtime permits the direct call, so ported code compiled, ran and
+  was wrong. The callback now runs.
+
+- **The EH frame sniffer dereferenced an unaligned frame pointer** (#323), and
+  the fault handler was marked installed before it was installed (#320). Both
+  are ReleaseSafe-only, which is the configuration every release binary is
+  built in.
+
+- **Validation accepted modules the specification rejects.** `call_ref` and
+  `return_call_ref` checked their callee with a bare `isRef`, so a non-null
+  externref was read as a function entity and both engines died; they now
+  require a subtype of `(ref null typeidx)` and an immediate that names a func
+  type (#249). A module with no code section was skipped by the validate path
+  entirely (#278). Three GC subtype gaps closed alongside (#231, #240, #247).
+
 ### Changed
 
 - **Building zwasm no longer fetches anything** (#235). `build.zig` imported
@@ -22,6 +95,32 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   the root package now declares no dependencies at all. `zig build lint` is
   unchanged in rules, coverage and exit code — it is the only step that still
   needs the network on a cold package store.
+
+### Documentation
+
+- `include/zwasm.h` no longer claims the interpreter is the default engine — it
+  has been `auto` (JIT-first, interpreter fallback) since ADR-0200, and the
+  header is the only file a C embedder reads (#309). `include/wasi.h`'s
+  trap-kind advice catches up with ADR-0218 (#348). The tutorial and README
+  name `zig build static-lib` as the step that produces `libzwasm.a` and the
+  public headers, which nothing in the reader's path said before (#325).
+  `docs/development.md` records how a release is cut (#241).
+
+### Known limitations
+
+- **A cross-module func import cannot bind when the source instance is
+  JIT-backed** (#360), which is the stock engine since ADR-0200. Two modules
+  cannot be composed through `wasm_instance_new`. Forcing
+  `ZWASM_ENGINE_INTERP` on the source through `zwasm_instance_new_ex` works,
+  but that is a zwasm extension rather than the portable wasm-c-api path.
+- **Instantiation failures return NULL without setting the trap
+  out-parameter** (#353), so a failed link reports no reason.
+- **The official preview1 corpus is 65/72 on Windows** — seven symlink,
+  hardlink and readdir cases (#290). Measurable there for the first time in
+  this release; the runner previously died mid-corpus and the advisory step
+  reported the leg green.
+- A GC heap-cap trap reaches the C API as `ZWASM_TRAP_BINDING_ERROR` on the
+  interpreter where the Zig API reports `OutOfMemory` (#361).
 
 ## [2.5.0] - 2026-08-11
 
