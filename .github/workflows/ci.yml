@@ -37,8 +37,18 @@ on:
 permissions:
   contents: read
 
+# A superseded PR run is waste, so PR runs share one group per ref and the
+# newer run cancels the older. A `main` run is different: each covers a
+# distinct merged commit, and the extended checks it carries run nowhere
+# else — cancelling it leaves that commit with no lint / DCE / ReleaseSafe-JIT
+# / AOT verification and nothing reports the gap (#312: 46% of `main` runs
+# were cancelled this way). Keying the `main` group on the SHA gives every
+# merge its own group, so runs overlap instead of cancelling. A queue
+# (`cancel-in-progress: false` with a shared group) would not do: GitHub keeps
+# only the newest pending run per group, so a burst of merges would still
+# drop the middle ones.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: true
 
 jobs:
