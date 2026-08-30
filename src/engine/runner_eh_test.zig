@@ -27,7 +27,6 @@ const heap_mod = @import("../feature/gc/heap.zig");
 // against test/spec/.../gc/i31/i31.0.wasm).
 
 test "runI32Export: JIT try_table with a catch clause keeps its fall-through, br and nested results, and its caller's homed locals (#280)" {
-    if (builtin.os.tag == .windows) return skip.phaseEnd(.win64);
     // A catch clause is one more forward edge into its target block, so the
     // body's fall-through / `br` result and the caught payload must merge
     // into the same slots (`fallthrough` / `br_and_fallthrough`); a nested
@@ -101,7 +100,6 @@ test "runI32Export: JIT try_table with a catch clause keeps its fall-through, br
 }
 
 test "runI32Export: JIT throw spills homed locals for the landing pad, and the innermost try_table wins a same-range nest (#280)" {
-    if (builtin.os.tag == .windows) return skip.phaseEnd(.win64);
     // `throw` / `throw_ref` leave the frame through the trampoline, so the
     // register-homed locals must be spilled before it just as before a call
     // (`local_survives_same_frame_throw`, `local_survives_cross_then_same`).
