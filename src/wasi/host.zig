@@ -161,6 +161,12 @@ pub const Host = struct {
     /// Optional source of bytes for `fd_read` over fd 0 (stdin).
     /// Tests set both; `stdin_pos` is mutated as the guest reads.
     stdin_bytes: ?[]const u8 = null,
+    /// When `stdin_bytes` is null, serve the guest's fd 0 from the host
+    /// process's own stdin, one `fd_read` at a time (#257). A byte slice
+    /// would have to be read to EOF before the guest runs, which caps the
+    /// input and blocks on a pipe that never closes; reading on demand has
+    /// neither problem and lets a terminal work interactively. Needs `io`.
+    stdin_inherit: bool = false,
     stdin_pos: usize = 0,
     /// `std.Io` value used for filesystem syscalls (`path_open`,
     /// future `fd_read` / `fd_write` over file fds). Set by the

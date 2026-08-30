@@ -6,12 +6,12 @@
  *       (drop (array.new_default $a (i32.const 0x7fffffff)))
  *       (i32.const 42)))
  *
- * The array asks for ~8 GiB, past the GC heap's 4 GiB cap. The Zig API
- * reports that as OutOfMemory; the C surface used to report
- * ZWASM_TRAP_BINDING_ERROR ("host invocation error") for the same condition,
- * telling the host its own import wiring broke. Interpreter only: the JIT
- * does not trap on the cap at all (#364), and this case grows a JIT lane when
- * that lands.
+ * The array asks for ~8 GiB, past the GC heap's 4 GiB cap. The condition is
+ * an allocation failure, and the C surface reports it as
+ * ZWASM_TRAP_OUT_OF_MEMORY — the same answer the Zig API gives — never as a
+ * binding error, which would tell the host its own import wiring broke.
+ * Interpreter only: the JIT does not trap on the cap at all (#364), and this
+ * case grows a JIT lane when that lands.
  */
 
 #include <stdio.h>

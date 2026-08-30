@@ -159,8 +159,8 @@ fn finalComponentIs(path: []const u8, which: DottedFinal) bool {
 /// resolving a link it is about to refuse.
 pub fn unlinkTrailingSlashErrno(dir: std.Io.Dir, io: std.Io, path: []const u8) p1.Errno {
     if (comptime builtin.os.tag != .windows) return .success;
-    if (path.len == 0 or path[path.len - 1] != '/') return .success;
-    const named = std.mem.trimEnd(u8, path, "/");
+    if (path.len == 0 or !isSep(path[path.len - 1])) return .success;
+    const named = std.mem.trimEnd(u8, path, separators);
     const st = dir.statFile(io, named, .{ .follow_symlinks = false }) catch |err| return mapDirErr(err);
     return if (st.kind == .directory) .isdir else .notdir;
 }

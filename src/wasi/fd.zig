@@ -255,7 +255,10 @@ pub fn fdRead(
         const buf_len = readU32LE(mem, entry_off + 4) orelse return .fault;
         const dst = sliceMem(mem, buf, buf_len) orelse return .fault;
 
-        const n = readStdinSlice(host, dst);
+        const n = if (host.stdin_bytes == null and host.stdin_inherit) blk: {
+            const io = host.io orelse return .nosys;
+            break :blk std.Io.File.stdin().readStreaming(io, &.{dst}) catch return .io;
+        } else readStdinSlice(host, dst);
         if (n == 0) break; // EOF or no stdin source
         total += @intCast(n);
         if (n < dst.len) break; // short read; spec lets us stop

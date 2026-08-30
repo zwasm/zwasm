@@ -398,7 +398,7 @@ pub fn emitReturnCallRef(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mo
     {
         const fixup_at: u32 = @intCast(ctx.buf.items.len);
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encBCond(.eq, 0));
-        try ctx.cind_bounds_fixups.append(ctx.allocator, fixup_at);
+        try ctx.null_ref_fixups.append(ctx.allocator, fixup_at); // null_reference (code 10), as call_ref reports
     }
 
     // Native entry: LDR X16, [X17, #funcentity_funcptr_offset]

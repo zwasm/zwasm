@@ -1,26 +1,30 @@
-/* zwasm v2 — C-API conformance: the trap kind describes the call just made (#336)
+/* zwasm v2 — C-API conformance: the trap kind describes the call just made (#336, #357)
  *
- * A trap stub that raises the JIT's trap flag without writing a kind — the
- * generic bounds bucket — used to leave whatever kind the previous call had
- * stored, so a host switching on `zwasm_trap_kind` after an ordinary guest
- * fault could read the previous call's `ZWASM_TRAP_WASI_EXIT`. The kind is
- * now cleared on every entry, so the second call below reports its own kind
- * (or no specific kind) and never the first call's.
+ * Contract pinned here: `zwasm_trap_kind` on the trap a `wasm_func_call`
+ * returns names that call's own fault, on every engine and host arch, and
+ * `zwasm_store_wasi_exit_code` reports a status only for a call that exited.
+ * The JIT clears its per-runtime kind on every entry, and each trap site
+ * routes to a stub that writes its precise kind, so nothing a previous call
+ * left behind can leak into the next answer.
  *
  *   (module
  *     (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
  *     (type $t (func))
+ *     (tag $x)
  *     (func $f (type $t) (nop))
+ *     (func $thrower (throw $x))
  *     (table 1 funcref)
  *     (elem (i32.const 0) $f)
  *     (func (export "quit") (i32.const 3) (call $exit))
- *     (func (export "oops") (i32.const 99) (return_call_indirect (type $t))))
+ *     (func (export "oops") (i32.const 99) (return_call_indirect (type $t)))
+ *     (func (export "boom") (call $thrower))
+ *     (func (export "nullref") (return_call_ref $t (ref.null $t))))
  *
- * `quit` exits through proc_exit (kind WASI_EXIT, status 3). `oops` then
- * tail-calls through index 99 of a one-entry table — an out-of-bounds table
- * access with no exit status behind it. Run on every engine; exits 0 when
- * the second trap reports OOB_TABLE (#357) and the accessor reports no
- * status.
+ * Sequence per engine: `quit` (WASI_EXIT, status 3) → `oops`, a tail call
+ * through index 99 of a one-entry table (OOB_TABLE, no status) → `quit` →
+ * `boom`, a throw no frame catches (UNCAUGHT_EXCEPTION, no status) → `quit`
+ * → `nullref`, a tail call through a null funcref (NULL_REFERENCE, no
+ * status). Exits 0 when every kind and status is the expected one.
  */
 
 #include <stdbool.h>
@@ -37,12 +41,19 @@ static const uint8_t kGuest[] = {
     0x00, 0x00, 0x60, 0x01, 0x7f, 0x00, 0x02, 0x24, 0x01, 0x16, 0x77, 0x61,
     0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f,
     0x70, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x31, 0x09, 0x70, 0x72, 0x6f,
-    0x63, 0x5f, 0x65, 0x78, 0x69, 0x74, 0x00, 0x01, 0x03, 0x04, 0x03, 0x00,
-    0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x07, 0x0f, 0x02, 0x04,
-    0x71, 0x75, 0x69, 0x74, 0x00, 0x02, 0x04, 0x6f, 0x6f, 0x70, 0x73, 0x00,
-    0x03, 0x09, 0x07, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x01, 0x0a, 0x15,
-    0x03, 0x03, 0x00, 0x01, 0x0b, 0x06, 0x00, 0x41, 0x03, 0x10, 0x00, 0x0b,
-    0x08, 0x00, 0x41, 0xe3, 0x00, 0x13, 0x00, 0x00, 0x0b,
+    0x63, 0x5f, 0x65, 0x78, 0x69, 0x74, 0x00, 0x01, 0x03, 0x07, 0x06, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x0d,
+    0x03, 0x01, 0x00, 0x00, 0x07, 0x20, 0x04, 0x04, 0x71, 0x75, 0x69, 0x74,
+    0x00, 0x03, 0x04, 0x6f, 0x6f, 0x70, 0x73, 0x00, 0x04, 0x04, 0x62, 0x6f,
+    0x6f, 0x6d, 0x00, 0x05, 0x07, 0x6e, 0x75, 0x6c, 0x6c, 0x72, 0x65, 0x66,
+    0x00, 0x06, 0x09, 0x07, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x01, 0x0a,
+    0x26, 0x06, 0x03, 0x00, 0x01, 0x0b, 0x04, 0x00, 0x08, 0x00, 0x0b, 0x06,
+    0x00, 0x41, 0x03, 0x10, 0x00, 0x0b, 0x08, 0x00, 0x41, 0xe3, 0x00, 0x13,
+    0x00, 0x00, 0x0b, 0x04, 0x00, 0x10, 0x02, 0x0b, 0x06, 0x00, 0xd0, 0x00,
+    0x15, 0x00, 0x0b, 0x00, 0x26, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x01, 0x13,
+    0x03, 0x00, 0x04, 0x65, 0x78, 0x69, 0x74, 0x01, 0x01, 0x66, 0x02, 0x07,
+    0x74, 0x68, 0x72, 0x6f, 0x77, 0x65, 0x72, 0x04, 0x04, 0x01, 0x00, 0x01,
+    0x74, 0x0b, 0x04, 0x01, 0x00, 0x01, 0x78
 };
 
 static const char* engine_name(uint8_t kind) {
@@ -89,21 +100,21 @@ static int run(uint8_t engine) {
     if (itrap) wasm_trap_delete(itrap);
     if (!instance) { fprintf(stderr, "[%s] instantiate failed\n", engine_name(engine)); goto cleanup; }
     wasm_instance_exports(instance, &exports);
-    if (exports.size < 2) { fputs("missing exports\n", stderr); goto cleanup; }
+    if (exports.size < 4) { fputs("missing exports\n", stderr); goto cleanup; }
 
     /* 1. quit: proc_exit(3) → WASI_EXIT, status 3. */
     int32_t k1 = call_kind(&exports, 0);
-    uint32_t code = 0xdeadbeefu;
-    bool has1 = zwasm_store_wasi_exit_code(store, &code);
-    if (k1 != ZWASM_TRAP_WASI_EXIT || !has1 || code != 3) {
+    uint32_t code1 = 0xdeadbeefu;
+    bool has1 = zwasm_store_wasi_exit_code(store, &code1);
+    if (k1 != ZWASM_TRAP_WASI_EXIT || !has1 || code1 != 3) {
         fprintf(stderr, "[%s] quit: kind=%d has=%d code=%u, want WASI_EXIT/true/3\n",
-                engine_name(engine), (int) k1, (int) has1, code);
+                engine_name(engine), (int) k1, (int) has1, code1);
         goto cleanup;
     }
 
-    /* 2. oops: an ordinary guest fault — must not inherit the previous kind. */
+    /* 2. oops: an ordinary guest fault after an exit — its own kind, no status. */
     int32_t k2 = call_kind(&exports, 1);
-    code = 0xdeadbeefu;
+    uint32_t code = 0xdeadbeefu;
     bool has2 = zwasm_store_wasi_exit_code(store, &code);
     if (k2 < 0) { fprintf(stderr, "[%s] oops did not trap\n", engine_name(engine)); goto cleanup; }
     if (k2 != ZWASM_TRAP_OOB_TABLE || has2) {
@@ -111,8 +122,29 @@ static int run(uint8_t engine) {
                 engine_name(engine), (int) k2, (int) has2, ZWASM_TRAP_OOB_TABLE);
         goto cleanup;
     }
-    printf("[%s] quit kind=%d code=%u; oops kind=%d (no status) — ok\n",
-           engine_name(engine), (int) k1, 3u, (int) k2);
+    /* 3. quit again, then boom: an uncaught throw reports its own kind. */
+    if (call_kind(&exports, 0) != ZWASM_TRAP_WASI_EXIT) { fprintf(stderr, "[%s] second quit\n", engine_name(engine)); goto cleanup; }
+    int32_t k3 = call_kind(&exports, 2);
+    code = 0xdeadbeefu;
+    bool has3 = zwasm_store_wasi_exit_code(store, &code);
+    if (k3 < 0) { fprintf(stderr, "[%s] boom did not trap\n", engine_name(engine)); goto cleanup; }
+    if (k3 != ZWASM_TRAP_UNCAUGHT_EXCEPTION || has3) {
+        fprintf(stderr, "[%s] boom: kind=%d has=%d, want UNCAUGHT_EXCEPTION (%d) with no status\n",
+                engine_name(engine), (int) k3, (int) has3, ZWASM_TRAP_UNCAUGHT_EXCEPTION);
+        goto cleanup;
+    }
+    /* 4. quit again, then nullref: a tail call through a null funcref. */
+    if (call_kind(&exports, 0) != ZWASM_TRAP_WASI_EXIT) { fprintf(stderr, "[%s] third quit\n", engine_name(engine)); goto cleanup; }
+    int32_t k4 = call_kind(&exports, 3);
+    code = 0xdeadbeefu;
+    bool has4 = zwasm_store_wasi_exit_code(store, &code);
+    if (k4 != ZWASM_TRAP_NULL_REFERENCE || has4) {
+        fprintf(stderr, "[%s] nullref: kind=%d has=%d, want NULL_REFERENCE (%d) with no status\n",
+                engine_name(engine), (int) k4, (int) has4, ZWASM_TRAP_NULL_REFERENCE);
+        goto cleanup;
+    }
+    printf("[%s] quit kind=%d code=%u; oops kind=%d; boom kind=%d; nullref kind=%d (no status) — ok\n",
+           engine_name(engine), (int) k1, code1, (int) k2, (int) k3, (int) k4);
     rc = 0;
 
 cleanup:
