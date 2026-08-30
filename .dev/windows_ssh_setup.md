@@ -166,6 +166,37 @@ zwasm v1.
   quoting need extra care; use `bash -lc '...'` over inline
   heredocs.
 
+## Failure modes seen in v2 (2026-08) — proving that a test ran
+
+- **The Zig 0.16 build runner panics when its stdout is the SSH pipe.**
+  `zig build … --summary all` (or any build with a large log) run through
+  `ssh <host> bash -lc '…'` dies in `fileWriteStreamingWindows`
+  (`.PENDING => unreachable`) before the summary is printed, and the step
+  reports "unable to read results of configure phase". Redirect the
+  build's output to a file on the host and copy the file back, e.g.
+  `ssh <host> bash -l ./run.sh` with `zig build test --summary all >
+  unit.log 2>&1` inside the script. The `run_remote_windows.sh` streaming
+  form is fine for `test-all` because its per-step output is small.
+- **`--summary all` is the evidence.** A green `zig build test` prints
+  nothing on success, so a log with no test names proves nothing. The
+  summary's `run test N pass, M skip` line is the count to compare against
+  the other OSes; a rising skip count is a test that stopped running.
+- **`-Dtest-filter=<substring>` narrows every unit suite** (not only
+  `test-wasi-p3`), so a Windows-only assertion can be shown to execute:
+  `zig build test -Dtest-filter=#262 --summary all` → `run test 4 pass`.
+- **The Win64 phase-end batch (`skip.phaseEnd(.win64)`) is 147 tests that
+  never run on Windows anywhere** — the guard is an OS test, not a phase
+  gate, so running `test-all` on the host skips them too. Measured with
+  the guards removed: 141 pass (#370). Do not read "0 failed" on Windows
+  as covering those tests until #370 closes.
+- **One unit-test executable occasionally stalls** ("test runner failed
+  to respond for 1m") on the host and not on CI's runner — observed once
+  in three runs; rerun before treating it as a failure.
+- **The stock login shell over SSH is PowerShell.** A long `bash -lc`
+  body with `&&`, `$?` or parentheses is parsed by PowerShell first and
+  fails with `ParserError`; copy a script to the host and run
+  `bash -l ./script.sh` instead.
+
 ## Microsoft Defender exclusions (build-perf)
 
 `MsMpEng.exe` (Defender real-time scan) was observed dominating
