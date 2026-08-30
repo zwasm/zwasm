@@ -14,16 +14,10 @@ the same verdict (#226).
 | `clang_wasm64/` | memory64 | i64-indexed memory load / store |
 | `clang_O0_arr_sum/`, `clang_O0_fp_sum/` | — | unoptimised C scalar / FP loops |
 | `rust_fib/`, `rust_data/`, `rust_loop_sum/`, `rust_bubble_sort/` | — | rustc wasm32 |
-| `emscripten_eh/` | EH | built, not yet wired — see below |
+| `emscripten_eh/` | EH | C++ `throw` across a call, caught by type (`try_table` / `throw` / `throw_ref`) |
 | `wasm_of_ocaml/` | GC × EH × TC | not provisioned — see below |
 
-## The two that do not run
-
-`emscripten_eh/` — the fixture exists (`../src/emscripten_eh/`, source and
-built `.wasm` together) and reaches `try_table`, which nothing else here does.
-It is registered as a skip because the JIT miscompiles it while the interpreter
-and wasmtime agree on the result (#280); this lane runs fixtures through the
-JIT. It flips to `expect=fixtures` when that closes.
+## The one that does not run
 
 `wasm_of_ocaml/` — the only fixture that would reach GC, EH and TC in one
 module, which is the cross-check ADR-0117 asks for. The toolchain is not

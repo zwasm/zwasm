@@ -374,19 +374,6 @@ pub const BlockInfo = struct {
     /// `else` emission; remains `null` for plain blocks / loops /
     /// if-without-else.
     else_inst: ?u32 = null,
-    /// Block result arity (count of result types). Set by the lowerer
-    /// at block open (= `readBlockArity() & 0xFF`). D-328 needs it at a
-    /// catch-target block's `.end` to mint the right number of result
-    /// vregs (the JIT regalloc otherwise has nothing to size them from).
-    result_arity: u8 = 0,
-    /// D-328: true when some `try_table` catch clause branches to THIS
-    /// block (resolved from the catch's `label_idx` by the lowerer). The
-    /// caught values arrive via the unwinder, not a ZIR op, so both the
-    /// liveness pass and the JIT emit MUST mint `result_arity` fresh
-    /// vregs at this block's `.end` (in lockstep) — else a multi-value
-    /// catch result collides to one slot. Only `.block`-kind targets are
-    /// marked (loops branch to their start, not `.end`).
-    is_catch_target: bool = false,
 };
 
 // ZirOp catalog extracted to `zir_ops.zig` per ADR-0087 (pure

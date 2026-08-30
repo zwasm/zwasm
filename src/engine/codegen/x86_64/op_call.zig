@@ -119,7 +119,7 @@ fn spillHomedCallerSaved(ctx: *ctx_mod.EmitCtx) Error!void {
     try homedSpillReload(ctx, .spill);
 }
 
-fn reloadHomedCallerSaved(ctx: *ctx_mod.EmitCtx) Error!void {
+pub fn reloadHomedCallerSaved(ctx: *ctx_mod.EmitCtx) Error!void {
     try homedSpillReload(ctx, .reload);
 }
 

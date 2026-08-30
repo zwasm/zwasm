@@ -71,7 +71,7 @@ fn spillHomedCallerSaved(ctx: *EmitCtx) Error!void {
 
 /// Reload every register-homed local from its in-frame slot AFTER a BL/BLR
 /// (before the result is captured). Inverse of `spillHomedCallerSaved`.
-fn reloadHomedCallerSaved(ctx: *EmitCtx) Error!void {
+pub fn reloadHomedCallerSaved(ctx: *EmitCtx) Error!void {
     try homedCallerSavedSpillReload(ctx, .reload);
 }
 

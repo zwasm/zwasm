@@ -117,18 +117,25 @@ pub const ExceptionTable = struct {
     /// `throw_tag_idx` is meaningless in a different instance's index
     /// space, but the resolved u64 identity is globally comparable.
     pub fn lookupByIdentity(self: ExceptionTable, pc: u32, throw_id: u64) ?HandlerMatch {
+        // Entries are appended in try_table emit order, so an enclosing
+        // try_table's clauses precede a nested one's. The innermost
+        // try_table covering `pc` must win (= the smallest covering
+        // range); within one try_table the first matching clause wins.
+        var best: ?HandlerEntry = null;
         for (self.entries) |e| {
             if (pc < e.pc_start or pc >= e.pc_end) continue;
             const matches = switch (e.kind) {
                 .catch_all, .catch_all_ref => true,
                 .catch_, .catch_ref => e.tag_idx != null and self.identity(e.tag_idx.?) == throw_id,
             };
-            if (matches) return .{
-                .landing_pad_pc = e.landing_pad_pc,
-                .kind = e.kind,
-            };
+            if (!matches) continue;
+            if (best == null or e.pc_end - e.pc_start < best.?.pc_end - best.?.pc_start) best = e;
         }
-        return null;
+        const e = best orelse return null;
+        return .{
+            .landing_pad_pc = e.landing_pad_pc,
+            .kind = e.kind,
+        };
     }
 
     /// Public accessor for a local tag index's identity id (used by the

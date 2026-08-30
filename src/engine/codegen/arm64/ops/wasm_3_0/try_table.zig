@@ -138,6 +138,25 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     }
     const entry_count: u32 = @intCast(range_end - range_start);
 
+    // A catch clause is one more forward edge into its target block, carrying
+    // values the unwinder delivers rather than any op. Give the target its
+    // canonical merge vregs now (fresh ones — no operand exists yet) so the
+    // body's fall-through and any `br` merge into the same slots at `.end`,
+    // where the landing-pad prelude writes the caught payload. Liveness mints
+    // the same vregs at this op (lockstep).
+    for (catch_entries[range_start..range_end]) |ce| {
+        if (ce.label_idx >= labels_depth_outer) continue;
+        const tgt = &ctx.labels.items[labels_depth_outer - 1 - ce.label_idx];
+        if (tgt.kind != .block or tgt.merge_captured or tgt.result_arity == 0) continue;
+        var i: u32 = 0;
+        while (i < tgt.result_arity) : (i += 1) {
+            tgt.merge_top_vregs[i] = ctx.next_vreg.*;
+            ctx.next_vreg.* += 1;
+            if (tgt.merge_top_vregs[i] >= ctx.alloc.slots.len) return error.SlotOverflow;
+        }
+        tgt.merge_captured = true;
+    }
+
     try ctx.open_try_tables.?.append(ctx.allocator, .{
         .labels_depth = labels_depth_after_push,
         .entry_start = entry_start,

@@ -1678,41 +1678,14 @@ pub fn compile(
                     //     (.catch_ref / .catch_all_ref) is v0.2 scope
                     //     per ADR-0120 §3.
                     const popped_depth: u32 = @intCast(labels.items.len);
-                    // D-328: capture the catch-target block's arity + entry
-                    // depth BEFORE emitEndIntra pops the label.
-                    const ct_bidx: u64 = ins.payload;
-                    const ct_is_target = ct_bidx < func.blocks.items.len and
-                        func.blocks.items[@intCast(ct_bidx)].is_catch_target;
-                    const ct_arity: u32 = if (labels.items.len > 0) labels.items[labels.items.len - 1].result_arity else 0;
-                    const ct_entry_depth: u32 = if (labels.items.len > 0) labels.items[labels.items.len - 1].entry_stack_depth else 0;
                     try op_control.emitEndIntra(&ctx, &ins);
-                    // D-328: dead-fall-through catch landing pad — mint
-                    // `result_arity` DISTINCT result vregs (lockstep with
-                    // liveness, which mints the same vregs at this `.end`) so a
-                    // multi-value catch result occupies separate slots. The
-                    // landing-pad prelude below then writes the caught payload
-                    // into these distinct vregs.
-                    if (ct_is_target and ct_arity > 0) {
-                        // Truncate dead body vregs back to entry, then mint
-                        // ct_arity fresh canonical result vregs (IDENTICAL to
-                        // liveness — keeps next_vreg in lockstep).
-                        if (pushed_vregs.items.len > ct_entry_depth) {
-                            pushed_vregs.shrinkRetainingCapacity(ct_entry_depth);
-                        }
-                        var ci: u32 = 0;
-                        while (ci < ct_arity) : (ci += 1) {
-                            const rv = next_vreg;
-                            next_vreg += 1;
-                            if (rv >= alloc.slots.len) {
-                                dbg.print("codegen", "arm64/emit: catch-target .end SlotOverflow func[{d}] vreg={d} >= slots.len={d} ct_bidx={d} ct_arity={d} ct_entry_depth={d} labels.len={d}\n", .{ func.func_idx, rv, alloc.slots.len, ct_bidx, ct_arity, ct_entry_depth, labels.items.len });
-                                return Error.SlotOverflow;
-                            }
-                            try pushed_vregs.append(allocator, rv);
-                        }
-                    }
                     if (landing_pad_fixups.items.len > 0) {
                         // Detect if any matching clause needs a prelude.
-                        var any_payload = false;
+                        // A catch lands here straight from the unwinder, bypassing the
+                        // post-call reload of register-homed locals: their home registers
+                        // hold whatever the unwound callees left. The prelude must reload
+                        // them from their frame slots, so take the per-clause path.
+                        var any_payload = ctx.homing.count > 0;
                         var probe_i: usize = 0;
                         while (probe_i < landing_pad_fixups.items.len) : (probe_i += 1) {
                             const fx = landing_pad_fixups.items[probe_i];
@@ -1757,6 +1730,11 @@ pub fn compile(
                             // patch JMPs to common_pc = buf.items.len.
                             var jmp_placeholders: std.ArrayList(u32) = .empty;
                             defer jmp_placeholders.deinit(allocator);
+                            // The block's fall-through path arrives here too and must not run
+                            // the landing-pad preludes laid out inline below; jump it straight
+                            // to the common continuation.
+                            try jmp_placeholders.append(allocator, @intCast(buf.items.len));
+                            try gpr.writeU32(allocator, &buf, inst.encB(0));
 
                             var i: usize = 0;
                             while (i < landing_pad_fixups.items.len) {
@@ -1786,6 +1764,9 @@ pub fn compile(
                                     if (dest_reg != 0) try gpr.writeU32(allocator, &buf, inst.encOrrReg(dest_reg, 31, 0)); // MOV dest, X0
                                     try gpr.gprStoreSpilled(allocator, &buf, alloc, spill_base_off, exnref_vreg, 0);
                                 }
+                                // After the reify call (it clobbers caller-saved
+                                // homes) and before the payload loads.
+                                try op_call.reloadHomedCallerSaved(&ctx);
                                 if (entry.kind == .catch_ or entry.kind == .catch_ref) {
                                     const tag_idx = entry.tag_idx orelse return Error.UnsupportedOp;
                                     const n_payload: u32 = if (ctx.tag_param_counts.len > tag_idx)
