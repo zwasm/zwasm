@@ -167,6 +167,10 @@ pub fn mapInterpTrap(err: anyerror) TrapKind {
         error.IndirectCallTypeMismatch => .indirect_call_mismatch,
         error.StackOverflow, error.CallStackExhausted => .stack_overflow,
         error.OutOfMemory => .out_of_memory,
+        // The GC heap's 4 GiB cap (huge array.new* / struct.new) is the same
+        // "allocation size too large" condition; the Zig facade already maps
+        // it to OutOfMemory (#361).
+        error.OutOfHeap => .out_of_memory,
         // D-293 slice-4a — Wasm 3.0 GC/typed-ref/EH traps (were mis-mapped to binding_error).
         error.NullReference => .null_reference,
         error.CastFailure => .cast_failure,

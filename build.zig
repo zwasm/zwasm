@@ -1314,6 +1314,8 @@ pub fn build(b: *std.Build) void {
         .{ .src = "test/c_api_conformance/wasi_host_lifetime.c", .name = "wasi_host_lifetime" }, // a captured WASI host outlives its instances
         .{ .src = "test/c_api_conformance/host_func_direct_call.c", .name = "host_func_direct_call" }, // #315 wasm_func_call on a wasm_func_new func
         .{ .src = "test/c_api_conformance/version.c", .name = "version" }, // a C host reads the runtime's version
+        .{ .src = "test/c_api_conformance/trap_kind_per_call.c", .name = "trap_kind_per_call" }, // #336 the kind describes the call just made
+        .{ .src = "test/c_api_conformance/gc_heap_cap_trap.c", .name = "gc_heap_cap_trap" }, // #361 GC heap cap is OUT_OF_MEMORY
         .{
             .src = "test/c_api_conformance/wasi_preopen.c",
             .name = "wasi_preopen",

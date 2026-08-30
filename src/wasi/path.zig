@@ -42,13 +42,17 @@ fn sliceMemConst(mem: []const u8, ptr: u32, len: u32) ?[]const u8 {
 /// it is unchanged by this.
 pub fn confine(path: []const u8) p1.Errno {
     if (path.len == 0) return .noent;
-    if (path[0] == '/') return .notcapable;
+    if (isSep(path[0])) return .notcapable;
+    // `C:x` is drive-relative on NT and resolves against that drive's current
+    // directory, not the preopen; nothing the guest can name that way stays
+    // inside.
+    if (builtin.os.tag == .windows and path.len >= 2 and path[1] == ':' and std.ascii.isAlphabetic(path[0])) return .notcapable;
     // An interior NUL would be truncated by the host's C path conversion, so
     // the guest would silently open a DIFFERENT path than the one it named.
     if (std.mem.findScalar(u8, path, 0) != null) return .inval;
 
     var depth: usize = 0;
-    var it = std.mem.tokenizeScalar(u8, path, '/');
+    var it = std.mem.tokenizeAny(u8, path, separators);
     while (it.next()) |seg| {
         if (std.mem.eql(u8, seg, ".")) continue;
         if (std.mem.eql(u8, seg, "..")) {
@@ -59,6 +63,17 @@ pub fn confine(path: []const u8) p1.Errno {
         depth += 1;
     }
     return .success;
+}
+
+/// The bytes the host treats as a path separator. WASI paths are written with
+/// `/`, but the host kernel is what resolves them: on Windows a `\` in a guest
+/// path is a separator too, so `..\..\x` must count as two ascents rather
+/// than one opaque component (#262). On POSIX a backslash is an ordinary
+/// filename byte and stays opaque.
+const separators: []const u8 = if (builtin.os.tag == .windows) "/\\" else "/";
+
+fn isSep(c: u8) bool {
+    return std.mem.findScalar(u8, separators, c) != null;
 }
 
 /// A symlink TARGET escapes the preopen root if, resolved relative to the
@@ -74,10 +89,10 @@ pub fn confine(path: []const u8) p1.Errno {
 /// follow-time confinement (RESOLVE_BENEATH / component walk) tracked by D-315;
 /// this lexical check is sound and matches the WASI host policy for creation.
 fn symlinkTargetEscapes(link_sub: []const u8, target: []const u8) bool {
-    if (target.len > 0 and target[0] == '/') return true; // absolute target
+    if (target.len > 0 and isSep(target[0])) return true; // absolute target
     // Depth of the directory containing the link, relative to the preopen root.
     var depth: usize = 0;
-    var lit = std.mem.tokenizeScalar(u8, link_sub, '/');
+    var lit = std.mem.tokenizeAny(u8, link_sub, separators);
     while (lit.next()) |seg| {
         if (std.mem.eql(u8, seg, ".")) continue;
         if (std.mem.eql(u8, seg, "..")) {
@@ -87,7 +102,7 @@ fn symlinkTargetEscapes(link_sub: []const u8, target: []const u8) bool {
         depth += 1;
     }
     if (depth > 0) depth -= 1; // drop the link's own final component
-    var tit = std.mem.tokenizeScalar(u8, target, '/');
+    var tit = std.mem.tokenizeAny(u8, target, separators);
     while (tit.next()) |seg| {
         if (std.mem.eql(u8, seg, ".")) continue;
         if (std.mem.eql(u8, seg, "..")) {
@@ -118,7 +133,7 @@ const DottedFinal = enum { dot_only, dot_or_dotdot };
 
 fn finalComponentIs(path: []const u8, which: DottedFinal) bool {
     var last: []const u8 = &.{};
-    var it = std.mem.tokenizeScalar(u8, path, '/');
+    var it = std.mem.tokenizeAny(u8, path, separators);
     while (it.next()) |seg| last = seg;
     if (std.mem.eql(u8, last, ".")) return true;
     return which == .dot_or_dotdot and std.mem.eql(u8, last, "..");
@@ -727,6 +742,27 @@ test "confine: the empty path and an interior NUL are rejected" {
     // The host's C path conversion would truncate at the NUL and resolve a
     // DIFFERENT path than the guest named.
     try testing.expectEqual(p1.Errno.inval, confine("dir/nested/file\x00"));
+}
+
+test "confine: a backslash is a separator on Windows and an opaque byte elsewhere (#262)" {
+    if (builtin.os.tag == .windows) {
+        try std.testing.expectEqual(p1.Errno.notcapable, confine("..\\..\\x"));
+        try std.testing.expectEqual(p1.Errno.notcapable, confine("a\\..\\..\\x"));
+        try std.testing.expectEqual(p1.Errno.notcapable, confine("a/..\\../x"));
+        try std.testing.expectEqual(p1.Errno.notcapable, confine("\\x"));
+        try std.testing.expectEqual(p1.Errno.notcapable, confine("C:\\x"));
+        try std.testing.expectEqual(p1.Errno.notcapable, confine("c:x"));
+        try std.testing.expectEqual(p1.Errno.success, confine("a\\..\\b"));
+        try std.testing.expectEqual(p1.Errno.success, confine("a\\b\\..\\c"));
+        try std.testing.expect(symlinkTargetEscapes("d\\link", "..\\..\\x"));
+        try std.testing.expect(!symlinkTargetEscapes("d\\link", "..\\y"));
+    } else {
+        // One component named `..\..\x`: it neither ascends nor is absolute.
+        try std.testing.expectEqual(p1.Errno.success, confine("..\\..\\x"));
+        try std.testing.expectEqual(p1.Errno.success, confine("\\x"));
+        try std.testing.expectEqual(p1.Errno.success, confine("C:\\x"));
+        try std.testing.expect(!symlinkTargetEscapes("d/link", "..\\..\\x"));
+    }
 }
 
 test "confine: POSIX meaning survives, because the path is not rewritten" {

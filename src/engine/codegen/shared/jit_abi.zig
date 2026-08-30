@@ -223,6 +223,10 @@ pub const JitRuntime = extern struct {
     ///   3  = call_indirect sig (B.NE)
     /// Layout-stable: replaces the existing 4-byte pad after
     /// `trap_flag`. All offsets in this struct unchanged.
+    /// Cleared together with `trap_flag` on every JIT entry (#336): a trap
+    /// stub that raises the flag without writing a kind — the generic
+    /// `bounds_fixups` bucket — must read as "no kind", not as whatever the
+    /// previous invocation left here.
     trap_kind: u32 = 0,
     /// Globals array base pointer (ADR-0027 + ADR-0110
     /// widen). Each entry is one `runtime.value.Value` = 16 bytes
