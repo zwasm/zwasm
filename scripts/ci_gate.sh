@@ -8,10 +8,13 @@
 #   Core — every OS: zig fmt --check (src/ + bench/latency/ + tools/) +
 #     zig build test-all + bench-latency-build + test-discovery guard +
 #     spec-manifest shape guard + ReleaseSafe-runner floor
-#   Core — Linux only: run-rust-host (D-254). Still core — it runs on every
-#     PR — but only where the runner's gnu-target rustc is ABI-compatible
-#     with zig's native libzwasm.a. Listed separately because "every OS"
-#     above is load-bearing: anything added here is verified on ONE leg.
+#   Core — Linux only: run-rust-host (D-254) + ReleaseSafe unit tests
+#     (zig build test -Doptimize=ReleaseSafe, #347). Still core — they run on
+#     every PR — but only on the leg that has the wall-clock headroom for
+#     them (rust-host also needs the runner's gnu-target rustc to be
+#     ABI-compatible with zig's native libzwasm.a). Listed separately because
+#     "every OS" above is load-bearing: anything added here is verified on
+#     ONE leg.
 #   Extended (ZWASM_CI_EXTENDED=1; Unix legs): lint + build-option DCE +
 #     ReleaseSafe JIT smoke (D-245) + AOT cross-compile portability +
 #     external system-linker consumer (test_extlink.sh) + zone_check +
@@ -68,6 +71,23 @@ if [ "$(uname -s)" = "Linux" ]; then
     else
         echo "[ci_gate] (skip run-rust-host — rustc not on PATH; needs the .#rust-host shell)"
     fi
+fi
+
+# ReleaseSafe unit tests (#347). The Debug `test` lane cannot see a defect that
+# only an optimized host frame layout produces — #323 (an unaligned frame
+# pointer dereferenced by the EH sniffer) reached `main` that way, and every
+# release binary is built ReleaseSafe. ReleaseSafe and not ReleaseFast /
+# ReleaseSmall: `support.dbg` is comptime-disabled in those two, so five of its
+# tests fail there by construction, and ReleaseSafe is the mode that names the
+# fault instead of exiting 70 silently. LINUX-only: the leg finishes ~12 min
+# before aarch64-macos, so the ~5 min this adds does not move the gate's
+# wall-clock. Core, not extended — extended does not run on every PR, which is
+# not a regression barrier. `--summary all` for the same reason `test-all`
+# carries it. No graceful-skip arm: unlike rust-host this needs no external
+# toolchain.
+if [ "$(uname -s)" = "Linux" ]; then
+    echo "[ci_gate] ReleaseSafe unit tests (Linux-only core, #347)"
+    zig build test -Doptimize=ReleaseSafe --summary all
 fi
 
 # Test-discovery guard (sweep S5): a named test block that no test step

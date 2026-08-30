@@ -14,8 +14,9 @@
 #       corpus in test-all) regresses from `runner_optimize` back to raw
 #       `optimize` (= Debug) — the 2026-06-14 gap.
 #
-# Debug-by-design allowlist (verified intentional): `core` itself (self-import),
-# `core_tests` (leak-detecting DebugAllocator), `exe` AS THE INSTALLED ARTIFACT
+# Honours-`-Doptimize` allowlist (verified intentional): `core` itself
+# (self-import), `core_tests` (leak-detecting DebugAllocator by default; CI's
+# Linux leg also runs it ReleaseSafe, #347), `exe` AS THE INSTALLED ARTIFACT
 # (the shipped CLI honours -Doptimize) — but NOT as a runner's engine, which is
 # what (a2) checks — the light unit-test mods, the trivial single-wasm examples.
 set -euo pipefail
