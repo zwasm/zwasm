@@ -1,7 +1,7 @@
 //! x86_64 emit handler for `try_table` — Zone 2 per ADR-0074
 //! + ADR-0114 D2. Mirror of arm64 sibling.
 //!
-//! Wasm spec 3.0 §3.3.10.6. Emits zero JIT bytes; registers
+//! Wasm spec 3.0 §3.3.10.6. Emits one NOP (see arm64); registers
 //! handler entries into `ExceptionTable.Builder` for the
 //! FP-walk unwinder.
 //!
@@ -11,6 +11,8 @@ const std = @import("std");
 
 const meta = @import("../../../../../instruction/wasm_3_0/try_table.zig");
 const ctx_mod = @import("../../ctx.zig");
+const inst = @import("../../inst.zig");
+const exception_table = @import("../../../shared/exception_table.zig");
 const zir = @import("../../../../../ir/zir.zig");
 
 pub const op_tag = meta.op_tag;
@@ -49,6 +51,11 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     }
     const lp = lp_opt orelse return error.UnsupportedOp;
 
+    // One NOP so this try_table's PC range starts strictly inside any
+    // enclosing one: `ExceptionTable.lookup` picks the smallest covering
+    // range, and blocks / arity-0 `end`s emit no bytes, so without it a
+    // nested try_table could share its enclosing range exactly.
+    try ctx.buf.appendSlice(ctx.allocator, inst.encNop().slice());
     const pc_start: u32 = @intCast(ctx.buf.items.len);
     const entry_start: u32 = @intCast(builder.entries.items.len);
     const range_start: usize = lp.catches_start;
@@ -105,24 +112,7 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     }
     const entry_count: u32 = @intCast(range_end - range_start);
 
-    // A catch clause is one more forward edge into its target block, carrying
-    // values the unwinder delivers rather than any op. Give the target its
-    // canonical merge vregs now (fresh ones — no operand exists yet) so the
-    // body's fall-through and any `br` merge into the same slots at `.end`,
-    // where the landing-pad prelude writes the caught payload. Liveness mints
-    // the same vregs at this op (lockstep).
-    for (catch_entries[range_start..range_end]) |ce| {
-        if (ce.label_idx >= labels_depth_outer) continue;
-        const tgt = &ctx.labels.items[labels_depth_outer - 1 - ce.label_idx];
-        if (tgt.kind != .block or tgt.merge_captured or tgt.result_arity == 0) continue;
-        var i: u32 = 0;
-        while (i < tgt.result_arity) : (i += 1) {
-            tgt.merge_top_vregs[i] = ctx.next_vreg.*;
-            ctx.next_vreg.* += 1;
-            if (tgt.merge_top_vregs[i] >= ctx.alloc.slots.len) return error.SlotOverflow;
-        }
-        tgt.merge_captured = true;
-    }
+    try exception_table.captureCatchTargetMerge(ctx, catch_entries[range_start..range_end], labels_depth_outer);
 
     try ctx.open_try_tables.?.append(ctx.allocator, .{
         .labels_depth = labels_depth_after_push,

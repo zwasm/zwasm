@@ -28,6 +28,7 @@
 //! Zone 2 (`src/engine/codegen/shared/`).
 
 const std = @import("std");
+const zir = @import("../../../ir/zir.zig");
 
 /// Catch clause flavor — mirrors `ir/zir.zig::CatchKind` so the
 /// per-arch emit path can copy through without re-encoding. The
@@ -55,6 +56,30 @@ pub const HandlerEntry = struct {
     landing_pad_pc: u32,
     kind: CatchKind,
 };
+
+/// A catch clause is one more forward edge into its target block, carrying
+/// values the unwinder delivers rather than any op. At `try_table` emit, give
+/// each target block its canonical merge vregs (fresh ones — no operand exists
+/// yet) so the body's fall-through and any `br` merge into the same slots at
+/// `.end`, where the landing-pad prelude writes the caught payload.
+/// `liveness.compute` mints the same vregs at the same op (lockstep). Shared
+/// by both arch emitters; `ctx` is the arch EmitCtx (same label shape).
+/// `labels_depth_outer` is the label depth BEFORE the try_table's own label —
+/// catch labels resolve outside the try_table.
+pub fn captureCatchTargetMerge(ctx: anytype, catches: []const zir.CatchEntry, labels_depth_outer: u32) error{SlotOverflow}!void {
+    for (catches) |ce| {
+        if (ce.label_idx >= labels_depth_outer) continue;
+        const tgt = &ctx.labels.items[labels_depth_outer - 1 - ce.label_idx];
+        if (tgt.kind != .block or tgt.merge_captured or tgt.result_arity == 0) continue;
+        var i: u32 = 0;
+        while (i < tgt.result_arity) : (i += 1) {
+            tgt.merge_top_vregs[i] = ctx.next_vreg.*;
+            ctx.next_vreg.* += 1;
+            if (tgt.merge_top_vregs[i] >= ctx.alloc.slots.len) return error.SlotOverflow;
+        }
+        tgt.merge_captured = true;
+    }
+}
 
 /// Result of a successful `lookup`: the landing-pad PC plus the
 /// catch flavor (so the unwinder knows whether to push the
@@ -120,7 +145,9 @@ pub const ExceptionTable = struct {
         // Entries are appended in try_table emit order, so an enclosing
         // try_table's clauses precede a nested one's. The innermost
         // try_table covering `pc` must win (= the smallest covering
-        // range); within one try_table the first matching clause wins.
+        // range — strictly smaller, since every try_table emits a NOP
+        // before its range starts); equal ranges are clauses of ONE
+        // try_table, where the first matching clause wins (`<`).
         var best: ?HandlerEntry = null;
         for (self.entries) |e| {
             if (pc < e.pc_start or pc >= e.pc_end) continue;

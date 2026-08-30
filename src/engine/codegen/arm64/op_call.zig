@@ -65,7 +65,7 @@ const CallFixup = ctx_mod.CallFixup;
 /// current value — `local.set` writes the home reg directly, so the register IS
 /// the live value). Paired with `reloadHomedCallerSaved` after the call (omitted
 /// for tail calls, where control does not return).
-fn spillHomedCallerSaved(ctx: *EmitCtx) Error!void {
+pub fn spillHomedCallerSaved(ctx: *EmitCtx) Error!void {
     try homedCallerSavedSpillReload(ctx, .spill);
 }
 

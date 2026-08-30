@@ -44,6 +44,7 @@ const abi = @import("../../abi.zig");
 const gpr = @import("../../gpr.zig");
 const inst = @import("../../inst.zig");
 const jit_abi = @import("../../../shared/jit_abi.zig");
+const op_call = @import("../../op_call.zig");
 const zir = @import("../../../../../ir/zir.zig");
 
 pub const op_tag = meta.op_tag;
@@ -64,6 +65,10 @@ pub const is_safepoint: bool = false;
 const scratch: inst.Xn = 16;
 
 pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void {
+    // A throw leaves this frame through the trampoline, never returning to
+    // the post-call reload; the landing pad reloads register-homed locals
+    // from their frame slots, so their current values must be there.
+    try op_call.spillHomedCallerSaved(ctx);
     const tag_idx: u32 = @intCast(ins.payload);
 
     // ADR-0120 — pop N payload values

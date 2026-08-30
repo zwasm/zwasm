@@ -115,7 +115,7 @@ fn homedSpillReload(ctx: *ctx_mod.EmitCtx, dir: SpillDir) Error!void {
     }
 }
 
-fn spillHomedCallerSaved(ctx: *ctx_mod.EmitCtx) Error!void {
+pub fn spillHomedCallerSaved(ctx: *ctx_mod.EmitCtx) Error!void {
     try homedSpillReload(ctx, .spill);
 }
 
