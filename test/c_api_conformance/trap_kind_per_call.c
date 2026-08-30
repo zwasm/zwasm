@@ -19,7 +19,8 @@
  * `quit` exits through proc_exit (kind WASI_EXIT, status 3). `oops` then
  * tail-calls through index 99 of a one-entry table — an out-of-bounds table
  * access with no exit status behind it. Run on every engine; exits 0 when
- * the second trap never reports WASI_EXIT and the accessor reports no status.
+ * the second trap reports OOB_TABLE (#357) and the accessor reports no
+ * status.
  */
 
 #include <stdbool.h>
@@ -105,9 +106,9 @@ static int run(uint8_t engine) {
     code = 0xdeadbeefu;
     bool has2 = zwasm_store_wasi_exit_code(store, &code);
     if (k2 < 0) { fprintf(stderr, "[%s] oops did not trap\n", engine_name(engine)); goto cleanup; }
-    if (k2 == ZWASM_TRAP_WASI_EXIT || has2) {
-        fprintf(stderr, "[%s] oops: kind=%d has=%d — reports the previous call's exit\n",
-                engine_name(engine), (int) k2, (int) has2);
+    if (k2 != ZWASM_TRAP_OOB_TABLE || has2) {
+        fprintf(stderr, "[%s] oops: kind=%d has=%d, want OOB_TABLE (%d) with no status\n",
+                engine_name(engine), (int) k2, (int) has2, ZWASM_TRAP_OOB_TABLE);
         goto cleanup;
     }
     printf("[%s] quit kind=%d code=%u; oops kind=%d (no status) — ok\n",

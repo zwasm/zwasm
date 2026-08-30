@@ -315,7 +315,7 @@ fn emitCallIndirectSubtype(
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(16, abi.runtime_ptr_save_gpr, jit_abi.call_indirect_resolve_fn_off));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encBLR(16));
 
-    // X0 = funcptr | 0 (OOB / sig-subtype fail) | 1 (NULL_ELEM_SENTINEL).
+    // X0 = funcptr | 0 (sig-subtype fail) | 1 (NULL_ELEM_SENTINEL) | 2 (OOB_ELEM_SENTINEL).
     // D-294 residual: CMP X0,#1 FIRST → uninitialized_elem (code 13), so a null
     // elem under a subtyping module matches the inline non-subtyping path + interp
     // + wasmtime/wasmer, instead of the generic sig-mismatch the 0-trap reports.
@@ -325,8 +325,14 @@ fn emitCallIndirectSubtype(
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encBCond(.eq, 0));
         try ctx.uninit_elem_fixups.append(ctx.allocator, fixup_at);
     }
-    // CMP X0,#0 (64-bit) ; B.EQ → call_indirect sig-trap stub (trap_kind 3; a
-    // bounds OOB also routes here — trap-reason granularity is diagnostic).
+    // CMP X0,#2 ; B.EQ → call_indirect bounds stub (trap_kind 2, #357).
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCmpImmX(0, 2));
+    {
+        const fixup_at: u32 = @intCast(ctx.buf.items.len);
+        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encBCond(.eq, 0));
+        try ctx.cind_bounds_fixups.append(ctx.allocator, fixup_at);
+    }
+    // CMP X0,#0 (64-bit) ; B.EQ → call_indirect sig-trap stub (trap_kind 3).
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCmpImmX(0, 0));
     {
         const fixup_at: u32 = @intCast(ctx.buf.items.len);
