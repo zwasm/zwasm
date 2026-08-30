@@ -7,7 +7,7 @@
 
 The 3-host gate (Mac aarch64 + ubuntunote x86_64 + windowsmini Win64; ADR-0076)
 runs windowsmini as a background BATCHED gate. In practice the windowsmini
-verification load (the `cm-shota@windowsmini.local` SSH-driven `test-all`) is
+verification load (the `<user>@<windows-host>` SSH-driven `test-all`) is
 **contending with the user's separate ClojureWasmFromScratch development** on the
 same physical windowsmini box. The user wants to stop paying that cost during
 routine feature iteration.
