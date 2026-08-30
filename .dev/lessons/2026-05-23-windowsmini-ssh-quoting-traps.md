@@ -85,7 +85,7 @@ on the ssh side. Or use `setsid <cmd> < /dev/null > /tmp/x.log
 ### 7. lldb attach works without admin
 
 Confirmed via attaching to a spawned `pwsh.exe`. No
-SE_DEBUG_NAME requirement on the windowsmini standard `shota`
+SE_DEBUG_NAME requirement on the windowsmini standard `<user>`
 user. `process interrupt` works, `process detach` works,
 register/backtrace read clean.
 

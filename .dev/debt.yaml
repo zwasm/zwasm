@@ -2052,7 +2052,7 @@ entries:
       blocked-by: `run_remote_windows.sh` has no bench step. **CORRECTION 2026-06-14: the
       "hyperfine absent" half of this barrier is DISSOLVED** — hyperfine 1.20.0 (the latest
       release) IS installed on windowsmini via `scripts/windows/install_tools.ps1` (verified
-      `C:\Users\shota\AppData\Local\zwasm-tools\hyperfine-1.20.0`). Remaining barrier = the
+      `$env:LOCALAPPDATA\zwasm-tools\hyperfine-1.20.0`). Remaining barrier = the
       missing bench step + ADR-0137 scope: Windows bench *timing* auto-recording into
       `bench/history.yaml` is deferred (§11.2/§11.P re-scoped to 2-host Mac+Linux bench). The
       3-host **correctness** reconcile (windowsmini test-all) is UNAFFECTED — only perf-timing

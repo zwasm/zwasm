@@ -2,7 +2,7 @@
 
 - **Status**: Closed (implemented)
 - **Date**: 2026-05-20
-- **Author**: autonomous-loop (Claude) + shota.508 (review)
+- **Author**: autonomous-loop (Claude) + chaploud (review)
 - **Tags**: regalloc, ABI, scratch, D-132, D-133, §9.12-C, substrate
 
 ## Context

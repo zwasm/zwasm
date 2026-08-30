@@ -281,8 +281,8 @@ Common SSH invocation pattern for all Windows recipes:
 
 ```bash
 # From Mac: drop into windowsmini's PowerShell or Git-Bash
-ssh windowsmini "powershell -NoLogo -NoProfile -Command \"<cmd>\""
-ssh windowsmini "bash -lc '<cmd>'"
+ssh <windows-host> "powershell -NoLogo -NoProfile -Command \"<cmd>\""
+ssh <windows-host> "bash -lc '<cmd>'"
 ```
 
 ### Recipe 9 — `lldb -b` first triage on windowsmini (SSH)
@@ -290,7 +290,7 @@ ssh windowsmini "bash -lc '<cmd>'"
 Mirror of Recipe 1, adapted for Win64 PE/COFF:
 
 ```bash
-ssh windowsmini "bash -lc '
+ssh <windows-host> "bash -lc '
   cd ~/Documents/MyProducts/zwasm
   lldb -b \
     -o \"settings set target.x86-disassembly-flavor intel\" \
@@ -330,14 +330,14 @@ scanned at that moment.
 #      spec_assert_runner start)
 
 # Headless (SSH-driven) capture via /BackingFile + /Quiet:
-ssh windowsmini "powershell -NoLogo -NoProfile -Command \"
-  Start-Process -FilePath 'C:\Users\shota\AppData\Local\zwasm-tools\sysinternals-2026-05-22\Procmon64.exe' \
-    -ArgumentList '/Quiet','/Minimized','/BackingFile','C:\Users\shota\procmon-trace.pml','/AcceptEula'
+ssh <windows-host> "powershell -NoLogo -NoProfile -Command \"
+  Start-Process -FilePath '$env:LOCALAPPDATA\zwasm-tools\sysinternals-2026-05-22\Procmon64.exe' \
+    -ArgumentList '/Quiet','/Minimized','/BackingFile','$env:USERPROFILE\procmon-trace.pml','/AcceptEula'
 \""
 # Run test-all in another SSH session
 # Then:
-ssh windowsmini "powershell -NoLogo -NoProfile -Command \"
-  & 'C:\Users\shota\AppData\Local\zwasm-tools\sysinternals-2026-05-22\Procmon64.exe' /Terminate
+ssh <windows-host> "powershell -NoLogo -NoProfile -Command \"
+  & '$env:LOCALAPPDATA\zwasm-tools\sysinternals-2026-05-22\Procmon64.exe' /Terminate
 \""
 # Then SCP procmon-trace.pml back to Mac and open with Procmon GUI
 # (Procmon native PML format is not text-readable; export to CSV via GUI for grep)
@@ -359,19 +359,19 @@ transition". Test directly:
 
 ```bash
 # Snapshot of all open handles for a specific process:
-ssh windowsmini "powershell -NoLogo -NoProfile -Command \"
-  & 'C:\Users\shota\AppData\Local\zwasm-tools\sysinternals-2026-05-22\handle64.exe' \
+ssh <windows-host> "powershell -NoLogo -NoProfile -Command \"
+  & '$env:LOCALAPPDATA\zwasm-tools\sysinternals-2026-05-22\handle64.exe' \
     -p zwasm-spec-runner.exe -accepteula
 \""
 
 # Per-process count (rough):
-ssh windowsmini "powershell -NoLogo -NoProfile -Command \"
-  & 'C:\Users\shota\AppData\Local\zwasm-tools\sysinternals-2026-05-22\handle64.exe' \
+ssh <windows-host> "powershell -NoLogo -NoProfile -Command \"
+  & '$env:LOCALAPPDATA\zwasm-tools\sysinternals-2026-05-22\handle64.exe' \
     -p zwasm-spec-runner.exe -accepteula 2>\\\$null | Measure-Object -Line
 \""
 
 # All processes with high handle count:
-ssh windowsmini "powershell -NoLogo -NoProfile -Command \"
+ssh <windows-host> "powershell -NoLogo -NoProfile -Command \"
   Get-Process | Sort-Object -Property HandleCount -Descending | Select-Object -First 10 Name, HandleCount, Id
 \""
 ```
@@ -387,18 +387,18 @@ bytes are NOT in a PE/COFF file (they live at mmap'd memory),
 the same `--disassemble -b binary` form works:
 
 ```bash
-ssh windowsmini "bash -lc '
+ssh <windows-host> "bash -lc '
   # Hex dump from spike code: write block.bytes to /tmp/jit.bin (via lldb memory write -outfile)
   llvm-objdump --disassemble -b binary -m x86_64 --x86-asm-syntax=intel /tmp/jit.bin
 '"
 
 # To inspect an actual PE/COFF binary (test exe symbols, sections):
-ssh windowsmini "bash -lc '
+ssh <windows-host> "bash -lc '
   llvm-readobj --headers --sections --symbols ./zig-out/bin/zwasm-spec-runner.exe
 '"
 
 # To dump only the .text section disasm:
-ssh windowsmini "bash -lc '
+ssh <windows-host> "bash -lc '
   llvm-objdump --disassemble --section=.text ./zig-out/bin/zwasm-spec-runner.exe | head -200
 '"
 ```
@@ -416,9 +416,9 @@ ADR-0103, instrument the `vehHandler` entry point with
 # Then run the test that triggers VEH
 
 # Programmatic launch:
-ssh windowsmini "powershell -NoLogo -NoProfile -Command \"
-  Start-Process -FilePath 'C:\Users\shota\AppData\Local\zwasm-tools\sysinternals-2026-05-22\Dbgview.exe' \
-    -ArgumentList '/g','/t','/k','/l','C:\Users\shota\veh-trace.log'
+ssh <windows-host> "powershell -NoLogo -NoProfile -Command \"
+  Start-Process -FilePath '$env:LOCALAPPDATA\zwasm-tools\sysinternals-2026-05-22\Dbgview.exe' \
+    -ArgumentList '/g','/t','/k','/l','$env:USERPROFILE\veh-trace.log'
 \""
 ```
 
@@ -434,7 +434,7 @@ Windows Error Reporting auto-drops a `.dmp` file to
 2026-05-22 setup). lldb on Windows can read these:
 
 ```bash
-ssh windowsmini "bash -lc '
+ssh <windows-host> "bash -lc '
   ls -la ~/AppData/Local/CrashDumps/
   lldb -c ~/AppData/Local/CrashDumps/zwasm-spec-runner.exe.<pid>.dmp \
     -o \"thread backtrace all\" \
@@ -451,14 +451,14 @@ or PowerShell ssh if user has admin):
 $reg = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps"
 New-Item -Path "$reg\zwasm-spec-runner.exe" -Force
 Set-ItemProperty -Path "$reg\zwasm-spec-runner.exe" -Name DumpType -Value 2
-Set-ItemProperty -Path "$reg\zwasm-spec-runner.exe" -Name DumpFolder -Value 'C:\Users\shota\AppData\Local\CrashDumps'
+Set-ItemProperty -Path "$reg\zwasm-spec-runner.exe" -Name DumpFolder -Value '$env:LOCALAPPDATA\CrashDumps'
 Set-ItemProperty -Path "$reg\zwasm-spec-runner.exe" -Name DumpCount -Value 10
 ```
 
 (Not yet applied on windowsmini as of 2026-05-22 — add when
 first Win64 crash needs post-mortem analysis.)
 
-### Recipe 15 — `ssh windowsmini cmd /c '...'` stable orchestration (HANG / interactive debug)
+### Recipe 15 — `ssh <windows-host> cmd /c '...'` stable orchestration (HANG / interactive debug)
 
 Codifies the 8-trap learning from D-165 cycle 9
 (`.dev/lessons/2026-05-23-windowsmini-ssh-quoting-traps.md`).
@@ -470,7 +470,7 @@ hard at exactly the wrong moment (during root-cause hunts).
 **Stable form** — bypasses PowerShell + Git-Bash + MSYS:
 
 ```bash
-ssh windowsmini cmd /c "<windows-cmd-with-windows-paths>"
+ssh <windows-host> cmd /c "<windows-cmd-with-windows-paths>"
 ```
 
 Inside the double-quoted string, `cmd /c` interprets
@@ -478,7 +478,7 @@ Windows-native switches (`/F`, `/FI`, `/T`, `/NOBREAK`, etc.)
 without path conversion. Chain commands with cmd `&&`:
 
 ```bash
-ssh windowsmini 'cmd /c "cd /d C:\Users\shota\Documents\MyProducts\zwasm && git fetch origin main && git reset --hard origin/main && zig build install"'
+ssh <windows-host> 'cmd /c "cd /d $env:USERPROFILE\Documents\MyProducts\zwasm && git fetch origin main && git reset --hard origin/main && zig build install"'
 ```
 
 Note: `cd /d <path>` forces drive change too — required when
@@ -541,7 +541,7 @@ D-330 c_sha256 `\n` residual (func 4 putc/`__overflow` region).
 Win64 legacy variant — dump to file, scp back to Mac:
 
 ```bash
-ssh windowsmini 'cmd /c "cd /d <repo> && set ZWASM_DEBUG=jit.dump&& start /B zig-out\bin\zwasm.exe run --engine jit <file.wasm> > %USERPROFILE%\dump.log 2>&1"'
+ssh <windows-host> 'cmd /c "cd /d <repo> && set ZWASM_DEBUG=jit.dump&& start /B zig-out\bin\zwasm.exe run --engine jit <file.wasm> > %USERPROFILE%\dump.log 2>&1"'
 scp -q windowsmini:dump.log /tmp/dump.log
 ```
 
