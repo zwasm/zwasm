@@ -247,9 +247,14 @@ pub fn build(b: *std.Build) void {
     // where the test loader lives (per ADR-0024 D-2). The CLI
     // exe's tests come along too via the inline `test "..."`
     // blocks in `src/cli/main.zig`.
-    const core_tests = b.addTest(.{ .root_module = core });
+    // `-Dtest-filter=<substring>` narrows every unit suite to the tests whose
+    // name contains it — the way to prove one test ran on a given host
+    // instead of reading a total.
+    const test_filter = b.option([]const u8, "test-filter", "run only tests whose name contains this string");
+    const test_filters: []const []const u8 = if (test_filter) |f| b.dupeStrings(&.{f}) else &.{};
+    const core_tests = b.addTest(.{ .root_module = core, .filters = test_filters });
     const run_core_tests = b.addRunArtifact(core_tests);
-    const cli_tests = b.addTest(.{ .root_module = exe_mod });
+    const cli_tests = b.addTest(.{ .root_module = exe_mod, .filters = test_filters });
     const run_cli_tests = b.addRunArtifact(cli_tests);
     // Close-plan §6 (j) D-153 / direct-implementation route
     // (2026-05-21). spectest is the standard Wasm host module
@@ -546,10 +551,7 @@ pub fn build(b: *std.Build) void {
     const test_list_step = b.step("test-list", "List every discovered test name (S5 test-discovery guard input)");
     test_list_step.dependOn(&run_list_tests.step);
 
-    const p3_tests = b.addTest(.{
-        .root_module = core_p3,
-        .filters = if (b.option([]const u8, "test-filter", "run only tests whose name contains this string (test-wasi-p3)")) |f| b.dupeStrings(&.{f}) else &.{},
-    });
+    const p3_tests = b.addTest(.{ .root_module = core_p3, .filters = test_filters });
     const run_p3_tests = b.addRunArtifact(p3_tests);
     const test_wasi_p3_step = b.step("test-wasi-p3", "Run the WASI Preview-3 (async) unit tests under a forced -Dwasi=p3 module (ADR-0193 P3)");
     test_wasi_p3_step.dependOn(&run_p3_tests.step);
