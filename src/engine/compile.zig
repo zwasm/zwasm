@@ -1183,7 +1183,7 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
             // equality on concrete→concrete (cross-rec-group identity).
             &types,
         ) catch |err| {
-            std.debug.print("compileWasm: func[{d}] params={d} results={d} → validate {s}\n", .{
+            dbg.print("codegen", "compileWasm: func[{d}] params={d} results={d} → validate {s}\n", .{
                 wasm_idx,
                 sig.params.len,
                 sig.results.len,
@@ -1213,7 +1213,7 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
             bounds_elided,
             table_idx_types,
         ) catch |err| {
-            std.debug.print("compileWasm: func[{d}] params={d} results={d} → {s}\n", .{
+            dbg.print("codegen", "compileWasm: func[{d}] params={d} results={d} → {s}\n", .{
                 wasm_idx,
                 sig.params.len,
                 sig.results.len,

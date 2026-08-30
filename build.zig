@@ -1227,8 +1227,9 @@ pub fn build(b: *std.Build) void {
 
     // `zig build test-wasi-p1-official` — the OFFICIAL wasi-testsuite
     // wasm32-wasip1 corpus (D-582). Deliberately NOT in `test-all` yet: the
-    // corpus reports 14 engine-independent failures (D-583), so folding it
-    // into the blocking gate now would red every PR. CI runs it as an ADVISORY
+    // corpus is not green on every OS (D-583 carries the live count — no copy
+    // here, a copy is what went stale), so folding it into the blocking gate
+    // now would red every PR. CI runs it as an ADVISORY
     // step in the `gate` job (step-level `continue-on-error`); this step joins
     // `test-all` when D-583 discharges, which is that row's exit condition.
     //
