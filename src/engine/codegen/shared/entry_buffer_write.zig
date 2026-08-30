@@ -85,6 +85,7 @@ pub fn invokeBufferWrite(
 ) Error!void {
     rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
     rt.trap_flag = 0;
+    rt.trap_kind = 0;
     // D-311 / D-245: route through the non-inline cohort-clobber trampoline so
     // the host's callee-saved registers (RBX/R12-R15 · X19-X28) are saved &
     // restored around the JIT call. The native_emit'd body MOV-installs that

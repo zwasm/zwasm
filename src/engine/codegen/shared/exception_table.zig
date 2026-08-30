@@ -9,8 +9,10 @@
 //! Storage shape (per ADR-0114 D3): a sequence of `HandlerEntry`
 //! records, each capturing one catch clause within a try_table
 //! body. The table is consulted by the FP-walk unwinder using the
-//! `(throw_pc, throw_tag_idx)` pair as the key; the first matching
-//! entry (innermost-try_table-first by insertion order) wins.
+//! `(throw_pc, throw_tag_idx)` pair as the key; among the matching
+//! entries that cover the pc, the one with the smallest range wins
+//! (the innermost try_table — each emits a NOP so nested ranges are
+//! strictly nested), and among a try_table's own clauses the first.
 //!
 //! ADR-0114 D3 cites the eventual `*TagInstance` pointer-equality
 //! key (D7), but the interp already keys on `tag_idx` (the
@@ -28,6 +30,7 @@
 //! Zone 2 (`src/engine/codegen/shared/`).
 
 const std = @import("std");
+const zir = @import("../../../ir/zir.zig");
 
 /// Catch clause flavor — mirrors `ir/zir.zig::CatchKind` so the
 /// per-arch emit path can copy through without re-encoding. The
@@ -55,6 +58,30 @@ pub const HandlerEntry = struct {
     landing_pad_pc: u32,
     kind: CatchKind,
 };
+
+/// A catch clause is one more forward edge into its target block, carrying
+/// values the unwinder delivers rather than any op. At `try_table` emit, give
+/// each target block its canonical merge vregs (fresh ones — no operand exists
+/// yet) so the body's fall-through and any `br` merge into the same slots at
+/// `.end`, where the landing-pad prelude writes the caught payload.
+/// `liveness.compute` mints the same vregs at the same op (lockstep). Shared
+/// by both arch emitters; `ctx` is the arch EmitCtx (same label shape).
+/// `labels_depth_outer` is the label depth BEFORE the try_table's own label —
+/// catch labels resolve outside the try_table.
+pub fn captureCatchTargetMerge(ctx: anytype, catches: []const zir.CatchEntry, labels_depth_outer: u32) error{SlotOverflow}!void {
+    for (catches) |ce| {
+        if (ce.label_idx >= labels_depth_outer) continue;
+        const tgt = &ctx.labels.items[labels_depth_outer - 1 - ce.label_idx];
+        if (tgt.kind != .block or tgt.merge_captured or tgt.result_arity == 0) continue;
+        var i: u32 = 0;
+        while (i < tgt.result_arity) : (i += 1) {
+            tgt.merge_top_vregs[i] = ctx.next_vreg.*;
+            ctx.next_vreg.* += 1;
+            if (tgt.merge_top_vregs[i] >= ctx.alloc.slots.len) return error.SlotOverflow;
+        }
+        tgt.merge_captured = true;
+    }
+}
 
 /// Result of a successful `lookup`: the landing-pad PC plus the
 /// catch flavor (so the unwinder knows whether to push the
@@ -94,8 +121,8 @@ pub const ExceptionTable = struct {
     }
 
     /// Lookup the handler for a `(throw_pc, throw_tag_idx)` pair.
-    /// Returns the first matching entry per the
-    /// innermost-try_table-first insertion order; null if no
+    /// Returns the matching entry with the smallest covering range
+    /// (innermost try_table; first clause within it); null if no
     /// catch clause matches (= unwind continues to caller frame
     /// per ADR-0114 D5).
     ///
@@ -117,18 +144,27 @@ pub const ExceptionTable = struct {
     /// `throw_tag_idx` is meaningless in a different instance's index
     /// space, but the resolved u64 identity is globally comparable.
     pub fn lookupByIdentity(self: ExceptionTable, pc: u32, throw_id: u64) ?HandlerMatch {
+        // Entries are appended in try_table emit order, so an enclosing
+        // try_table's clauses precede a nested one's. The innermost
+        // try_table covering `pc` must win (= the smallest covering
+        // range — strictly smaller, since every try_table emits a NOP
+        // before its range starts); equal ranges are clauses of ONE
+        // try_table, where the first matching clause wins (`<`).
+        var best: ?HandlerEntry = null;
         for (self.entries) |e| {
             if (pc < e.pc_start or pc >= e.pc_end) continue;
             const matches = switch (e.kind) {
                 .catch_all, .catch_all_ref => true,
                 .catch_, .catch_ref => e.tag_idx != null and self.identity(e.tag_idx.?) == throw_id,
             };
-            if (matches) return .{
-                .landing_pad_pc = e.landing_pad_pc,
-                .kind = e.kind,
-            };
+            if (!matches) continue;
+            if (best == null or e.pc_end - e.pc_start < best.?.pc_end - best.?.pc_start) best = e;
         }
-        return null;
+        const e = best orelse return null;
+        return .{
+            .landing_pad_pc = e.landing_pad_pc,
+            .kind = e.kind,
+        };
     }
 
     /// Public accessor for a local tag index's identity id (used by the
@@ -370,9 +406,8 @@ test "exception_table: insertion-order wins (innermost try_table first)" {
 
     // Outer try_table: PC range [0, 1000), catch_all → landing 999.
     // Inner try_table: PC range [100, 200), catch_ tag=3 → landing 150.
-    // The INNER entry is added FIRST per the
-    // innermost-try_table-first insertion discipline (the per-arch
-    // emit walks try_table bodies depth-first).
+    // Insertion order does not decide the match: the inner entry
+    // wins because its range is the smaller one.
     try b.add(testing.allocator, .{
         .pc_start = 100,
         .pc_end = 200,

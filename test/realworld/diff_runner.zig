@@ -887,7 +887,7 @@ fn jitCompare(
     // pre-existing (as is `test-realworld-run`'s), and arming it would change
     // what that lane exercises, so it is left alone rather than swept in.
     const jit_limits: cli_run.Limits = .{ .timeout_ms = 60_000 };
-    const jit_exit: u8 = cli_run.runWasmJitCaptured(gpa, io, bytes, null, argv, preopens, &.{}, &.{}, jit_limits, &jit_stdout, null) catch |err| {
+    const jit_exit: u8 = cli_run.runWasmJitCaptured(gpa, io, bytes, null, argv, preopens, &.{}, &.{}, jit_limits, &jit_stdout, null, .none) catch |err| {
         try out.print("  SKIP-JIT-RUN  {s}: {s}\n", .{ name, @errorName(err) });
         return .skip;
     };

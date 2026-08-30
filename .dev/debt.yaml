@@ -401,6 +401,17 @@ entries:
       between the two measurements. Split into sub-rows once the first
       root cause is known, not before.
       ---
+      Re-measured 2026-08-30 at `2adca93c3` (`zig build
+      test-wasi-p1-official`): aarch64-macos and x86_64-linux **72/72** on
+      both engines. x86_64-windows is the open host: **65/72** on CI's
+      windows-2022 runner and **64/72** on a Windows 11 host, the same
+      symlink / hardlink / readdir family on both engines (#290):
+      `fd_readdir`, `nofollow_errors`, `path_exists`, `path_link`,
+      `readlink`, `symlink_create`, `symlink_filestat`, plus
+      `path_symlink_trailing_slashes` on Windows 11 only. The Windows number
+      was not measurable before #313 — the runner died mid-corpus and the
+      advisory step reported the leg green.
+      ---
       **`dangling_symlink` looks flaky and is not.** It fails on a clean
       preopen tree (20/20), leaves `dangling_symlink_symlink.cleanup` behind,
       and that leftover makes every later run against the same tree pass. The
@@ -424,7 +435,7 @@ entries:
       deliberate, time-boxed advisory in the sense of ADR-0174 ("NOT a silent
       skip"), not an indefinite workaround.
     first_raised: "2026-08-14"
-    last_reviewed: "2026-08-24"
+    last_reviewed: "2026-08-30"
     refs: |-
       src/wasi/** (preview1 syscall implementations); test/wasi/wasip1_official/**;
       ROADMAP §11.1 (syscall surface 46/46); ADR-0161 (preview1 completion
@@ -2041,7 +2052,7 @@ entries:
       blocked-by: `run_remote_windows.sh` has no bench step. **CORRECTION 2026-06-14: the
       "hyperfine absent" half of this barrier is DISSOLVED** — hyperfine 1.20.0 (the latest
       release) IS installed on windowsmini via `scripts/windows/install_tools.ps1` (verified
-      `C:\Users\shota\AppData\Local\zwasm-tools\hyperfine-1.20.0`). Remaining barrier = the
+      `$env:LOCALAPPDATA\zwasm-tools\hyperfine-1.20.0`). Remaining barrier = the
       missing bench step + ADR-0137 scope: Windows bench *timing* auto-recording into
       `bench/history.yaml` is deferred (§11.2/§11.P re-scoped to 2-host Mac+Linux bench). The
       3-host **correctness** reconcile (windowsmini test-all) is UNAFFECTED — only perf-timing

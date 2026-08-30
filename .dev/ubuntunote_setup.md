@@ -38,7 +38,7 @@ longer in the per-chunk gate.
 ```
 Host ubuntunote
     HostName ubuntunote.local
-    User shota
+    User <user>
     IdentityFile ~/.ssh/id_ed25519
     IdentitiesOnly yes
     ServerAliveInterval 60

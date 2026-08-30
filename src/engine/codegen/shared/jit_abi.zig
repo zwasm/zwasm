@@ -223,6 +223,10 @@ pub const JitRuntime = extern struct {
     ///   3  = call_indirect sig (B.NE)
     /// Layout-stable: replaces the existing 4-byte pad after
     /// `trap_flag`. All offsets in this struct unchanged.
+    /// Cleared together with `trap_flag` on every JIT entry (#336): a trap
+    /// stub that raises the flag without writing a kind — the generic
+    /// `bounds_fixups` bucket — must read as "no kind", not as whatever the
+    /// previous invocation left here.
     trap_kind: u32 = 0,
     /// Globals array base pointer (ADR-0027 + ADR-0110
     /// widen). Each entry is one `runtime.value.Value` = 16 bytes
@@ -1404,19 +1408,19 @@ pub fn jitCallIndirectResolve(rt: *JitRuntime, table_idx: u32, idx: u64, expecte
         typeidx_base = rt.typeidx_base;
         size = rt.table_size;
     } else {
-        if (table_idx >= rt.tables_jit_ci_count or table_idx >= rt.tables_count) return 0;
+        if (table_idx >= rt.tables_jit_ci_count or table_idx >= rt.tables_count) return OOB_ELEM_SENTINEL;
         funcptr_base = rt.tables_jit_ci_ptr[table_idx].funcptr_base;
         typeidx_base = rt.tables_jit_ci_ptr[table_idx].typeidx_base;
         size = rt.tables_ptr[table_idx].len;
     }
-    if (idx >= size) return 0;
+    if (idx >= size) return OOB_ELEM_SENTINEL;
     // D-294 residual: a NULL (uninitialized) element has the maxInt(u32) no-func
     // sentinel typeidx (compile_init.zig pre-seeds it; same indicator the inline
     // non-subtyping path's `CMN typeidx,#1` checks). Return the distinct NULL
     // sentinel (1) so the caller emits uninitialized_elem (code 13), matching
     // interp + wasmtime/wasmer, instead of collapsing it into the generic
     // sig-mismatch (code 3) the `return 0` path traps as. Funcptrs are mmap'd
-    // code addresses, never 0/1, so both sentinels are unambiguous.
+    // code addresses, never 0/1/2, so all three sentinels are unambiguous.
     if (typeidx_base[idx] == std.math.maxInt(u32)) return NULL_ELEM_SENTINEL;
     if (!ref_test_ops.concreteReachesGti(gti, typeidx_base[idx], expected_typeidx)) return 0;
     return funcptr_base[idx];
@@ -1427,6 +1431,12 @@ pub fn jitCallIndirectResolve(rt: *JitRuntime, table_idx: u32, idx: u64, expecte
 /// The subtyping call_indirect caller (op_call.zig both arches) routes it to
 /// the uninitialized_elem (code 13) trap stub. D-294 residual.
 pub const NULL_ELEM_SENTINEL: u64 = 1;
+
+/// Distinct return value from `jitCallIndirectResolve` for an index past the
+/// table (or a table the JIT does not carry), so the caller emits oob_table
+/// (code 2) — what the inline non-subtyping path, the interpreter and wasmtime
+/// report — instead of the sig-mismatch the `0` return means (#357).
+pub const OOB_ELEM_SENTINEL: u64 = 2;
 
 // ============================================================
 // Comptime offset constants — consumed by prologue emit (per-arch

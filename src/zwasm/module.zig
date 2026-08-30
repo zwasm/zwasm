@@ -129,10 +129,10 @@ pub const Module = struct {
         /// D-332 — host cap on a table's INITIAL declared element count (mirrors
         /// `max_memory_pages`; extends the grow-time `store_table_elements_max`).
         max_table_elements: Budget = .{ .limited = default_max_table_elements },
-        /// ADR-0200 — per-instance engine selection. `.auto` (default) routes to
-        /// interp until the JIT host-import bridge lands; `.jit` opts into the
-        /// native JIT engine (no-import compute modules this increment); `.interp`
-        /// forces the interpreter.
+        /// ADR-0200 — per-instance engine selection. `.auto` (default) prefers
+        /// the JIT and falls back to the interpreter for a module the JIT
+        /// declines; `.jit` requires the JIT (instantiation fails where it would
+        /// have fallen back); `.interp` forces the interpreter.
         engine: _api_instance.EngineKind = .auto,
     };
 

@@ -32,6 +32,10 @@ pub const is_safepoint: bool = false;
 
 pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void {
     _ = ins;
+    // A throw leaves this frame through the trampoline, never returning to
+    // the post-call reload; the landing pad reloads register-homed locals
+    // from their frame slots, so their current values must be there.
+    try op_call.spillHomedCallerSaved(ctx);
     if (ctx.pushed_vregs.items.len < 1) return ctx_mod.Error.AllocationMissing;
     const exn_vreg = ctx.pushed_vregs.pop().?;
     const exn_reg = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, exn_vreg, 0);

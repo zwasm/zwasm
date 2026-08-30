@@ -41,7 +41,7 @@ The mini PC must already have, per zwasm v1's setup:
 `rsync` is **not** required on `windowsmini`; v2 syncs via
 `git pull` from `origin`, mirroring zwasm v1.
 
-## `ssh windowsmini cmd /c '...'` — the orchestration short-circuit
+## `ssh <windows-host> cmd /c '...'` — the orchestration short-circuit
 
 **Reach for `cmd /c` first.** windowsmini's default OpenSSH
 shell is PowerShell 7. Nesting `bash -lc` re-enters Git-Bash
@@ -54,14 +54,14 @@ Recipe 15).
 
 ```bash
 # RELIABLE — cmd interprets Windows switches and paths directly
-ssh windowsmini cmd /c "<windows-cmd>"
-ssh windowsmini 'cmd /c "cd /d C:\Users\shota\... && git pull && zig build install"'
+ssh <windows-host> cmd /c "<windows-cmd>"
+ssh <windows-host> 'cmd /c "cd /d $env:USERPROFILE\... && git pull && zig build install"'
 
 # OK for bash-style scripts (single-quoted body)
-ssh windowsmini bash -lc "'<bash-body>'"
+ssh <windows-host> bash -lc "'<bash-body>'"
 
 # AVOID — bare PowerShell interpretation of bash-like input
-ssh windowsmini '<looks-like-bash-but-runs-in-pwsh>'
+ssh <windows-host> '<looks-like-bash-but-runs-in-pwsh>'
 ```
 
 Use `bash -lc "'...'"` only when you genuinely want
@@ -69,7 +69,7 @@ bash/POSIX semantics on Windows (uncommon for debug ops). For
 `taskkill`, `tasklist`, `dir`, log paths, lldb attach, etc.
 use `cmd /c "..."`.
 
-Log path convention: `%USERPROFILE%\<file>.log` (= `C:\Users\shota\<file>.log`).
+Log path convention: `%USERPROFILE%\<file>.log` (= `$env:USERPROFILE\<file>.log`).
 `C:\tmp\` does NOT exist by default.
 
 ## SSH alias
@@ -89,7 +89,7 @@ shell-script body with `bash -lc '...'` when invoking via `ssh`.
 Verification:
 
 ```bash
-ssh windowsmini "echo ok && zig version"
+ssh <windows-host> "echo ok && zig version"
 ```
 
 Expected output: `ok` + `0.16.0` (or whatever pinned Zig version
@@ -101,7 +101,7 @@ The clone lives at the same path as v1's: `~/Documents/MyProducts/`.
 Only the directory name differs.
 
 ```bash
-ssh windowsmini bash -lc "'
+ssh <windows-host> bash -lc "'
   mkdir -p ~/Documents/MyProducts &&
   cd ~/Documents/MyProducts &&
   git clone -b main git@github.com:zwasm/zwasm.git zwasm
@@ -119,7 +119,7 @@ The minimum for §9.0 task 0.3 is:
 
 ```bash
 # from Mac, in zwasm/
-ssh windowsmini bash -lc "'
+ssh <windows-host> bash -lc "'
   cd Documents/MyProducts/zwasm &&
   git fetch origin main &&
   git reset --hard origin/main &&
@@ -166,6 +166,37 @@ zwasm v1.
   quoting need extra care; use `bash -lc '...'` over inline
   heredocs.
 
+## Failure modes seen in v2 (2026-08) — proving that a test ran
+
+- **The Zig 0.16 build runner panics when its stdout is the SSH pipe.**
+  `zig build … --summary all` (or any build with a large log) run through
+  `ssh <host> bash -lc '…'` dies in `fileWriteStreamingWindows`
+  (`.PENDING => unreachable`) before the summary is printed, and the step
+  reports "unable to read results of configure phase". Redirect the
+  build's output to a file on the host and copy the file back, e.g.
+  `ssh <host> bash -l ./run.sh` with `zig build test --summary all >
+  unit.log 2>&1` inside the script. The `run_remote_windows.sh` streaming
+  form is fine for `test-all` because its per-step output is small.
+- **`--summary all` is the evidence.** A green `zig build test` prints
+  nothing on success, so a log with no test names proves nothing. The
+  summary's `run test N pass, M skip` line is the count to compare against
+  the other OSes; a rising skip count is a test that stopped running.
+- **`-Dtest-filter=<substring>` narrows every unit suite** (not only
+  `test-wasi-p3`), so a Windows-only assertion can be shown to execute:
+  `zig build test -Dtest-filter=#262 --summary all` → `run test 4 pass`.
+- **The Win64 phase-end batch (`skip.phaseEnd(.win64)`) is 147 tests that
+  never run on Windows anywhere** — the guard is an OS test, not a phase
+  gate, so running `test-all` on the host skips them too. Measured with
+  the guards removed: 141 pass (#370). Do not read "0 failed" on Windows
+  as covering those tests until #370 closes.
+- **One unit-test executable occasionally stalls** ("test runner failed
+  to respond for 1m") on the host and not on CI's runner — observed once
+  in three runs; rerun before treating it as a failure.
+- **The stock login shell over SSH is PowerShell.** A long `bash -lc`
+  body with `&&`, `$?` or parentheses is parsed by PowerShell first and
+  fails with `ParserError`; copy a script to the host and run
+  `bash -l ./script.sh` instead.
+
 ## Microsoft Defender exclusions (build-perf)
 
 `MsMpEng.exe` (Defender real-time scan) was observed dominating
@@ -176,20 +207,20 @@ suspected to reduce the D-028 test-runner-IPC-timeout flake rate.
 
 **Setup procedure** (one-time, from any SSH session — admin
 elevation surprisingly *not* required on this windowsmini, so
-the standard `shota` SSH user can install these):
+the standard `<user>` SSH user can install these):
 
 ```bash
-ssh windowsmini 'powershell -NoProfile -Command "Add-MpPreference -ExclusionPath '"'"'C:\Users\shota\Documents\MyProducts\zwasm\.zig-cache'"'"'"'
-ssh windowsmini 'powershell -NoProfile -Command "Add-MpPreference -ExclusionPath '"'"'C:\Users\shota\Documents\MyProducts\zwasm\zig-out'"'"'"'
-ssh windowsmini 'powershell -NoProfile -Command "Add-MpPreference -ExclusionPath '"'"'C:\Users\shota\AppData\Local\zig'"'"'"'
-ssh windowsmini 'powershell -NoProfile -Command "Add-MpPreference -ExclusionPath '"'"'C:\Users\shota\AppData\Local\zwasm-tools'"'"'"'
-ssh windowsmini 'powershell -NoProfile -Command "Add-MpPreference -ExclusionProcess '"'"'zig.exe'"'"'"'
+ssh <windows-host> 'powershell -NoProfile -Command "Add-MpPreference -ExclusionPath '"'"'$env:USERPROFILE\Documents\MyProducts\zwasm\.zig-cache'"'"'"'
+ssh <windows-host> 'powershell -NoProfile -Command "Add-MpPreference -ExclusionPath '"'"'$env:USERPROFILE\Documents\MyProducts\zwasm\zig-out'"'"'"'
+ssh <windows-host> 'powershell -NoProfile -Command "Add-MpPreference -ExclusionPath '"'"'$env:LOCALAPPDATA\zig'"'"'"'
+ssh <windows-host> 'powershell -NoProfile -Command "Add-MpPreference -ExclusionPath '"'"'$env:LOCALAPPDATA\zwasm-tools'"'"'"'
+ssh <windows-host> 'powershell -NoProfile -Command "Add-MpPreference -ExclusionProcess '"'"'zig.exe'"'"'"'
 ```
 
 **Verify** (any time):
 
 ```bash
-ssh windowsmini 'powershell -NoProfile -Command "Get-MpPreference | Select-Object -Property ExclusionPath, ExclusionProcess | Format-List"'
+ssh <windows-host> 'powershell -NoProfile -Command "Get-MpPreference | Select-Object -Property ExclusionPath, ExclusionProcess | Format-List"'
 ```
 
 If a fresh windowsmini host is provisioned (or the OS is
@@ -211,7 +242,7 @@ windowsmini.
 Periodic verification on windowsmini:
 
 ```bash
-ssh windowsmini 'cd Documents/MyProducts/zwasm && \
+ssh <windows-host> 'cd Documents/MyProducts/zwasm && \
     bash scripts/run_bench.sh --windows-subset --quick'
 ```
 
@@ -262,13 +293,13 @@ configuration):
 
 **ExclusionPath (8)**:
 - `C:\Program Files\LLVM` (lldb + llvm-objdump / nm / readobj / symbolizer / cxxfilt / etc.)
-- `C:\Users\shota\AppData\Local\zig` (zig global cache)
-- `C:\Users\shota\AppData\Local\zwasm-tools` (wabt / wasmtime / hyperfine / yq / wasm-tools)
-- `C:\Users\shota\AppData\Local\zwasm-tools\sysinternals-<date>` (explicit subpath for clarity)
-- `C:\Users\shota\AppData\Local\CrashDumps` (reserved for WER `.dmp` output)
-- `C:\Users\shota\Documents\MyProducts\zwasm` (repo root)
-- `C:\Users\shota\Documents\MyProducts\zwasm\.zig-cache`
-- `C:\Users\shota\Documents\MyProducts\zwasm\zig-out`
+- `$env:LOCALAPPDATA\zig` (zig global cache)
+- `$env:LOCALAPPDATA\zwasm-tools` (wabt / wasmtime / hyperfine / yq / wasm-tools)
+- `$env:LOCALAPPDATA\zwasm-tools\sysinternals-<date>` (explicit subpath for clarity)
+- `$env:LOCALAPPDATA\CrashDumps` (reserved for WER `.dmp` output)
+- `$env:USERPROFILE\Documents\MyProducts\zwasm` (repo root)
+- `$env:USERPROFILE\Documents\MyProducts\zwasm\.zig-cache`
+- `$env:USERPROFILE\Documents\MyProducts\zwasm\zig-out`
 
 **ExclusionProcess (17)** — all `build.zig::addExecutable` outputs:
 `build.exe`, `test.exe`, `zig.exe`, `zwasm.exe`,
@@ -324,7 +355,7 @@ foreach ($exe in @(
 )) {
     New-Item -Path "$reg\$exe" -Force | Out-Null
     Set-ItemProperty -Path "$reg\$exe" -Name DumpType -Value 2  # 2 = full mini-dump
-    Set-ItemProperty -Path "$reg\$exe" -Name DumpFolder -Value 'C:\Users\shota\AppData\Local\CrashDumps'
+    Set-ItemProperty -Path "$reg\$exe" -Name DumpFolder -Value '$env:LOCALAPPDATA\CrashDumps'
     Set-ItemProperty -Path "$reg\$exe" -Name DumpCount -Value 10
 }
 ```

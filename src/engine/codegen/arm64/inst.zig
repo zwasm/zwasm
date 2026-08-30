@@ -609,6 +609,11 @@ pub fn encLdpPostIdx(rt: Xn, rt2: Xn, rn: Xn, byte_offset: i10) u32 {
     return 0xA8C00000 | (imm7 << 15) | (@as(u32, rt2) << 10) | (@as(u32, rn) << 5) | @as(u32, rt);
 }
 
+/// `NOP`. Encoding: `0xD503201F`.
+pub fn encNop() u32 {
+    return 0xD503201F;
+}
+
 /// `B disp` — unconditional 26-bit-signed-offset branch (PC-relative,
 /// in instruction units = 4 bytes). Range ±128 MiB.
 /// Encoding: `0 00101 [imm26:26]` = `0x14000000`.

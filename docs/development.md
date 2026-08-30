@@ -92,7 +92,8 @@ required **`ci-required`** status check. CI runs
 [`scripts/ci_gate.sh`](../scripts/ci_gate.sh) on **all three supported OSes** —
 macOS aarch64, Linux x86_64, Windows x86_64. Your PR gets the *core* gate: fmt
 + `test-all` + the rust-host consumer + the test-discovery guard + the
-ReleaseSafe-runner floor guard (ADR-0177). The extended
+ReleaseSafe-runner floor guard (ADR-0177) + the unit tests built
+ReleaseSafe (Linux leg only; the mode every release binary is built in). The extended
 static/build checks (lint, the build-option DCE matrix, AOT cross-compile,
 `zone_check`) run on the merge to `main`, not per PR — they are up to ~20
 cold-cache builds and would dominate every PR's wall-clock. All three legs are
@@ -122,19 +123,31 @@ its own (ADR-0156). Three manual steps; the rest is the `release` workflow.
 1. **Bump `.version` in `build.zig.zon`.** SemVer against the previous tag —
    `git log v<previous>..main --no-merges` is the input to that call.
 2. **Add the CHANGELOG section** for the new version, dated.
-3. **Push the tag.** `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. **Push the tag.** `git tag -a vX.Y.Z -m "<one-paragraph summary>" &&
+   git push origin vX.Y.Z`. Annotated, on the merge commit of the release
+   PR: the message is what `git show vX.Y.Z` prints, and it is the only
+   place a reader sees the release described without the CHANGELOG open.
 
 Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds
 and packages all four targets in ReleaseSafe (macOS aarch64, Linux
 x86_64/aarch64, Windows x86_64), then creates the GitHub Release with the
-archives and `SHA256SUMS`. Nothing else in this repository needs touching.
+archives and `SHA256SUMS`. The workflow runs no tests: the tag's
+correctness rests on the `main` run that already verified the commit
+under it, so check that run completed before pushing the tag. The Release
+notes are GitHub's generated pull-request list unless a Release for the tag
+already exists — to hand-write them, create the Release (with the CHANGELOG
+section as its body) before the workflow reaches that step, or edit it
+after. Nothing else in this repository needs touching.
 
 **One step is outside this repository and is not automated: the Homebrew
 formula.** `zwasm/homebrew-tap`'s `Formula/zwasm.rb` pins the release URL
 and its sha256, so until it is updated `brew install zwasm/tap/zwasm` still
 installs the previous version — while the README points readers at exactly
-that command. Update the formula as part of the release, not after someone
-reports it.
+that command. The formula carries three URLs and three sha256 values; take
+them from the Release's `SHA256SUMS`, not from a local build. Update the
+formula as part of the release, not after someone reports it. Downstream
+bindings that vendor this repository (`zwasm-rust-sdk`) pin the tag in
+their own docs and are their maintainers' step, not this one.
 
 ## Git hooks (recommended)
 

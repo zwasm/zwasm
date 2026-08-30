@@ -84,7 +84,7 @@ now (demand-driven).
 |-----------------------------------------------------------------------------------------------------------------|---------|----------------------------------------------------------|
 | Wasm 1.0                                                                                                        | ✅ 100% | spec testsuite green on the 3-OS CI matrix                |
 | Wasm 2.0 (multi-value, SIMD-128, bulk-memory, reference-types, non-trapping FP→int, sign-ext, mutable globals) | ✅ 100% | `skip-impl == 0`; bit-identical across hosts             |
-| Wasm 3.0 (GC, EH, tail-call, memory64, multi-memory, typed func refs, extended-const, relaxed-simd, custom annotations) | ✅ 100% | all 9 proposals; spec testsuite green on the 3-OS CI matrix |
+| Wasm 3.0 (GC, EH, tail-call, memory64, multi-memory, typed func refs, extended-const, relaxed-simd, custom annotations) | ✅ 100% | all 9 proposals; spec testsuite green on the 3-OS CI matrix (extended-const: unit-tested, its corpus lane is pending #217) |
 
 ### WASI
 
