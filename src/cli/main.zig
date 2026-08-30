@@ -318,6 +318,21 @@ pub fn main(init: std.process.Init) !void {
             try argv_list.append(gpa, path);
             while (arg_it.next()) |a| try argv_list.append(gpa, a);
 
+            // The guest's fd 0, decided ONCE for every run path below (.cwasm /
+            // component / core interp / core JIT, #257): a piped or redirected
+            // stdin is read up front into the host's stdin source; a TTY stays
+            // EOF because the host serves reads from a byte slice and has no
+            // interactive streaming stdin.
+            var stdin_pipe: ?[]u8 = null;
+            defer if (stdin_pipe) |s| gpa.free(s);
+            const stdin_file = std.Io.File.stdin();
+            const stdin_is_tty = stdin_file.isTty(io) catch true;
+            if (!stdin_is_tty) {
+                var rd_buf: [4096]u8 = undefined;
+                var rd = stdin_file.reader(io, &rd_buf);
+                stdin_pipe = rd.interface.allocRemaining(gpa, .limited(64 * 1024 * 1024)) catch null;
+            }
+
             // ADR-0203 stage 3 — a pre-compiled AOT artefact (CWAS magic)
             // runs through the SAME full-runtime JIT path as a `.wasm`:
             // the engine deserializes the artifact and executes it with
@@ -334,7 +349,7 @@ pub fn main(init: std.process.Init) !void {
                     try printlnErr(io, "zwasm run: --engine interp cannot run a .cwasm artifact (precompiled JIT code); run the original .wasm instead");
                     std.process.exit(2);
                 }
-                const code = cli_run.runWasmJitCaptured(gpa, io, run_bytes, invoke_name, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, limits, null, invoke_args) catch |err| {
+                const code = cli_run.runWasmJitCaptured(gpa, io, run_bytes, invoke_name, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, limits, null, invoke_args, stdin_pipe) catch |err| {
                     var buf: [256]u8 = undefined;
                     const msg = std.fmt.bufPrint(&buf, "zwasm run: cannot run '{s}': {s}", .{ path, @errorName(err) }) catch "zwasm run: .cwasm run failed";
                     try printlnErr(io, msg);
@@ -356,17 +371,6 @@ pub fn main(init: std.process.Init) !void {
                     try printlnErr(io, "zwasm run: --fuel/--timeout/--max-memory are not wired for components yet (core modules only)");
                     std.process.exit(2);
                 }
-                // Piped stdin feeds the guest stdin source (a TTY stays EOF —
-                // interactive streaming stdin is not wired for components).
-                var stdin_pipe: ?[]u8 = null;
-                defer if (stdin_pipe) |s| gpa.free(s);
-                const stdin_file = std.Io.File.stdin();
-                const stdin_is_tty = stdin_file.isTty(io) catch true;
-                if (!stdin_is_tty) {
-                    var rd_buf: [4096]u8 = undefined;
-                    var rd = stdin_file.reader(io, &rd_buf);
-                    stdin_pipe = rd.interface.allocRemaining(gpa, .limited(64 * 1024 * 1024)) catch null;
-                }
                 const code = cli_run.runComponentWasi(gpa, io, run_bytes, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, stdin_pipe) catch |err| {
                     var buf: [256]u8 = undefined;
                     const msg = std.fmt.bufPrint(&buf, "zwasm run: cannot run component '{s}': {s}", .{ path, @errorName(err) }) catch "zwasm run: component run failed";
@@ -380,9 +384,9 @@ pub fn main(init: std.process.Init) !void {
             // D-477 — typed `--invoke NAME=ARGS` now also runs on the JIT engine
             // (marshalled through the generalized buffer-write thunk).
             const code = (if (engine_jit)
-                cli_run.runWasmJitCaptured(gpa, io, run_bytes, invoke_name, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, limits, null, invoke_args)
+                cli_run.runWasmJitCaptured(gpa, io, run_bytes, invoke_name, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, limits, null, invoke_args, stdin_pipe)
             else
-                cli_run.runWasmCapturedOpts(gpa, io, run_bytes, argv_list.items, null, invoke_name, preopen_list.items, env_keys.items, env_vals.items, invoke_args, limits)) catch |err| {
+                cli_run.runWasmCapturedFull(gpa, io, run_bytes, argv_list.items, null, null, stdin_pipe, invoke_name, preopen_list.items, env_keys.items, env_vals.items, invoke_args, limits)) catch |err| {
                 // Per ADR-0016 phase 1: prefer the structured
                 // diagnostic when one was set; fall back to the
                 // legacy `@errorName` form for unwired sites.

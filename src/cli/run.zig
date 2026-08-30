@@ -82,8 +82,9 @@ pub fn runWasm(
 /// `zwasm run --engine=jit` (ADR-0136): JIT-compile `bytes` and run the
 /// entry export (`invoke_name`, else `_start`) to completion. **D-244**: now
 /// attaches a WASI host (`io` + `argv`) so the JIT does REAL WASI — clock /
-/// random / fd_write→stdout / fd_read→stdin / args / environ route through the
-/// shared interp handlers (`jit_dispatch.zig`), and `proc_exit(N)` surfaces as
+/// random / fd_write→stdout / fd_read→stdin (the `stdin_bytes` handed to
+/// `runWasmJitCaptured`; this wrapper hands none, so fd 0 reads EOF) / args /
+/// environ route through the shared interp handlers (`jit_dispatch.zig`), and `proc_exit(N)` surfaces as
 /// the exit code, `argv` + `--dir` preopens are threaded in, and the full 46
 /// preview1 syscalls resolve (`jit_dispatch.zig`). A compute-only module simply
 /// ignores the host. Returns 0 on a clean exit; a genuine trap propagates (the
@@ -99,7 +100,7 @@ pub fn runWasmJit(
     env_vals: []const []const u8,
     limits: Limits,
 ) !u8 {
-    return runWasmJitCaptured(alloc, io, bytes, invoke_name, argv, preopens, env_keys, env_vals, limits, null, null);
+    return runWasmJitCaptured(alloc, io, bytes, invoke_name, argv, preopens, env_keys, env_vals, limits, null, null, null);
 }
 
 /// Like `runWasmJit` but routes guest stdout (`fd_write` on fd 1) into
@@ -122,6 +123,7 @@ pub fn runWasmJitCaptured(
     limits: Limits,
     stdout_capture: ?*std.ArrayList(u8),
     invoke_args: ?[]const u8,
+    stdin_bytes: ?[]const u8,
 ) !u8 {
     const runner = @import("../engine/runner.zig");
     // ADR-0203 stage 3 — a `.cwasm` artifact runs through the SAME flow as a
@@ -141,6 +143,7 @@ pub fn runWasmJitCaptured(
     defer host.deinit();
     host.io = io;
     if (stdout_capture) |b| host.stdout_buffer = b;
+    if (stdin_bytes) |s| host.stdin_bytes = s; // the guest's fd 0 source; null = EOF
     host.max_capture_bytes = limits.max_output_bytes;
     // ADR-0179 #3a-4 — `--timeout` arms a timer on the io event loop that
     // raises the interrupt flag the JIT polls (prologue + back-edges).
@@ -401,7 +404,7 @@ pub fn runCwasmWasi(
     stdout_capture: ?*std.ArrayList(u8),
 ) !u8 {
     diagnostic.clearDiag();
-    return runWasmJitCaptured(alloc, io, cwasm_bytes, invoke_name, argv, preopens, env_keys, env_vals, .{}, stdout_capture, null);
+    return runWasmJitCaptured(alloc, io, cwasm_bytes, invoke_name, argv, preopens, env_keys, env_vals, .{}, stdout_capture, null, null);
 }
 
 /// Like `runWasm` but routes guest stdout writes (`fd_write`
@@ -878,7 +881,7 @@ const answer_wasm = [_]u8{
 test "runWasmJitCaptured: --invoke a zero-arg i32 export prints the typed result (wasmtime/interp parity)" {
     var capture: std.ArrayList(u8) = .empty;
     defer capture.deinit(testing.allocator);
-    const code = try runWasmJitCaptured(testing.allocator, testing.io, &answer_wasm, "a", &.{}, &.{}, &.{}, &.{}, .{}, &capture, null);
+    const code = try runWasmJitCaptured(testing.allocator, testing.io, &answer_wasm, "a", &.{}, &.{}, &.{}, &.{}, .{}, &capture, null, null);
     try testing.expectEqual(@as(u8, 0), code);
     try testing.expectEqualStrings("42\n", capture.items);
 }
@@ -895,7 +898,7 @@ const answer_f64_wasm = [_]u8{
 test "runWasmJitCaptured: --invoke a zero-arg f64 export prints the typed result (64-bit carrier)" {
     var capture: std.ArrayList(u8) = .empty;
     defer capture.deinit(testing.allocator);
-    const code = try runWasmJitCaptured(testing.allocator, testing.io, &answer_f64_wasm, "a", &.{}, &.{}, &.{}, &.{}, .{}, &capture, null);
+    const code = try runWasmJitCaptured(testing.allocator, testing.io, &answer_f64_wasm, "a", &.{}, &.{}, &.{}, &.{}, .{}, &capture, null, null);
     try testing.expectEqual(@as(u8, 0), code);
     try testing.expectEqualStrings("3.5\n", capture.items);
 }
@@ -918,7 +921,7 @@ test "runWasmJitCaptured: D-477 --invoke add=2,3 on the JIT engine prints 5 (arm
     // Win64-deferred — see runner_multiarg_invoke_test.zig.)
     var capture: std.ArrayList(u8) = .empty;
     defer capture.deinit(testing.allocator);
-    const code = try runWasmJitCaptured(testing.allocator, testing.io, &add2_wasm, "add", &.{}, &.{}, &.{}, &.{}, .{}, &capture, "2,3");
+    const code = try runWasmJitCaptured(testing.allocator, testing.io, &add2_wasm, "add", &.{}, &.{}, &.{}, &.{}, .{}, &capture, "2,3", null);
     try testing.expectEqual(@as(u8, 0), code);
     try testing.expectEqualStrings("5\n", capture.items);
 }
@@ -943,7 +946,7 @@ test "runWasmJitCaptured: D-477 --invoke swap2=7,9 multi-result prints each valu
     if (builtin.os.tag == .windows) return;
     var capture: std.ArrayList(u8) = .empty;
     defer capture.deinit(testing.allocator);
-    const code = try runWasmJitCaptured(testing.allocator, testing.io, &swap2_wasm, "swap2", &.{}, &.{}, &.{}, &.{}, .{}, &capture, "7,9");
+    const code = try runWasmJitCaptured(testing.allocator, testing.io, &swap2_wasm, "swap2", &.{}, &.{}, &.{}, &.{}, .{}, &capture, "7,9", null);
     try testing.expectEqual(@as(u8, 0), code);
     try testing.expectEqualStrings("9\n7\n", capture.items);
 }
@@ -1070,14 +1073,14 @@ test "cwasm --invoke behaves byte-identically to its source .wasm (ADR-0203 stag
     defer cap_cwasm.deinit(testing.allocator);
     var cap_wasm: std.ArrayList(u8) = .empty;
     defer cap_wasm.deinit(testing.allocator);
-    const code_c = try runWasmJitCaptured(testing.allocator, testing.io, cwasm, "f", &.{}, &.{}, &.{}, &.{}, .{}, &cap_cwasm, null);
-    const code_w = try runWasmJitCaptured(testing.allocator, testing.io, &wasm, "f", &.{}, &.{}, &.{}, &.{}, .{}, &cap_wasm, null);
+    const code_c = try runWasmJitCaptured(testing.allocator, testing.io, cwasm, "f", &.{}, &.{}, &.{}, &.{}, .{}, &cap_cwasm, null, null);
+    const code_w = try runWasmJitCaptured(testing.allocator, testing.io, &wasm, "f", &.{}, &.{}, &.{}, &.{}, .{}, &cap_wasm, null, null);
     try testing.expectEqual(code_w, code_c);
     try testing.expectEqual(@as(u8, 0), code_c);
     try testing.expectEqualStrings("42\n", cap_cwasm.items);
     try testing.expectEqualStrings(cap_wasm.items, cap_cwasm.items);
     // A missing name is a loud ExportNotFound — same error as the .wasm path.
-    try testing.expectError(error.ExportNotFound, runWasmJitCaptured(testing.allocator, testing.io, cwasm, "nope", &.{}, &.{}, &.{}, &.{}, .{}, null, null));
+    try testing.expectError(error.ExportNotFound, runWasmJitCaptured(testing.allocator, testing.io, cwasm, "nope", &.{}, &.{}, &.{}, &.{}, .{}, null, null, null));
 }
 
 test "cwasm honors --fuel: a long loop traps out-of-fuel like the .wasm path (ADR-0203 stage 3)" {
@@ -1114,12 +1117,12 @@ test "cwasm honors --fuel: a long loop traps out-of-fuel like the .wasm path (AD
     defer testing.allocator.free(cwasm);
 
     // No fuel: the loop completes → exit 0.
-    try testing.expectEqual(@as(u8, 0), try runWasmJitCaptured(testing.allocator, testing.io, cwasm, null, &.{}, &.{}, &.{}, &.{}, .{}, null, null));
+    try testing.expectEqual(@as(u8, 0), try runWasmJitCaptured(testing.allocator, testing.io, cwasm, null, &.{}, &.{}, &.{}, &.{}, .{}, null, null, null));
     // Tiny fuel: the SAME artifact traps out-of-fuel → exit 1 (parity with
     // the .wasm lane below) — the limit provably reaches the artifact code.
     const limited: Limits = .{ .fuel = 100 };
-    try testing.expectEqual(@as(u8, 1), try runWasmJitCaptured(testing.allocator, testing.io, cwasm, null, &.{}, &.{}, &.{}, &.{}, limited, null, null));
-    try testing.expectEqual(@as(u8, 1), try runWasmJitCaptured(testing.allocator, testing.io, &wasm, null, &.{}, &.{}, &.{}, &.{}, limited, null, null));
+    try testing.expectEqual(@as(u8, 1), try runWasmJitCaptured(testing.allocator, testing.io, cwasm, null, &.{}, &.{}, &.{}, &.{}, limited, null, null, null));
+    try testing.expectEqual(@as(u8, 1), try runWasmJitCaptured(testing.allocator, testing.io, &wasm, null, &.{}, &.{}, &.{}, &.{}, limited, null, null, null));
 }
 
 test "cwasm honors --invoke NAME=ARGS: typed args route through the embedded bytes (ADR-0203 stage 3)" {
@@ -1153,8 +1156,8 @@ test "cwasm honors --invoke NAME=ARGS: typed args route through the embedded byt
     defer cap_cwasm.deinit(testing.allocator);
     var cap_wasm: std.ArrayList(u8) = .empty;
     defer cap_wasm.deinit(testing.allocator);
-    const code_c = try runWasmJitCaptured(testing.allocator, testing.io, cwasm, "add", &.{}, &.{}, &.{}, &.{}, .{}, &cap_cwasm, "2,3");
-    const code_w = try runWasmJitCaptured(testing.allocator, testing.io, &wasm, "add", &.{}, &.{}, &.{}, &.{}, .{}, &cap_wasm, "2,3");
+    const code_c = try runWasmJitCaptured(testing.allocator, testing.io, cwasm, "add", &.{}, &.{}, &.{}, &.{}, .{}, &cap_cwasm, "2,3", null);
+    const code_w = try runWasmJitCaptured(testing.allocator, testing.io, &wasm, "add", &.{}, &.{}, &.{}, &.{}, .{}, &cap_wasm, "2,3", null);
     try testing.expectEqual(code_w, code_c);
     try testing.expectEqualStrings("5\n", cap_cwasm.items);
     try testing.expectEqualStrings(cap_wasm.items, cap_cwasm.items);
@@ -1287,6 +1290,46 @@ test "runWasmJit: --engine jit surfaces the guest proc_exit code (D-244 2d)" {
     if (builtin.os.tag == .windows) return @import("../test_support/skip.zig").phaseEnd(.win64);
     const code = try runWasmJit(testing.allocator, testing.io, &proc_exit_42_jit, null, &.{}, &.{}, &.{}, &.{}, .{});
     try testing.expectEqual(@as(u8, 42), code);
+}
+
+// `test/wasi/stdin_echo.wat` (issue #257): fd_read ≤32 bytes from fd 0,
+// fd_write them to fd 1, proc_exit(nread).
+const stdin_echo_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x10, 0x03, 0x60, 0x04, 0x7f, 0x7f, 0x7f,
+    0x7f, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x00, 0x00, 0x02, 0x67, 0x03, 0x16, 0x77, 0x61,
+    0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72, 0x65, 0x76,
+    0x69, 0x65, 0x77, 0x31, 0x07, 0x66, 0x64, 0x5f, 0x72, 0x65, 0x61, 0x64, 0x00, 0x00, 0x16, 0x77,
+    0x61, 0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72, 0x65,
+    0x76, 0x69, 0x65, 0x77, 0x31, 0x08, 0x66, 0x64, 0x5f, 0x77, 0x72, 0x69, 0x74, 0x65, 0x00, 0x00,
+    0x16, 0x77, 0x61, 0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70,
+    0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x31, 0x09, 0x70, 0x72, 0x6f, 0x63, 0x5f, 0x65, 0x78, 0x69,
+    0x74, 0x00, 0x01, 0x03, 0x02, 0x01, 0x02, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x13, 0x02, 0x06,
+    0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00,
+    0x03, 0x0a, 0x3a, 0x01, 0x38, 0x00, 0x41, 0x00, 0x41, 0xc0, 0x00, 0x36, 0x02, 0x00, 0x41, 0x04,
+    0x41, 0x20, 0x36, 0x02, 0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x01, 0x41, 0x10, 0x10, 0x00, 0x1a,
+    0x41, 0x04, 0x41, 0x10, 0x28, 0x02, 0x00, 0x36, 0x02, 0x00, 0x41, 0x01, 0x41, 0x00, 0x41, 0x01,
+    0x41, 0x14, 0x10, 0x01, 0x1a, 0x41, 0x10, 0x28, 0x02, 0x00, 0x10, 0x02, 0x0b,
+};
+
+test "stdin_bytes reaches the guest's fd 0 on both engines; none = EOF (#257)" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .windows) return @import("../test_support/skip.zig").phaseEnd(.win64);
+    var cap_jit: std.ArrayList(u8) = .empty;
+    defer cap_jit.deinit(testing.allocator);
+    const jit = try runWasmJitCaptured(testing.allocator, testing.io, &stdin_echo_wasm, null, &.{}, &.{}, &.{}, &.{}, .{}, &cap_jit, null, "hello\n");
+    try testing.expectEqual(@as(u8, 6), jit);
+    try testing.expectEqualStrings("hello\n", cap_jit.items);
+
+    var cap_interp: std.ArrayList(u8) = .empty;
+    defer cap_interp.deinit(testing.allocator);
+    const interp = try runWasmCapturedFull(testing.allocator, testing.io, &stdin_echo_wasm, &.{}, &cap_interp, null, "hello\n", null, &.{}, &.{}, &.{}, null, .{ .engine = .interp });
+    try testing.expectEqual(@as(u8, 6), interp);
+    try testing.expectEqualStrings("hello\n", cap_interp.items);
+
+    var cap_eof: std.ArrayList(u8) = .empty;
+    defer cap_eof.deinit(testing.allocator);
+    try testing.expectEqual(@as(u8, 0), try runWasmJitCaptured(testing.allocator, testing.io, &stdin_echo_wasm, null, &.{}, &.{}, &.{}, &.{}, .{}, &cap_eof, null, null));
+    try testing.expectEqual(@as(usize, 0), cap_eof.items.len);
 }
 
 // `(module (func (export "_start") unreachable))` — a genuine trap with NO

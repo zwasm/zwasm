@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
     {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(gpa);
-        const exit = cli_run.runWasmJitCaptured(gpa, io, bytes, null, &ARGV, &.{}, &.{}, &.{}, .{}, &buf, null) catch |e| {
+        const exit = cli_run.runWasmJitCaptured(gpa, io, bytes, null, &ARGV, &.{}, &.{}, &.{}, .{}, &buf, null, null) catch |e| {
             try out.print("(1) jit-alone ERR {s}\n", .{@errorName(e)});
             try out.flush();
             return;
@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
         _ = cli_run.runWasmCaptured(gpa, io, bytes, &ARGV, &ibuf, null) catch {};
         var jbuf: std.ArrayList(u8) = .empty;
         defer jbuf.deinit(gpa);
-        const exit = cli_run.runWasmJitCaptured(gpa, io, bytes, null, &ARGV, &.{}, &.{}, &.{}, .{}, &jbuf, null) catch |e| {
+        const exit = cli_run.runWasmJitCaptured(gpa, io, bytes, null, &ARGV, &.{}, &.{}, &.{}, .{}, &jbuf, null, null) catch |e| {
             try out.print("(2) interp-then-jit ERR {s}\n", .{@errorName(e)});
             try out.flush();
             return;
@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(gpa);
         try buf.ensureTotalCapacity(gpa, 1 << 16);
-        const exit = cli_run.runWasmJitCaptured(gpa, io, bytes, null, &ARGV, &.{}, &.{}, &.{}, .{}, &buf, null) catch |e| {
+        const exit = cli_run.runWasmJitCaptured(gpa, io, bytes, null, &ARGV, &.{}, &.{}, &.{}, .{}, &buf, null, null) catch |e| {
             try out.print("(3) jit pre-sized ERR {s}\n", .{@errorName(e)});
             try out.flush();
             return;
@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
         @memset(dummy, 0xAA);
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(gpa);
-        const exit = cli_run.runWasmJitCaptured(gpa, io, bytes, null, &ARGV, &.{}, &.{}, &.{}, .{}, &buf, null) catch |e| {
+        const exit = cli_run.runWasmJitCaptured(gpa, io, bytes, null, &ARGV, &.{}, &.{}, &.{}, .{}, &buf, null, null) catch |e| {
             try out.print("(4) heap-shifted ERR {s}\n", .{@errorName(e)});
             try out.flush();
             return;
