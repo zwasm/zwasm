@@ -872,9 +872,11 @@ any `Frame` field the emit's `Label` has but liveness pins to a constant
 
 **Trigger.** A lane is green at the default optimize level and fails at
 `-Doptimize=Release*`. `ci_gate.sh` runs `test-all` at the default optimize
-level; the one ReleaseSafe build it does run, `check_jit_releasesafe.sh`, sits
-in the `ZWASM_CI_EXTENDED` leg, which fires on the push to `main` and not on a
-PR. So this class reaches `main` before any lane sees it.
+level; the unit tests also run ReleaseSafe on every PR's Linux leg (#347), so
+check that leg's log first — it names the failing test. The integration
+runners have no optimized lane on a PR: `check_jit_releasesafe.sh` sits in the
+`ZWASM_CI_EXTENDED` leg, which fires on the push to `main`, so a runner-only
+instance of this class still reaches `main` before any lane sees it.
 
 **First: settle whether it is the optimizer or the mode.** Run all four.
 Debug-only-green with every Release mode failing identically points at the

@@ -164,12 +164,14 @@ pub fn build(b: *std.Build) void {
     // TEST RUNNERS only. Debug host execution is ~5-10x slower; the runners
     // (spec / realworld / wast / edge corpus) are run-time-dominated, so they
     // build ReleaseSafe for iteration speed (still full safety checks). The
-    // `core_tests` UNIT suite stays on Debug `core` (it calls raw `module.entry`
-    // fn-ptrs that violate the JIT host-boundary callee-saved contract under an
-    // optimized host — a test-harness pattern, not a production path; production
-    // routes through the cohort trampoline). Production (`exe`/lib) keeps `core`
-    // honouring `-Doptimize`. Floor at ReleaseSafe so a plain Debug build still
-    // runs runners fast; a higher `-Doptimize` (ReleaseFast) wins.
+    // `core_tests` UNIT suite stays on `core` honouring `-Doptimize`: Debug by
+    // default (leak-detecting allocator), and ReleaseSafe on CI's Linux leg
+    // (`ci_gate.sh`, #347) — so a unit test must reach JIT code through the
+    // cohort trampoline (`callEntrySafe`), never a raw `module.entry` fn-ptr,
+    // which violates the host-boundary callee-saved contract under an optimized
+    // host. Production (`exe`/lib) keeps `core` honouring `-Doptimize`. Floor
+    // at ReleaseSafe so a plain Debug build still runs runners fast; a higher
+    // `-Doptimize` (ReleaseFast) wins.
     const core_rs = b.createModule(.{
         .root_source_file = b.path("src/zwasm.zig"),
         .target = target,

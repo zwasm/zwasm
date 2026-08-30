@@ -46,9 +46,10 @@ permissions:
 # merge its own group, so runs overlap instead of cancelling. A queue
 # (`cancel-in-progress: false` with a shared group) would not do: GitHub keeps
 # only the newest pending run per group, so a burst of merges would still
-# drop the middle ones.
+# drop the middle ones. The event name is part of the key so that a manual
+# dispatch on `main` (core-only) cannot cancel the push run for the same SHA.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.sha) || '' }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}-{1}', github.event_name, github.sha) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -272,7 +273,8 @@ jobs:
       # JIT smoke + AOT cross-compile) are up to ~20 cold-cache ReleaseSafe builds
       # and dominate wall-clock (~2.5-4.5 min/build on hosted runners), so they
       # run ONLY on the merge to `main` (push) — not on every PR / dispatch, which
-      # get the fast core gate (fmt + test-all, ~10 min). windows is always core.
+      # get the core gate (fmt + test-all + the Linux-only ReleaseSafe unit tests
+      # and rust-host; see ci_gate.sh's header). windows is always core.
       - name: ci_gate.sh
         shell: bash
         env:
