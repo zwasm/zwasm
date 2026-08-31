@@ -87,17 +87,34 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   ran with no handler and died on the first guard fault — a race, in any build
   mode (#320).
 
-- **The default engine ran ordinary toolchain output wrong, and said the wrong
-  thing about it** (#366). emcc `-fwasm-exceptions` output produced a wrong
-  answer on the default engine — a `try_table` with a catch clause lost its
-  fall-through result, with two further EH defects behind it (#280).
-  `zwasm run` never handed a core module the process stdin, and now serves it
-  on demand (#257). The C API reported `unreachable` for an out-of-bounds tail
-  call on x86_64, and could report a previous call's kind rather than this
-  one's (#357, #336). Win64 RDI and RSI were not preserved around a JIT call
-  (#287). A `..\` path escaped its preopen on Windows (#262). A GC heap-cap
-  trap reached the C API as `binding_error` on the interpreter (#361, interp
-  half; the JIT half is #364).
+- **A `try_table` with a catch clause lost its fall-through result on the
+  JIT** (#280): emcc `-fwasm-exceptions` output trapped `oob_memory` on the
+  default engine where the interpreter and wasmtime return the value. Behind
+  it, the same family: register-homed locals were stale at a landing pad
+  (they are reloaded there now, and spilled before a `throw` leaves the
+  frame), an enclosing try_table could shadow a nested one covering the same
+  code, and a `try_table` left dead by a tail call desynced the JIT's
+  internal numbering for the rest of the function. The emcc fixture runs in
+  the realworld lane's JIT result-check now.
+
+- **`zwasm run` never handed a core module the process stdin** (#257) —
+  `fd_read` on fd 0 was always EOF, whatever stdin held. The guest reads the
+  process stdin on demand now: piped and redirected input arrive as the
+  guest asks for them (no size cap, no read-ahead on a pipe that stays
+  open, a terminal works), end of input is a zero-byte read, and
+  `poll_oneoff` reports the descriptor readable rather than hung up. The C
+  API still has no stdin source — that is #365 below.
+
+- **Trap kinds on the C surface describe the call just made.** On x86_64 an
+  out-of-bounds `return_call_indirect` or `call_indirect` and a null
+  `return_call_ref` reported `unreachable` (#357); the JIT never cleared
+  the kind between calls, so a kindless trap could report the previous
+  call's — including `WASI_EXIT` (#336); and the interpreter mapped the GC
+  heap cap to `binding_error` instead of `out_of_memory` (#361's
+  interpreter half). On Windows, RDI/RSI are callee-saved under Win64 and
+  were missing from the JIT's clobber list (#287), and `path.confine`
+  treated `..\` as an opaque byte, so a backslash path escaped the preopen
+  (#262).
 
 - **Three JIT codegen faults on paths a real toolchain reaches.** The mixed
   multi-result thunks did not survive optimisation on Win64 (#288);
@@ -151,12 +168,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   `path_symlink_trailing_slashes` (#290). Symlink, hardlink and readdir cases.
   Measurable there for the first time in this release; the runner previously
   died mid-corpus and the advisory step reported the leg green.
-- **On the JIT, a GC heap-cap allocation does not trap at all** (#364) — it
-  returns a null reference and the guest continues. The interpreter half of
-  this is fixed above.
-- **A C host cannot feed a guest's stdin** (#365).
-  `zwasm_wasi_config_inherit_stdio` promises fd 0 routing and nothing in the C
-  API delivers it; the CLI serves stdin since #257, the C surface does not.
+- **The JIT does not trap on the GC heap cap** (#364): an
+  `array.new_default` past the 4 GiB cap returns a reference and the guest
+  runs on, where the interpreter traps `out_of_memory` and wasmtime traps
+  "allocation size too large".
+- **The C API has no way to feed a guest's stdin** (#365):
+  `zwasm_wasi_config_inherit_stdio` routes stdout and stderr but not fd 0,
+  so an embedder's guest reads EOF where the CLI serves the process stdin.
 
 ## [2.5.0] - 2026-08-11
 
