@@ -7,17 +7,12 @@
 // FILE-SIZE-EXEMPT: pure test suite already P1+P3-extracted from runner_test.zig (ADR-0128); slicing duplicates fixtures (N4) (investigated 2026-08-12, per ADR-0099)
 
 const std = @import("std");
-const builtin = @import("builtin");
 const testing = std.testing;
-const skip = @import("../test_support/skip.zig");
 
 const runner = @import("runner.zig");
 const runI32Export = runner.runI32Export;
 const runF32Export = runner.runF32Export;
 const JitInstance = runner.JitInstance;
-
-const entry = @import("codegen/shared/entry.zig");
-const heap_mod = @import("../feature/gc/heap.zig");
 
 // ============================================================
 // 10.G GC-on-JIT — i31 op family e2e (ref.i31 / i31.get_s /
