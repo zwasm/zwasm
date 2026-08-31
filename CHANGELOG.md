@@ -10,6 +10,125 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-08-31
+
+### Added
+
+- **A C host can read a WASI guest's exit status** (#234).
+  `zwasm_store_wasi_exit_code` (`wasi.h`) returns the value the guest passed to
+  `proc_exit`, and false when the Store has no WASI host or the guest never
+  called it. The contract took four passes to settle and the final shape is
+  what ships: the status is **per call** — each `wasm_func_call` into a Store
+  clears it before running, so a `true` return describes the call just made and
+  never an earlier guest's (#341) — and it follows **the runtime that actually
+  ran `proc_exit`**, including when a call reaches another instance's export
+  through an imported func or an imported table (#345, #352, ADR-0222 /
+  ADR-0224) — measured on the interpreter, which is where a cross-instance
+  call binds at all until #360.
+  `zwasm_store_set_wasi` retires the host it replaces instead of
+  freeing it, so an instance built under the old configuration keeps working
+  (#314, ADR-0219). A `proc_exit` trap is also classified apart from a guest
+  fault as `ZWASM_TRAP_WASI_EXIT`, identically on every engine (#331,
+  ADR-0218) — but the kind never carries the number, so a host that needs the
+  status reads it through the accessor either way.
+
+- **WASI 0.1 is 72/72 on the official wasi-testsuite** for both engines on
+  macOS and Linux, up from 58/72 on the interpreter and 54/72 on the JIT when
+  the corpus was first measured on x86_64-linux (ADR-0208, D-583). The step is
+  advisory and runs on the merge rather than on a PR, so nothing blocking holds
+  that number yet — D-583's discharge is what moves it into `test-all`.
+  A preopen now advertises the rights wasmtime does plus
+  `PATH_FILESTAT_SET_SIZE` (ADR-0215 D2), and each call checks the right its
+  witx doc comment names, answering `notcapable` when it is absent (#251,
+  #260). wasmtime reports rights but only reads `FD_READ` / `FD_WRITE`; zwasm
+  enforces them, as WasmEdge, WAMR and wasmer do. `poll_oneoff` answers
+  `fd_read` / `fd_write`
+  subscriptions rather than only clock ones (#263, ADR-0217). Path handling
+  lost four host aborts and two wrong answers along the way: a trailing slash
+  on `path_unlink_file` and a dotted final component on `path_rename` no longer
+  panic the process (#310, #267), `path_open` honours `LOOKUP_SYMLINK_FOLLOW`
+  on the final component (#276), four `fd_*` calls honour state the slot
+  already carries (#274), and a `..` that stays inside the preopen is an
+  ordinary path (#261).
+
+- **`zwasm_version`** (`zwasm.h`) — the linked library reports its own semver
+  (#237, ADR-0221). Only the accessor: macros, numeric fields and build
+  identity are deferred with named triggers, because `libzwasm.a` and the
+  headers are installed from one checkout by `zig build static-lib`, so the
+  header/library mismatch a version macro detects cannot occur.
+
+### Fixed
+
+- **Four JIT liveness divergences that desynced vreg numbering into silent
+  miscompiles** (#250, #252, #258, #272, D-596). Liveness simulates the operand
+  stack and must agree with what emit actually pushes; where they disagreed the
+  numbering slid and the JIT produced a wrong answer with no trap. The shapes:
+  a block reached only by `br` losing its result vreg past `.end`,
+  `ref.as_non_null` treated as 1→1 rather than transparent, the if-merge and
+  terminator drains indexing from the wrong base, and the `else` arm's
+  `param_arity` run one level deeper than emit. `ZWASM_DEBUG=liveverify` now
+  checks the two against each other by vreg (#269), which is how the last of
+  them was found.
+
+- **`wasm_func_call` on a func created by `wasm_func_new` reported success
+  without running the callback** (#315, ADR-0220). It returned NULL — the
+  wasm-c-api's "no trap" — leaving the caller's result vector untouched;
+  `wasm_func_param_arity` answers for host funcs, so an embedder that
+  validated its argument shape first got a clean pass and then an unwritten
+  answer. wasmtime permits the direct call, so ported code compiled, ran and
+  was wrong. The callback now runs.
+
+- **The EH frame sniffer dereferenced an unaligned frame pointer** (#323).
+  ReleaseSafe-only, which is the configuration every release binary is built
+  in — and which no lane ran the unit tests under, which is how it reached
+  `main`. The Linux leg of every PR now runs them ReleaseSafe, and a `main`
+  run is no longer cancelled by the next merge (#347, #312). Separately, `signal.ensureInstalled` marked the fault handler installed
+  before installing it, so a second thread entering JIT code inside that window
+  ran with no handler and died on the first guard fault — a race, in any build
+  mode (#320).
+
+- **A `try_table` with a catch clause lost its fall-through result on the
+  JIT** (#280): emcc `-fwasm-exceptions` output trapped `oob_memory` on the
+  default engine where the interpreter and wasmtime return the value. Behind
+  it, the same family: register-homed locals were stale at a landing pad
+  (they are reloaded there now, and spilled before a `throw` leaves the
+  frame), an enclosing try_table could shadow a nested one covering the same
+  code, and a `try_table` left dead by a tail call desynced the JIT's
+  internal numbering for the rest of the function. The emcc fixture runs in
+  the realworld lane's JIT result-check now.
+
+- **`zwasm run` never handed a core module the process stdin** (#257) —
+  `fd_read` on fd 0 was always EOF, whatever stdin held. The guest reads the
+  process stdin on demand now: piped and redirected input arrive as the
+  guest asks for them (no size cap, no read-ahead on a pipe that stays
+  open, a terminal works), end of input is a zero-byte read, and
+  `poll_oneoff` reports the descriptor readable rather than hung up. The C
+  API still has no stdin source — that is #365 below.
+
+- **Trap kinds on the C surface describe the call just made.** On x86_64 an
+  out-of-bounds `return_call_indirect` or `call_indirect` and a null
+  `return_call_ref` reported `unreachable` (#357); the JIT never cleared
+  the kind between calls, so a kindless trap could report the previous
+  call's — including `WASI_EXIT` (#336); and the interpreter mapped the GC
+  heap cap to `binding_error` instead of `out_of_memory` (#361's
+  interpreter half). On Windows, RDI/RSI are callee-saved under Win64 and
+  were missing from the JIT's clobber list (#287), and `path.confine`
+  treated `..\` as an opaque byte, so a backslash path escaped the preopen
+  (#262).
+
+- **Three JIT codegen faults on paths a real toolchain reaches.** The mixed
+  multi-result thunks did not survive optimisation on Win64 (#288);
+  `table.get`'s index was read after the descriptor loads rather than
+  snapshotted before them (#212); and a null funcptr in a table was executed
+  rather than trapped (D-586).
+
+- **Validation accepted modules the specification rejects.** `call_ref` and
+  `return_call_ref` checked their callee with a bare `isRef`, so a non-null
+  externref was read as a function entity and both engines died; they now
+  require a subtype of `(ref null typeidx)` and an immediate that names a func
+  type (#249). A module with no code section was skipped by the validate path
+  entirely (#278). Three GC subtype gaps closed alongside (#231, #240, #247).
+
 ### Changed
 
 - **Building zwasm no longer fetches anything** (#235). `build.zig` imported
@@ -22,6 +141,40 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   the root package now declares no dependencies at all. `zig build lint` is
   unchanged in rules, coverage and exit code — it is the only step that still
   needs the network on a cold package store.
+
+### Documentation
+
+- `include/zwasm.h` no longer claims the interpreter is the default engine — it
+  has been `auto` (JIT-first, interpreter fallback) since ADR-0200, and the
+  header is the only file a C embedder reads (#309). `include/wasi.h`'s
+  trap-kind advice catches up with ADR-0218 (#348). The tutorial and README
+  name `zig build static-lib` as the step that produces `libzwasm.a` and the
+  public headers, which nothing in the reader's path said before (#325).
+  `docs/development.md` records how a release is cut (#241). The Homebrew
+  install points at `zwasm/homebrew-tap`, the last live `clojurewasm`
+  reference in the tree.
+
+### Known limitations
+
+- **A cross-module func import cannot bind when the source instance is
+  JIT-backed** (#360), which is the stock engine since ADR-0200. Two modules
+  cannot be composed through `wasm_instance_new`. Forcing
+  `ZWASM_ENGINE_INTERP` on the source through `zwasm_instance_new_ex` works,
+  but that is a zwasm extension rather than the portable wasm-c-api path.
+- **Instantiation failures return NULL without setting the trap
+  out-parameter** (#353), so a failed link reports no reason.
+- **The official preview1 corpus is host-dependent on Windows** — 65/72 on
+  CI's `windows-2022`, 64/72 on a Windows 11 host, which also fails
+  `path_symlink_trailing_slashes` (#290). Symlink, hardlink and readdir cases.
+  Measurable there for the first time in this release; the runner previously
+  died mid-corpus and the advisory step reported the leg green.
+- **The JIT does not trap on the GC heap cap** (#364): an
+  `array.new_default` past the 4 GiB cap returns a reference and the guest
+  runs on, where the interpreter traps `out_of_memory` and wasmtime traps
+  "allocation size too large".
+- **The C API has no way to feed a guest's stdin** (#365):
+  `zwasm_wasi_config_inherit_stdio` routes stdout and stderr but not fd 0,
+  so an embedder's guest reads EOF where the CLI serves the process stdin.
 
 ## [2.5.0] - 2026-08-11
 
