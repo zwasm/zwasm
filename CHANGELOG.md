@@ -80,10 +80,24 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 - **The EH frame sniffer dereferenced an unaligned frame pointer** (#323).
   ReleaseSafe-only, which is the configuration every release binary is built
-  in. Separately, `signal.ensureInstalled` marked the fault handler installed
+  in — and which no lane ran the unit tests under, which is how it reached
+  `main`. The Linux leg of every PR now runs them ReleaseSafe, and a `main`
+  run is no longer cancelled by the next merge (#347, #312). Separately, `signal.ensureInstalled` marked the fault handler installed
   before installing it, so a second thread entering JIT code inside that window
   ran with no handler and died on the first guard fault — a race, in any build
   mode (#320).
+
+- **The default engine ran ordinary toolchain output wrong, and said the wrong
+  thing about it** (#366). emcc `-fwasm-exceptions` output produced a wrong
+  answer on the default engine — a `try_table` with a catch clause lost its
+  fall-through result, with two further EH defects behind it (#280).
+  `zwasm run` never handed a core module the process stdin, and now serves it
+  on demand (#257). The C API reported `unreachable` for an out-of-bounds tail
+  call on x86_64, and could report a previous call's kind rather than this
+  one's (#357, #336). Win64 RDI and RSI were not preserved around a JIT call
+  (#287). A `..\` path escaped its preopen on Windows (#262). A GC heap-cap
+  trap reached the C API as `binding_error` on the interpreter (#361, interp
+  half; the JIT half is #364).
 
 - **Three JIT codegen faults on paths a real toolchain reaches.** The mixed
   multi-result thunks did not survive optimisation on Win64 (#288);
@@ -137,12 +151,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   `path_symlink_trailing_slashes` (#290). Symlink, hardlink and readdir cases.
   Measurable there for the first time in this release; the runner previously
   died mid-corpus and the advisory step reported the leg green.
-- **A GC heap-cap trap is not reported as one on either engine** (#361). On
-  the interpreter it reaches the C API as `ZWASM_TRAP_BINDING_ERROR` where the
-  Zig API reports `OutOfMemory`; on the JIT the cap does not trap at all — an
-  `array.new_default` of `0x7fffffff` returns a value and the guest exits 0.
-- An out-of-bounds `return_call_indirect` traps `unreachable` on the JIT where
-  the interpreter traps `oob_table` (#357) — the same class as #361.
+- **On the JIT, a GC heap-cap allocation does not trap at all** (#364) — it
+  returns a null reference and the guest continues. The interpreter half of
+  this is fixed above.
+- **A C host cannot feed a guest's stdin** (#365).
+  `zwasm_wasi_config_inherit_stdio` promises fd 0 routing and nothing in the C
+  API delivers it; the CLI serves stdin since #257, the C surface does not.
 
 ## [2.5.0] - 2026-08-11
 
