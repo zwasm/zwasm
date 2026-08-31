@@ -123,7 +123,7 @@ bash scripts/check_releasesafe_runners.sh
 
 if [ "${ZWASM_CI_EXTENDED:-0}" = "1" ]; then
     echo "[ci_gate] extended: zig build lint"
-    zig build lint
+    zig build lint -- --max-warnings 0
 
     echo "[ci_gate] extended: build-option DCE / level-separation (9 combos)"
     bash scripts/check_build_dce.sh --gate
