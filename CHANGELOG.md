@@ -10,7 +10,7 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
-## [2.6.0] - 2026-08-30
+## [2.6.0] - 2026-08-31
 
 ### Added
 
