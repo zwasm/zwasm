@@ -667,8 +667,28 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(wasm_3_0_assert_runner_exe);
     const run_wasm_3_0_assert = b.addRunArtifact(wasm_3_0_assert_runner_exe);
     run_wasm_3_0_assert.addArg(b.pathFromRoot("test/spec/wasm-3.0-assert"));
-    const test_spec_wasm_3_0_assert_step = b.step("test-spec-wasm-3.0-assert", "Run Wasm 3.0 spec assertion runner skeleton (§10 / 10.T-2b; 5 sub-corpora enumerated)");
+    // Pinned, not left to the ambient environment. A Run step with no env_map
+    // inherits the caller's, so with ZWASM_SPEC_ENGINE=jit exported this run
+    // is ALSO the jit lane and the interp lane silently stops existing —
+    // `test-all` then passes having never run the interpreter over the corpus
+    // (measured: both lines printed `[jit]`). Which engine a lane verifies is
+    // the lane's property, not the shell's.
+    run_wasm_3_0_assert.setEnvironmentVariable("ZWASM_SPEC_ENGINE", "interp");
+    // §1 (ADR-0128) — the same corpus on the JIT. README claims the Wasm 3.0
+    // testsuite is green on the 3-OS CI matrix; until this run existed the JIT
+    // half of that claim was never executed by CI at all, on any OS.
+    // Measured 2026-09-02: ~2s, against ~8s for the interp run, so it goes in
+    // the core gate rather than behind ZWASM_CI_EXTENDED — which covers only
+    // the two Unix legs and so could not have backed a 3-OS claim.
+    // The runner enumerates its known-wrong JIT outcomes per arch and gates on
+    // an exact match, so this run is red on a regression AND on a fix that
+    // nobody wrote down.
+    const run_wasm_3_0_assert_jit = b.addRunArtifact(wasm_3_0_assert_runner_exe);
+    run_wasm_3_0_assert_jit.addArg(b.pathFromRoot("test/spec/wasm-3.0-assert"));
+    run_wasm_3_0_assert_jit.setEnvironmentVariable("ZWASM_SPEC_ENGINE", "jit");
+    const test_spec_wasm_3_0_assert_step = b.step("test-spec-wasm-3.0-assert", "Run Wasm 3.0 spec assertion runner on both engines (§10 / 10.T-2b; 6 sub-corpora enumerated)");
     test_spec_wasm_3_0_assert_step.dependOn(&run_wasm_3_0_assert.step);
+    test_spec_wasm_3_0_assert_step.dependOn(&run_wasm_3_0_assert_jit.step);
 
     // In-source test of the runner skeleton (covers PROPOSALS list).
     const wasm_3_0_assert_unit_mod = createSanitizedModule(b, sanitize_opts, .{
@@ -1560,6 +1580,7 @@ pub fn build(b: *std.Build) void {
     // baked manifests, exits clean. Adopts JIT-execute as impl rows
     // 10.M / 10.R / 10.TC / 10.E / 10.G land.
     test_all_step.dependOn(&run_wasm_3_0_assert.step);
+    test_all_step.dependOn(&run_wasm_3_0_assert_jit.step);
     // The wasm-3.0 runner's embedded unit tests (§1 JIT-corpus
     // eligibility + manifest parse) were wired only into `test` — so
     // the per-chunk gate (`mac_gate.sh` → test-all) never ran them and
