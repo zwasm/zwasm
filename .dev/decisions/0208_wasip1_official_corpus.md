@@ -3,7 +3,14 @@
 > **Doc-state**: ACTIVE
 
 - **Status**: Accepted (2026-08-18 — maintainer sign-off on PR #183; the
-  official suite is the bar, D1–D3 as written)
+  official suite is the bar). **D3 superseded by ADR-0225 (2026-09-02)**: the
+  step blocks with a per-OS `known_table` instead of carrying
+  `continue-on-error`, and runs on pull requests as well as the merge. D1 and
+  D2 stand. The "Ratchet the 14 failures instead of running advisory" entry
+  under `Alternatives rejected` is superseded with it — its ground, "Nothing in
+  the repo ratchets failures today", was already false when written
+  (`test/aot/aot_process_diff.zig` has carried that mechanism since
+  `4ac56549a`, 2026-07-09).
 - **Date**: 2026-08-14
 - **Front**: B-hardening (D-582 infrastructure, D-583 the behaviour gaps it exposes)
 - **Findings base**: measured conformance run 2026-08-14 at `2e40d4314` on
@@ -120,6 +127,9 @@ The existing three-fixture `test-wasi-p1` step stays. It exercises the
 longer load-bearing as a conformance claim.
 
 ### D3 — Run it as an advisory step in `gate`, with a written exit condition
+
+> **SUPERSEDED by ADR-0225 (2026-09-02).** Kept as written; what shipped is in
+> ADR-0225 D1/D3.
 
 The step runs at the end of the existing `gate` job on all three OSes with
 step-level `continue-on-error: true`. GitHub's contract is that a failing

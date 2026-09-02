@@ -418,22 +418,30 @@ entries:
       first pass of the 2026-08-14 measurement recorded it as flaky for
       exactly this reason.
       ---
-        DISCHARGE: all 8 green on all three OSes, on both lanes (item (1)
-        wires BOTH lanes into `test-all`, the blocking gate).
-        Four edits land together — anything left behind is a doc that outlives
+        DISCHARGE: the corpus green on all three OSes, on both lanes (item
+        (1) wires BOTH lanes into `test-all`, the blocking gate).
+        Five edits land together — anything left behind is a doc that outlives
         its subject, which is how §11.2 came to describe neither reality nor
         intent:
       (1) `build.zig` — `test_all_step.dependOn` both lanes (`ci_gate.sh` needs
           no edit; it already runs `zig build test-all`);
-      (2) `.github/workflows/ci.yml` — delete the advisory step in `gate`;
+      (2) `.github/workflows/ci.yml` — delete the step in `gate`;
       (3) `docs/development.md` — drop the "Not in `test-all`" marker from the
           table row, restore `test-all`'s "all of the above", and delete the
-          paragraph about the advisory placement;
-      (4) this row — deleted, per the ledger's delete-on-discharge rule
+          paragraph about the separate placement;
+      (4) `test/wasi/official_runner.zig` — remove the windows rows from
+          `known_table`; the table itself stays, empty, the way the AOT
+          differential's does, so a future finding has a home;
+      (5) this row — deleted, per the ledger's delete-on-discharge rule
           (D-582 discharged 2026-08-24).
-      Until then the step reports real counts and stays non-blocking — a
-      deliberate, time-boxed advisory in the sense of ADR-0174 ("NOT a silent
-      skip"), not an indefinite workaround.
+      Until then the step is BLOCKING with a ratchet (ADR-0225 supersedes
+      ADR-0208 D3's advisory placement): linux and macOS are at baseline 0 and
+      any failure reds the PR, and the windows rows above are the `known_table`
+      — tolerated, while anything outside it, and any listed name that starts
+      passing, reds the PR too. The table describes CI's windows-2022 runner,
+      not the Windows 11 host: `path_symlink_trailing_slashes` is recorded here
+      and deliberately NOT in the table, because one exact-match table cannot
+      hold both counts.
     first_raised: "2026-08-14"
     last_reviewed: "2026-08-30"
     refs: |-

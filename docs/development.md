@@ -77,13 +77,18 @@ fixtures from source (emcc / TinyGo / Rust) is a maintainer task using the Nix
 
 `test-wasi-p1-official` is the one layer `test-all` does not carry. The corpus
 is not green (D-583 carries the live count — no copy of it here, that is what
-went stale last time), so CI runs it as an **advisory step** in the `gate`
-job: the red shows in the run without blocking the merge. Because it cannot
-block either way, it runs **only on the merge to `main`**, like the extended
-checks below — your PR will not show it. It is not part of the local
-`gate_commit.sh` / `gate_merge.sh` flow either, so run it directly when
-touching WASI preview1. When D-583 discharges, the step joins `test-all` and
-the advisory goes away (ADR-0208 D2/D3).
+went stale last time), so CI runs it as its own **blocking** step in the `gate`
+job, on every PR and on the merge. What makes that placement possible is the
+ratchet in `test/wasi/official_runner.zig`: linux and macOS are at baseline 0
+and must stay there, while the Windows leg carries a `known_table` of the
+currently-failing names — those are tolerated, anything else is not, and a
+listed test that starts passing fails the run so its entry gets removed with
+the fix. The table is written for CI's windows-2022 runner; a local Windows 11
+box fails one more (D-583), and that is the box disagreeing with the runner,
+not the table being wrong. It is not part of the local `gate_commit.sh` /
+`gate_merge.sh` flow, so run it directly when touching WASI preview1. When
+D-583 discharges, the step joins `test-all` and this paragraph goes away
+(ADR-0208 D2/D3).
 
 ## The merge gate — CI is authoritative
 
