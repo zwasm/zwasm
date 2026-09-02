@@ -441,8 +441,8 @@ const JitKnownFail = struct {
 /// that does not depend on the argument (f32 → 0x66666666 for both the 5.0
 /// and 10.5 cases, f64 → 0x4050066666666666 for both), so this is a wrong
 /// value returned without an error — not a trap and not a refusal to
-/// compile. The mechanism is NOT diagnosed here; the symptom has its own
-/// issue, and this row exists so the lane can gate meanwhile.
+/// compile. The mechanism is NOT diagnosed here: the symptom is #378, and
+/// this row exists so the lane can gate on everything else meanwhile.
 ///
 /// Windows is x86_64 too but does NOT share this row — see below.
 const jit_known_fail_x86_64_sysv: []const JitKnownFail = &.{
@@ -458,7 +458,7 @@ const jit_known_fail_x86_64_sysv: []const JitKnownFail = &.{
 /// `imported-mismatch` is a no-arg `-> i32:3` assert, so it is neither the
 /// float class above nor the Win64 float-register defect. The interpreter
 /// passes it on Windows, and the JIT passes it on Linux; only this
-/// combination fails. Tracked as its own defect.
+/// combination fails. Tracked separately from #378 as #379.
 ///
 /// This row is why the key is the TARGET and not the arch: keyed on arch
 /// alone, the Windows leg reports a regression on every run.
