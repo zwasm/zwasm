@@ -444,24 +444,40 @@ const JitKnownFail = struct {
 /// compile. The mechanism is NOT diagnosed here; the symptom has its own
 /// issue, and this row exists so the lane can gate meanwhile.
 ///
-/// The Windows leg is x86_64 too and shares this row. If it ever diverges,
-/// split the row by OS rather than widening it — Win64 has its own live
-/// float-register defect (XMM6-XMM15 are non-volatile, allocated from, and
-/// never saved), which would show up here as EXTRA failures.
-const jit_known_fail_x86_64: []const JitKnownFail = &.{
+/// Windows is x86_64 too but does NOT share this row — see below.
+const jit_known_fail_x86_64_sysv: []const JitKnownFail = &.{
     .{ .key = "exception-handling/try_table/throw-catch-param-f32", .count = 2 },
     .{ .key = "exception-handling/try_table/throw-catch-param-f64", .count = 2 },
     .{ .key = "exception-handling/try_table/throw-catch_ref-param-f32", .count = 2 },
     .{ .key = "exception-handling/try_table/throw-catch_ref-param-f64", .count = 2 },
 };
 
-/// aarch64 (the macOS leg) — **NOT MEASURED**. No aarch64 host was available
-/// when this lane was wired, so this row is a PREDICTION mirrored from the
-/// x86_64 one, on the guess that the defect sits in shared lowering rather
-/// than in either backend's register allocator. The first 3-OS CI run is the
-/// measurement; if the macOS leg reports a different set, correct this row
-/// from its output before merging. A wrong guess here is loud, which is the
-/// point of stating it rather than defaulting to empty.
+/// x86_64-windows — measured 2026-09-02 by this lane's own first CI run.
+///
+/// The same 8 float directives, plus one the SysV leg passes:
+/// `imported-mismatch` is a no-arg `-> i32:3` assert, so it is neither the
+/// float class above nor the Win64 float-register defect. The interpreter
+/// passes it on Windows, and the JIT passes it on Linux; only this
+/// combination fails. Tracked as its own defect.
+///
+/// This row is why the key is the TARGET and not the arch: keyed on arch
+/// alone, the Windows leg reports a regression on every run.
+const jit_known_fail_x86_64_windows: []const JitKnownFail = &.{
+    .{ .key = "exception-handling/try_table/throw-catch-param-f32", .count = 2 },
+    .{ .key = "exception-handling/try_table/throw-catch-param-f64", .count = 2 },
+    .{ .key = "exception-handling/try_table/throw-catch_ref-param-f32", .count = 2 },
+    .{ .key = "exception-handling/try_table/throw-catch_ref-param-f64", .count = 2 },
+    .{ .key = "exception-handling/try_table/imported-mismatch", .count = 1 },
+};
+
+/// aarch64 (the macOS leg) — measured 2026-09-02 by this lane's own first CI
+/// run: `8 failed`, `4 enumerated, 0 unexpected, 0 stale`. The same 8
+/// directives as the SysV x86_64 row, which is why the defect is not in
+/// either backend's register allocator.
+///
+/// Written first as a prediction copied from x86_64 and left to be falsified,
+/// rather than defaulted to empty: an empty row fails the leg with 8
+/// unexpected entries and reports only that nobody had looked.
 const jit_known_fail_aarch64: []const JitKnownFail = &.{
     .{ .key = "exception-handling/try_table/throw-catch-param-f32", .count = 2 },
     .{ .key = "exception-handling/try_table/throw-catch-param-f64", .count = 2 },
@@ -469,16 +485,22 @@ const jit_known_fail_aarch64: []const JitKnownFail = &.{
     .{ .key = "exception-handling/try_table/throw-catch_ref-param-f64", .count = 2 },
 };
 
-/// An architecture with no row expects ZERO JIT fails. That is the loud
-/// default: a host nobody measured reports every fail as unexpected rather
-/// than inheriting somebody else's excuse.
+/// A target with no row expects ZERO JIT fails. That is the loud default: a
+/// host nobody measured reports every fail as unexpected rather than
+/// inheriting somebody else's excuse.
 fn jitKnownFails() []const JitKnownFail {
     return switch (builtin.cpu.arch) {
-        .x86_64 => jit_known_fail_x86_64,
+        .x86_64 => if (builtin.os.tag == .windows)
+            jit_known_fail_x86_64_windows
+        else
+            jit_known_fail_x86_64_sysv,
         .aarch64 => jit_known_fail_aarch64,
         else => &.{},
     };
 }
+
+/// Names the row in the diagnostics, so a mismatch says which list to edit.
+const jit_target_label = @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag);
 
 /// Every JIT return-fail the run actually observed, one entry per failing
 /// directive. Recorded at all three `jit_return.fail` sites so the gate sees
@@ -1950,8 +1972,8 @@ pub fn main(init: std.process.Init) !void {
             if (seen == kf.count) continue;
             jit_stale += 1;
             try stdout.print(
-                "JIT-EXPECTATION-STALE  {s}: enumerated {d} failing directive(s), observed {d} — correct the {t} row in spec_assert_runner_wasm_3_0.zig\n",
-                .{ kf.key, kf.count, seen, builtin.cpu.arch },
+                "JIT-EXPECTATION-STALE  {s}: enumerated {d} failing directive(s), observed {d} — correct the {s} row in spec_assert_runner_wasm_3_0.zig\n",
+                .{ kf.key, kf.count, seen, jit_target_label },
             );
         }
         for (jit_fail_log.keys.items) |k| {
@@ -1967,8 +1989,8 @@ pub fn main(init: std.process.Init) !void {
             );
         }
         try stdout.print(
-            "[wasm-3.0-assert] JIT known-wrong ({t}): {d} enumerated, {d} unexpected, {d} stale\n",
-            .{ builtin.cpu.arch, known.len, jit_unexpected, jit_stale },
+            "[wasm-3.0-assert] JIT known-wrong ({s}): {d} enumerated, {d} unexpected, {d} stale\n",
+            .{ jit_target_label, known.len, jit_unexpected, jit_stale },
         );
     }
     try stdout.flush();
