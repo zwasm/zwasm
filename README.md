@@ -9,9 +9,10 @@ A spec-compliant WebAssembly runtime written in Zig.
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 - **Full spec coverage** — WebAssembly 3.0 (all 9 proposals), spec testsuite
-  green on macOS aarch64, Linux x86_64 and Windows x86_64. CI runs one engine;
-  wiring the JIT spec lane in is tracked in #205. WASI 0.1, 0.2 (Component
-  Model, on by default) and 0.3 (native async, opt-in).
+  green on macOS aarch64, Linux x86_64 and Windows x86_64. CI runs both
+  engines; the JIT lane enumerates its known-wrong outcomes and gates on an
+  exact match. WASI 0.1, 0.2 (Component Model, on by default) and 0.3
+  (native async, opt-in).
 - **Three execution backends** — interpreter, JIT (arm64 + x86_64) and AOT
   (`.cwasm`), differentially tested against each other on every change.
   wasmtime is the external oracle for the interpreter and JIT; the AOT lane

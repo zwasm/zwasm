@@ -141,16 +141,14 @@ echo "[run_remote_ubuntu] remote HEAD: $remote_sha"
 #    pinned via flake.nix) to produce the x86_64-linux row. Extra args
 #    after `bench` forward, e.g. `… bench --quick --phase-record` or
 #    `… bench --quick --bench=tinygo/arith`; default = full --quick.
-# Optional env-passthrough: `ZWASM_SPEC_ENGINE=jit bash scripts/run_remote_ubuntu.sh
-# test-spec-wasm-3.0-assert` forwards the engine selector across SSH + nix develop
-# so the remote runs the JIT spec path (the x86_64 JIT-EH functional verify; cf.
-# the phase-10 close invariants, whose script was deleted 2026-08-20).
-ENV_PREFIX=""
-[ -n "${ZWASM_SPEC_ENGINE:-}" ] && ENV_PREFIX="ZWASM_SPEC_ENGINE=$ZWASM_SPEC_ENGINE "
+# The ZWASM_SPEC_ENGINE passthrough that used to live here is gone: the only
+# reader is the wasm-3.0 assert runner, and `test-spec-wasm-3.0-assert` now
+# runs both engines with each lane's selector pinned in build.zig. Forwarding
+# the variable could no longer change what the remote ran.
 case "$STEP" in
-    build) REMOTE_CMD="${ENV_PREFIX}zig build" ;;
+    build) REMOTE_CMD="zig build" ;;
     bench) REMOTE_CMD="bash scripts/record_merge_bench.sh ${*:---quick}" ;;
-    *)     REMOTE_CMD="${ENV_PREFIX}zig build $STEP" ;;
+    *)     REMOTE_CMD="zig build $STEP" ;;
 esac
 
 # `nix develop --command` pins Zig 0.16.0 + project deps via
