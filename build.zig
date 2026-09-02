@@ -667,6 +667,13 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(wasm_3_0_assert_runner_exe);
     const run_wasm_3_0_assert = b.addRunArtifact(wasm_3_0_assert_runner_exe);
     run_wasm_3_0_assert.addArg(b.pathFromRoot("test/spec/wasm-3.0-assert"));
+    // Pinned, not left to the ambient environment. A Run step with no env_map
+    // inherits the caller's, so with ZWASM_SPEC_ENGINE=jit exported this run
+    // is ALSO the jit lane and the interp lane silently stops existing —
+    // `test-all` then passes having never run the interpreter over the corpus
+    // (measured: both lines printed `[jit]`). Which engine a lane verifies is
+    // the lane's property, not the shell's.
+    run_wasm_3_0_assert.setEnvironmentVariable("ZWASM_SPEC_ENGINE", "interp");
     // §1 (ADR-0128) — the same corpus on the JIT. README claims the Wasm 3.0
     // testsuite is green on the 3-OS CI matrix; until this run existed the JIT
     // half of that claim was never executed by CI at all, on any OS.
