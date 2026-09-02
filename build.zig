@@ -1366,6 +1366,7 @@ pub fn build(b: *std.Build) void {
         .{ .src = "test/c_api_conformance/version.c", .name = "version" }, // a C host reads the runtime's version
         .{ .src = "test/c_api_conformance/trap_kind_per_call.c", .name = "trap_kind_per_call" }, // #336 the kind describes the call just made
         .{ .src = "test/c_api_conformance/gc_heap_cap_trap.c", .name = "gc_heap_cap_trap" }, // #361 GC heap cap is OUT_OF_MEMORY
+        .{ .src = "test/c_api_conformance/cross_module_func.c", .name = "cross_module_func" }, // #360 cross-module func import on every engine
         .{
             .src = "test/c_api_conformance/wasi_preopen.c",
             .name = "wasi_preopen",
