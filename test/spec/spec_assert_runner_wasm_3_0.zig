@@ -22,6 +22,7 @@
 //! Per ROADMAP §10 / 10.T-2b + Phase 10 design plan §4.6.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const manifest_parser = @import("wasm_3_0_manifest.zig");
 const zwasm = @import("zwasm");
@@ -392,6 +393,122 @@ fn jitErrorIsUnwiredShape(e: zwasm.engine.runner.Error) bool {
     };
 }
 
+/// ADR-0210 / ADR-0174 — the committed corpus's size, held in the binary so
+/// that losing part of it is loud instead of arithmetic.
+///
+/// The identity the runner checks is invariant under "the corpus got
+/// smaller": every remaining directive still lands in exactly one bucket, so
+/// a corpus missing a whole manifest directory printed a smaller `lines=`,
+/// `ACCOUNTING: CLOSED`, and exited 0 (measured 2026-09-02 by moving
+/// `exception-handling/try_table` aside: `lines` 15478 → 15424, `exception`
+/// 4 → 0, still green). `scripts/check_spec_manifest_shape.sh` does not close
+/// it either — it checks the corpus's SHAPE and prints the total it finds,
+/// with nothing to compare that total against.
+///
+/// Both numbers are re-derivable from outside the binary, which is the point:
+///   find test/spec/wasm-3.0-assert -mindepth 3 -maxdepth 3 -name manifest.txt | wc -l
+///   cat test/spec/wasm-3.0-assert/*/*/manifest.txt | wc -l
+/// A corpus regen edits these two constants in the same commit as the corpus.
+/// Same rule as `vendored_total` in `test/wasi/official_runner.zig`.
+const corpus_manifests: u32 = 86;
+const corpus_lines: u32 = 15478;
+
+/// §1 (ADR-0128) — one KNOWN-WRONG JIT outcome, enumerated so the lane can
+/// gate on `ret.fail` like every other category instead of exempting itself.
+///
+/// This list is NOT a suppression. It is the lane's claim about what is
+/// broken, checked in both directions: an unlisted fail turns the run red,
+/// and so does a listed one that stopped failing. Shrinking it is how the
+/// underlying defect gets closed; growing it silently is what the exact
+/// match prevents.
+const JitKnownFail = struct {
+    /// `<proposal>/<manifest-dir>/<export>` — the same triple the
+    /// `--fail-detail` `JITval` / `JITfail` lines print, so a new fail can
+    /// be turned into a row by copying it off the diagnostic output.
+    key: []const u8,
+    /// Failing DIRECTIVES for that export, not distinct exports: the corpus
+    /// asserts `throw-catch-param-f32` twice (5.0 and 10.5) and both fail.
+    /// A set keyed on the export alone would report 4 where there are 8 and
+    /// would not notice one of the pair being fixed.
+    count: u32,
+};
+
+/// x86_64 — measured 2026-09-02 on x86_64-linux, `ZWASM_SPEC_ENGINE=jit`.
+///
+/// These 8 are every f32/f64 `assert_return` directive in the
+/// exception-handling corpus, and they are the ONLY float directives in it;
+/// every non-float directive passes. The JIT returns a constant bit pattern
+/// that does not depend on the argument (f32 → 0x66666666 for both the 5.0
+/// and 10.5 cases, f64 → 0x4050066666666666 for both), so this is a wrong
+/// value returned without an error — not a trap and not a refusal to
+/// compile. The mechanism is NOT diagnosed here; the symptom has its own
+/// issue, and this row exists so the lane can gate meanwhile.
+///
+/// The Windows leg is x86_64 too and shares this row. If it ever diverges,
+/// split the row by OS rather than widening it — Win64 has its own live
+/// float-register defect (XMM6-XMM15 are non-volatile, allocated from, and
+/// never saved), which would show up here as EXTRA failures.
+const jit_known_fail_x86_64: []const JitKnownFail = &.{
+    .{ .key = "exception-handling/try_table/throw-catch-param-f32", .count = 2 },
+    .{ .key = "exception-handling/try_table/throw-catch-param-f64", .count = 2 },
+    .{ .key = "exception-handling/try_table/throw-catch_ref-param-f32", .count = 2 },
+    .{ .key = "exception-handling/try_table/throw-catch_ref-param-f64", .count = 2 },
+};
+
+/// aarch64 (the macOS leg) — **NOT MEASURED**. No aarch64 host was available
+/// when this lane was wired, so this row is a PREDICTION mirrored from the
+/// x86_64 one, on the guess that the defect sits in shared lowering rather
+/// than in either backend's register allocator. The first 3-OS CI run is the
+/// measurement; if the macOS leg reports a different set, correct this row
+/// from its output before merging. A wrong guess here is loud, which is the
+/// point of stating it rather than defaulting to empty.
+const jit_known_fail_aarch64: []const JitKnownFail = &.{
+    .{ .key = "exception-handling/try_table/throw-catch-param-f32", .count = 2 },
+    .{ .key = "exception-handling/try_table/throw-catch-param-f64", .count = 2 },
+    .{ .key = "exception-handling/try_table/throw-catch_ref-param-f32", .count = 2 },
+    .{ .key = "exception-handling/try_table/throw-catch_ref-param-f64", .count = 2 },
+};
+
+/// An architecture with no row expects ZERO JIT fails. That is the loud
+/// default: a host nobody measured reports every fail as unexpected rather
+/// than inheriting somebody else's excuse.
+fn jitKnownFails() []const JitKnownFail {
+    return switch (builtin.cpu.arch) {
+        .x86_64 => jit_known_fail_x86_64,
+        .aarch64 => jit_known_fail_aarch64,
+        else => &.{},
+    };
+}
+
+/// Every JIT return-fail the run actually observed, one entry per failing
+/// directive. Recorded at all three `jit_return.fail` sites so the gate sees
+/// the same population the counter does.
+const JitFailLog = struct {
+    gpa: std.mem.Allocator,
+    keys: std.ArrayList([]const u8) = .empty,
+
+    fn record(self: *JitFailLog, proposal: []const u8, manifest: []const u8, func: []const u8) !void {
+        // The manifest name is borrowed from a directory iterator whose
+        // buffer is reused, so the key is copied rather than referenced.
+        const key = try std.fmt.allocPrint(self.gpa, "{s}/{s}/{s}", .{ proposal, manifest, func });
+        errdefer self.gpa.free(key);
+        try self.keys.append(self.gpa, key);
+    }
+
+    fn deinit(self: *JitFailLog) void {
+        for (self.keys.items) |k| self.gpa.free(k);
+        self.keys.deinit(self.gpa);
+    }
+
+    fn countFor(self: JitFailLog, key: []const u8) u32 {
+        var n: u32 = 0;
+        for (self.keys.items) |k| {
+            if (std.mem.eql(u8, k, key)) n += 1;
+        }
+        return n;
+    }
+};
+
 /// Shared catch-classifier for the §1 JIT no-arg dispatch arms (i32 / i64 /
 /// f32 / f64): compile/setup rejects → an enumerated skip (the JIT never
 /// executed this shape), execution-stage outcomes (e.g. `error.Trap`) → fail.
@@ -399,6 +516,7 @@ fn jitErrorIsUnwiredShape(e: zwasm.engine.runner.Error) bool {
 fn recordJitRunErr(
     e: zwasm.engine.runner.Error,
     summary: *ProposalSummary,
+    jit_fail_log: *JitFailLog,
     fail_detail: bool,
     stdout: anytype,
     proposal: []const u8,
@@ -410,6 +528,7 @@ fn recordJitRunErr(
         if (fail_detail) try stdout.print("  JITskip [{s}/{s}] {s} (unwired shape: err={s})\n", .{ proposal, ename, fname, @errorName(e) });
     } else {
         summary.jit_return.fail += 1;
+        try jit_fail_log.record(proposal, ename, fname);
         if (fail_detail) try stdout.print("  JITfail [{s}/{s}] {s} err={s}\n", .{ proposal, ename, fname, @errorName(e) });
     }
 }
@@ -485,6 +604,12 @@ pub fn main(init: std.process.Init) !void {
     // once more over the whole corpus by exactly the same code.
     var grand: ProposalSummary = .{ .name = "wasm-3.0-assert" };
     var mismatched_proposals: u32 = 0;
+    // Populated only in jit mode (the interp arms never touch it), and read
+    // once after the loop to check the observed fails against the enumerated
+    // ones. Kept beside `grand` because it is the same kind of thing: state
+    // the run accumulates and then has to reconcile before it may exit 0.
+    var jit_fail_log: JitFailLog = .{ .gpa = gpa };
+    defer jit_fail_log.deinit();
 
     for (PROPOSALS) |proposal| {
         var summary: ProposalSummary = .{ .name = proposal };
@@ -1137,7 +1262,7 @@ pub fn main(init: std.process.Init) !void {
                                 }
                                 var rbuf: [16]TypedResult = undefined;
                                 inst.invokeMulti(gpa, d.func_name, arg_bits[0..d.args_len], rbuf[0..d.results_len]) catch |e| {
-                                    try recordJitRunErr(e, &summary, fail_detail, stdout, proposal, entry.name, d.func_name);
+                                    try recordJitRunErr(e, &summary, &jit_fail_log, fail_detail, stdout, proposal, entry.name, d.func_name);
                                     continue;
                                 };
                                 var mv_match = true;
@@ -1160,11 +1285,12 @@ pub fn main(init: std.process.Init) !void {
                                     summary.jit_return.pass += 1;
                                 } else {
                                     summary.jit_return.fail += 1;
+                                    try jit_fail_log.record(proposal, entry.name, d.func_name);
                                 }
                                 continue;
                             }
                             const got = inst.invoke(gpa, d.func_name, arg_bits[0..d.args_len]) catch |e| {
-                                try recordJitRunErr(e, &summary, fail_detail, stdout, proposal, entry.name, d.func_name);
+                                try recordJitRunErr(e, &summary, &jit_fail_log, fail_detail, stdout, proposal, entry.name, d.func_name);
                                 continue;
                             };
                             // got == null ⇒ nothing to compare: a void result
@@ -1185,6 +1311,7 @@ pub fn main(init: std.process.Init) !void {
                                 summary.jit_return.pass += 1;
                             } else {
                                 summary.jit_return.fail += 1;
+                                try jit_fail_log.record(proposal, entry.name, d.func_name);
                                 if (fail_detail) try stdout.print("  JITval [{s}/{s}] {s} ty={s} got=0x{x:0>16}\n", .{ proposal, entry.name, d.func_name, exp_tv.ty, got_val });
                             }
                             continue;
@@ -1778,26 +1905,85 @@ pub fn main(init: std.process.Init) !void {
         "[wasm-3.0-assert] ACCOUNTING: {s} ({d} proposal(s) failed the identity)\n",
         .{ if (closed) "CLOSED" else "OPEN", mismatched_proposals },
     );
+
+    // The lane's own verdict line, in the same vocabulary as
+    // `test/wasi/official_runner.zig` ("N passed, N failed, N total") so the
+    // two conformance lanes cannot describe their coverage two different
+    // ways. `skipped` is this lane's extra term: ADR-0128 keeps shapes like
+    // multi-memory out of the JIT's scope, and a shape the engine could not
+    // attempt is neither a pass nor a failure. It stays in the denominator.
+    //
+    // Printing the numbers rather than an OK/NG verdict is the ADR-0174
+    // rule the RECONCILE line above already follows: a bare verdict is how a
+    // lane with pass=0 hides behind a green step.
+    const asserts_pass = grand.ret.pass + grand.trap.pass + grand.invalid.pass +
+        grand.unlinkable.pass + grand.uninstantiable.pass + grand.malformed.pass +
+        grand.exception.pass;
+    const asserts_fail = grand.ret.fail + grand.trap.fail + grand.invalid.fail +
+        grand.unlinkable.fail + grand.uninstantiable.fail + grand.malformed.fail +
+        grand.exception.fail;
+    const asserts_skip = grand.ret.skip + grand.trap.skip + grand.invalid.skip +
+        grand.unlinkable.skip + grand.uninstantiable.skip + grand.malformed.skip +
+        grand.exception.skip;
+    const asserts_total = grand.ret.total + grand.trap.total + grand.invalid.total +
+        grand.unlinkable.total + grand.uninstantiable.total + grand.malformed.total +
+        grand.exception.total;
+    try stdout.print(
+        "wasm_3_0_assert [{s}]: {d} passed, {d} failed, {d} skipped, {d} total (over {d} proposals)\n",
+        .{ if (jit_mode) "jit" else "interp", asserts_pass, asserts_fail, asserts_skip, asserts_total, PROPOSALS.len },
+    );
+
+    // §1 (ADR-0128) — the JIT lane's exact-match gate. Both directions:
+    //   unexpected — a fail with no row: a regression, or a host nobody
+    //                measured. Red.
+    //   stale      — a row whose fails stopped happening: the defect was
+    //                fixed and the row is now suppressing nothing while
+    //                claiming to. Red, so the list shrinks when the bug does.
+    // This REPLACES the old `if (jit_mode) 0` exemption on `ret.fail`. Two
+    // mechanisms for one job is how the wrong one wins, so there is one.
+    var jit_unexpected: u32 = 0;
+    var jit_stale: u32 = 0;
+    if (jit_mode) {
+        const known = jitKnownFails();
+        for (known) |kf| {
+            const seen = jit_fail_log.countFor(kf.key);
+            if (seen == kf.count) continue;
+            jit_stale += 1;
+            try stdout.print(
+                "JIT-EXPECTATION-STALE  {s}: enumerated {d} failing directive(s), observed {d} — correct the {t} row in spec_assert_runner_wasm_3_0.zig\n",
+                .{ kf.key, kf.count, seen, builtin.cpu.arch },
+            );
+        }
+        for (jit_fail_log.keys.items) |k| {
+            var listed = false;
+            for (known) |kf| {
+                if (std.mem.eql(u8, kf.key, k)) listed = true;
+            }
+            if (listed) continue;
+            jit_unexpected += 1;
+            try stdout.print(
+                "JIT-UNEXPECTED-FAIL  {s}: the JIT executed this and got the wrong result, and no row enumerates it\n",
+                .{k},
+            );
+        }
+        try stdout.print(
+            "[wasm-3.0-assert] JIT known-wrong ({t}): {d} enumerated, {d} unexpected, {d} stale\n",
+            .{ builtin.cpu.arch, known.len, jit_unexpected, jit_stale },
+        );
+    }
     try stdout.flush();
 
     // ADR-0174 — GATE on declarative-assert fails (close the "OK-verdict-hides-
     // pass=0" anomaly fully: the CRLF fix restored real windows coverage, but the
     // runner still always-exit-0'd, so a future real wasm-3.0 fail wouldn't turn
-    // test-all red). 0 fails on all 3 hosts today (verified), so this gates clean.
-    // JIT-path RETURN fails (jit_return.fail) are NOT gated — that's the opt-in
-    // JIT run stage with known eligibility-skips (handover JIT long-tail),
-    // reported only. Read that narrowly: `trap.fail` below IS summed
-    // unconditionally, and in jit mode the assert_trap arm evaluates `cur_jit`,
-    // so a JIT-only trap regression already exits non-zero. That asymmetry
-    // predates this file's accounting rework; D-590 hands it to whoever
-    // gates the JIT lane.
-    // In jit mode `ret.fail` mirrors the JIT verdict, which ADR-0128 keeps
-    // report-only — gating it here would silently promote the opt-in JIT
-    // lane into a merge gate. That promotion is a deliberate decision for
-    // whoever closes the remaining JIT fail, not a side effect of making
-    // the accounting close.
-    const gated_ret_fail = if (jit_mode) 0 else grand.ret.fail;
-    const grand_assert_fail = gated_ret_fail + grand.trap.fail +
+    // test-all red). The interp lane has 0 fails on all 3 hosts; the JIT lane's
+    // known-wrong outcomes are enumerated in `jitKnownFails`, not exempted.
+    // In jit mode `ret.fail` is the JIT verdict, and every one of those fails
+    // is either enumerated above or already counted as unexpected — summing
+    // it here as well would gate the same fail twice and make the enumerated
+    // ones permanently red. The reconciliation IS the gate for this lane.
+    const ret_fail_unaccounted = if (jit_mode) jit_unexpected + jit_stale else grand.ret.fail;
+    const grand_assert_fail = ret_fail_unaccounted + grand.trap.fail +
         grand.invalid.fail + grand.unlinkable.fail + grand.uninstantiable.fail +
         grand.malformed.fail + grand.exception.fail;
     // ADR-0210 — an unclosed identity gates too. A conformance number
@@ -1814,7 +2000,20 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("[wasm-3.0-assert] {d} sub-corpora could not be read — the printed denominator covers only what was reachable\n", .{grand.manifest_errors});
         try stdout.flush();
     }
-    if (grand_assert_fail > 0 or !closed or grand.manifest_errors > 0 or unenumerated_dirs > 0) std.process.exit(1);
+    // A corpus that shrank is not a smaller conformance result, it is a
+    // missing one — and unlike the buckets above it cannot be detected from
+    // inside the tally, which closes just as happily over a fraction.
+    const partial = grand.manifests != corpus_manifests or grand.lines != corpus_lines;
+    if (partial) {
+        try stdout.print(
+            "[wasm-3.0-assert] PARTIAL CORPUS: read {d} manifests / {d} lines, committed corpus is {d} / {d}\n" ++
+                "      these counts are not a conformance result. The corpus is committed —\n" ++
+                "      a missing part is a checkout or path-resolution failure, not a fresh tree.\n",
+            .{ grand.manifests, grand.lines, corpus_manifests, corpus_lines },
+        );
+        try stdout.flush();
+    }
+    if (grand_assert_fail > 0 or !closed or grand.manifest_errors > 0 or unenumerated_dirs > 0 or partial) std.process.exit(1);
 }
 
 /// One assertion category: `<name>=<total>(p=… f=… s=…)`. The total is
