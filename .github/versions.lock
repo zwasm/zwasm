@@ -1,6 +1,10 @@
 # versions.lock — mirror of the pinned tool versions used by zwasm CI.
 #
-# Source of truth: flake.nix (Linux/macOS via the nix devshell + direnv).
+# Source of truth: flake.nix (Linux/macOS via the nix devshell + direnv) —
+# EXCEPT WASMTIME_VERSION. flake.nix takes `pkgs.wasmtime` unversioned, so the
+# dev shell floats with nixpkgs and the value below is CI's pin alone. The
+# realworld differential prints the wasmtime it actually ran against and
+# annotates a mismatch against this line rather than failing on it.
 # This file mirrors the same pins for environments that cannot use Nix —
 # primarily the GitHub-hosted CI runners and Windows native installs that
 # need a version string before nix is available. Sourced as a bash file

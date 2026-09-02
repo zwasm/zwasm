@@ -24,7 +24,8 @@
 //!                 categorises (WASI host gap / validator gap /
 //!                 no entry); orthogonal to differential coverage.
 //!   SKIP-WASMTIME-MISSING — wasmtime not on PATH; runner exits
-//!                 0 with a "no diffs run on this host" notice.
+//!                 0, and every summary line it would have printed
+//!                 says NOT-GATING: oracle-absent instead.
 //!                 Hosts with wasmtime installed see the real gate.
 //!
 //! The `--jit` lane (D-283) re-runs the same corpus through the
@@ -49,11 +50,26 @@
 //! silent (ADR-0210) — and stay covered by the manual `--interp-all`
 //! variant.
 //!
+//! Summary vocabulary, shared with `test/aot/aot_process_diff.zig`: the last
+//! field of every summary line is `GATING`, `NOT-GATING: <reason>`, or
+//! `REPORT-ONLY` (the opt-in lanes that gate nothing by design). Reason is one
+//! of `oracle-absent`, `oracle-unusable`, `corpus-empty`. A lane that checked
+//! nothing says so in its own summary, so a zero exit is never read as a
+//! checked run.
+//!
+//! Oracle version: the runner prints the wasmtime it ran against and compares
+//! it to `WASMTIME_VERSION` in `.github/versions.lock` (passed as
+//! `--versions-lock <path>`), so the lane's numbers are attributable to a
+//! named oracle. A mismatch is annotated, not fatal: that lock file is CI's
+//! pin only — `flake.nix` takes `pkgs.wasmtime` unversioned, so the dev shell
+//! floats with nixpkgs and a fatal check would fail every developer host.
+//!
 //! Usage:
 //!   zig build test-realworld-diff         # shared (.auto) lane only
 //!   zig build test-realworld-diff-jit     # + the gating JIT + forced-interp lanes (test-all)
 //!   zig build test-realworld-diff-interp  # forced-interp over the FULL corpus (manual)
 //!   diff_runner_exe <corpus-dir> [--jit|--aot|--wasmer|--interp|--interp-all]
+//!                                [--versions-lock <path>]
 
 const std = @import("std");
 
@@ -173,6 +189,8 @@ pub fn main(init: std.process.Init) !void {
     var jit_lane = false;
     var interp_lane = false;
     var interp_all = false;
+    var versions_lock: ?[]u8 = null;
+    defer if (versions_lock) |v| gpa.free(v);
     while (arg_it.next()) |a| {
         if (std.mem.eql(u8, a, "--aot")) {
             aot_lane = true;
@@ -185,23 +203,51 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, a, "--interp-all")) {
             interp_lane = true;
             interp_all = true;
+        } else if (std.mem.eql(u8, a, "--versions-lock")) {
+            // Duped: the iterator may reuse its buffer across `next` calls.
+            if (arg_it.next()) |v| versions_lock = try gpa.dupe(u8, v);
         }
     }
 
-    const wasmtime_path_opt = try resolveWasmtime(gpa, io);
-    defer if (wasmtime_path_opt) |p| gpa.free(p);
+    const oracle_opt = try resolveWasmtime(gpa, io);
+    defer if (oracle_opt) |o| o.deinit(gpa);
 
-    if (wasmtime_path_opt == null) {
+    if (oracle_opt == null) {
         try stdout.print(
             "SKIP-WASMTIME-MISSING — wasmtime not on PATH (and no nix-store wrapper found). " ++
                 "§9.6 / 6.F differential gate is non-fatal on this host; the gate is real on " ++
-                "hosts with wasmtime installed (the dev shell pins it via flake.nix).\n",
+                "hosts with wasmtime installed (the dev shell provides it via flake.nix).\n",
             .{},
         );
+        // The skip has to reach the summary, not only the log above. Exit 0
+        // with no summary is indistinguishable from a clean run to anything
+        // reading the tail — which is how a wasmtime-less host produced a
+        // green leg that had checked nothing.
+        try stdout.print("\ndiff_runner: the corpus was not walked — NOT-GATING: oracle-absent\n", .{});
+        if (jit_lane) try stdout.print("diff_runner [jit]: 0 fixtures reached this lane — NOT-GATING: oracle-absent\n", .{});
+        if (interp_lane) try stdout.print("diff_runner [interp]: 0 fixtures reached this lane — NOT-GATING: oracle-absent\n", .{});
         try stdout.flush();
         return;
     }
-    const wasmtime_path = wasmtime_path_opt.?;
+    const wasmtime_path = oracle_opt.?.cmd;
+
+    // Which oracle the numbers below belong to. `resolveWasmtime` already ran
+    // `wasmtime --version` to probe reachability; this keeps its answer.
+    const pinned_opt: ?[]u8 = if (versions_lock) |path| try pinnedWasmtimeVersion(gpa, io, path) else null;
+    defer if (pinned_opt) |v| gpa.free(v);
+    const version_mismatch = if (pinned_opt) |pinned| !std.mem.eql(u8, pinned, oracle_opt.?.version) else false;
+    if (pinned_opt) |pinned| {
+        try stdout.print("oracle: wasmtime {s} — .github/versions.lock pins {s}\n", .{ oracle_opt.?.version, pinned });
+    } else {
+        try stdout.print("oracle: wasmtime {s} — no pin given (--versions-lock)\n", .{oracle_opt.?.version});
+    }
+    if (version_mismatch) {
+        try stdout.print(
+            "ORACLE-VERSION-MISMATCH — this run's figures are attributable to wasmtime {s}, not to the pinned {s}\n",
+            .{ oracle_opt.?.version, pinned_opt.? },
+        );
+    }
+    try stdout.flush();
 
     // Second-oracle resolution (only when --wasmer): wasmer is Mac-only in the
     // flake, so it is absent on the x86_64 hosts — the lane then skips with a
@@ -526,11 +572,24 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    // wasmtime resolved but every spawn failed (e.g. a `which` hit that does
+    // not execute). Decided BEFORE the summaries so the tails can say it — the
+    // notice used to be printed after them, so every lane line above claimed
+    // GATING on a host where nothing had run.
+    const oracle_unusable = matched == 0 and skipped_wasmtime_fail == total and total > 0;
+    const shared_reason: ?[]const u8 = if (total == 0)
+        "corpus-empty"
+    else if (oracle_unusable)
+        "oracle-unusable"
+    else
+        null;
+
     try stdout.print(
         "\ndiff_runner: {d}/{d} matched, {d} mismatched, {d} skipped-empty, " ++
-            "{d} skipped-wasmtime-fail, {d} skipped-v2\n",
+            "{d} skipped-wasmtime-fail, {d} skipped-v2",
         .{ matched, total, mismatched, skipped_empty, skipped_wasmtime_fail, skipped_v2 },
     );
+    try printTail(stdout, shared_reason, version_mismatch);
     // AOT lane summary (opt-in, report-only; D-283 widen / D-251 validate).
     if (aot_lane) {
         try stdout.print(
@@ -547,9 +606,13 @@ pub fn main(init: std.process.Init) !void {
     if (jit_lane) {
         try stdout.print(
             "diff_runner [jit]: {d}/{d} matched vs wasmtime, {d} mismatched, {d} skipped (JIT-unsupported / trap), " ++
-                "{d} skipped-empty, {d} unaccounted — GATING (fatal on mismatch, skip, or shortfall)\n",
+                "{d} skipped-empty, {d} unaccounted",
             .{ jit_matched, jit_eligible, jit_mismatched, jit_skipped, jit_skipped_empty, jit_eligible -| (jit_matched + jit_mismatched + jit_skipped + jit_skipped_empty) },
         );
+        // An empty eligible set is a lane that owed no verdict and gave none:
+        // its three gate arms are all vacuously satisfied, which is exactly the
+        // state the word GATING must not be printed for.
+        try printTail(stdout, shared_reason orelse (if (jit_eligible == 0) "oracle-unusable" else null), version_mismatch);
         // ADR-0210 rule 4: print the identity, do not leave it implied. `{d}/{d}`
         // above is against the ELIGIBLE set, so the corpus-level denominator has
         // to be reconciled separately or the ratio reads as full coverage.
@@ -562,9 +625,10 @@ pub fn main(init: std.process.Init) !void {
     if (interp_lane) {
         try stdout.print(
             "diff_runner [interp]: {d}/{d} matched vs wasmtime, {d} mismatched, {d} skipped (interp-unsupported / trap), " ++
-                "{d} skipped-empty, {d} unaccounted — GATING (fatal on mismatch, skip, or shortfall)\n",
+                "{d} skipped-empty, {d} unaccounted",
             .{ interp_matched, interp_eligible, interp_mismatched, interp_skipped, interp_skipped_empty, interp_eligible -| (interp_matched + interp_mismatched + interp_skipped + interp_skipped_empty) },
         );
+        try printTail(stdout, shared_reason orelse (if (interp_eligible == 0) "oracle-unusable" else null), version_mismatch);
         // Same rule-4 print as the JIT lane, one bucket wider: the enumerated
         // slow skips are part of the corpus-level denominator, so a fixture
         // enumerated out is visibly NOT part of the `{d}/{d}` coverage ratio.
@@ -696,12 +760,10 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         }
     }
-    // wasmtime resolved via `which` but every spawn failed (e.g. on
-    // windowsmini, where `which wasmtime` finds a stub that doesn't
-    // actually execute). Treat as SKIP-WASMTIME-MISSING so the gate
-    // remains portable; the gate is real on hosts where wasmtime
-    // genuinely runs.
-    if (matched == 0 and skipped_wasmtime_fail == total and total > 0) {
+    // Treated as SKIP-WASMTIME-MISSING so the gate remains portable; the gate
+    // is real on hosts where wasmtime genuinely runs. The summaries above
+    // already carry `NOT-GATING: oracle-unusable`.
+    if (oracle_unusable) {
         try stdout.print(
             "SKIP-WASMTIME-UNUSABLE — wasmtime resolved but every spawn failed " ++
                 "({d} of {d} fixtures); §9.6 / 6.F differential gate is non-fatal on this host.\n",
@@ -954,8 +1016,54 @@ fn interpCompare(
     return .mismatch;
 }
 
+/// The reference oracle: the command to spawn plus the version it reported.
+const Oracle = struct {
+    cmd: []u8,
+    version: []u8,
+
+    fn deinit(self: Oracle, gpa: std.mem.Allocator) void {
+        gpa.free(self.cmd);
+        gpa.free(self.version);
+    }
+};
+
+/// `WASMTIME_VERSION` from a `.github/versions.lock`-shaped file, or null when
+/// the file is unreadable or carries no such key.
+fn pinnedWasmtimeVersion(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !?[]u8 {
+    const cwd = std.Io.Dir.cwd();
+    const text = cwd.readFileAlloc(io, path, gpa, .limited(64 << 10)) catch return null;
+    defer gpa.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    const key = "WASMTIME_VERSION=";
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (std.mem.startsWith(u8, trimmed, key)) return try gpa.dupe(u8, trimmed[key.len..]);
+    }
+    return null;
+}
+
+/// `wasmtime 47.0.3 (5554cc1a6 2026-07-31)` → `47.0.3`.
+fn parseWasmtimeVersion(out: []const u8) []const u8 {
+    var it = std.mem.tokenizeAny(u8, out, " \t\r\n");
+    _ = it.next() orelse return "unknown";
+    return it.next() orelse "unknown";
+}
+
+/// The one summary tail both differential runners print. Kept as a function so
+/// the two words and the three reasons cannot drift between call sites.
+fn printTail(out: anytype, reason: ?[]const u8, version_mismatch: bool) !void {
+    if (reason) |r| {
+        try out.print(" — NOT-GATING: {s}\n", .{r});
+    } else if (version_mismatch) {
+        try out.print(" — GATING (oracle-version-mismatch)\n", .{});
+    } else {
+        try out.print(" — GATING\n", .{});
+    }
+}
+
 /// Test whether `wasmtime` is reachable on PATH. Returns the
-/// bare command name (`"wasmtime"`) if reachable, null otherwise.
+/// bare command name (`"wasmtime"`) and its reported version if
+/// reachable, null otherwise.
 ///
 /// We deliberately do NOT return the path from `which` /
 /// `where.exe` because on Windows MSYS / Git-Bash hosts (e.g.
@@ -968,14 +1076,16 @@ fn interpCompare(
 /// Discharges debt D-008 (the previous "wasmtime stub on
 /// windowsmini" framing was wrong; wasmtime IS installed there
 /// — `which`'s MSYS-format path was the actual blocker).
-fn resolveWasmtime(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
+fn resolveWasmtime(allocator: std.mem.Allocator, io: std.Io) !?Oracle {
     const result = std.process.run(allocator, io, .{
         .argv = &[_][]const u8{ "wasmtime", "--version" },
     }) catch return null;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     if (result.term != .exited or result.term.exited != 0) return null;
-    return try allocator.dupe(u8, "wasmtime");
+    const cmd = try allocator.dupe(u8, "wasmtime");
+    errdefer allocator.free(cmd);
+    return .{ .cmd = cmd, .version = try allocator.dupe(u8, parseWasmtimeVersion(result.stdout)) };
 }
 
 /// Test whether `wasmer` is reachable on PATH (the §9.6 A3 second-oracle lane).
