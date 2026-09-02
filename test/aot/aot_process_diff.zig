@@ -317,7 +317,6 @@ fn run(init: std.process.Init) !u8 {
             for (seen_content.items) |h| {
                 if (std.mem.eql(u8, &h, &content_hash)) duplicate_content = true;
             }
-            if (!duplicate_content) try seen_content.append(gpa, content_hash);
 
             const stored_before = try countStoredArtifacts(io, cwd, cache_root_rel);
             var lane_miss = runLane(gpa, io, lane_c_argv, corpus_dir) catch |err| {
@@ -357,6 +356,11 @@ fn run(init: std.process.Init) !u8 {
                     .{ entry.name, stored_after_hit - stored_after_miss },
                 );
             }
+            // Recorded only once both cache lanes have run. A fixture whose
+            // lane could not be launched `continue`s above without creating an
+            // entry, so recording it earlier would make the next identical
+            // fixture's real first store read as a duplicate's forbidden one.
+            if (!duplicate_content) try seen_content.append(gpa, content_hash);
 
             const equal = lane_a.exit == lane_b.exit and std.mem.eql(u8, lane_a.stdout, lane_b.stdout);
             const cache_equal = lane_a.exit == lane_miss.exit and
