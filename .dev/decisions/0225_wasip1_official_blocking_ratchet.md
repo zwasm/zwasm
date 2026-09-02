@@ -1,6 +1,7 @@
 # 0225 — The official preview1 corpus blocks, with a ratchet; ADR-0208 D3's advisory placement is superseded
 
-- **Status**: Proposed
+- **Status**: Accepted (2026-09-02 — maintainer sign-off on PR #380, taken on
+  the measurements in Context before any of it was written; D1–D3 as written)
 - **Date**: 2026-09-02
 - **Author**: Junji Takakura
 - **Tags**: ci, wasi, gate, ratchet
