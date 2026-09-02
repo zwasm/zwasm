@@ -1,17 +1,19 @@
 # CI — the host-local gate on the 3 supported OSes, mirroring the local
 # 3-host gate (Mac aarch64 + Linux x86_64 + Windows x86_64). Each matrix leg
 # runs `scripts/ci_gate.sh`, which is where nearly all of the blocking content
-# lives, so it stays the single source of truth for what the maintainer runs
-# per host; the differential oracle is wasmtime, and its install is required.
+# lives and is the single definition of it; the differential oracle is
+# wasmtime, and its install is required.
 #
-# The leg has ONE blocking step outside that script — `test-wasi-p1-official`,
-# whose own block below says why it sits here rather than inside. So a green
-# local `gate_merge.sh` does not predict this leg. That is not new to it:
-# `doc-truth` is blocking through `ci-required` and its
-# `check_wasi03_coverage_claims` / `check_doc_fossils` have no local
-# counterpart at all. `ci-required` is authoritative and the local scripts are
-# pre-flight (ADR-0076 D9) — but do not read the paragraph above as a promise
-# that a local green cannot go red here.
+# What that does NOT mean is that a green local run predicts this leg, and two
+# things break the correspondence. The leg has one blocking step outside the
+# script — `test-wasi-p1-official`, whose own block below says why it sits
+# here. And `gate_merge.sh` does not invoke `ci_gate.sh` at all: it runs
+# `gate_commit.sh` locally and `run_remote_*.sh test-all` on the two remote
+# hosts, so it approximates the leg rather than reproducing it. Workflow-wide
+# the same already holds for `doc-truth`, which blocks through `ci-required`
+# while its `check_wasi03_coverage_claims` / `check_doc_fossils` have no local
+# counterpart. `ci-required` is authoritative; the local scripts are
+# pre-flight (ADR-0076 D9).
 #
 # Triggers: pull_request (any target) + push to `main` + manual dispatch.
 # `main` is the trunk and is ruleset-protected: no direct pushes — every change
