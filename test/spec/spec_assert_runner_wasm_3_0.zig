@@ -1955,6 +1955,33 @@ pub fn main(init: std.process.Init) !void {
         .{ if (jit_mode) "jit" else "interp", asserts_pass, asserts_fail, asserts_skip, asserts_total, PROPOSALS.len },
     );
 
+    // Not every assertion in the corpus exercises an engine. assert_invalid /
+    // assert_unlinkable / assert_uninstantiable / assert_malformed are decode,
+    // validate and link verdicts, identical on both lanes. Folded silently
+    // into a line labelled `[jit]` they read as JIT coverage, which is the
+    // shape of overstatement this lane exists to remove — so the line says
+    // how many of its own total actually reached the engine named in it.
+    //
+    // assert_exception is the one that SHOULD reach it and does not: that arm
+    // has no jit branch (see the ASYMMETRY note on it), so in jit mode its 4
+    // directives run on the interpreter and are counted out here rather than
+    // left inside a JIT pass count.
+    const engine_independent = grand.invalid.total + grand.unlinkable.total +
+        grand.uninstantiable.total + grand.malformed.total;
+    const interp_only_exception: u32 = if (jit_mode) grand.exception.total else 0;
+    const engine_executed = asserts_total - engine_independent - interp_only_exception;
+    try stdout.print(
+        "wasm_3_0_assert [{s}]: of that total, {d} reached the engine and {d} are decode/validate/link verdicts no engine executes",
+        .{ if (jit_mode) "jit" else "interp", engine_executed, engine_independent },
+    );
+    if (interp_only_exception > 0) {
+        try stdout.print(
+            "; {d} assert_exception ran on the interpreter (that arm has no jit branch)",
+            .{interp_only_exception},
+        );
+    }
+    try stdout.print("\n", .{});
+
     // §1 (ADR-0128) — the JIT lane's exact-match gate. Both directions:
     //   unexpected — a fail with no row: a regression, or a host nobody
     //                measured. Red.
