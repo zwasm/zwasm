@@ -156,27 +156,34 @@ comptime {
     }
 }
 
-/// `stem`'s expectation, marking its row ENCOUNTERED on the way — see `Seen`.
-/// The two travel together because a lookup that does not record the visit is
-/// exactly the hole `Seen` exists to close.
-fn lookup(stem: []const u8, seen: *Seen) Expectation {
-    for (known_table, seen) |e, *flag| {
+/// `stem`'s expectation, counting the visit on the way — see `Hits`. The two
+/// travel together because a lookup that does not record the visit is exactly
+/// the hole `Hits` exists to close.
+fn lookup(stem: []const u8, hits: *Hits) Expectation {
+    for (known_table, hits) |e, *n| {
         if (std.mem.eql(u8, e.name, stem)) {
-            flag.* = true;
+            n.* += 1;
             return e.exp;
         }
     }
     return .match;
 }
 
-/// One flag per `known_table` row, set when the corpus actually yields that
-/// test. A row nobody encountered is a tolerance for a test that is no longer
-/// there: an upstream bump that REMOVES a listed test and adds another keeps
-/// `vendored_total` intact, so nothing else in this runner would notice, and
-/// the row would sit there tolerating nothing until someone re-read it. The
-/// ratchet exists to stop the table drifting from the corpus; drifting by
-/// deletion is the direction the RATCHET-FLIP check cannot see.
-const Seen = [known_table.len]bool;
+/// How many corpus tests each `known_table` row matched over one whole walk.
+/// Exactly one is the only healthy value, and both other answers are the table
+/// drifting from the corpus in a direction RATCHET-FLIP cannot see:
+///
+/// - **zero** — the row tolerates a test that is no longer there. An upstream
+///   bump that REMOVES a listed test and adds another keeps `vendored_total`
+///   intact, so nothing else in this runner would notice, and the row would sit
+///   there until someone re-read it.
+/// - **more than one** — two suites vendor the same stem, so the row speaks for
+///   both and silently tolerates a test nobody chose to list. Today the corpus
+///   has no cross-suite collision, but nothing upstream or in
+///   `scripts/vendor_wasip1_official.sh` promises that: the script asserts
+///   per-language COUNTS, not name uniqueness. A count is cheaper than the
+///   comment that would otherwise assert it.
+const Hits = [known_table.len]u32;
 
 const Counts = struct {
     passed: u32 = 0,
@@ -266,7 +273,7 @@ pub fn main(init: std.process.Init) !void {
 
     var total: Counts = .{};
     var suites: u32 = 0;
-    var seen: Seen = @splat(false);
+    var hits: Hits = @splat(0);
 
     var root_it = root_dir.iterate();
     while (try root_it.next(io)) |entry| {
@@ -295,7 +302,7 @@ pub fn main(init: std.process.Init) !void {
             },
         };
 
-        const suite = try runSuite(gpa, io, out, corpus_root, entry.name, engine, scratch_root, &seen);
+        const suite = try runSuite(gpa, io, out, corpus_root, entry.name, engine, scratch_root, &hits);
         total.passed += suite.passed;
         total.failed += suite.failed;
         total.expected_failed += suite.expected_failed;
@@ -365,29 +372,37 @@ pub fn main(init: std.process.Init) !void {
             .{ total.ran(), vendored_total },
         );
     }
-    // A row nobody encountered describes a test the corpus no longer holds, so
-    // the tolerance it grants is dead. Checked after the loop, not inside it:
-    // the rows are spread across the three suites and only the whole walk knows
-    // which were reached.
-    var stale: u32 = 0;
-    for (known_table, seen) |e, was_seen| {
-        if (was_seen) continue;
-        try out.print(
-            "STALE-ROW  known_table lists '{s}' ({s}), which this corpus does not\n" ++
-                "      hold — remove the row, or re-vendor with\n" ++
-                "      scripts/vendor_wasip1_official.sh\n",
-            .{ e.name, switch (e.exp) {
-                .match => "",
-                .known_failure => |row| row,
-            } },
-        );
-        stale += 1;
+    // Checked after the loop, not inside it: the rows are spread across the
+    // three suites and only the whole walk knows how often each was reached.
+    var drifted: u32 = 0;
+    for (known_table, hits) |e, n| {
+        if (n == 1) continue;
+        const row = switch (e.exp) {
+            .match => "",
+            .known_failure => |r| r,
+        };
+        if (n == 0) {
+            try out.print(
+                "STALE-ROW  known_table lists '{s}' ({s}), which this corpus does not\n" ++
+                    "      hold — remove the row, or re-vendor with\n" ++
+                    "      scripts/vendor_wasip1_official.sh\n",
+                .{ e.name, row },
+            );
+        } else {
+            try out.print(
+                "DUP-STEM   known_table's '{s}' ({s}) matched {d} corpus tests — the\n" ++
+                    "      row speaks for all of them. Key the table by suite, or\n" ++
+                    "      re-vendor with scripts/vendor_wasip1_official.sh\n",
+                .{ e.name, row, n },
+            );
+        }
+        drifted += 1;
     }
 
     try out.flush();
     discardAbsent(cwd.deleteTree(io, scratch_root));
     if (total.failed != 0 or total.errored != 0 or partial or
-        total.ratchet_flips != 0 or stale != 0)
+        total.ratchet_flips != 0 or drifted != 0)
     {
         std.process.exit(1);
     }
@@ -414,7 +429,7 @@ fn runSuite(
     suite_name: []const u8,
     engine: Engine,
     scratch_root: []const u8,
-    seen: *Seen,
+    hits: *Hits,
 ) !Counts {
     const suite_path = try std.Io.Dir.path.join(gpa, &.{ corpus_root, suite_name });
     defer gpa.free(suite_path);
@@ -463,7 +478,7 @@ fn runSuite(
         if (!std.mem.endsWith(u8, entry.name, ".wasm")) continue;
 
         const stem = entry.name[0 .. entry.name.len - ".wasm".len];
-        const exp = lookup(stem, seen);
+        const exp = lookup(stem, hits);
         if (runOne(gpa, io, out, &suite_dir, suite_path, stem, entry.name, engine, scratch_root)) {
             counts.passed += 1;
             if (exp == .known_failure) {

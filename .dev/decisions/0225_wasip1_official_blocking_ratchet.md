@@ -68,10 +68,14 @@ whose test starts passing. A row whose test is no longer THERE is the other
 direction, and it is silent: an upstream bump that removes a listed test and
 adds another keeps the vendored total intact, so nothing else in the runner
 notices, and the row sits tolerating nothing. Each row therefore carries an
-encountered flag, and a row the walk never reached exits non-zero as
-`STALE-ROW`. Duplicate keys are a `@compileError`, since the second copy would
-be unreachable and its flag would never be set either. Found by Devin's review
-on PR #380 and reproduced before fixing — a bogus row passed at exit 0.
+hit COUNT, and any row the walk did not reach exactly once exits non-zero:
+`STALE-ROW` at zero, `DUP-STEM` above one. Duplicate keys within the table are
+a `@compileError`, since the second copy would be unreachable and never
+counted. Both directions came from Devin's review on PR #380 and were
+reproduced before fixing — a bogus row passed at exit 0, and stem uniqueness
+across the three suites was asserted only by a comment:
+`scripts/vendor_wasip1_official.sh` pins per-language COUNTS, not names, so a
+rename that collides two suites' stems keeps the vendored total intact.
 
 ### D2 — The table describes CI's windows-2022 runner and no other host
 
