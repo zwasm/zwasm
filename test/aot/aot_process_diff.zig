@@ -109,13 +109,25 @@ fn runLane(
     };
 }
 
-/// `.cwasm` entries under the cache-lane root. Called per fixture (before the
-/// miss, after the miss, after the hit) rather than once per run: a store that
-/// works for one fixture and fails for the other 63 satisfies a whole-run
-/// "at least one was stored" check, while `cache_equal` stays true because a
-/// never-stored entry simply recompiles to identical bytes.
-fn countStoredArtifacts(io: std.Io, cwd: std.Io.Dir, root_rel: []const u8) !u32 {
-    var n: u32 = 0;
+/// One walk of the cache-lane root: how many `.cwasm` entries it holds, and
+/// whether the entry for `key_hex` is one of them.
+///
+/// Per fixture, not once per run: a store that works for one fixture and
+/// fails for the other 63 satisfies a whole-run "at least one was stored"
+/// check, while `cache_equal` stays true because a never-stored entry simply
+/// recompiles to identical bytes.
+///
+/// Asks whether THIS fixture's entry exists rather than whether the count
+/// grew, which is what keeps the answer independent of what earlier fixtures
+/// in the run did. `src/cli/cache.zig` `keyHex` is SHA-256 of the module
+/// bytes and the codegen-affecting knobs live in the subdirectory name, so
+/// `<key>.cwasm` under any subdirectory is this module's artifact — and two
+/// byte-identical fixtures share it, the second one's miss lane legitimately
+/// storing nothing.
+const CacheScan = struct { total: u32, has_key: bool };
+
+fn scanCache(io: std.Io, cwd: std.Io.Dir, root_rel: []const u8, key_hex: []const u8) !CacheScan {
+    var scan: CacheScan = .{ .total = 0, .has_key = false };
     var root_dir = try cwd.openDir(io, root_rel, .{ .iterate = true });
     defer root_dir.close(io);
     var root_it = root_dir.iterate();
@@ -125,10 +137,14 @@ fn countStoredArtifacts(io: std.Io, cwd: std.Io.Dir, root_rel: []const u8) !u32 
         defer sub_dir.close(io);
         var sub_it = sub_dir.iterate();
         while (try sub_it.next(io)) |e| {
-            if (std.mem.endsWith(u8, e.name, ".cwasm")) n += 1;
+            if (!std.mem.endsWith(u8, e.name, ".cwasm")) continue;
+            scan.total += 1;
+            if (e.name.len == key_hex.len + ".cwasm".len and std.mem.startsWith(u8, e.name, key_hex)) {
+                scan.has_key = true;
+            }
         }
     }
-    return n;
+    return scan;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -203,15 +219,6 @@ fn run(init: std.process.Init) !u8 {
     var unsound_reported: u32 = 0;
     var unexpected: u32 = 0; // gate
     var ratchet_flips: u32 = 0; // gate (a known_table entry now matches)
-
-    // Content hashes of the fixtures whose cache entry this run has already
-    // created. The cache is keyed by module CONTENT (`src/cli/cache.zig`
-    // `keyHex` = SHA-256 of the bytes), so two byte-identical fixtures — same
-    // name or not, same directory or not — share one entry: the second one's
-    // "miss" lane is a hit and stores nothing, which the store check below
-    // would otherwise read as a broken store.
-    var seen_content: std.ArrayList([32]u8) = .empty;
-    defer seen_content.deinit(gpa);
 
     var n_dirs: u32 = 0;
     var corpus_empty = false;
@@ -309,58 +316,40 @@ fn run(init: std.process.Init) !u8 {
                 &.{ cli, "run", cache_flag, "--dir", p, entry.name }
             else
                 &.{ cli, "run", cache_flag, entry.name };
+            // This fixture's cache key — see `scanCache`.
             const fixture_bytes = try dir.readFileAlloc(io, entry.name, gpa, .limited(64 << 20));
             defer gpa.free(fixture_bytes);
             var content_hash: [32]u8 = undefined;
             std.crypto.hash.sha2.Sha256.hash(fixture_bytes, &content_hash, .{});
-            var duplicate_content = false;
-            for (seen_content.items) |h| {
-                if (std.mem.eql(u8, &h, &content_hash)) duplicate_content = true;
-            }
+            const key_hex = std.fmt.bytesToHex(content_hash, .lower);
 
-            const stored_before = try countStoredArtifacts(io, cwd, cache_root_rel);
             var lane_miss = runLane(gpa, io, lane_c_argv, corpus_dir) catch |err| {
                 try stdout.print("SKIP-SPAWN  {s}: lane C miss: {s}\n", .{ entry.name, @errorName(err) });
                 skipped_spawn += 1;
                 continue;
             };
             defer lane_miss.deinit(gpa);
-            const stored_after_miss = try countStoredArtifacts(io, cwd, cache_root_rel);
+            const after_miss = try scanCache(io, cwd, cache_root_rel, &key_hex);
             var lane_hit = runLane(gpa, io, lane_c_argv, corpus_dir) catch |err| {
                 try stdout.print("SKIP-SPAWN  {s}: lane C hit: {s}\n", .{ entry.name, @errorName(err) });
                 skipped_spawn += 1;
                 continue;
             };
             defer lane_hit.deinit(gpa);
-            const stored_after_hit = try countStoredArtifacts(io, cwd, cache_root_rel);
-            if (duplicate_content) {
-                // An earlier fixture in this run has the same bytes, so BOTH
-                // lanes here are hits on its entry and neither may store.
-                if (stored_after_hit != stored_before) {
-                    unexpected += 1;
-                    try stdout.print(
-                        "CACHE-DUP-STORE  {s}: byte-identical to an earlier fixture, yet {d} entries were added\n",
-                        .{ entry.name, stored_after_hit - stored_before },
-                    );
-                }
-            } else if (stored_after_miss == stored_before) {
+            const after_hit = try scanCache(io, cwd, cache_root_rel, &key_hex);
+            if (!after_miss.has_key) {
                 unexpected += 1;
                 try stdout.print(
-                    "CACHE-STORE-FAIL  {s}: the miss lane stored nothing ({d} entries before and after)\n",
-                    .{ entry.name, stored_before },
+                    "CACHE-STORE-FAIL  {s}: no entry for this module after the miss lane ({d} in the root)\n",
+                    .{ entry.name, after_miss.total },
                 );
-            } else if (stored_after_hit != stored_after_miss) {
+            } else if (after_hit.total != after_miss.total) {
                 unexpected += 1;
                 try stdout.print(
                     "CACHE-HIT-MISSED  {s}: the hit lane stored {d} more entries — it recompiled instead of hitting\n",
-                    .{ entry.name, stored_after_hit - stored_after_miss },
+                    .{ entry.name, after_hit.total - after_miss.total },
                 );
             }
-            // Recorded only once both cache lanes have run. A fixture whose
-            // lane could not be launched `continue`s above without creating an
-            // entry, so recording it earlier would make the next identical
-            // fixture's real first store read as a duplicate's forbidden one.
-            if (!duplicate_content) try seen_content.append(gpa, content_hash);
 
             const equal = lane_a.exit == lane_b.exit and std.mem.eql(u8, lane_a.stdout, lane_b.stdout);
             const cache_equal = lane_a.exit == lane_miss.exit and
