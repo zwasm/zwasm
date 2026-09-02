@@ -1955,32 +1955,32 @@ pub fn main(init: std.process.Init) !void {
         .{ if (jit_mode) "jit" else "interp", asserts_pass, asserts_fail, asserts_skip, asserts_total, PROPOSALS.len },
     );
 
-    // Not every assertion in the corpus exercises an engine. assert_invalid /
-    // assert_unlinkable / assert_uninstantiable / assert_malformed are decode,
-    // validate and link verdicts, identical on both lanes. Folded silently
-    // into a line labelled `[jit]` they read as JIT coverage, which is the
-    // shape of overstatement this lane exists to remove — so the line says
-    // how many of its own total actually reached the engine named in it.
+    // The `passed` above is not all one engine's work. `ZWASM_SPEC_ENGINE`
+    // routes exactly two categories — assert_return and assert_trap — plus
+    // assert_exception in interp mode, whose arm has no jit branch (see the
+    // ASYMMETRY note on it). Everything else builds against `cur_engine`,
+    // which takes the default options on BOTH lanes and never consults the
+    // selector, which is why both lanes report the same unrouted count.
     //
-    // assert_exception is the one that SHOULD reach it and does not: that arm
-    // has no jit branch (see the ASYMMETRY note on it), so in jit mode its 4
-    // directives run on the interpreter and are counted out here rather than
-    // left inside a JIT pass count.
-    const engine_independent = grand.invalid.total + grand.unlinkable.total +
-        grand.uninstantiable.total + grand.malformed.total;
-    const interp_only_exception: u32 = if (jit_mode) grand.exception.total else 0;
-    const engine_executed = asserts_total - engine_independent - interp_only_exception;
+    // Folded together they read as coverage by the engine in the label, which
+    // is the overstatement this lane exists to remove. Split on passes rather
+    // than totals: a skip is not coverage by anyone, and it is already its own
+    // column.
+    const selector_routed_pass = grand.ret.pass + grand.trap.pass +
+        (if (jit_mode) 0 else grand.exception.pass);
+    const unrouted_pass = asserts_pass - selector_routed_pass;
     try stdout.print(
-        "wasm_3_0_assert [{s}]: of that total, {d} reached the engine and {d} are decode/validate/link verdicts no engine executes",
-        .{ if (jit_mode) "jit" else "interp", engine_executed, engine_independent },
+        "wasm_3_0_assert [{s}]: {d} of those passes came from the engine this lane selects, {d} did not{s}\n",
+        .{
+            if (jit_mode) "jit" else "interp",
+            selector_routed_pass,
+            unrouted_pass,
+            if (jit_mode)
+                " (assert_invalid / unlinkable / uninstantiable / malformed never consult the selector; assert_exception has no jit branch)"
+            else
+                " (assert_invalid / unlinkable / uninstantiable / malformed never consult the selector)",
+        },
     );
-    if (interp_only_exception > 0) {
-        try stdout.print(
-            "; {d} assert_exception ran on the interpreter (that arm has no jit branch)",
-            .{interp_only_exception},
-        );
-    }
-    try stdout.print("\n", .{});
 
     // §1 (ADR-0128) — the JIT lane's exact-match gate. Both directions:
     //   unexpected — a fail with no row: a regression, or a host nobody
