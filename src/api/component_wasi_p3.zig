@@ -1470,3 +1470,118 @@ test "wasip3-official: sockets-tcp-receive" {
 test "wasip3-official: sockets-echo (join! interleaved data plane)" {
     try runOfficialWasip3Test("sockets-echo");
 }
+
+/// The vendored corpus root, relative to the repo root. The 45 test blocks
+/// above reach it through `runOfficialWasip3Test`, which builds the same
+/// prefix from a comptime name.
+const wasip3_official_root = "test/component/wasip3_official";
+
+// ADR-0210 — the denominator behind "the official wasm32-wasip3 corpus,
+// 45/45 green on all three supported OSes".
+//
+// Every `.wasm` in the corpus does have a `test "wasip3-official: …"` block
+// above, but nothing checked that, and the two sides drift in opposite ways:
+//
+//   corpus -> covered   a newly vendored binary that nobody writes a block
+//                       for is simply never run, and the lane stays green
+//                       over a corpus it no longer covers.
+//   covered -> corpus   a block naming a binary that regen removed fails on
+//                       the file read, which is loud — but only once the
+//                       block still exists to fail, so it is checked here
+//                       too rather than relied on.
+//
+// The covered set is read from `builtin.test_functions` rather than from a
+// second hand-written list: a list would be one more copy of the 45 names,
+// and a copy is the thing this test exists to stop.
+//
+// CAVEAT: `-Dtest-filter` removes tests from `test_functions`, so a filter
+// that keeps THIS block while dropping the 45 reports them all as uncovered.
+// No build step passes a filter (`test-all` does not), and the failure names
+// itself below.
+test "wasip3-official: the covered set is exactly the vendored corpus" {
+    const builtin = @import("builtin");
+    const alloc = testing.allocator;
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // `<module path>.test.wasip3-official: <name>[ (note)]` — the block's own
+    // name carries the corpus entry it covers, so it is the source of truth.
+    const marker = ".test.wasip3-official: ";
+    var covered: std.ArrayList([]const u8) = .empty;
+    defer covered.deinit(alloc);
+    for (builtin.test_functions) |t| {
+        const at = std.mem.find(u8, t.name, marker) orelse continue;
+        var name = t.name[at + marker.len ..];
+        // Several blocks append a parenthesised note ("(async wait-until/…)").
+        if (std.mem.find(u8, name, " (")) |sp| name = name[0..sp];
+        if (std.mem.eql(u8, name, "the covered set is exactly the vendored corpus")) continue;
+        try covered.append(alloc, name);
+    }
+
+    var root = std.Io.Dir.cwd().openDir(io, wasip3_official_root, .{ .iterate = true }) catch |err| {
+        // ADR-0174 — the corpus is committed, so an unopenable root is a path
+        // or checkout failure. It must never read as "0 entries, all green".
+        std.debug.print(
+            "wasip3-official corpus root '{s}' not openable: {t}\n" ++
+                "  the corpus is committed — regen with scripts/vendor_wasip3_official.sh\n",
+            .{ wasip3_official_root, err },
+        );
+        return error.TestUnexpectedResult;
+    };
+    defer root.close(io);
+
+    var vendored: u32 = 0;
+    var uncovered: u32 = 0;
+    var it = root.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".wasm")) continue;
+        vendored += 1;
+        const stem = entry.name[0 .. entry.name.len - ".wasm".len];
+        var found = false;
+        for (covered.items) |c| {
+            if (std.mem.eql(u8, c, stem)) found = true;
+        }
+        if (!found) {
+            uncovered += 1;
+            std.debug.print(
+                "UNCOVERED  {s}/{s}: vendored, but no `test \"wasip3-official: {s}\"` block runs it\n",
+                .{ wasip3_official_root, entry.name, stem },
+            );
+        }
+    }
+
+    var absent: u32 = 0;
+    for (covered.items) |c| {
+        const rel = try std.fmt.allocPrint(alloc, "{s}.wasm", .{c});
+        defer alloc.free(rel);
+        root.access(io, rel, .{}) catch {
+            absent += 1;
+            std.debug.print(
+                "ABSENT  a test block covers '{s}', but {s}/{s} is not in the corpus\n",
+                .{ c, wasip3_official_root, rel },
+            );
+        };
+    }
+
+    // Always print the count. The claim this lane backs is a NUMBER, and an
+    // OK/NG verdict is how a lane running over a fraction of its corpus reads
+    // as green (ADR-0174). Same vocabulary as `test/wasi/official_runner.zig`
+    // and the wasm-3.0 assert lane.
+    std.debug.print(
+        "wasip3_official: {d} covered, {d} uncovered, {d} absent, {d} vendored\n",
+        .{ covered.items.len, uncovered, absent, vendored },
+    );
+
+    if (vendored == 0) {
+        // Reachable with an openable-but-empty root, where every check above
+        // passes vacuously.
+        std.debug.print("the corpus root holds no .wasm — regen with scripts/vendor_wasip3_official.sh\n", .{});
+        return error.TestUnexpectedResult;
+    }
+    try testing.expectEqual(@as(u32, 0), uncovered);
+    try testing.expectEqual(@as(u32, 0), absent);
+    try testing.expectEqual(@as(usize, vendored), covered.items.len);
+}
