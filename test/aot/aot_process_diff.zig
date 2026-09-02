@@ -204,6 +204,15 @@ fn run(init: std.process.Init) !u8 {
     var unexpected: u32 = 0; // gate
     var ratchet_flips: u32 = 0; // gate (a known_table entry now matches)
 
+    // Content hashes of the fixtures whose cache entry this run has already
+    // created. The cache is keyed by module CONTENT (`src/cli/cache.zig`
+    // `keyHex` = SHA-256 of the bytes), so two byte-identical fixtures — same
+    // name or not, same directory or not — share one entry: the second one's
+    // "miss" lane is a hit and stores nothing, which the store check below
+    // would otherwise read as a broken store.
+    var seen_content: std.ArrayList([32]u8) = .empty;
+    defer seen_content.deinit(gpa);
+
     var n_dirs: u32 = 0;
     var corpus_empty = false;
     while (arg_it.next()) |corpus_dir_arg| {
@@ -300,6 +309,16 @@ fn run(init: std.process.Init) !u8 {
                 &.{ cli, "run", cache_flag, "--dir", p, entry.name }
             else
                 &.{ cli, "run", cache_flag, entry.name };
+            const fixture_bytes = try dir.readFileAlloc(io, entry.name, gpa, .limited(64 << 20));
+            defer gpa.free(fixture_bytes);
+            var content_hash: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(fixture_bytes, &content_hash, .{});
+            var duplicate_content = false;
+            for (seen_content.items) |h| {
+                if (std.mem.eql(u8, &h, &content_hash)) duplicate_content = true;
+            }
+            if (!duplicate_content) try seen_content.append(gpa, content_hash);
+
             const stored_before = try countStoredArtifacts(io, cwd, cache_root_rel);
             var lane_miss = runLane(gpa, io, lane_c_argv, corpus_dir) catch |err| {
                 try stdout.print("SKIP-SPAWN  {s}: lane C miss: {s}\n", .{ entry.name, @errorName(err) });
@@ -315,7 +334,17 @@ fn run(init: std.process.Init) !u8 {
             };
             defer lane_hit.deinit(gpa);
             const stored_after_hit = try countStoredArtifacts(io, cwd, cache_root_rel);
-            if (stored_after_miss == stored_before) {
+            if (duplicate_content) {
+                // An earlier fixture in this run has the same bytes, so BOTH
+                // lanes here are hits on its entry and neither may store.
+                if (stored_after_hit != stored_before) {
+                    unexpected += 1;
+                    try stdout.print(
+                        "CACHE-DUP-STORE  {s}: byte-identical to an earlier fixture, yet {d} entries were added\n",
+                        .{ entry.name, stored_after_hit - stored_before },
+                    );
+                }
+            } else if (stored_after_miss == stored_before) {
                 unexpected += 1;
                 try stdout.print(
                     "CACHE-STORE-FAIL  {s}: the miss lane stored nothing ({d} entries before and after)\n",
