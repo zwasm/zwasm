@@ -36,6 +36,13 @@
 //! Everything else defaults to `.match` — any divergence is a finding and
 //! the gate exits non-zero.
 //!
+//! Summary vocabulary, shared with `test/realworld/diff_runner.zig`: the last
+//! field of every summary line is `GATING` or `NOT-GATING: <reason>`, and
+//! reason is one of `oracle-absent`, `oracle-unusable`, `corpus-empty` — this
+//! runner compares zwasm against itself, so only the last can appear here. A
+//! lane that checked nothing says so in its own summary, so a zero exit is
+//! never read as a checked run.
+//!
 //! Usage: `zig build test-aot-diff` /
 //!        `zwasm-aot-process-diff <zwasm-cli> <corpus-dir> [corpus-dir...]`
 
@@ -100,6 +107,28 @@ fn runLane(
         },
         .crashed = result.term != .exited,
     };
+}
+
+/// `.cwasm` entries under the cache-lane root. Called per fixture (before the
+/// miss, after the miss, after the hit) rather than once per run: a store that
+/// works for one fixture and fails for the other 63 satisfies a whole-run
+/// "at least one was stored" check, while `cache_equal` stays true because a
+/// never-stored entry simply recompiles to identical bytes.
+fn countStoredArtifacts(io: std.Io, cwd: std.Io.Dir, root_rel: []const u8) !u32 {
+    var n: u32 = 0;
+    var root_dir = try cwd.openDir(io, root_rel, .{ .iterate = true });
+    defer root_dir.close(io);
+    var root_it = root_dir.iterate();
+    while (try root_it.next(io)) |sub| {
+        if (sub.kind != .directory) continue;
+        var sub_dir = try root_dir.openDir(io, sub.name, .{ .iterate = true });
+        defer sub_dir.close(io);
+        var sub_it = sub_dir.iterate();
+        while (try sub_it.next(io)) |e| {
+            if (std.mem.endsWith(u8, e.name, ".cwasm")) n += 1;
+        }
+    }
+    return n;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -176,8 +205,10 @@ fn run(init: std.process.Init) !u8 {
     var ratchet_flips: u32 = 0; // gate (a known_table entry now matches)
 
     var n_dirs: u32 = 0;
+    var corpus_empty = false;
     while (arg_it.next()) |corpus_dir_arg| {
         n_dirs += 1;
+        const dir_first_total = total;
         const corpus_dir = try gpa.dupe(u8, corpus_dir_arg);
         defer gpa.free(corpus_dir);
 
@@ -269,18 +300,34 @@ fn run(init: std.process.Init) !u8 {
                 &.{ cli, "run", cache_flag, "--dir", p, entry.name }
             else
                 &.{ cli, "run", cache_flag, entry.name };
+            const stored_before = try countStoredArtifacts(io, cwd, cache_root_rel);
             var lane_miss = runLane(gpa, io, lane_c_argv, corpus_dir) catch |err| {
                 try stdout.print("SKIP-SPAWN  {s}: lane C miss: {s}\n", .{ entry.name, @errorName(err) });
                 skipped_spawn += 1;
                 continue;
             };
             defer lane_miss.deinit(gpa);
+            const stored_after_miss = try countStoredArtifacts(io, cwd, cache_root_rel);
             var lane_hit = runLane(gpa, io, lane_c_argv, corpus_dir) catch |err| {
                 try stdout.print("SKIP-SPAWN  {s}: lane C hit: {s}\n", .{ entry.name, @errorName(err) });
                 skipped_spawn += 1;
                 continue;
             };
             defer lane_hit.deinit(gpa);
+            const stored_after_hit = try countStoredArtifacts(io, cwd, cache_root_rel);
+            if (stored_after_miss == stored_before) {
+                unexpected += 1;
+                try stdout.print(
+                    "CACHE-STORE-FAIL  {s}: the miss lane stored nothing ({d} entries before and after)\n",
+                    .{ entry.name, stored_before },
+                );
+            } else if (stored_after_hit != stored_after_miss) {
+                unexpected += 1;
+                try stdout.print(
+                    "CACHE-HIT-MISSED  {s}: the hit lane stored {d} more entries — it recompiled instead of hitting\n",
+                    .{ entry.name, stored_after_hit - stored_after_miss },
+                );
+            }
 
             const equal = lane_a.exit == lane_b.exit and std.mem.eql(u8, lane_a.stdout, lane_b.stdout);
             const cache_equal = lane_a.exit == lane_miss.exit and
@@ -331,12 +378,32 @@ fn run(init: std.process.Init) !u8 {
                 }
             }
 
+            // A lane that did not exit cleanly produced no comparable result:
+            // `runLane` reports its exit as the harness's 255, which a guest
+            // can also return, so two symmetric crashes make `equal` true. A
+            // crash is therefore never a match — it is the outcome the lane
+            // exists to catch.
+            const crashed_lane: ?[]const u8 = if (lane_a.crashed)
+                "A (.wasm)"
+            else if (lane_b.crashed)
+                "B (.cwasm)"
+            else if (lane_miss.crashed)
+                "C (cache miss)"
+            else if (lane_hit.crashed)
+                "C (cache hit)"
+            else
+                null;
+
             switch (expectationFor(entry.name)) {
                 .match => {
-                    if (equal and cache_equal) {
+                    if (equal and cache_equal and crashed_lane == null) {
                         matched += 1;
                     } else {
                         unexpected += 1;
+                        if (crashed_lane) |lane| try stdout.print(
+                            "LANE-CRASHED  {s}: lane {s} did not exit cleanly; its exit code is the harness's, not the guest's\n",
+                            .{ entry.name, lane },
+                        );
                         if (!equal) try stdout.print(
                             "AOT-DIVERGE  {s}: wasm(exit={d}, {d}B stdout) vs cwasm(exit={d}, {d}B stdout{s})\n",
                             .{
@@ -355,7 +422,10 @@ fn run(init: std.process.Init) !u8 {
                     }
                 },
                 .wrong_result => |reason| {
-                    if (equal) {
+                    // The flip test reads every lane the `.match` arm reads —
+                    // a known divergence whose CACHE lane broke, or that now
+                    // "agrees" only because both lanes crashed, is not fixed.
+                    if (equal and cache_equal and crashed_lane == null) {
                         ratchet_flips += 1;
                         try stdout.print(
                             "RATCHET-FLIP  {s}: known divergence ({s}) now MATCHES — remove its known_table entry in this PR\n",
@@ -363,8 +433,9 @@ fn run(init: std.process.Init) !u8 {
                         );
                     } else {
                         expected_diverged += 1;
-                        try stdout.print("EXPECTED-DIVERGE  {s}: {s} (wasm exit={d} / cwasm exit={d})\n", .{
-                            entry.name, reason, lane_a.exit, lane_b.exit,
+                        const crash_note: []const u8 = if (crashed_lane != null) ", a lane CRASHED" else "";
+                        try stdout.print("EXPECTED-DIVERGE  {s}: {s} (wasm exit={d} / cwasm exit={d}{s})\n", .{
+                            entry.name, reason, lane_a.exit, lane_b.exit, crash_note,
                         });
                     }
                 },
@@ -377,6 +448,14 @@ fn run(init: std.process.Init) !u8 {
             }
             try stdout.flush();
         }
+        // Per DIRECTORY, not over their sum. The two corpora are produced by
+        // different means — the realworld `.wasm` are generated on the Mac
+        // host — so one can empty out while the other still reports a full set
+        // of matches, a closed accounting, and a zero exit.
+        if (total == dir_first_total) {
+            try stdout.print("CORPUS-EMPTY  {s}: the directory contributed no .wasm fixture\n", .{corpus_dir});
+            corpus_empty = true;
+        }
     }
 
     if (n_dirs == 0) {
@@ -385,36 +464,25 @@ fn run(init: std.process.Init) !u8 {
         return 2;
     }
 
-    // The cache lanes must have actually STORED entries — a silently-broken
-    // store would still "match" above by recompiling on every run.
-    var stored_artifacts: u32 = 0;
-    {
-        var root_dir = try cwd.openDir(io, cache_root_rel, .{ .iterate = true });
-        defer root_dir.close(io);
-        var root_it = root_dir.iterate();
-        while (try root_it.next(io)) |sub| {
-            if (sub.kind != .directory) continue;
-            var sub_dir = try root_dir.openDir(io, sub.name, .{ .iterate = true });
-            defer sub_dir.close(io);
-            var sub_it = sub_dir.iterate();
-            while (try sub_it.next(io)) |e| {
-                if (std.mem.endsWith(u8, e.name, ".cwasm")) stored_artifacts += 1;
-            }
-        }
-    }
-    if (matched > 0 and stored_artifacts == 0) {
-        unexpected += 1;
-        try stdout.print("CACHE-STORE-FAIL: cache lanes matched but zero .cwasm entries were stored\n", .{});
-    }
-
     try stdout.print(
-        "\naot_process_diff: {d} fixtures — {d} matched, {d} spawn-skip, {d} refused, {d} expected-diverge, {d} unsound-reported, {d} UNEXPECTED, {d} ratchet-flips — GATING\n",
+        "\naot_process_diff: {d} fixtures — {d} matched, {d} spawn-skip, {d} refused, {d} expected-diverge, {d} unsound-reported, {d} UNEXPECTED, {d} ratchet-flips — ",
         .{ total, matched, skipped_spawn, refused_produce, expected_diverged, unsound_reported, unexpected, ratchet_flips },
     );
+    if (corpus_empty or total == 0) {
+        try stdout.print("NOT-GATING: corpus-empty\n", .{});
+    } else if (unsound_reported != 0) {
+        // `.unsound` rows are report-only by design (see the header), so a run
+        // carrying them gates over fewer fixtures than its total suggests. No
+        // expiry mechanism while `known_table` is empty — the summary says how
+        // many fixtures the word GATING does not cover.
+        try stdout.print("GATING ({d} report-only, not gated)\n", .{unsound_reported});
+    } else {
+        try stdout.print("GATING\n", .{});
+    }
     try stdout.flush();
 
-    if (total == 0) {
-        try stdout.print("error: empty corpus\n", .{});
+    if (corpus_empty or total == 0) {
+        try stdout.print("error: a corpus directory contributed no fixture — the run differentiated nothing\n", .{});
         try stdout.flush();
         return 1;
     }

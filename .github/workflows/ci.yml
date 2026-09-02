@@ -1,8 +1,8 @@
 # CI — the host-local gate on the 3 supported OSes, mirroring the local
 # 3-host gate (Mac aarch64 + Linux x86_64 + Windows x86_64). Each matrix leg
 # runs `scripts/ci_gate.sh` so CI verifies exactly what the maintainer runs
-# per host (single source of truth); the differential oracle uses wasmtime
-# when the install step succeeds.
+# per host (single source of truth); the differential oracle is wasmtime, and
+# its install is required.
 #
 # Triggers: pull_request (any target) + push to `main` + manual dispatch.
 # `main` is the trunk and is ruleset-protected: no direct pushes — every change
@@ -212,11 +212,16 @@ jobs:
         shell: pwsh
         run: Add-Content -Path $env:GITHUB_PATH -Value "$HOME\.local\zig-0.16.0"
 
-      # Reference oracle for the interp-vs-JIT-vs-wasmtime differential. Best
-      # effort: the differential runner degrades to a SKIP when it is absent,
-      # so a download hiccup must not fail the gate.
-      - name: Install wasmtime (reference oracle, best effort)
-        continue-on-error: true
+      # Reference oracle for the interp-vs-JIT-vs-wasmtime differential.
+      # REQUIRED, not best effort (issue #213): the runner degrades to a SKIP
+      # when wasmtime is absent and a skipped lane still exits 0, so a download
+      # hiccup bought a leg that was green and had checked nothing. The step's
+      # `conclusion` is what `ci-required` reads, so only a failing step makes
+      # that visible through the API. A flake now reds the leg and is re-run —
+      # measured 0 failures in 144 step runs (3 OSes x 48 runs, 2026-09-01).
+      # The symmetry argument for best-effort is spent: `wasm-tools` below is
+      # installed without `continue-on-error` (ADR-0212 D4).
+      - name: Install wasmtime (reference oracle, required)
         shell: bash
         run: |
           set -euo pipefail
@@ -267,7 +272,7 @@ jobs:
         run: |
           zig version
           wasm-tools --version
-          wasmtime --version || echo "wasmtime absent — differential will SKIP"
+          wasmtime --version
 
       # Extended checks (lint + 9-combo × 2-arch build-DCE matrix + ReleaseSafe
       # JIT smoke + AOT cross-compile) are up to ~20 cold-cache ReleaseSafe builds

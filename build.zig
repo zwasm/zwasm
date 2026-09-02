@@ -1073,6 +1073,8 @@ pub fn build(b: *std.Build) void {
     });
     const run_realworld_diff = b.addRunArtifact(realworld_diff_runner_exe);
     run_realworld_diff.addArg(b.pathFromRoot("test/realworld/wasm"));
+    // The pinned oracle version the run annotates itself against (issue #213).
+    run_realworld_diff.addArgs(&.{ "--versions-lock", b.pathFromRoot(".github/versions.lock") });
     run_realworld_diff.has_side_effects = true; // fixture-only changes must re-run (cyc216 gap)
     // Nothing in the build graph depends on this step any more — `test-all`
     // takes `test-realworld-diff-jit`, which is the same runner plus `--jit`.
@@ -1090,6 +1092,7 @@ pub fn build(b: *std.Build) void {
     // now (triages AOT-WASI corpus coverage); a follow-up gates it once clean.
     const run_realworld_diff_aot = b.addRunArtifact(realworld_diff_runner_exe);
     run_realworld_diff_aot.addArg(b.pathFromRoot("test/realworld/wasm"));
+    run_realworld_diff_aot.addArgs(&.{ "--versions-lock", b.pathFromRoot(".github/versions.lock") });
     run_realworld_diff_aot.addArg("--aot");
     run_realworld_diff_aot.has_side_effects = true;
     const test_realworld_diff_aot_step = b.step("test-realworld-diff-aot", "Realworld differential incl. the opt-in AOT lane (D-283)");
@@ -1121,6 +1124,7 @@ pub fn build(b: *std.Build) void {
     // (wasmer is not in the x86_64 dev shells), graceful skip off-Mac.
     const run_realworld_diff_wasmer = b.addRunArtifact(realworld_diff_runner_exe);
     run_realworld_diff_wasmer.addArg(b.pathFromRoot("test/realworld/wasm"));
+    run_realworld_diff_wasmer.addArgs(&.{ "--versions-lock", b.pathFromRoot(".github/versions.lock") });
     run_realworld_diff_wasmer.addArg("--wasmer");
     run_realworld_diff_wasmer.has_side_effects = true;
     const test_realworld_diff_wasmer_step = b.step("test-realworld-diff-wasmer", "Realworld differential incl. the opt-in wasmer second-oracle lane (§9.6 A3)");
@@ -1144,6 +1148,7 @@ pub fn build(b: *std.Build) void {
     // lane's cost class). Full-corpus coverage: `test-realworld-diff-interp`.
     const run_realworld_diff_jit = b.addRunArtifact(realworld_diff_runner_exe);
     run_realworld_diff_jit.addArg(b.pathFromRoot("test/realworld/wasm"));
+    run_realworld_diff_jit.addArgs(&.{ "--versions-lock", b.pathFromRoot(".github/versions.lock") });
     run_realworld_diff_jit.addArg("--jit");
     run_realworld_diff_jit.addArg("--interp");
     run_realworld_diff_jit.has_side_effects = true;
@@ -1157,6 +1162,7 @@ pub fn build(b: *std.Build) void {
     // Debug. One command re-derives interp-vs-wasmtime for all 56.
     const run_realworld_diff_interp = b.addRunArtifact(realworld_diff_runner_exe);
     run_realworld_diff_interp.addArg(b.pathFromRoot("test/realworld/wasm"));
+    run_realworld_diff_interp.addArgs(&.{ "--versions-lock", b.pathFromRoot(".github/versions.lock") });
     run_realworld_diff_interp.addArg("--interp-all");
     run_realworld_diff_interp.has_side_effects = true;
     const test_realworld_diff_interp_step = b.step("test-realworld-diff-interp", "Full-corpus forced-interp differential incl. the enumerated-slow fixtures (manual; not in test-all)");
