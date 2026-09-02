@@ -1206,6 +1206,26 @@ fn runServiceRequest(built: *wasi_p2.BuiltComponent, rop: HttpReqOp) !void {
     if (rop.expect_body) |eb| try testing.expectEqualStrings(eb, capture.items);
 }
 
+/// The corpus entry a `test "wasip3-official: <name>"` block covers, taken
+/// from the block's own name.
+///
+/// The reconciliation below reads coverage out of `builtin.test_functions`,
+/// i.e. out of the test NAMES. If the name and the argument were two
+/// independent strings, a copy/paste slip could run one binary under another
+/// one's title: the named binary would count as covered, never run, and the
+/// set comparison would still pass. Deriving the argument from the name
+/// leaves one value, so there is nothing for them to disagree about.
+///
+/// `@src().fn_name` inside a test block is `test.<the block's name>`; several
+/// blocks append a parenthesised note, which is not part of the file stem.
+fn officialCorpusName(comptime src: std.builtin.SourceLocation) []const u8 {
+    const marker = "test.wasip3-official: ";
+    const at = std.mem.find(u8, src.fn_name, marker) orelse
+        @compileError("official corpus test must be named `wasip3-official: <corpus stem>`");
+    const rest = src.fn_name[at + marker.len ..];
+    return if (std.mem.find(u8, rest, " (")) |sp| rest[0..sp] else rest;
+}
+
 /// Run one vendored official test end-to-end and assert its manifest.
 fn runOfficialWasip3Test(comptime name: []const u8) !void {
     const alloc = testing.allocator;
@@ -1333,142 +1353,142 @@ fn runOfficialWasip3Test(comptime name: []const u8) !void {
 }
 
 test "wasip3-official: cli-env" {
-    try runOfficialWasip3Test("cli-env");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: cli-exit" {
-    try runOfficialWasip3Test("cli-exit");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: cli-stdio" {
-    try runOfficialWasip3Test("cli-stdio");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: cli-stdio-roundtrip" {
-    try runOfficialWasip3Test("cli-stdio-roundtrip");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: cli-stdout-flush" {
-    try runOfficialWasip3Test("cli-stdout-flush");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: cli-terminal" {
-    try runOfficialWasip3Test("cli-terminal");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: monotonic-clock (async wait-until/wait-for timers)" {
-    try runOfficialWasip3Test("monotonic-clock");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: multi-clock-wait (20 interleaved wait-until subtasks)" {
-    try runOfficialWasip3Test("multi-clock-wait");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: random (incl. cached insecure-seed)" {
-    try runOfficialWasip3Test("random");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: wall-clock" {
-    try runOfficialWasip3Test("wall-clock");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: run-with-err (exit code 1)" {
-    try runOfficialWasip3Test("run-with-err");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 
 test "wasip3-official: filesystem-stat" {
-    try runOfficialWasip3Test("filesystem-stat");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-io (file via-stream data plane)" {
-    try runOfficialWasip3Test("filesystem-io");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-advise" {
-    try runOfficialWasip3Test("filesystem-advise");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-dotdot" {
-    try runOfficialWasip3Test("filesystem-dotdot");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-flags-and-type" {
-    try runOfficialWasip3Test("filesystem-flags-and-type");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-hard-links" {
-    try runOfficialWasip3Test("filesystem-hard-links");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-is-same-object" {
-    try runOfficialWasip3Test("filesystem-is-same-object");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-metadata-hash" {
-    try runOfficialWasip3Test("filesystem-metadata-hash");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-mkdir-rmdir" {
-    try runOfficialWasip3Test("filesystem-mkdir-rmdir");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-open-errors" {
-    try runOfficialWasip3Test("filesystem-open-errors");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-read-directory" {
-    try runOfficialWasip3Test("filesystem-read-directory");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-rename" {
-    try runOfficialWasip3Test("filesystem-rename");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-set-size" {
-    try runOfficialWasip3Test("filesystem-set-size");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: filesystem-unlink-errors" {
-    try runOfficialWasip3Test("filesystem-unlink-errors");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 
 test "wasip3-official: sockets-tcp-properties (TCP option store)" {
-    try runOfficialWasip3Test("sockets-tcp-properties");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: sockets-udp-properties (UDP option store)" {
-    try runOfficialWasip3Test("sockets-udp-properties");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: sockets-udp-bind (bind + address validation)" {
-    try runOfficialWasip3Test("sockets-udp-bind");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: sockets-tcp-bind (REUSEADDR + addrinuse contracts)" {
-    try runOfficialWasip3Test("sockets-tcp-bind");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: sockets-tcp-connect (incl. explicit-bind connect)" {
-    try runOfficialWasip3Test("sockets-tcp-connect");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: http-fields (fields resource, RFC 9110 validation)" {
-    try runOfficialWasip3Test("http-fields");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: http-request (method/scheme/path/authority validation)" {
-    try runOfficialWasip3Test("http-request");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: http-response (status code + immutable headers)" {
-    try runOfficialWasip3Test("http-response");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: http-service (handler export + body capture)" {
-    try runOfficialWasip3Test("http-service");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: http-service-echo (request body + header reflection)" {
-    try runOfficialWasip3Test("http-service-echo");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: http-service-uri (scheme/authority set by host)" {
-    try runOfficialWasip3Test("http-service-uri");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: http-client (client.send against the harness echo endpoint)" {
-    try runOfficialWasip3Test("http-client");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 
 test "wasip3-official: http-request-options (timeouts + immutable child)" {
-    try runOfficialWasip3Test("http-request-options");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: sockets-udp-connect" {
-    try runOfficialWasip3Test("sockets-udp-connect");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: sockets-udp-send" {
-    try runOfficialWasip3Test("sockets-udp-send");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: sockets-udp-receive" {
-    try runOfficialWasip3Test("sockets-udp-receive");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: sockets-tcp-listen" {
-    try runOfficialWasip3Test("sockets-tcp-listen");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: sockets-tcp-send" {
-    try runOfficialWasip3Test("sockets-tcp-send");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: sockets-tcp-receive" {
-    try runOfficialWasip3Test("sockets-tcp-receive");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 test "wasip3-official: sockets-echo (join! interleaved data plane)" {
-    try runOfficialWasip3Test("sockets-echo");
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 
 /// The vendored corpus root, relative to the repo root. The 45 test blocks
@@ -1496,9 +1516,10 @@ const wasip3_official_root = "test/component/wasip3_official";
 //
 // CAVEAT: `-Dtest-filter` removes tests from `test_functions`, so a filter
 // that keeps THIS block while dropping the 45 reports them all as uncovered.
-// No build step passes a filter (`test-all` does not), and the failure names
-// itself below.
-test "wasip3-official: the covered set is exactly the vendored corpus" {
+// This block is deliberately NOT named `wasip3-official: …`, so the obvious
+// filter drops this block instead — the harmless direction. No build step
+// passes a filter (`test-all` does not), and the failure names itself below.
+test "wasip3_official corpus: every vendored binary has a block that runs it" {
     const builtin = @import("builtin");
     const alloc = testing.allocator;
 
@@ -1516,7 +1537,6 @@ test "wasip3-official: the covered set is exactly the vendored corpus" {
         var name = t.name[at + marker.len ..];
         // Several blocks append a parenthesised note ("(async wait-until/…)").
         if (std.mem.find(u8, name, " (")) |sp| name = name[0..sp];
-        if (std.mem.eql(u8, name, "the covered set is exactly the vendored corpus")) continue;
         try covered.append(alloc, name);
     }
 
