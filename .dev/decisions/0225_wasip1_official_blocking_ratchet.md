@@ -63,6 +63,16 @@ check: a corpus that stops producing a summary line does so by dying, and a
 dead process exits non-zero. What hid #310 was not a missing check, it was
 `continue-on-error` overwriting the one that existed.
 
+The table is held to the corpus in both directions. RATCHET-FLIP covers a row
+whose test starts passing. A row whose test is no longer THERE is the other
+direction, and it is silent: an upstream bump that removes a listed test and
+adds another keeps the vendored total intact, so nothing else in the runner
+notices, and the row sits tolerating nothing. Each row therefore carries an
+encountered flag, and a row the walk never reached exits non-zero as
+`STALE-ROW`. Duplicate keys are a `@compileError`, since the second copy would
+be unreachable and its flag would never be set either. Found by Devin's review
+on PR #380 and reproduced before fixing — a bogus row passed at exit 0.
+
 ### D2 — The table describes CI's windows-2022 runner and no other host
 
 D-583 records `path_symlink_trailing_slashes` failing on a Windows 11 host,
@@ -115,3 +125,8 @@ macOS leg, 44 s across linux and windows — against a macOS gate leg that ran
   "stays non-blocking" sentence.
 - The #290 cluster is now load-bearing: fixing any of those names requires
   removing its table row in the same PR, which the ratchet enforces.
+- `test/aot/aot_process_diff.zig`'s `known_table`, which this one is modelled
+  on, has the STALE-ROW hole too — its `expectationFor` is consulted only for
+  fixtures the corpus yields. Not fixed here: that lane's table is empty today,
+  so the hole is latent, and closing it belongs with that lane rather than in a
+  preview1 gate change.

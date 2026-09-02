@@ -88,7 +88,7 @@ box fails one more (D-583), and that is the box disagreeing with the runner,
 not the table being wrong. It is not part of the local `gate_commit.sh` /
 `gate_merge.sh` flow, so run it directly when touching WASI preview1. When
 D-583 discharges, the step joins `test-all` and this paragraph goes away
-(ADR-0208 D2/D3).
+(ADR-0208 D2, ADR-0225).
 
 ## The merge gate — CI is authoritative
 

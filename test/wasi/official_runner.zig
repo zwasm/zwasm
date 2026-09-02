@@ -144,12 +144,39 @@ const known_table: []const KnownEntry = switch (builtin.os.tag) {
     else => &.{},
 };
 
-fn expectationFor(stem: []const u8) Expectation {
-    for (known_table) |e| {
-        if (std.mem.eql(u8, e.name, stem)) return e.exp;
+comptime {
+    // A duplicated key makes the second row unreachable, and the
+    // never-encountered check below would then never fire for it either.
+    for (known_table, 0..) |a, i| {
+        for (known_table[i + 1 ..]) |b| {
+            if (std.mem.eql(u8, a.name, b.name)) {
+                @compileError("known_table lists '" ++ a.name ++ "' twice");
+            }
+        }
+    }
+}
+
+/// `stem`'s expectation, marking its row ENCOUNTERED on the way — see `Seen`.
+/// The two travel together because a lookup that does not record the visit is
+/// exactly the hole `Seen` exists to close.
+fn lookup(stem: []const u8, seen: *Seen) Expectation {
+    for (known_table, seen) |e, *flag| {
+        if (std.mem.eql(u8, e.name, stem)) {
+            flag.* = true;
+            return e.exp;
+        }
     }
     return .match;
 }
+
+/// One flag per `known_table` row, set when the corpus actually yields that
+/// test. A row nobody encountered is a tolerance for a test that is no longer
+/// there: an upstream bump that REMOVES a listed test and adds another keeps
+/// `vendored_total` intact, so nothing else in this runner would notice, and
+/// the row would sit there tolerating nothing until someone re-read it. The
+/// ratchet exists to stop the table drifting from the corpus; drifting by
+/// deletion is the direction the RATCHET-FLIP check cannot see.
+const Seen = [known_table.len]bool;
 
 const Counts = struct {
     passed: u32 = 0,
@@ -239,6 +266,7 @@ pub fn main(init: std.process.Init) !void {
 
     var total: Counts = .{};
     var suites: u32 = 0;
+    var seen: Seen = @splat(false);
 
     var root_it = root_dir.iterate();
     while (try root_it.next(io)) |entry| {
@@ -267,7 +295,7 @@ pub fn main(init: std.process.Init) !void {
             },
         };
 
-        const suite = try runSuite(gpa, io, out, corpus_root, entry.name, engine, scratch_root);
+        const suite = try runSuite(gpa, io, out, corpus_root, entry.name, engine, scratch_root, &seen);
         total.passed += suite.passed;
         total.failed += suite.failed;
         total.expected_failed += suite.expected_failed;
@@ -337,9 +365,30 @@ pub fn main(init: std.process.Init) !void {
             .{ total.ran(), vendored_total },
         );
     }
+    // A row nobody encountered describes a test the corpus no longer holds, so
+    // the tolerance it grants is dead. Checked after the loop, not inside it:
+    // the rows are spread across the three suites and only the whole walk knows
+    // which were reached.
+    var stale: u32 = 0;
+    for (known_table, seen) |e, was_seen| {
+        if (was_seen) continue;
+        try out.print(
+            "STALE-ROW  known_table lists '{s}' ({s}), which this corpus does not\n" ++
+                "      hold — remove the row, or re-vendor with\n" ++
+                "      scripts/vendor_wasip1_official.sh\n",
+            .{ e.name, switch (e.exp) {
+                .match => "",
+                .known_failure => |row| row,
+            } },
+        );
+        stale += 1;
+    }
+
     try out.flush();
     discardAbsent(cwd.deleteTree(io, scratch_root));
-    if (total.failed != 0 or total.errored != 0 or partial or total.ratchet_flips != 0) {
+    if (total.failed != 0 or total.errored != 0 or partial or
+        total.ratchet_flips != 0 or stale != 0)
+    {
         std.process.exit(1);
     }
 }
@@ -365,6 +414,7 @@ fn runSuite(
     suite_name: []const u8,
     engine: Engine,
     scratch_root: []const u8,
+    seen: *Seen,
 ) !Counts {
     const suite_path = try std.Io.Dir.path.join(gpa, &.{ corpus_root, suite_name });
     defer gpa.free(suite_path);
@@ -413,7 +463,7 @@ fn runSuite(
         if (!std.mem.endsWith(u8, entry.name, ".wasm")) continue;
 
         const stem = entry.name[0 .. entry.name.len - ".wasm".len];
-        const exp = expectationFor(stem);
+        const exp = lookup(stem, seen);
         if (runOne(gpa, io, out, &suite_dir, suite_path, stem, entry.name, engine, scratch_root)) {
             counts.passed += 1;
             if (exp == .known_failure) {
