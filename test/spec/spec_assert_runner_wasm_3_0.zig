@@ -1955,32 +1955,31 @@ pub fn main(init: std.process.Init) !void {
         .{ if (jit_mode) "jit" else "interp", asserts_pass, asserts_fail, asserts_skip, asserts_total, PROPOSALS.len },
     );
 
-    // The `passed` above is not all one engine's work. `ZWASM_SPEC_ENGINE`
-    // routes exactly two categories — assert_return and assert_trap — plus
-    // assert_exception in interp mode, whose arm has no jit branch (see the
-    // ASYMMETRY note on it). Everything else builds against `cur_engine`,
-    // which takes the default options on BOTH lanes and never consults the
-    // selector, which is why both lanes report the same unrouted count.
+    // Which engine produced the `passed` above is not what the label says.
+    // `ZWASM_SPEC_ENGINE` routes exactly two categories — assert_return and
+    // assert_trap — through `cur_jit`. Every other category builds against
+    // `cur_engine`, and a `cur_engine` instance is the INTERPRETER (the arms
+    // themselves say so: the assert_exception ASYMMETRY note names the interp
+    // instance, and the jit `.invoke` arm routes setup through `cur_jit`
+    // *instead of* it).
     //
-    // Folded together they read as coverage by the engine in the label, which
-    // is the overstatement this lane exists to remove. Split on passes rather
-    // than totals: a skip is not coverage by anyone, and it is already its own
-    // column.
-    const selector_routed_pass = grand.ret.pass + grand.trap.pass +
-        (if (jit_mode) 0 else grand.exception.pass);
-    const unrouted_pass = asserts_pass - selector_routed_pass;
-    try stdout.print(
-        "wasm_3_0_assert [{s}]: {d} of those passes came from the engine this lane selects, {d} did not{s}\n",
-        .{
-            if (jit_mode) "jit" else "interp",
-            selector_routed_pass,
-            unrouted_pass,
-            if (jit_mode)
-                " (assert_invalid / unlinkable / uninstantiable / malformed never consult the selector; assert_exception has no jit branch)"
-            else
-                " (assert_invalid / unlinkable / uninstantiable / malformed never consult the selector)",
-        },
-    );
+    // So the interp lane's number needs no qualification — everything ran on
+    // the interpreter — while the jit lane's does: 808 of its passes are
+    // interpreter work sitting under a `[jit]` label. Split on passes, not
+    // totals: a skip is nobody's coverage and already has its own column.
+    if (jit_mode) {
+        const jit_pass = grand.ret.pass + grand.trap.pass;
+        const interp_pass = asserts_pass - jit_pass;
+        try stdout.print(
+            "wasm_3_0_assert [jit]: {d} of those passes came from the JIT, {d} from the interpreter (assert_invalid / unlinkable / uninstantiable / malformed build against cur_engine; assert_exception has no jit branch)\n",
+            .{ jit_pass, interp_pass },
+        );
+    } else {
+        try stdout.print(
+            "wasm_3_0_assert [interp]: all {d} of those passes came from the interpreter\n",
+            .{asserts_pass},
+        );
+    }
 
     // §1 (ADR-0128) — the JIT lane's exact-match gate. Both directions:
     //   unexpected — a fail with no row: a regression, or a host nobody
