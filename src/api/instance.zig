@@ -841,8 +841,12 @@ fn crossModuleJitTarget(
     // thunk jumping straight into the callee's body, so a wrongly accepted
     // link there is an ABI mismatch rather than a semantic one. Decline the
     // shape until the exporter's own `Types` are retained (the facade linker's
-    // `export_src_types` + `canonicalEqualCross` is the model) — the caller
-    // falls back to the interp, which is exactly where main already sent it.
+    // `export_src_types` + `canonicalEqualCross` is the model). Declining is
+    // NOT a graceful degradation: the `.auto` retry lands in `buildBindings`,
+    // which needs the source's interpreter `Runtime` and a JIT-backed source
+    // has none, so this shape stays unsupported — NULL with no trap, #353's
+    // surface. It is unsupported at `main` too, by the same route, so the
+    // guard withholds an acceptance rather than removing one.
     if (hasConcreteHeapType(want_sig) or hasConcreteHeapType(src_sig)) return error.Unsupported;
     if (!validator_helpers.funcTypeImportCompatible(want_sig, src_sig, importer_types))
         return error.Unsupported;
