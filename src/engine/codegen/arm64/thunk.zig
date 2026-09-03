@@ -30,28 +30,38 @@
 //! 0x20    ADR X16, +72                      ; X16 ← literal pool base
 //! 0x24    LDR X0,  [X16]                    ; X0  ← callee_rt
 //! 0x28    STR X0,  [SP, #64]                ; #381: park callee_rt in the frame pad
-//! 0x2C    LDR X16, [X16, #8]                ; X16 ← callee_entry
-//! 0x30    BLR X16                           ; CALL (LR ← PC+4)
-//! 0x34    LDR X19, [SP, #16]                ; RESTORE caller's X19
-//! 0x38    LDR X24, [SP, #24]                ; RESTORE caller's X24
-//! 0x3C    LDR X25, [SP, #32]                ; RESTORE caller's X25
-//! 0x40    LDR X26, [SP, #40]                ; RESTORE caller's X26
-//! 0x44    LDR X27, [SP, #48]                ; RESTORE caller's X27
-//! 0x48    LDR X28, [SP, #56]                ; RESTORE caller's X28
-//! 0x4C    LDR X16, [SP, #64]                ; #381 relay: X16 ← callee_rt
-//! 0x50    LDR X17, [X16, #40]               ; X17 ← callee trap_flag|trap_kind
-//! 0x54    CBZ X17, +2                       ; no trap → skip the store
-//! 0x58    STR X17, [X19, #40]               ; relay onto the CALLER's runtime
-//! 0x5C    LDP X29, X30, [SP], #80           ; restore FP+LR, pop frame
-//! 0x60    RET                               ; return to importer
-//! 0x64    NOP                               ; pad — keeps the pool 8-aligned
+//! 0x2C    STR XZR, [X0, #40]                ; #381 entry clear: callee trap_flag|kind
+//! 0x30    LDR X16, [X16, #8]                ; X16 ← callee_entry
+//! 0x34    BLR X16                           ; CALL (LR ← PC+4)
+//! 0x38    LDR X19, [SP, #16]                ; RESTORE caller's X19
+//! 0x3C    LDR X24, [SP, #24]                ; RESTORE caller's X24
+//! 0x40    LDR X25, [SP, #32]                ; RESTORE caller's X25
+//! 0x44    LDR X26, [SP, #40]                ; RESTORE caller's X26
+//! 0x48    LDR X27, [SP, #48]                ; RESTORE caller's X27
+//! 0x4C    LDR X28, [SP, #56]                ; RESTORE caller's X28
+//! 0x50    LDR X16, [SP, #64]                ; #381 relay: X16 ← callee_rt
+//! 0x54    LDR X17, [X16, #40]               ; X17 ← callee trap_flag|trap_kind
+//! 0x58    CBZ X17, +2                       ; no trap → skip the store
+//! 0x5C    STR X17, [X19, #40]               ; relay onto the CALLER's runtime
+//! 0x60    LDP X29, X30, [SP], #80           ; restore FP+LR, pop frame
+//! 0x64    RET                               ; return to importer
 //! 0x68    .quad callee_rt                   ; literal pool
 //! 0x70    .quad callee_entry
 //! ```
 //!
-//! 25 × 4-byte instructions + 4-byte pad + 16-byte literal pool = 120 bytes
-//! total. `ADR X16, +<offset>` resolves from the ADR's PC (offset 0x20) to
-//! the literal pool base (0x68) — distance = 72 bytes.
+//! 26 × 4-byte instructions + 16-byte literal pool = 120 bytes total (the
+//! entry-clear STR consumed the alignment pad the relay had needed, so the
+//! size is unchanged). `ADR X16, +<offset>` resolves from the ADR's PC
+//! (offset 0x20) to the literal pool base (0x68) — distance = 72 bytes.
+//!
+//! Entry clear (#381): the thunk IS a JIT entry into another instance's
+//! runtime, and it was the only one that did not clear the trap fields on the
+//! way in — `entry.zig` does it for every host-driven entry, precisely so a
+//! previous run's flag cannot be read as this run's (#336 for the kind). The
+//! callee's `trap_flag`/`trap_kind` therefore stayed set after a cross-module
+//! trap, and once the relay below started READING them a later, successful
+//! call into that same exporter reported the old trap. Clearing on the way in
+//! is what makes the relay's read mean "this call".
 //!
 //! Trap relay (#381): a JIT trap is a FLAG, not an unwind — the trap stub
 //! writes `[X19 + trap_flag_off]` and returns, and every call site re-reads
@@ -110,11 +120,11 @@ comptime {
         @compileError("bridge thunk relays trap_flag|trap_kind as one 8-byte pair; trap_flag_off is no longer 8-aligned");
 }
 
-/// Total thunk size in bytes (25 instructions × 4 bytes + a 4-byte
-/// pad that re-aligns the pool + 2 quad literals × 8 bytes = 120).
-/// Stable across all callee signatures. D-144 grew the thunk from
-/// 56 → 96 bytes to cover the full six-register reserved-invariant
-/// cohort; #381's trap relay grew it 96 → 120.
+/// Total thunk size in bytes (26 instructions × 4 bytes + 2 quad
+/// literals × 8 bytes = 120). Stable across all callee signatures.
+/// D-144 grew the thunk from 56 → 96 bytes to cover the full
+/// six-register reserved-invariant cohort; #381's entry clear + trap
+/// relay grew it 96 → 120.
 pub const thunk_bytes: usize = 120;
 
 /// #381 — frame slot the thunk parks `callee_rt` in across the call, so the
@@ -162,33 +172,37 @@ pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize) void {
     // is corruptible across the call and X0 returns the callee's result, so
     // the relay below cannot recover it from either.
     std.mem.writeInt(u32, buf[40..44], inst.encStrImm(0, inst.sp_reg, callee_rt_slot), .little);
+    const flag_off: u15 = jit_abi.trap_flag_off;
+    // STR XZR, [X0, #40] — #381 entry clear: zero the callee's
+    // trap_flag|trap_kind pair while X0 still holds callee_rt, so the relay
+    // below reads THIS call's outcome and not a trap the exporter kept from
+    // an earlier one.
+    std.mem.writeInt(u32, buf[44..48], inst.encStrImm(inst.xzr, 0, flag_off), .little);
     // LDR X16, [X16, #8] — X16 ← callee_entry.
-    std.mem.writeInt(u32, buf[44..48], inst.encLdrImm(16, 16, 8), .little);
+    std.mem.writeInt(u32, buf[48..52], inst.encLdrImm(16, 16, 8), .little);
     // BLR X16 — CALL.
-    std.mem.writeInt(u32, buf[48..52], inst.encBlr(16), .little);
+    std.mem.writeInt(u32, buf[52..56], inst.encBlr(16), .little);
     // LDR X19..X28 — restore caller's reserved-invariant cohort.
-    std.mem.writeInt(u32, buf[52..56], inst.encLdrImm(19, inst.sp_reg, 16), .little);
-    std.mem.writeInt(u32, buf[56..60], inst.encLdrImm(24, inst.sp_reg, 24), .little);
-    std.mem.writeInt(u32, buf[60..64], inst.encLdrImm(25, inst.sp_reg, 32), .little);
-    std.mem.writeInt(u32, buf[64..68], inst.encLdrImm(26, inst.sp_reg, 40), .little);
-    std.mem.writeInt(u32, buf[68..72], inst.encLdrImm(27, inst.sp_reg, 48), .little);
-    std.mem.writeInt(u32, buf[72..76], inst.encLdrImm(28, inst.sp_reg, 56), .little);
+    std.mem.writeInt(u32, buf[56..60], inst.encLdrImm(19, inst.sp_reg, 16), .little);
+    std.mem.writeInt(u32, buf[60..64], inst.encLdrImm(24, inst.sp_reg, 24), .little);
+    std.mem.writeInt(u32, buf[64..68], inst.encLdrImm(25, inst.sp_reg, 32), .little);
+    std.mem.writeInt(u32, buf[68..72], inst.encLdrImm(26, inst.sp_reg, 40), .little);
+    std.mem.writeInt(u32, buf[72..76], inst.encLdrImm(27, inst.sp_reg, 48), .little);
+    std.mem.writeInt(u32, buf[76..80], inst.encLdrImm(28, inst.sp_reg, 56), .little);
     // #381 trap relay — X19 now holds caller_rt again, so the store below
     // lands on the CALLER. Reading and writing the same 8-byte offset carries
     // trap_flag AND trap_kind. Conditional, so a clean return cannot clear a
     // flag the caller already holds.
-    const flag_off: u15 = jit_abi.trap_flag_off;
-    std.mem.writeInt(u32, buf[76..80], inst.encLdrImm(16, inst.sp_reg, callee_rt_slot), .little);
-    std.mem.writeInt(u32, buf[80..84], inst.encLdrImm(17, 16, flag_off), .little);
-    std.mem.writeInt(u32, buf[84..88], inst.encCbz(17, 2), .little); // → LDP
-    std.mem.writeInt(u32, buf[88..92], inst.encStrImm(17, 19, flag_off), .little);
+    std.mem.writeInt(u32, buf[80..84], inst.encLdrImm(16, inst.sp_reg, callee_rt_slot), .little);
+    std.mem.writeInt(u32, buf[84..88], inst.encLdrImm(17, 16, flag_off), .little);
+    std.mem.writeInt(u32, buf[88..92], inst.encCbz(17, 2), .little); // → LDP
+    std.mem.writeInt(u32, buf[92..96], inst.encStrImm(17, 19, flag_off), .little);
     // LDP X29, X30, [SP], #80 — restore FP+LR, pop frame.
-    std.mem.writeInt(u32, buf[92..96], inst.encLdpPostIdx(29, 30, inst.sp_reg, 80), .little);
+    std.mem.writeInt(u32, buf[96..100], inst.encLdpPostIdx(29, 30, inst.sp_reg, 80), .little);
     // RET — return to importer's call site.
-    std.mem.writeInt(u32, buf[96..100], inst.encRet(30), .little);
-    // NOP — 25 instructions leave the pool 4-aligned; pad it back to 8.
-    std.mem.writeInt(u32, buf[100..104], inst.encNop(), .little);
-    // Literal pool at offset 0x68 (= 104).
+    std.mem.writeInt(u32, buf[100..104], inst.encRet(30), .little);
+    // Literal pool at offset 0x68 (= 104). The entry-clear STR consumed the
+    // alignment pad the relay had needed, so the pool stays 8-aligned.
     std.mem.writeInt(u64, buf[104..112], callee_rt, .little);
     std.mem.writeInt(u64, buf[112..120], callee_entry, .little);
 }
@@ -220,22 +234,23 @@ test "emitThunk: encoding round-trip via helpers" {
     try testing.expectEqual(inst.encAdr(16, 72), std.mem.readInt(u32, buf[32..36], .little));
     try testing.expectEqual(inst.encLdrImm(0, 16, 0), std.mem.readInt(u32, buf[36..40], .little));
     try testing.expectEqual(inst.encStrImm(0, inst.sp_reg, callee_rt_slot), std.mem.readInt(u32, buf[40..44], .little));
-    try testing.expectEqual(inst.encLdrImm(16, 16, 8), std.mem.readInt(u32, buf[44..48], .little));
-    try testing.expectEqual(inst.encBlr(16), std.mem.readInt(u32, buf[48..52], .little));
-    try testing.expectEqual(inst.encLdrImm(19, inst.sp_reg, 16), std.mem.readInt(u32, buf[52..56], .little));
-    try testing.expectEqual(inst.encLdrImm(24, inst.sp_reg, 24), std.mem.readInt(u32, buf[56..60], .little));
-    try testing.expectEqual(inst.encLdrImm(25, inst.sp_reg, 32), std.mem.readInt(u32, buf[60..64], .little));
-    try testing.expectEqual(inst.encLdrImm(26, inst.sp_reg, 40), std.mem.readInt(u32, buf[64..68], .little));
-    try testing.expectEqual(inst.encLdrImm(27, inst.sp_reg, 48), std.mem.readInt(u32, buf[68..72], .little));
-    try testing.expectEqual(inst.encLdrImm(28, inst.sp_reg, 56), std.mem.readInt(u32, buf[72..76], .little));
+    // #381 entry clear.
+    try testing.expectEqual(inst.encStrImm(inst.xzr, 0, jit_abi.trap_flag_off), std.mem.readInt(u32, buf[44..48], .little));
+    try testing.expectEqual(inst.encLdrImm(16, 16, 8), std.mem.readInt(u32, buf[48..52], .little));
+    try testing.expectEqual(inst.encBlr(16), std.mem.readInt(u32, buf[52..56], .little));
+    try testing.expectEqual(inst.encLdrImm(19, inst.sp_reg, 16), std.mem.readInt(u32, buf[56..60], .little));
+    try testing.expectEqual(inst.encLdrImm(24, inst.sp_reg, 24), std.mem.readInt(u32, buf[60..64], .little));
+    try testing.expectEqual(inst.encLdrImm(25, inst.sp_reg, 32), std.mem.readInt(u32, buf[64..68], .little));
+    try testing.expectEqual(inst.encLdrImm(26, inst.sp_reg, 40), std.mem.readInt(u32, buf[68..72], .little));
+    try testing.expectEqual(inst.encLdrImm(27, inst.sp_reg, 48), std.mem.readInt(u32, buf[72..76], .little));
+    try testing.expectEqual(inst.encLdrImm(28, inst.sp_reg, 56), std.mem.readInt(u32, buf[76..80], .little));
     // #381 trap relay.
-    try testing.expectEqual(inst.encLdrImm(16, inst.sp_reg, callee_rt_slot), std.mem.readInt(u32, buf[76..80], .little));
-    try testing.expectEqual(inst.encLdrImm(17, 16, jit_abi.trap_flag_off), std.mem.readInt(u32, buf[80..84], .little));
-    try testing.expectEqual(inst.encCbz(17, 2), std.mem.readInt(u32, buf[84..88], .little));
-    try testing.expectEqual(inst.encStrImm(17, 19, jit_abi.trap_flag_off), std.mem.readInt(u32, buf[88..92], .little));
-    try testing.expectEqual(inst.encLdpPostIdx(29, 30, inst.sp_reg, 80), std.mem.readInt(u32, buf[92..96], .little));
-    try testing.expectEqual(inst.encRet(30), std.mem.readInt(u32, buf[96..100], .little));
-    try testing.expectEqual(inst.encNop(), std.mem.readInt(u32, buf[100..104], .little));
+    try testing.expectEqual(inst.encLdrImm(16, inst.sp_reg, callee_rt_slot), std.mem.readInt(u32, buf[80..84], .little));
+    try testing.expectEqual(inst.encLdrImm(17, 16, jit_abi.trap_flag_off), std.mem.readInt(u32, buf[84..88], .little));
+    try testing.expectEqual(inst.encCbz(17, 2), std.mem.readInt(u32, buf[88..92], .little));
+    try testing.expectEqual(inst.encStrImm(17, 19, jit_abi.trap_flag_off), std.mem.readInt(u32, buf[92..96], .little));
+    try testing.expectEqual(inst.encLdpPostIdx(29, 30, inst.sp_reg, 80), std.mem.readInt(u32, buf[96..100], .little));
+    try testing.expectEqual(inst.encRet(30), std.mem.readInt(u32, buf[100..104], .little));
     try testing.expectEqual(callee_rt, std.mem.readInt(u64, buf[104..112], .little));
     try testing.expectEqual(callee_entry, std.mem.readInt(u64, buf[112..120], .little));
 }
@@ -248,15 +263,18 @@ test "emitThunk: encoding round-trip via helpers" {
 test "emitThunk: the trap relay reads the callee's runtime and writes the caller's (#381)" {
     var buf: [thunk_bytes]u8 = undefined;
     emitThunk(&buf, 0, 0);
-    const load = std.mem.readInt(u32, buf[80..84], .little);
-    const store = std.mem.readInt(u32, buf[88..92], .little);
+    const load = std.mem.readInt(u32, buf[84..88], .little);
+    const store = std.mem.readInt(u32, buf[92..96], .little);
     // Load base = X16 (the parked callee_rt); store base = X19 (caller_rt).
     try testing.expectEqual(inst.encLdrImm(17, 16, jit_abi.trap_flag_off), load);
     try testing.expectEqual(inst.encStrImm(17, 19, jit_abi.trap_flag_off), store);
     // The X19 restore precedes the store — otherwise it would land on the callee.
-    try testing.expectEqual(inst.encLdrImm(19, inst.sp_reg, 16), std.mem.readInt(u32, buf[52..56], .little));
-    // CBZ +2 words from byte 84 = byte 92 = the LDP epilogue.
-    try testing.expectEqual(inst.encLdpPostIdx(29, 30, inst.sp_reg, 80), std.mem.readInt(u32, buf[84 + 2 * 4 ..][0..4], .little));
+    try testing.expectEqual(inst.encLdrImm(19, inst.sp_reg, 16), std.mem.readInt(u32, buf[56..60], .little));
+    // CBZ +2 words from byte 88 = byte 96 = the LDP epilogue.
+    try testing.expectEqual(inst.encLdpPostIdx(29, 30, inst.sp_reg, 80), std.mem.readInt(u32, buf[88 + 2 * 4 ..][0..4], .little));
+    // The entry clear zeroes the CALLEE's pair (base X0 = callee_rt) before the
+    // call, so the load above cannot see an earlier call's trap.
+    try testing.expectEqual(inst.encStrImm(inst.xzr, 0, jit_abi.trap_flag_off), std.mem.readInt(u32, buf[44..48], .little));
 }
 
 test "emitThunk: round-trip literals at zero" {
@@ -266,7 +284,7 @@ test "emitThunk: round-trip literals at zero" {
     try testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, buf[112..120], .little));
     // Instruction prefix unchanged regardless of literals.
     try testing.expectEqual(inst.encStpPreIdx(29, 30, inst.sp_reg, -80), std.mem.readInt(u32, buf[0..4], .little));
-    try testing.expectEqual(inst.encRet(30), std.mem.readInt(u32, buf[96..100], .little));
+    try testing.expectEqual(inst.encRet(30), std.mem.readInt(u32, buf[100..104], .little));
 }
 
 test "emitThunk: instruction prefix is constant across two distinct callees" {
@@ -293,8 +311,8 @@ test "emitThunk: saves/restores X19+X24..X28 around BLR" {
     try testing.expectEqual(inst.encStrImm(19, inst.sp_reg, 16), std.mem.readInt(u32, buf[8..12], .little));
     try testing.expectEqual(inst.encStrImm(24, inst.sp_reg, 24), std.mem.readInt(u32, buf[12..16], .little));
     try testing.expectEqual(inst.encStrImm(28, inst.sp_reg, 56), std.mem.readInt(u32, buf[28..32], .little));
-    // Post-BLR restores at offsets 52..76 (shifted +4 by the #381 STR X0).
-    try testing.expectEqual(inst.encLdrImm(19, inst.sp_reg, 16), std.mem.readInt(u32, buf[52..56], .little));
-    try testing.expectEqual(inst.encLdrImm(24, inst.sp_reg, 24), std.mem.readInt(u32, buf[56..60], .little));
-    try testing.expectEqual(inst.encLdrImm(28, inst.sp_reg, 56), std.mem.readInt(u32, buf[72..76], .little));
+    // Post-BLR restores at offsets 56..80 (shifted +8 by the two #381 stores).
+    try testing.expectEqual(inst.encLdrImm(19, inst.sp_reg, 16), std.mem.readInt(u32, buf[56..60], .little));
+    try testing.expectEqual(inst.encLdrImm(24, inst.sp_reg, 24), std.mem.readInt(u32, buf[60..64], .little));
+    try testing.expectEqual(inst.encLdrImm(28, inst.sp_reg, 56), std.mem.readInt(u32, buf[76..80], .little));
 }
