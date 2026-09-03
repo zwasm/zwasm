@@ -35,17 +35,27 @@ const arch_thunk = switch (builtin.target.cpu.arch) {
 };
 
 /// Bridge thunk byte count for the current target architecture.
-/// Per ADR-0066 Amendment §A1 (D-142 fix (A)):
-/// - 56 bytes on AArch64 (9 instructions + 4-byte alignment pad
-///   + 16-byte literal pool); call-and-return shape preserving
-///   caller's X19 across the BLR.
-/// - 40 bytes on x86_64 (PUSH RBP + MOV RBP,RSP + PUSH R15 + SUB
-///   RSP,8 + 2× MOV imm64 + CALL RAX + ADD RSP,8 + POP R15 + POP
-///   RBP + RET); call-and-return shape preserving caller's R15
-///   across the CALL + an RBP frame-link for cross-instance EH
-///   unwinding (D-238 / ADR-0185 a).
-/// Stable across all callee signatures — every thunk has the
-/// same shape; only the embedded literals differ.
+/// Stable across all callee signatures — every thunk has the same
+/// shape; only the embedded literals differ.
+///
+/// The per-arch modules own the layout and its byte count; this
+/// facade deliberately does NOT restate either. Both numbers have
+/// moved three times (D-144 grew arm64 56 → 96; D-238 / ADR-0185 a
+/// grew x86_64 27 → 40; #381 grew x86_64 40 → 79) and the copy
+/// here was stale for two of them.
+///
+/// What IS this facade's contract, and holds on both arches:
+/// - **Call-and-return**, not a tail-jump (D-142 fix (A)): the
+///   thunk CALLs the callee and returns to the importer, so it can
+///   restore state around the call.
+/// - The caller's runtime pointer (arm64 X19 / x86_64 R15) and the
+///   rest of the reserved-invariant cohort survive the call.
+/// - The callee's `trap_flag`/`trap_kind` are cleared on the way in
+///   and relayed onto the caller's runtime on the way out (#381), so
+///   a trap raised inside the callee reaches the importer's existing
+///   post-call check.
+/// - An RBP / X29 frame-link makes the thunk frame a chain link for
+///   the cross-instance EH unwinder (D-238 / ADR-0185 a, ADR-0134 D1).
 pub const thunk_bytes: usize = arch_thunk.thunk_bytes;
 
 /// Emit one bridge thunk into `buf[0..thunk_bytes]`. `buf` MUST
@@ -55,9 +65,12 @@ pub const thunk_bytes: usize = arch_thunk.thunk_bytes;
 /// (c)-2.2 thunk-arena lifecycle chunk).
 ///
 /// `callee_rt`    — the callee instance's `*JitRuntime` cast to
-///                  `usize` (the address that will be installed
-///                  in the runtime-ptr register before the
-///                  tail-jump: X0 on AArch64, RDI on x86_64).
+///                  `usize`, installed in the entry-arg0 register
+///                  before the CALL so the callee's prologue
+///                  snapshots it into its own runtime-ptr register.
+///                  X0 on AArch64; on x86_64 the encoder writes RDI
+///                  unconditionally, which is entry-arg0 under SysV
+///                  ONLY — see the x86_64 module's Win64 note.
 /// `callee_entry` — the callee's JIT entry point address (the
 ///                  first instruction of the callee function's
 ///                  body in its module's JIT code block).

@@ -77,6 +77,22 @@
 //! (`op_call.zig:reloadHomedCallerSaved`), so clobbering them here is free.
 //! The return-value registers (RAX/RDX/XMM0/XMM1) are untouched.
 //!
+//! **This encoder is SysV-only, and that is a live Win64 defect (#385).**
+//! `MOV RDI, callee_rt` is entry-arg0 under SysV; under Win64 entry-arg0 is
+//! RCX (`abi.win64.entry_arg0_gpr`), and `op_call.zig:emitImportDispatch`
+//! leaves the IMPORTER's runtime there on the way into this thunk — so on
+//! Windows the callee's prologue snapshots the importer's runtime, not the
+//! exporter's. Two more Cc gaps ride along: RDI is callee-saved AND
+//! allocatable under Win64 (`abi.win64.allocatable_gprs`), so writing it here
+//! destroys a live importer register; and the CALL below reserves no Win64
+//! shadow space, whose home area would land on this thunk's own saved
+//! RBP/R15 and return address. All three predate the #381 relay and are
+//! tracked in #385 rather than widened into it — the relay is unaffected
+//! (it addresses the callee's runtime by immediate, not by arg register),
+//! but a green Windows CI leg on a cross-module trap test is NOT evidence
+//! that the callee ran on its own runtime: the trap reaches the importer
+//! either way, because on Win64 it was the importer's runtime all along.
+//!
 //! SysV AMD64 §3.2.1 invariant: RBX, RBP, R12..R15 are callee-saved.
 //! v2's JIT prologue (per ADR-0026 Cc-pivot) overwrites R15 with the
 //! new `*JitRuntime` argument WITHOUT first stack-saving the caller's
