@@ -1048,6 +1048,132 @@ test "JitInstance.initLinked: cross-module FUNC import dispatches to exporter (D
     try testing.expectEqual(@as(?u64, 42), try a_inst.invoke(gpa, "test", &.{}));
 }
 
+// #381 — the same public `initLinked` path, but the EXPORTER traps. A JIT trap
+// is a flag on the runtime the trap stub sees, and the bridge thunk runs the
+// callee with the callee's runtime pointer installed, so without propagation
+// the caller's post-call check (ADR-0199 / D-468) reads its own untouched
+// `trap_flag` and the importer runs on past a call that never returned a value.
+// The kind is asserted too: a fix that carries the flag but not the kind would
+// report a trap of kind 0 for an `unreachable`.
+test "JitInstance.initLinked: a trap in the cross-module callee reaches the caller (#381)" {
+    const gpa = testing.allocator;
+    // (module (func (export "get") (result i32) unreachable))
+    const b_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+        0x00, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x67,
+        0x65, 0x74, 0x00, 0x00, 0x0a, 0x05, 0x01, 0x03, 0x00, 0x00, 0x0b,
+    };
+    // (module (import "b" "get" (func $get (result i32)))
+    //         (func (export "test") (result i32) call $get))
+    const a_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+        0x00, 0x01, 0x7f, 0x02, 0x09, 0x01, 0x01, 0x62, 0x03, 0x67, 0x65, 0x74,
+        0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x74, 0x65,
+        0x73, 0x74, 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+    };
+    var b_inst = try JitInstance.init(gpa, &b_bytes);
+    defer b_inst.deinit(gpa);
+    const target = b_inst.exportedFuncTarget(gpa, "get") orelse return error.TestUnexpectedResult;
+    var a_inst = try JitInstance.initLinked(gpa, &a_bytes, &.{}, &.{target}, &.{}, &.{});
+    defer a_inst.deinit(gpa);
+    try testing.expectError(entry.Error.Trap, a_inst.invoke(gpa, "test", &.{}));
+    try testing.expectEqual(@as(u32, 5), a_inst.owned.rt.trap_kind); // unreachable_
+}
+
+// #381 — a trap left on the exporter's runtime must not be read as the
+// OUTCOME of a later call into it. The thunk is a JIT entry into another
+// instance's runtime and, unlike every host-driven entry (`entry.zig`), it did
+// not clear the trap fields on the way in; nothing read them, so nothing
+// noticed. Once the relay started reading them, the first cross-module trap
+// made every subsequent call into that exporter report the same trap — a
+// successful call reported as a failure, and (per #336's reason for clearing
+// the kind) a later generic trap inheriting this one's kind.
+test "JitInstance.initLinked: an exporter's earlier trap does not leak into a later call (#381)" {
+    const gpa = testing.allocator;
+    // (module (func (export "boom") (result i32) unreachable)
+    //         (func (export "ok") (result i32) i32.const 42))
+    const b_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
+        0x03, 0x02, 0x00, 0x00, 0x07, 0x0d, 0x02, 0x04,
+        0x62, 0x6f, 0x6f, 0x6d, 0x00, 0x00, 0x02, 0x6f,
+        0x6b, 0x00, 0x01, 0x0a, 0x0a, 0x02, 0x03, 0x00,
+        0x00, 0x0b, 0x04, 0x00, 0x41, 0x2a, 0x0b,
+    };
+    // (module (import "b" "boom" (func (result i32)))
+    //         (import "b" "ok" (func (result i32)))
+    //         (func (export "callBoom") (result i32) call 0)
+    //         (func (export "callOk") (result i32) call 1))
+    const a_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x02,
+        0x11, 0x02, 0x01, 0x62, 0x04, 0x62, 0x6f, 0x6f,
+        0x6d, 0x00, 0x00, 0x01, 0x62, 0x02, 0x6f, 0x6b,
+        0x00, 0x00, 0x03, 0x03, 0x02, 0x00, 0x00, 0x07,
+        0x15, 0x02, 0x08, 0x63, 0x61, 0x6c, 0x6c, 0x42,
+        0x6f, 0x6f, 0x6d, 0x00, 0x02, 0x06, 0x63, 0x61,
+        0x6c, 0x6c, 0x4f, 0x6b, 0x00, 0x03, 0x0a, 0x0b,
+        0x02, 0x04, 0x00, 0x10, 0x00, 0x0b, 0x04, 0x00,
+        0x10, 0x01, 0x0b,
+    };
+    var b_inst = try JitInstance.init(gpa, &b_bytes);
+    defer b_inst.deinit(gpa);
+    const t_boom = b_inst.exportedFuncTarget(gpa, "boom") orelse return error.TestUnexpectedResult;
+    const t_ok = b_inst.exportedFuncTarget(gpa, "ok") orelse return error.TestUnexpectedResult;
+    var a_inst = try JitInstance.initLinked(gpa, &a_bytes, &.{}, &.{ t_boom, t_ok }, &.{}, &.{});
+    defer a_inst.deinit(gpa);
+
+    try testing.expectEqual(@as(?u64, 42), try a_inst.invoke(gpa, "callOk", &.{}));
+    try testing.expectError(entry.Error.Trap, a_inst.invoke(gpa, "callBoom", &.{}));
+    try testing.expectEqual(@as(u32, 5), a_inst.owned.rt.trap_kind); // unreachable_
+    // The SAME exporter, a different export, after the trap.
+    try testing.expectEqual(@as(?u64, 42), try a_inst.invoke(gpa, "callOk", &.{}));
+    // …and the entry clear is why: the exporter's pair reads as "no trap"
+    // once a clean call has entered it. The kind half is asserted too — a
+    // clear that moved only the flag would leave 5 here for the next generic
+    // trap (which raises the flag without writing a kind) to inherit.
+    try testing.expectEqual(@as(u32, 0), b_inst.owned.rt.trap_flag);
+    try testing.expectEqual(@as(u32, 0), b_inst.owned.rt.trap_kind);
+}
+
+// #381 — `return_call` across the bridge. `op_tail_call.zig` notes there is no
+// post-call check at a tail-call site and cannot be, and relies on the
+// grand-caller's check instead; that grand-caller reads its OWN runtime, so
+// the relay is what makes both shapes work. Measured red before the relay:
+// both returned 0 rather than trapping.
+test "JitInstance.initLinked: a cross-module return_call propagates the callee's trap (#381)" {
+    const gpa = testing.allocator;
+    // (module (func (export "boom") (result i32) unreachable))
+    const b_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
+        0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x62,
+        0x6f, 0x6f, 0x6d, 0x00, 0x00, 0x0a, 0x05, 0x01,
+        0x03, 0x00, 0x00, 0x0b,
+    };
+    // (module (import "b" "boom" (func (result i32)))
+    //         (func (export "t") (result i32) return_call 0)  ;; reached from the host entry
+    //         (func (export "g") (result i32) call 1))        ;; reached via a grand-caller
+    const a_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x02,
+        0x0a, 0x01, 0x01, 0x62, 0x04, 0x62, 0x6f, 0x6f,
+        0x6d, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00, 0x00,
+        0x07, 0x09, 0x02, 0x01, 0x74, 0x00, 0x01, 0x01,
+        0x67, 0x00, 0x02, 0x0a, 0x0b, 0x02, 0x04, 0x00,
+        0x12, 0x00, 0x0b, 0x04, 0x00, 0x10, 0x01, 0x0b,
+    };
+    var b_inst = try JitInstance.init(gpa, &b_bytes);
+    defer b_inst.deinit(gpa);
+    const t = b_inst.exportedFuncTarget(gpa, "boom") orelse return error.TestUnexpectedResult;
+    var a_inst = try JitInstance.initLinked(gpa, &a_bytes, &.{}, &.{t}, &.{}, &.{});
+    defer a_inst.deinit(gpa);
+    try testing.expectError(entry.Error.Trap, a_inst.invoke(gpa, "t", &.{}));
+    try testing.expectEqual(@as(u32, 5), a_inst.owned.rt.trap_kind);
+    try testing.expectError(entry.Error.Trap, a_inst.invoke(gpa, "g", &.{}));
+    try testing.expectEqual(@as(u32, 5), a_inst.owned.rt.trap_kind);
+}
+
 test "JitInstance: cross-module TAG identity resolves to the exporter's id (ADR-0134 D3)" {
     const gpa = testing.allocator;
     // Exporter "test" — the real try_table.0 module: defines $e0, exports
