@@ -1,8 +1,19 @@
 # CI — the host-local gate on the 3 supported OSes, mirroring the local
 # 3-host gate (Mac aarch64 + Linux x86_64 + Windows x86_64). Each matrix leg
-# runs `scripts/ci_gate.sh` so CI verifies exactly what the maintainer runs
-# per host (single source of truth); the differential oracle is wasmtime, and
-# its install is required.
+# runs `scripts/ci_gate.sh`, which is where nearly all of the blocking content
+# lives and is the single definition of it; the differential oracle is
+# wasmtime, and its install is required.
+#
+# What that does NOT mean is that a green local run predicts this leg, and two
+# things break the correspondence. The leg has one blocking step outside the
+# script — `test-wasi-p1-official`, whose own block below says why it sits
+# here. And `gate_merge.sh` does not invoke `ci_gate.sh` at all: it runs
+# `gate_commit.sh` locally and `run_remote_*.sh test-all` on the two remote
+# hosts, so it approximates the leg rather than reproducing it. Workflow-wide
+# the same already holds for `doc-truth`, which blocks through `ci-required`
+# while its `check_wasi03_coverage_claims` / `check_doc_fossils` have no local
+# counterpart. `ci-required` is authoritative; the local scripts are
+# pre-flight (ADR-0076 D9).
 #
 # Triggers: pull_request (any target) + push to `main` + manual dispatch.
 # `main` is the trunk and is ruleset-protected: no direct pushes — every change
@@ -286,25 +297,32 @@ jobs:
           ZWASM_CI_EXTENDED: ${{ (github.event_name == 'push' && matrix.extended) && '1' || '0' }}
         run: bash scripts/ci_gate.sh
 
-      # Official wasi-testsuite wasm32-wasip1 corpus (D-582). ADVISORY: the
-      # corpus is not green (D-583), so a blocking placement would red every
-      # PR. No count here on purpose: D-583 carries the live one and
-      # `zig build test-wasi-p1-official` re-derives it. A count copied to a
-      # second file is what went stale — this block said 14 while the row
-      # already said 8. Step-level `continue-on-error`
-      # keeps the step's `outcome` as `failure` (visible in the run) while its
-      # `conclusion` — and therefore the job's, and therefore
-      # `needs.gate.result` that `ci-required` reads — stays `success`.
+      # Official wasi-testsuite wasm32-wasip1 corpus (D-582). BLOCKING, with
+      # the ratchet in `test/wasi/official_runner.zig`: linux and macOS are at
+      # baseline 0 so every test there must pass, and the Windows leg carries a
+      # `known_table` of the #290 family, which tolerates those failures and
+      # trips when one of them starts passing. No count here on purpose —
+      # D-583 carries the live one, `zig build test-wasi-p1-official`
+      # re-derives it, and the table holds NAMES. A count copied to a second
+      # file is what went stale: this block once said 14 while the row already
+      # said 8.
       #
-      # PUSH-ONLY since 2026-08-24. The paragraph above is exactly why: a
-      # failure here could not block a PR and never could, so the 182 s it
-      # cost on every PR bought no gate signal — measured 2026-08-25 on
-      # `286a91f89`, over the four same-base PR runs that still ran it:
-      # 138 s on the macOS leg (spread 7 s) plus 44 s across linux and
-      # windows. It still runs on the merge to `main`, the same window
-      # `ZWASM_CI_EXTENDED` already accepts for its own checks, so the corpus
-      # verdict stays a per-merge number. D-583's remaining failures are
-      # unaffected either way.
+      # `continue-on-error` is gone (was here 2026-08-24..). It rewrote a
+      # failing step's `conclusion` to `success`, and `conclusion` is what
+      # `needs.gate.result` — and therefore `ci-required` — reads. That hid
+      # #310, where the runner stopped producing a summary line at all rather
+      # than producing a worse number. No separate presence check replaces it:
+      # a runner that dies mid-corpus exits non-zero, so the exit code the step
+      # now honours already says "this leg verified nothing".
+      #
+      # Runs on PULL REQUESTS as well as the merge, reversing the 2026-08-24
+      # push-only placement. That placement was correct while the step could
+      # not block: the 182 s bought no gate signal — measured 2026-08-25 on
+      # `286a91f89` over four same-base PR runs, 138 s on the macOS leg (spread
+      # 7 s) plus 44 s across linux and windows. Now that it blocks, running it
+      # only after the merge would mean a preview1 regression is first seen as
+      # a red `main` — the situation #312 is about — so it belongs where it can
+      # stop the PR that causes it.
       #
       # Deliberately a step in THIS job rather than a job of its own: a
       # separate job would repeat the Zig install and rebuild zwasm from a cold
@@ -312,12 +330,10 @@ jobs:
       # a second full build per PR to run two lanes over 72 small binaries.
       # Here it reuses what `ci_gate.sh` just built.
       #
-      # Time-boxed in the ADR-0174 sense, not indefinite: when D-583 goes
-      # green on all three OSes the step moves into `test-all` and this block
-      # is deleted. That row's DISCHARGE clause lists the four edits.
-      - name: test-wasi-p1-official (advisory, D-582)
-        if: github.event_name == 'push'
-        continue-on-error: true
+      # Time-boxed in the ADR-0174 sense, not indefinite: when D-583 goes green
+      # on all three OSes the step moves into `test-all` and this block is
+      # deleted. That row's DISCHARGE clause lists the edits.
+      - name: test-wasi-p1-official (D-582)
         shell: bash
         run: zig build test-wasi-p1-official
 

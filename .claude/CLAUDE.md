@@ -81,7 +81,9 @@ text or code identifiers.
   merge gate. A PR run gets the **core** gate — zig fmt + `test-all` +
   `bench-latency-build` (compile-only, ADR-0209) + the test-discovery guard,
   plus on the Linux leg only `run-rust-host` and the unit tests built
-  ReleaseSafe (#347). The **extended** checks (lint /
+  ReleaseSafe (#347) — and, as a blocking step OUTSIDE `ci_gate.sh`,
+  `test-wasi-p1-official` (ADR-0225; the only leg content the script does not
+  define). The **extended** checks (lint /
   build-option DCE / ReleaseSafe JIT smoke / AOT cross-compile / `zone_check` /
   `spill_aware`) are gated on `ZWASM_CI_EXTENDED`, which `ci.yml` sets only on
   the **push to `main`** — they are up to ~20 cold-cache ReleaseSafe builds and

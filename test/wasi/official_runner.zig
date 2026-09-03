@@ -12,7 +12,10 @@
 //!
 //! Exit code: 2 on a usage error, 1 on anything below, 0 otherwise.
 //!
-//! - a test failed (`failed`) or could not be run (`errored`);
+//! - a test failed where `known_table` expected it to pass (`failed`), or
+//!   could not be run at all (`errored`);
+//! - a `known_table` entry PASSED — the gap is fixed and the entry has to go
+//!   with the fix (`ratchet_flips`);
 //! - the corpus ROOT is unopenable;
 //! - a suite carries upstream's descriptor but enumerates no tests;
 //! - the root holds no suites at all;
@@ -26,6 +29,11 @@
 //! ADR-0208 D2 requires the total too. The exact PER-LANGUAGE counts stay in
 //! `scripts/vendor_wasip1_official.sh`, which asserts them at regen; only the
 //! single total is repeated here.
+//!
+//! This exit code is the whole presence check the CI step needs: a corpus that
+//! stops producing a summary line does so by dying, and a dead process is a
+//! non-zero exit. What hid #310 was not a missing check but
+//! `continue-on-error` rewriting this code to success.
 //!
 //! ## Upstream manifest subset
 //!
@@ -47,6 +55,7 @@
 //!    JIT, so an unpinned lane silently measures the JIT and calls it preview1
 //!    coverage. `interp` and `jit` diverge by 4 tests today (D-583).
 
+const builtin = @import("builtin");
 const std = @import("std");
 
 const zwasm = @import("zwasm");
@@ -90,10 +99,102 @@ const Expect = struct {
 
 const Engine = enum { interp, jit };
 
+/// What this host is expected to do with a test. Mirrors the AOT differential's
+/// `known_table` (`test/aot/aot_process_diff.zig`), including its ratchet: the
+/// table records NAMES, never a count, so the count stays derivable from the
+/// run and cannot go stale the way a copied number does.
+const Expectation = union(enum) {
+    /// Must pass. A failure is a finding and the run exits non-zero.
+    match,
+    /// Fails on this OS today, tracked by the named debt row. A PASS here is a
+    /// RATCHET FLIP: the entry must be removed in the same PR, and the run
+    /// exits non-zero to force it.
+    known_failure: []const u8,
+};
+
+const KnownEntry = struct { name: []const u8, exp: Expectation };
+
+/// Keys are test stems, unique across all three vendored suites.
+///
+/// Windows carries the #290 symlink / hardlink / readdir family, identical on
+/// both engines and recorded in D-583.
+///
+/// **This table describes CI's windows-2022 runner, deliberately, and no other
+/// Windows host.** D-583 also records `path_symlink_trailing_slashes` failing
+/// on a Windows 11 host, where it makes eight. An exact-match table cannot
+/// describe both counts at once: listing eight reds windows-2022 with a
+/// ratchet flip, listing seven reds Windows 11 with an unexpected failure.
+/// The gate exists to hold CI, so CI's host is the one it is written for —
+/// an extra failure on a local Windows 11 box is that box disagreeing with
+/// the runner, not the ratchet being wrong. Do not add the eighth entry to
+/// make a local run quiet.
+///
+/// linux and macOS are empty — baseline 0, so every test there is `.match`
+/// and any failure is a finding.
+const known_table: []const KnownEntry = switch (builtin.os.tag) {
+    .windows => &.{
+        .{ .name = "fd_readdir", .exp = .{ .known_failure = "D-583" } },
+        .{ .name = "nofollow_errors", .exp = .{ .known_failure = "D-583" } },
+        .{ .name = "path_exists", .exp = .{ .known_failure = "D-583" } },
+        .{ .name = "path_link", .exp = .{ .known_failure = "D-583" } },
+        .{ .name = "readlink", .exp = .{ .known_failure = "D-583" } },
+        .{ .name = "symlink_create", .exp = .{ .known_failure = "D-583" } },
+        .{ .name = "symlink_filestat", .exp = .{ .known_failure = "D-583" } },
+    },
+    else => &.{},
+};
+
+comptime {
+    // A duplicated key makes the second row unreachable, and the
+    // never-encountered check below would then never fire for it either.
+    for (known_table, 0..) |a, i| {
+        for (known_table[i + 1 ..]) |b| {
+            if (std.mem.eql(u8, a.name, b.name)) {
+                @compileError("known_table lists '" ++ a.name ++ "' twice");
+            }
+        }
+    }
+}
+
+/// `stem`'s expectation, counting the visit on the way — see `Hits`. The two
+/// travel together because a lookup that does not record the visit is exactly
+/// the hole `Hits` exists to close.
+fn lookup(stem: []const u8, hits: *Hits) Expectation {
+    for (known_table, hits) |e, *n| {
+        if (std.mem.eql(u8, e.name, stem)) {
+            n.* += 1;
+            return e.exp;
+        }
+    }
+    return .match;
+}
+
+/// How many corpus tests each `known_table` row matched over one whole walk.
+/// Exactly one is the only healthy value, and both other answers are the table
+/// drifting from the corpus in a direction RATCHET-FLIP cannot see:
+///
+/// - **zero** — the row tolerates a test that is no longer there. An upstream
+///   bump that REMOVES a listed test and adds another keeps `vendored_total`
+///   intact, so nothing else in this runner would notice, and the row would sit
+///   there until someone re-read it.
+/// - **more than one** — two suites vendor the same stem, so the row speaks for
+///   both and silently tolerates a test nobody chose to list. Today the corpus
+///   has no cross-suite collision, but nothing upstream or in
+///   `scripts/vendor_wasip1_official.sh` promises that: the script asserts
+///   per-language COUNTS, not name uniqueness. A count is cheaper than the
+///   comment that would otherwise assert it.
+const Hits = [known_table.len]u32;
+
 const Counts = struct {
     passed: u32 = 0,
-    /// The test ran and gave the wrong answer. These are the D-583 items.
+    /// The test ran and gave the wrong answer where none was expected. This is
+    /// the bucket that gates.
     failed: u32 = 0,
+    /// Gave the wrong answer, and `known_table` says so. Reported, not gated.
+    expected_failed: u32 = 0,
+    /// A `.known_failure` entry that PASSED: the gap is fixed and its table
+    /// entry must go in the same PR. Gates, so the removal cannot be deferred.
+    ratchet_flips: u32 = 0,
     /// The test could not be run at all — unreadable `.wasm`, malformed
     /// manifest, unsupported preopen entry. Counted apart from `failed`
     /// because it means the CORPUS is broken, not the runtime, and reading it
@@ -102,7 +203,7 @@ const Counts = struct {
     errored: u32 = 0,
 
     fn ran(self: Counts) u32 {
-        return self.passed + self.failed + self.errored;
+        return self.passed + self.failed + self.expected_failed + self.errored;
     }
 };
 
@@ -172,6 +273,7 @@ pub fn main(init: std.process.Init) !void {
 
     var total: Counts = .{};
     var suites: u32 = 0;
+    var hits: Hits = @splat(0);
 
     var root_it = root_dir.iterate();
     while (try root_it.next(io)) |entry| {
@@ -200,9 +302,11 @@ pub fn main(init: std.process.Init) !void {
             },
         };
 
-        const suite = try runSuite(gpa, io, out, corpus_root, entry.name, engine, scratch_root);
+        const suite = try runSuite(gpa, io, out, corpus_root, entry.name, engine, scratch_root, &hits);
         total.passed += suite.passed;
         total.failed += suite.failed;
+        total.expected_failed += suite.expected_failed;
+        total.ratchet_flips += suite.ratchet_flips;
         total.errored += suite.errored;
         suites += 1;
 
@@ -240,8 +344,14 @@ pub fn main(init: std.process.Init) !void {
     // phase hides behind a green step (ADR-0174 context: a windows leg
     // reported OK while every spec category was pass=0).
     try out.print(
-        "\nwasi_p1_official [{t}]: {d} passed, {d} failed, {d} errored, {d} total (over {d} suites)\n",
-        .{ engine, total.passed, total.failed, total.errored, total.ran(), suites },
+        "\nwasi_p1_official [{t}]: {d} passed, {d} failed, {d} known-failed, " ++
+            "{d} errored, {d} ratchet-flips, {d} total (over {d} suites)\n",
+        .{
+            engine,        total.passed,
+            total.failed,  total.expected_failed,
+            total.errored, total.ratchet_flips,
+            total.ran(),   suites,
+        },
     );
     if (total.errored != 0) {
         try out.print(
@@ -262,9 +372,40 @@ pub fn main(init: std.process.Init) !void {
             .{ total.ran(), vendored_total },
         );
     }
+    // Checked after the loop, not inside it: the rows are spread across the
+    // three suites and only the whole walk knows how often each was reached.
+    var drifted: u32 = 0;
+    for (known_table, hits) |e, n| {
+        if (n == 1) continue;
+        const row = switch (e.exp) {
+            .match => "",
+            .known_failure => |r| r,
+        };
+        if (n == 0) {
+            try out.print(
+                "STALE-ROW  known_table lists '{s}' ({s}), which this corpus does not\n" ++
+                    "      hold — remove the row, or re-vendor with\n" ++
+                    "      scripts/vendor_wasip1_official.sh\n",
+                .{ e.name, row },
+            );
+        } else {
+            try out.print(
+                "DUP-STEM   known_table's '{s}' ({s}) matched {d} corpus tests — the\n" ++
+                    "      row speaks for all of them. Key the table by suite, or\n" ++
+                    "      re-vendor with scripts/vendor_wasip1_official.sh\n",
+                .{ e.name, row, n },
+            );
+        }
+        drifted += 1;
+    }
+
     try out.flush();
     discardAbsent(cwd.deleteTree(io, scratch_root));
-    if (total.failed != 0 or total.errored != 0 or partial) std.process.exit(1);
+    if (total.failed != 0 or total.errored != 0 or partial or
+        total.ratchet_flips != 0 or drifted != 0)
+    {
+        std.process.exit(1);
+    }
 }
 
 /// Swallow a cleanup error on a path that may legitimately not exist.
@@ -288,6 +429,7 @@ fn runSuite(
     suite_name: []const u8,
     engine: Engine,
     scratch_root: []const u8,
+    hits: *Hits,
 ) !Counts {
     const suite_path = try std.Io.Dir.path.join(gpa, &.{ corpus_root, suite_name });
     defer gpa.free(suite_path);
@@ -336,17 +478,39 @@ fn runSuite(
         if (!std.mem.endsWith(u8, entry.name, ".wasm")) continue;
 
         const stem = entry.name[0 .. entry.name.len - ".wasm".len];
+        const exp = lookup(stem, hits);
         if (runOne(gpa, io, out, &suite_dir, suite_path, stem, entry.name, engine, scratch_root)) {
             counts.passed += 1;
+            if (exp == .known_failure) {
+                try out.print(
+                    "RATCHET-FLIP  {s}: known failure ({s}) now PASSES — remove its\n" ++
+                        "      known_table entry in this PR\n",
+                    .{ stem, exp.known_failure },
+                );
+                counts.ratchet_flips += 1;
+            }
         } else |err| if (isTestVerdict(err)) {
-            try out.print("FAIL   {s}: {t}\n", .{ stem, err });
-            counts.failed += 1;
+            // A corpus problem is never expected, so the table is consulted
+            // only for a test VERDICT — `errored` below stays fatal either way.
+            switch (exp) {
+                .match => {
+                    try out.print("FAIL   {s}: {t}\n", .{ stem, err });
+                    counts.failed += 1;
+                },
+                .known_failure => |row| {
+                    try out.print("KNOWN  {s}: {t} ({s})\n", .{ stem, err, row });
+                    counts.expected_failed += 1;
+                },
+            }
         } else {
             try out.print("ERROR  {s}: {t} (could not run — corpus problem)\n", .{ stem, err });
             counts.errored += 1;
         }
     }
-    try out.print("    {d} passed, {d} failed, {d} errored\n", .{ counts.passed, counts.failed, counts.errored });
+    try out.print(
+        "    {d} passed, {d} failed, {d} known-failed, {d} errored\n",
+        .{ counts.passed, counts.failed, counts.expected_failed, counts.errored },
+    );
     return counts;
 }
 
