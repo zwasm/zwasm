@@ -831,9 +831,38 @@ fn crossModuleJitTarget(
     };
     const want_tidx = it.payload.func_typeidx;
     if (want_tidx >= importer_types.items.len) return error.Unsupported;
-    if (!validator_helpers.funcTypeImportCompatible(importer_types.items[want_tidx], src_sig, importer_types))
+    const want_sig = importer_types.items[want_tidx];
+    // #387 — `funcTypeImportCompatible` resolves both signatures in ONE type
+    // space, and the only one in hand here is the importer's. That is sound
+    // while every type is structural, and unsound the moment a signature names
+    // a type INDEX: `(ref $t)` means what `$t` means in the module it came
+    // from. The interp path has the same gap, but it carries
+    // `source_signature` to the call; a resolved JIT target becomes a bridge
+    // thunk jumping straight into the callee's body, so a wrongly accepted
+    // link there is an ABI mismatch rather than a semantic one. Decline the
+    // shape until the exporter's own `Types` are retained (the facade linker's
+    // `export_src_types` + `canonicalEqualCross` is the model) — the caller
+    // falls back to the interp, which is exactly where main already sent it.
+    if (hasConcreteHeapType(want_sig) or hasConcreteHeapType(src_sig)) return error.Unsupported;
+    if (!validator_helpers.funcTypeImportCompatible(want_sig, src_sig, importer_types))
         return error.Unsupported;
     return source_jit.exportedFuncTarget(ta, it.name) orelse error.Unsupported;
+}
+
+/// #387 — does this signature name a type-section INDEX anywhere? Such a type
+/// is only meaningful in its own module, so a single-type-space comparison
+/// cannot judge it across a module boundary.
+fn hasConcreteHeapType(sig: zir.FuncType) bool {
+    for ([_][]const zir.ValType{ sig.params, sig.results }) |half| {
+        for (half) |vt| switch (vt) {
+            .ref => |r| switch (r.heap_type) {
+                .concrete => return true,
+                .abstract => {},
+            },
+            else => {},
+        };
+    }
+    return false;
 }
 
 /// D-478 / #360 — resolve the JIT path's func imports. Returns
