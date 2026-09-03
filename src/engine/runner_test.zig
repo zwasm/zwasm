@@ -1048,6 +1048,38 @@ test "JitInstance.initLinked: cross-module FUNC import dispatches to exporter (D
     try testing.expectEqual(@as(?u64, 42), try a_inst.invoke(gpa, "test", &.{}));
 }
 
+// #381 — the same public `initLinked` path, but the EXPORTER traps. A JIT trap
+// is a flag on the runtime the trap stub sees, and the bridge thunk runs the
+// callee with the callee's runtime pointer installed, so without propagation
+// the caller's post-call check (ADR-0199 / D-468) reads its own untouched
+// `trap_flag` and the importer runs on past a call that never returned a value.
+// The kind is asserted too: a fix that carries the flag but not the kind would
+// report a trap of kind 0 for an `unreachable`.
+test "JitInstance.initLinked: a trap in the cross-module callee reaches the caller (#381)" {
+    const gpa = testing.allocator;
+    // (module (func (export "get") (result i32) unreachable))
+    const b_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+        0x00, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x67,
+        0x65, 0x74, 0x00, 0x00, 0x0a, 0x05, 0x01, 0x03, 0x00, 0x00, 0x0b,
+    };
+    // (module (import "b" "get" (func $get (result i32)))
+    //         (func (export "test") (result i32) call $get))
+    const a_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+        0x00, 0x01, 0x7f, 0x02, 0x09, 0x01, 0x01, 0x62, 0x03, 0x67, 0x65, 0x74,
+        0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x74, 0x65,
+        0x73, 0x74, 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+    };
+    var b_inst = try JitInstance.init(gpa, &b_bytes);
+    defer b_inst.deinit(gpa);
+    const target = b_inst.exportedFuncTarget(gpa, "get") orelse return error.TestUnexpectedResult;
+    var a_inst = try JitInstance.initLinked(gpa, &a_bytes, &.{}, &.{target}, &.{}, &.{});
+    defer a_inst.deinit(gpa);
+    try testing.expectError(entry.Error.Trap, a_inst.invoke(gpa, "test", &.{}));
+    try testing.expectEqual(@as(u32, 5), a_inst.owned.rt.trap_kind); // unreachable_
+}
+
 test "JitInstance: cross-module TAG identity resolves to the exporter's id (ADR-0134 D3)" {
     const gpa = testing.allocator;
     // Exporter "test" — the real try_table.0 module: defines $e0, exports
