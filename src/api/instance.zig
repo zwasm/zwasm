@@ -265,6 +265,15 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
                 alloc.destroy(rt);
             }
         }
+        // #360 — a JIT-backed instance still live here has its JitInstance
+        // parked for the reap below. Before this it was dropped on the floor
+        // (the cascade only ever looked at `inst.runtime`), leaking the code
+        // pages and the runtime on the reverse-order teardown path.
+        if (inst.jit) |jp| {
+            // EXEMPT-FALLBACK: ADR-0014 — park OOM at store-teardown accepts a JitInstance leak over UAF.
+            parkJitAsZombie(alloc, handle, jp) catch {};
+            inst.jit = null;
+        }
         inst.funcs_storage = &.{};
         inst.func_ptrs_storage = &.{};
         alloc.destroy(inst);
@@ -281,6 +290,14 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
         alloc.destroy(z.runtime);
     }
     handle.zombies.deinit(alloc);
+    // #360 — and the JIT-backed zombies: an importer's bridge thunk pointed at
+    // each of these, and every importer is gone with the cascade above.
+    for (handle.jit_zombies.items) |jp| {
+        const jit: *runner.JitInstance = @ptrCast(@alignCast(jp));
+        jit.deinit(alloc);
+        alloc.destroy(jit);
+    }
+    handle.jit_zombies.deinit(alloc);
     // Free the cross-module instance registry (ADR-0065 §"Cat III").
     // Values are erased `*Instance` pointers (lifetimes managed by
     // the zombie list); keys are caller-owned. Only the hashmap's
@@ -319,6 +336,19 @@ fn parkAsZombie(
         .runtime = rt,
         .arena = arena,
     });
+}
+
+/// #360 — the JIT counterpart of `parkAsZombie`. A cross-module func import
+/// bakes the exporter's `&owned.rt` and entry address into the importer's
+/// bridge thunk (D-225), so the exporter's `JitInstance` must outlive every
+/// importer. Parking defers the free to `wasm_store_delete`, by when nothing
+/// can call in. Takes the erased pointer the `Instance.jit` field carries.
+fn parkJitAsZombie(
+    store_alloc: std.mem.Allocator,
+    store: *Store,
+    jit: *anyopaque,
+) std.mem.Allocator.Error!void {
+    try store.jit_zombies.append(store_alloc, jit);
 }
 
 // ============================================================
@@ -1393,12 +1423,14 @@ pub export fn wasm_instance_delete(i: ?*Instance) callconv(.c) void {
     // already-freed handle.
     removeFromLiveInstances(store, handle);
     if (handle.jit) |jp| {
-        // ADR-0200 — JIT-backed instance: free the heap-pinned JitInstance, then
-        // the per-instance arena holding `exports_storage` (its name slices
-        // borrowed jit.compiled.arena, freed just above, and are not read here).
-        const jit: *runner.JitInstance = @ptrCast(@alignCast(jp));
-        jit.deinit(alloc);
-        alloc.destroy(jit);
+        // ADR-0200 / #360 — PARK the heap-pinned JitInstance rather than free it,
+        // the JIT counterpart of the interpreter arm below: an importer's bridge
+        // thunk holds this instance's runtime address and entry point (D-225), so
+        // freeing here would leave it calling into released code. Reaped by
+        // `wasm_store_delete`. The per-instance arena holding `exports_storage`
+        // IS freed — only the c_api handle reads it, and it is going away.
+        // EXEMPT-FALLBACK: ADR-0014 — park OOM accepts a JitInstance leak over UAF of an importer's bridge thunk.
+        parkJitAsZombie(alloc, store, jp) catch {};
         handle.jit = null;
         if (handle.arena) |arena| {
             arena.deinit();
