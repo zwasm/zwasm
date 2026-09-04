@@ -68,9 +68,9 @@ pub const thunk_bytes: usize = arch_thunk.thunk_bytes;
 ///                  `usize`, installed in the entry-arg0 register
 ///                  before the CALL so the callee's prologue
 ///                  snapshots it into its own runtime-ptr register.
-///                  X0 on AArch64; on x86_64 the encoder writes RDI
-///                  unconditionally, which is entry-arg0 under SysV
-///                  ONLY — see the x86_64 module's Win64 note.
+///                  X0 on AArch64; on x86_64 whichever register the
+///                  active convention names (`abi.current.entry_arg0_gpr`
+///                  — RDI under SysV, RCX under Win64, #385).
 /// `callee_entry` — the callee's JIT entry point address (the
 ///                  first instruction of the callee function's
 ///                  body in its module's JIT code block).
