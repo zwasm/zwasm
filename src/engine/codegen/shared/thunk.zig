@@ -35,8 +35,10 @@ const arch_thunk = switch (builtin.target.cpu.arch) {
 };
 
 /// Bridge thunk byte count for the current target architecture.
-/// Stable across all callee signatures — every thunk has the same
-/// shape; only the embedded literals differ.
+/// One shape for every callee — only the embedded literals differ. That is a
+/// bound, not just a convenience: the bridge takes no signature, so it can
+/// only be right for callees whose arguments and results all travel in
+/// registers (see the per-arch modules).
 ///
 /// The per-arch modules own the layout and its byte count; this
 /// facade deliberately does NOT restate either. Both numbers have

@@ -2,7 +2,8 @@
 //! (ADR-0066 + Amendment §A1, D-142
 //! fix (A.3) + D-238/ADR-0185 (a) RBP frame-link).
 //!
-//! Each thunk is a 40-byte native code snippet that wraps a
+//! Each thunk is a fixed-size native code snippet (`thunk_bytes`; the count
+//! lives there, not restated here — it has moved three times) that wraps a
 //! call-and-return around the callee's JIT entry. It does three
 //! things: **(1)** establishes a standard `PUSH RBP; MOV RBP,RSP`
 //! frame so the cross-instance EH unwinder can walk THROUGH the
@@ -155,7 +156,10 @@ comptime {
 /// R15 [2] + SUB RSP,8 [4] + MOV RDI imm64 [10] + MOV RAX imm64 [10]
 /// + #381 entry clear [3+7 = 10] + MOV RAX imm64 [10] + CALL RAX [2] +
 /// ADD RSP,8 [4] + POP R15 [2] + #381 trap relay [10+7+3+2+7 = 29] +
-/// POP RBP [1] + RET [1] = 79). Stable across all callee signatures.
+/// POP RBP [1] + RET [1] = 79). One shape for every callee, which bounds the
+/// bridge as much as it simplifies it: it takes no signature, so it can only
+/// be right for callees whose arguments and results all travel in registers.
+/// See the signature-agnostic note on `emitThunkCc`.
 pub const thunk_bytes: usize = 79;
 
 /// Emit one bridge thunk into `buf[0..thunk_bytes]`. `buf` MUST be
@@ -163,12 +167,30 @@ pub const thunk_bytes: usize = 79;
 /// allocating it inside an RX-mappable arena.
 ///
 /// `callee_rt`    — the callee instance's `*JitRuntime` value
-///                  to install in RDI before the CALL.
+///                  to install in the entry-arg0 register before the CALL
+///                  (RDI under SysV, RCX under Win64 — #385).
 /// `callee_entry` — the callee's JIT entry point.
 pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize) void {
     emitThunkCc(abi.current_cc, buf, callee_rt, callee_entry);
 }
 
+/// **Signature-agnostic, and the ABI is not.** The bridge receives no callee
+/// signature, so two shapes are wrong through it under either convention, and
+/// both predate this encoder:
+///
+/// - an **overflow stack argument** — the callee reads it at
+///   `[RBP + 16 + …]` relative to ITS frame (`emit.zig`), while the importer
+///   wrote it relative to the importer's RSP; this thunk's own frame sits in
+///   between and shifts it. arm64 is the same shape (`[X29, #16 + …]`).
+/// - a **MEMORY-class return** (results.len > 2) — the hidden result pointer
+///   belongs in entry-arg0 with the runtime moved to arg1, but
+///   `op_call.zig:emitImportDispatch` overwrites entry-arg0 with the runtime
+///   and this encoder overwrites it again.
+///
+/// Fixing either means making bridge emission signature-aware, which changes
+/// D-225's target-resolution contract rather than this encoder's ABI
+/// derivation. Tracked separately.
+///
 /// #385 — the body of `emitThunk`, with the calling convention as a comptime
 /// parameter. Production always passes `abi.current_cc`; the tests pass both,
 /// so the Win64 layout is checked from a SysV host. It has to be checkable
