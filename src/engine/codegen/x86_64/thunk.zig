@@ -343,11 +343,15 @@ test "emitThunkCc: Win64 reserves the 32-byte home area below the CALL (#385)" {
     try testing.expectEqual(win[9], win[45]); // the ADD undoes exactly the SUB
 }
 
+// These three assert the SysV bytes by construction, so they pin the
+// convention explicitly (#385): `emitThunk` follows `abi.current_cc`, and
+// on the Windows leg that is Win64 — where `48 BF` (MOV RDI) and
+// `48 83 EC 08` (SUB RSP,8) are exactly the bytes this PR replaces.
 test "emitThunk: byte-exact layout for known constants (D-238 RBP frame-link)" {
     var buf: [thunk_bytes]u8 = undefined;
     const callee_rt: usize = 0xDEADBEEF_CAFEBABE;
     const callee_entry: usize = 0x12345678_9ABCDEF0;
-    emitThunk(&buf, callee_rt, callee_entry);
+    emitThunkCc(.sysv, &buf, callee_rt, callee_entry);
 
     try testing.expectEqual(@as(u8, 0x55), buf[0]); // PUSH RBP
     try testing.expectEqualSlices(u8, &.{ 0x48, 0x89, 0xE5 }, buf[1..4]); // MOV RBP,RSP
@@ -401,7 +405,7 @@ test "emitThunk: byte-exact layout for known constants (D-238 RBP frame-link)" {
 // while the load reads the callee's, at the SAME offset.
 test "emitThunk: the trap relay reads the callee's runtime and writes the caller's (#381)" {
     var buf: [thunk_bytes]u8 = undefined;
-    emitThunk(&buf, 0, 0);
+    emitThunkCc(.sysv, &buf, 0, 0);
     const flag_off: i32 = jit_abi.trap_flag_off;
     const load = inst.encMovR64FromMemDisp32(.r10, .r11, flag_off);
     const store = inst.encStoreR64MemDisp32(.r10, .r15, flag_off);
@@ -426,7 +430,7 @@ test "emitThunk: the trap relay reads the callee's runtime and writes the caller
 
 test "emitThunk: round-trip literals at zero" {
     var buf: [thunk_bytes]u8 = undefined;
-    emitThunk(&buf, 0, 0);
+    emitThunkCc(.sysv, &buf, 0, 0);
     // Frame + opcode bytes unchanged; both imm64 fields all-zero.
     try testing.expectEqual(@as(u8, 0x55), buf[0]);
     try testing.expectEqualSlices(u8, &.{ 0x48, 0x89, 0xE5 }, buf[1..4]);
