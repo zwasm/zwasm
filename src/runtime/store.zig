@@ -82,6 +82,27 @@ pub const Store = struct {
     /// through the importer's lifetime). Walked + freed by
     /// `wasm_store_delete`.
     zombies: std.ArrayList(Zombie) = .empty,
+    /// The JIT-backed counterpart of `zombies` (#360). A cross-module
+    /// func import against a JIT exporter bakes that exporter's runtime
+    /// address and entry point into the importer's bridge thunk (D-225),
+    /// so freeing the exporter's `JitInstance` at `wasm_instance_delete`
+    /// leaves the importer calling into released code — the same hazard
+    /// ADR-0014 §2.1 parks the interpreter runtime for. JIT instances
+    /// therefore park here instead and are freed by `wasm_store_delete`,
+    /// by when no importer can reach them. Stored as `*anyopaque` (an
+    /// `engine/runner.zig::JitInstance` erased) because this Zone-1 file
+    /// MUST NOT import Zone-2 `engine/` — same discipline as
+    /// `Instance.jit`; the Zone-3 store teardown casts back.
+    jit_zombies: std.ArrayList(*anyopaque) = .empty,
+    /// #360 — byte buffers of modules the embedder deleted while a JIT-backed
+    /// instance built from them was alive or parked. `setup.zig`'s passive
+    /// data / elem segment descriptors alias the module's bytes (the
+    /// `wasm_bytes` outlives `RuntimeOwned` contract), so `wasm_module_delete`
+    /// moves the buffer here instead of freeing it — the handle itself is
+    /// destroyed as before, so a use-after-delete of the handle still faults
+    /// rather than going quiet. Freed by `wasm_store_delete` AFTER the
+    /// `jit_zombies` reap, by when no runtime aliases them.
+    orphaned_module_bytes: std.ArrayList([]u8) = .empty,
     /// Wasm 1.0 §4.5 cross-module instance registry per ADR-0065
     /// (Phase 9 Cat III §9.9-III scope). Spec testsuite uses
     /// `(register "M" $inst)` to bind a previously-instantiated

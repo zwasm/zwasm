@@ -68,6 +68,7 @@ const handles = @import("handles.zig");
 const jit_dispatch = @import("../wasi/jit_dispatch.zig"); // D-478 — WASI dispatch lookup
 const jit_host_bridge = @import("jit_host_bridge.zig"); // D-478 — host-func JIT bridge
 const setup_mod = @import("../engine/setup.zig"); // D-478 — HostFuncTarget
+const validator_helpers = @import("../validate/validator_helpers.zig"); // #360 — cross-module func import subtyping
 
 const ByteVec = vec.ByteVec;
 const ValVec = vec.ValVec;
@@ -109,6 +110,26 @@ pub const Module = extern struct {
     /// Cached borrowed `wasm_ref_t` view (`wasm_module_as_ref`, ADR-0158;
     /// payload = `@intFromPtr(self)`; freed in `wasm_module_delete`).
     ref_view: ?*handles.Ref = null,
+    /// #360 — JIT-backed instances built from this module. Their
+    /// `RuntimeOwned` aliases `bytes_ptr` (passive data / elem segment
+    /// descriptors point into it, per `setup.zig`'s contract that `wasm_bytes`
+    /// outlives the runtime), so while this is non-zero `wasm_module_delete`
+    /// hands the bytes to `Store.orphaned_module_bytes` instead of freeing
+    /// them.
+    ///
+    /// A borrow ends in exactly one way. A JIT instance is never freed at
+    /// `wasm_instance_delete` — it is PARKED on `Store.jit_zombies`
+    /// (importers may hold its address) — and the store-teardown cascade parks
+    /// too, so every borrower lives until `wasm_store_delete`'s reap, which
+    /// frees all parked runtimes and then all orphaned bytes in one sweep.
+    /// There is therefore no decrement anywhere: this only ever asks "has any
+    /// JIT instance aliased these bytes", and once one has, the bytes' free is
+    /// deferred to the store. Intended, not an oversight.
+    ///
+    /// Plain integer on purpose: a Store is single-threaded by design (the SDK
+    /// drops `Send`/`Sync` on it), so this is store-local and needs no atomic
+    /// and no mutex. Appended to the opaque handle; C never sees the layout.
+    jit_borrowers: u32 = 0,
 };
 
 // Instance + ExportType moved to src/runtime/instance/instance.zig
@@ -264,6 +285,15 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
                 alloc.destroy(rt);
             }
         }
+        // #360 — a JIT-backed instance still live here has its JitInstance
+        // parked for the reap below. Before this it was dropped on the floor
+        // (the cascade only ever looked at `inst.runtime`), leaking the code
+        // pages and the runtime on the reverse-order teardown path.
+        if (inst.jit) |jp| {
+            // EXEMPT-FALLBACK: ADR-0014 — park OOM at store-teardown accepts a JitInstance leak over UAF.
+            parkJitAsZombie(alloc, handle, jp) catch {};
+            inst.jit = null;
+        }
         inst.funcs_storage = &.{};
         inst.func_ptrs_storage = &.{};
         alloc.destroy(inst);
@@ -280,6 +310,19 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
         alloc.destroy(z.runtime);
     }
     handle.zombies.deinit(alloc);
+    // #360 — and the JIT-backed zombies: an importer's bridge thunk pointed at
+    // each of these, and every importer is gone with the cascade above.
+    for (handle.jit_zombies.items) |jp| {
+        const jit: *runner.JitInstance = @ptrCast(@alignCast(jp));
+        jit.deinit(alloc);
+        alloc.destroy(jit);
+    }
+    handle.jit_zombies.deinit(alloc);
+    // #360 — only now, with every parked runtime gone, may the module bytes
+    // those runtimes aliased be freed (`Module.jit_borrowers` explains why
+    // nothing frees them earlier).
+    for (handle.orphaned_module_bytes.items) |bytes| alloc.free(bytes);
+    handle.orphaned_module_bytes.deinit(alloc);
     // Free the cross-module instance registry (ADR-0065 §"Cat III").
     // Values are erased `*Instance` pointers (lifetimes managed by
     // the zombie list); keys are caller-owned. Only the hashmap's
@@ -318,6 +361,19 @@ fn parkAsZombie(
         .runtime = rt,
         .arena = arena,
     });
+}
+
+/// #360 — the JIT counterpart of `parkAsZombie`. A cross-module func import
+/// bakes the exporter's `&owned.rt` and entry address into the importer's
+/// bridge thunk (D-225), so the exporter's `JitInstance` must outlive every
+/// importer. Parking defers the free to `wasm_store_delete`, by when nothing
+/// can call in. Takes the erased pointer the `Instance.jit` field carries.
+fn parkJitAsZombie(
+    store_alloc: std.mem.Allocator,
+    store: *Store,
+    jit: *anyopaque,
+) std.mem.Allocator.Error!void {
+    try store.jit_zombies.append(store_alloc, jit);
 }
 
 // ============================================================
@@ -490,10 +546,27 @@ pub export fn wasm_module_validate(s: ?*Store, binary: ?*const ByteVec) callconv
 pub export fn wasm_module_delete(m: ?*Module) callconv(.c) void {
     const handle = m orelse return;
     if (handle.host_info_finalizer) |fin| fin(handle.host_info);
+    handle.host_info_finalizer = null;
     const store = handle.store orelse return;
     const alloc = storeAllocator(store) orelse return;
     if (handle.ref_view) |rv| alloc.destroy(rv); // object-identity as_ref view (ADR-0158)
-    if (handle.bytes_ptr) |p| alloc.free(p[0..handle.bytes_len]);
+    handle.ref_view = null;
+    // #360 — a JIT-backed instance built from this module aliases `bytes_ptr`
+    // (alive or parked; see `Module.jit_borrowers`). wasm-c-api lets the
+    // embedder delete the module first, so the BYTES move to the store's
+    // deferred-free list; the HANDLE is destroyed exactly as before, so a
+    // use-after-delete of it keeps faulting instead of going quiet. This sits
+    // after the `store orelse return` above, so it adds no second leak path to
+    // that existing one.
+    if (handle.bytes_ptr) |p| {
+        const bytes = p[0..handle.bytes_len];
+        if (handle.jit_borrowers > 0) {
+            // EXEMPT-FALLBACK: ADR-0014 — deferral OOM accepts a byte-buffer leak over freeing memory a parked runtime aliases.
+            store.orphaned_module_bytes.append(alloc, bytes) catch {};
+        } else {
+            alloc.free(bytes);
+        }
+    }
     alloc.destroy(handle);
 }
 
@@ -546,7 +619,7 @@ fn buildBindings(
             // The binding outlives this call — and outlives the instance
             // too, since `wasm_instance_delete` parks the arena holding it
             // on `store.zombies`. May over-mark (this also runs on the
-            // throwaway arena in `collectHostFuncTargets`); over-marking
+            // throwaway arena in `collectFuncImportTargets`); over-marking
             // only defers a free, so nothing compensates for it.
             //
             // ADR-0224 — reserve the retirement slot HERE, at capture, not at
@@ -768,39 +841,122 @@ pub fn instantiateFacade(store: *Store, module: *const Module, trap_out: ?*?*Tra
     return instantiateInternal(store, module, BuildBindingsCApi{ .imports_array = null }, trap_out, limits, engine);
 }
 
-/// D-478 — resolve embedder host-func imports for the JIT path into
-/// `HostFuncTarget`s (func-import order). Returns `error.Unsupported` for any
-/// import the JIT cannot satisfy (caller rejects → `.interp`). An empty slice
-/// means "all imports are WASI / none" — those are planted by setup via
-/// `jit_dispatch`, so the embedder binder is NOT consulted (no regression on
-/// the WASI-only JIT path, which needs no `store.wasi_host` at bind time).
-fn collectHostFuncTargets(
+/// D-478 / #360 — the JIT-satisfiable func imports of one module, both in
+/// func-import order: embedder host callbacks (`wasm_func_new`) and
+/// cross-module targets resolved against a JIT-backed exporter.
+const JitFuncImports = struct {
+    host: []setup_mod.HostFuncTarget = &.{},
+    /// Positional, `num_func_imports` long when non-empty; a zeroed entry is
+    /// an import setup resolves some other way (WASI / embedder host).
+    cross: []setup_mod.FuncImportTarget = &.{},
+};
+
+/// #360 — resolve one cross-module FUNC import against a JIT-backed source
+/// instance into the D-225 `FuncImportTarget` `initLinked` already consumes.
+/// `error.Unsupported` when the source is interp-backed (JIT-compiled code
+/// cannot enter an interpreter runtime), when it exports no such func, or
+/// when its type is not a subtype of the declared import type — the same
+/// §4.5.10 rule `instantiate.checkImportTypeMatches` applies on the interp
+/// path. Matching is BY NAME, as the interp binder's cross-module arm is.
+fn crossModuleJitTarget(
+    ta: std.mem.Allocator,
+    source_inst: *Instance,
+    it: sections.Import,
+    importer_types: *const sections.Types,
+) error{Unsupported}!setup_mod.FuncImportTarget {
+    const jit_ptr = source_inst.jit orelse return error.Unsupported;
+    const source_jit: *runner.JitInstance = @ptrCast(@alignCast(jit_ptr));
+    const src_et = lookupSourceExportType(source_inst, .func, it.name) catch return error.Unsupported;
+    const src_sig = switch (src_et) {
+        .func => |sft| sft.sig,
+        else => return error.Unsupported,
+    };
+    const want_tidx = it.payload.func_typeidx;
+    if (want_tidx >= importer_types.items.len) return error.Unsupported;
+    const want_sig = importer_types.items[want_tidx];
+    // #387 — `funcTypeImportCompatible` resolves both signatures in ONE type
+    // space, and the only one in hand here is the importer's. That is sound
+    // while every type is structural, and unsound the moment a signature names
+    // a type INDEX: `(ref $t)` means what `$t` means in the module it came
+    // from. The interp path has the same gap, but it carries
+    // `source_signature` to the call; a resolved JIT target becomes a bridge
+    // thunk jumping straight into the callee's body, so a wrongly accepted
+    // link there is an ABI mismatch rather than a semantic one. Decline the
+    // shape until the exporter's own `Types` are retained (the facade linker's
+    // `export_src_types` + `canonicalEqualCross` is the model). Declining is
+    // NOT a graceful degradation: the `.auto` retry lands in `buildBindings`,
+    // which needs the source's interpreter `Runtime` and a JIT-backed source
+    // has none, so this shape stays unsupported — NULL with no trap, #353's
+    // surface. It is unsupported at `main` too, by the same route, so the
+    // guard withholds an acceptance rather than removing one.
+    if (hasConcreteHeapType(want_sig) or hasConcreteHeapType(src_sig)) return error.Unsupported;
+    if (!validator_helpers.funcTypeImportCompatible(want_sig, src_sig, importer_types))
+        return error.Unsupported;
+    return source_jit.exportedFuncTarget(ta, it.name) orelse error.Unsupported;
+}
+
+/// #387 — does this signature name a type-section INDEX anywhere? Such a type
+/// is only meaningful in its own module, so a single-type-space comparison
+/// cannot judge it across a module boundary.
+fn hasConcreteHeapType(sig: zir.FuncType) bool {
+    for ([_][]const zir.ValType{ sig.params, sig.results }) |half| {
+        for (half) |vt| switch (vt) {
+            .ref => |r| switch (r.heap_type) {
+                .concrete => return true,
+                .abstract => {},
+            },
+            else => {},
+        };
+    }
+    return false;
+}
+
+/// D-478 / #360 — resolve the JIT path's func imports. Returns
+/// `error.Unsupported` for any import the JIT cannot satisfy (caller rejects →
+/// `.interp`). Empty slices mean "all imports are WASI / none" — those are
+/// planted by setup via `jit_dispatch`, so no binder is consulted (no
+/// regression on the WASI-only JIT path, which needs no `store.wasi_host` at
+/// bind time).
+///
+/// The C ABI path resolves straight off the import `Extern`s
+/// (`builder.imports`), because `buildBindings` — the interp binder — cannot
+/// describe a JIT-backed source at all: it reaches for that instance's
+/// interpreter `Runtime`, which is null by construction (ADR-0200's XOR). The
+/// native-facade path (`src/zwasm/linker.zig`) carries no extern array and
+/// keeps going through the binder, host funcs only.
+fn collectFuncImportTargets(
     ta: std.mem.Allocator,
     bytes: []const u8,
     builder_state: anytype,
     store: *Store,
-) error{ Unsupported, OutOfMemory }![]setup_mod.HostFuncTarget {
+) error{ Unsupported, OutOfMemory }!JitFuncImports {
     var mod = parser.parse(ta, bytes) catch return error.Unsupported;
-    const imp_section = mod.find(.import) orelse return &.{};
+    const imp_section = mod.find(.import) orelse return .{};
     var imports = sections.decodeImports(ta, imp_section.body) catch return error.Unsupported;
     defer imports.deinit();
 
     // First pass: only func imports are JIT-satisfiable; detect whether any
-    // needs the embedder binder (a non-WASI func import).
-    var needs_host = false;
+    // needs a binding resolved here (a non-WASI func import).
+    var needs_binding = false;
     for (imports.items) |it| {
         if (it.kind != .func) return error.Unsupported;
-        if (jit_dispatch.lookup(it.module, it.name) == null) needs_host = true;
+        if (jit_dispatch.lookup(it.module, it.name) == null) needs_binding = true;
     }
-    if (!needs_host) return &.{};
+    if (!needs_binding) return .{};
 
-    // Resolve embedder bindings only now (a host func needs them). buildBindings
-    // wires each host-func import's `host_call.ctx` to its `*HostFuncPayload`.
     var local_state = builder_state;
     const builder: BindingsBuilder = if (@TypeOf(builder_state) == BindingsBuilder)
         builder_state
     else
         local_state.asBuilder();
+
+    if (builder.imports) |arr| {
+        const type_sec = mod.find(.type) orelse return error.Unsupported;
+        return collectFromExterns(ta, type_sec.body, imports.items, arr);
+    }
+
+    // Native-facade path: buildBindings wires each host-func import's
+    // `host_call.ctx` to its `*HostFuncPayload`.
     const bindings_opt = builder.build(builder.ctx, ta, bytes, store) catch return error.Unsupported;
     const bindings = bindings_opt orelse return error.Unsupported;
 
@@ -816,13 +972,51 @@ fn collectHostFuncTargets(
         const dp = jit_host_bridge.dispatchPtrFor(payload.params, payload.results, func_idx) orelse return error.Unsupported;
         try out.append(ta, .{ .idx = func_idx, .dispatch_ptr = dp, .payload = @intFromPtr(payload) });
     }
-    return out.toOwnedSlice(ta);
+    return .{ .host = try out.toOwnedSlice(ta) };
 }
 
-/// ADR-0200 — build a JIT-backed `Instance` (`runtime == null`, `jit` set).
-/// The smallest increment: a no-import compute module compiled to native code
-/// via `engine/runner.zig::JitInstance`. Host imports + WASI are a later slice
-/// (the `func_import_targets` / `wasi_host` plumbing in the impl map). The
+/// C ABI half of `collectFuncImportTargets`: every import is a func (the
+/// caller checked), so the import index IS the func-import index. A host
+/// callback is a standalone entity (`instance == null`); anything carrying a
+/// source instance is a cross-module import.
+fn collectFromExterns(
+    ta: std.mem.Allocator,
+    type_section_body: []const u8,
+    items: []const sections.Import,
+    arr: [*]const ?*const Extern,
+) error{ Unsupported, OutOfMemory }!JitFuncImports {
+    var types = sections.decodeTypes(ta, type_section_body) catch return error.Unsupported;
+    defer types.deinit();
+
+    var host: std.ArrayList(setup_mod.HostFuncTarget) = .empty;
+    var cross = try ta.alloc(setup_mod.FuncImportTarget, items.len);
+    @memset(cross, .{});
+    var any_cross = false;
+    for (items, 0..) |it, i| {
+        const func_idx: u32 = @intCast(i);
+        if (jit_dispatch.lookup(it.module, it.name) != null) continue; // WASI → setup plants it
+        const ext = arr[i] orelse return error.Unsupported;
+        if (ext.kind != .func) return error.Unsupported;
+        if (ext.instance) |source_inst| {
+            cross[i] = try crossModuleJitTarget(ta, source_inst, it, &types);
+            any_cross = true;
+            continue;
+        }
+        const fh = ext.func orelse return error.Unsupported;
+        const payload = fh.host orelse return error.Unsupported;
+        const dp = jit_host_bridge.dispatchPtrFor(payload.params, payload.results, func_idx) orelse return error.Unsupported;
+        try host.append(ta, .{ .idx = func_idx, .dispatch_ptr = dp, .payload = @intFromPtr(payload) });
+    }
+    return .{
+        .host = try host.toOwnedSlice(ta),
+        .cross = if (any_cross) cross else &.{},
+    };
+}
+
+/// ADR-0200 — build a JIT-backed `Instance` (`runtime == null`, `jit` set)
+/// from a module compiled to native code via `engine/runner.zig::JitInstance`.
+/// Imports are resolved by `collectFuncImportTargets` (WASI / embedder host /
+/// cross-module) and fed to `initLinked`; `wasi_host` is attached below. The
 /// borrowed `wasm_bytes` live in the owning `Module`, which outlives the
 /// instance, and the `JitInstance` is heap-pinned so `exportedFuncTarget`'s
 /// `&owned.rt` stays stable.
@@ -831,22 +1025,24 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     const bytes_ptr = module.bytes_ptr orelse return null;
     const bytes = bytes_ptr[0..module.bytes_len];
 
-    // ADR-0200 / D-451 / D-478 — every import must be JIT-satisfiable AT
+    // ADR-0200 / D-451 / D-478 / #360 — every import must be JIT-satisfiable AT
     // INSTANTIATION (mirrors the interp linker's UnknownImport): a WASI func
-    // (`jit_dispatch.lookup`, planted by setup) OR an embedder host func
-    // (`wasm_func_new`) whose signature the comptime bridge covers. Anything
-    // else — non-func import, cross-module func, uncovered host-func signature,
-    // unsatisfied import — rejects here so the caller's `.interp` path handles
-    // it (no silent wrong answer; uncovered shapes never reach the JIT body).
-    // The resolved host-func targets are arena-scoped: setup copies their
-    // (idx, dispatch_ptr, payload) into the heap-owned `host_payloads`, so the
-    // arena can be reclaimed once `initLinked` returns.
+    // (`jit_dispatch.lookup`, planted by setup), an embedder host func
+    // (`wasm_func_new`) whose signature the comptime bridge covers, OR a func
+    // exported by another JIT-backed instance (D-225's `FuncImportTarget`).
+    // Anything else — non-func import, an interp-backed cross-module source,
+    // uncovered host-func signature, unsatisfied import — rejects here so the
+    // caller's `.interp` path handles it (no silent wrong answer; uncovered
+    // shapes never reach the JIT body). The resolved targets are arena-scoped:
+    // setup copies the host ones' (idx, dispatch_ptr, payload) into the
+    // heap-owned `host_payloads` and emits the cross-module ones into its own
+    // thunk arena, so this arena can be reclaimed once `initLinked` returns.
     var ht_arena = std.heap.ArenaAllocator.init(alloc);
     defer ht_arena.deinit();
-    const host_targets = collectHostFuncTargets(ht_arena.allocator(), bytes, builder_state, store) catch return null;
+    const func_imports = collectFuncImportTargets(ht_arena.allocator(), bytes, builder_state, store) catch return null;
 
     const jit = alloc.create(runner.JitInstance) catch return null;
-    jit.* = runner.JitInstance.initLinked(alloc, bytes, &.{}, &.{}, &.{}, host_targets) catch {
+    jit.* = runner.JitInstance.initLinked(alloc, bytes, &.{}, func_imports.cross, &.{}, func_imports.host) catch {
         alloc.destroy(jit);
         return null;
     };
@@ -984,6 +1180,11 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     // D-174 live-instance registry so wasm_store_delete cascades teardown.
     // EXEMPT-FALLBACK: D-174 — append OOM degrades to forward-order-only teardown (matches interp path).
     store.live_instances.append(alloc, @ptrCast(inst)) catch {};
+    // #360 — this runtime aliases the module's bytes for as long as it exists,
+    // parked included (`Module.jit_borrowers`). Taken last, after every
+    // fallible step, so no failure path can leave it held — nothing to
+    // errdefer.
+    @constCast(module).jit_borrowers += 1;
     return inst;
 }
 
@@ -995,6 +1196,11 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
 pub const BindingsBuilder = struct {
     ctx: *anyopaque,
     build: *const fn (ctx: *anyopaque, arena_alloc: std.mem.Allocator, bytes: []const u8, store: *Store) anyerror!?[]const runtime_instance_import.ImportBinding,
+    /// #360 — the C ABI import vector, when this builder wraps one. The JIT
+    /// path reads the `Extern`s directly (`collectFromExterns`): `build` is
+    /// the interp binder, and it cannot describe an import whose source
+    /// instance is JIT-backed. Null for the native-facade builder.
+    imports: ?[*]const ?*const Extern = null,
 };
 
 const BuildBindingsCApi = struct {
@@ -1006,7 +1212,7 @@ const BuildBindingsCApi = struct {
     }
 
     pub fn asBuilder(self: *BuildBindingsCApi) BindingsBuilder {
-        return .{ .ctx = self, .build = buildImpl };
+        return .{ .ctx = self, .build = buildImpl, .imports = self.imports_array };
     }
 };
 
@@ -1297,12 +1503,14 @@ pub export fn wasm_instance_delete(i: ?*Instance) callconv(.c) void {
     // already-freed handle.
     removeFromLiveInstances(store, handle);
     if (handle.jit) |jp| {
-        // ADR-0200 — JIT-backed instance: free the heap-pinned JitInstance, then
-        // the per-instance arena holding `exports_storage` (its name slices
-        // borrowed jit.compiled.arena, freed just above, and are not read here).
-        const jit: *runner.JitInstance = @ptrCast(@alignCast(jp));
-        jit.deinit(alloc);
-        alloc.destroy(jit);
+        // ADR-0200 / #360 — PARK the heap-pinned JitInstance rather than free it,
+        // the JIT counterpart of the interpreter arm below: an importer's bridge
+        // thunk holds this instance's runtime address and entry point (D-225), so
+        // freeing here would leave it calling into released code. Reaped by
+        // `wasm_store_delete`. The per-instance arena holding `exports_storage`
+        // IS freed — only the c_api handle reads it, and it is going away.
+        // EXEMPT-FALLBACK: ADR-0014 — park OOM accepts a JitInstance leak over UAF of an importer's bridge thunk.
+        parkJitAsZombie(alloc, store, jp) catch {};
         handle.jit = null;
         if (handle.arena) |arena| {
             arena.deinit();

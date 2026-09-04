@@ -113,8 +113,8 @@ WASM_API_EXTERN wasm_func_t* zwasm_instance_get_func(wasm_instance_t*, uint32_t 
 
 /* Per-instance engine kind for zwasm_instance_new_ex. AUTO — what stock
  * wasm_instance_new passes — compiles the module with the JIT and instantiates
- * the interpreter only for a module the JIT declines (an import outside the
- * JIT's host-func bridge, or a body it cannot compile). JIT forces the native
+ * the interpreter only for a module the JIT declines (an import it cannot
+ * satisfy, or a body it cannot compile). JIT forces the native
  * JIT: a declined module fails instantiation, returning NULL — no silent
  * downgrade. INTERP forces the interpreter, which unlike the other two rejects
  * a module importing wasi_snapshot_preview1 when no WASI host is configured on
