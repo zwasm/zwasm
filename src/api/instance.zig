@@ -601,7 +601,7 @@ fn lookupSourceExportType(
 fn buildBindings(
     arena_alloc: std.mem.Allocator,
     bytes: []const u8,
-    imports_array: ?[*]const ?*const Extern,
+    imports_array: ?[]const ?*const Extern,
     store: *Store,
 ) !?[]const runtime_instance_import.ImportBinding {
     var module = try parser.parse(arena_alloc, bytes);
@@ -638,7 +638,9 @@ fn buildBindings(
             } };
             continue;
         }
-        const ext_ptr = if (imports_array) |arr| arr[idx] else null;
+        // #392 — an entry the vector does not have is a missing import, not
+        // a read past the vector.
+        const ext_ptr = if (imports_array) |arr| (if (idx < arr.len) arr[idx] else null) else null;
         const ext = ext_ptr orelse return error.UnknownImportModule;
         const want_kind: ExternKind = switch (it.kind) {
             .func => .func,
@@ -815,9 +817,14 @@ pub fn instanceNewWithEngine(
     // wasm.h: `imports` is `const wasm_extern_vec_t*` ({size,data}), NOT a
     // bare extern array. Recast to the vec; hand buildBindings its `.data`
     // (indexed by the module's import count). Null vec/data → no imports.
-    const imports_array: ?[*]const ?*const Extern = if (imports) |p| iblk: {
+    // #392 — carry the vector's `.size` with its `.data`: the binder indexes
+    // this by the module's import count, and a vector shorter than that must
+    // fail instantiation (NULL) rather than be read past its end.
+    const imports_array: ?[]const ?*const Extern = if (imports) |p| iblk: {
         const v: *const ExternVec = @ptrCast(@alignCast(p));
-        break :iblk if (v.data) |d| @ptrCast(d) else null;
+        const d = v.data orelse break :iblk null;
+        const arr: [*]const ?*const Extern = @ptrCast(d);
+        break :iblk arr[0..v.size];
     } else null;
 
     // D-275: thread `trap_out` so a start-function trap surfaces per the
@@ -1145,7 +1152,7 @@ fn collectFromExterns(
     ta: std.mem.Allocator,
     type_section_body: []const u8,
     items: []const sections.Import,
-    arr: [*]const ?*const Extern,
+    arr: []const ?*const Extern,
 ) error{ Unsupported, OutOfMemory }!JitFuncImports {
     var types = sections.decodeTypes(ta, type_section_body) catch return error.Unsupported;
     defer types.deinit();
@@ -1157,6 +1164,7 @@ fn collectFromExterns(
     for (items, 0..) |it, i| {
         const func_idx: u32 = @intCast(i);
         if (jit_dispatch.lookup(it.module, it.name) != null) continue; // WASI → setup plants it
+        if (i >= arr.len) return error.Unsupported; // #392 — short vector
         const ext = arr[i] orelse return error.Unsupported;
         if (ext.kind != .func) return error.Unsupported;
         if (ext.instance) |source_inst| {
@@ -1362,11 +1370,11 @@ pub const BindingsBuilder = struct {
     /// path reads the `Extern`s directly (`collectFromExterns`): `build` is
     /// the interp binder, and it cannot describe an import whose source
     /// instance is JIT-backed. Null for the native-facade builder.
-    imports: ?[*]const ?*const Extern = null,
+    imports: ?[]const ?*const Extern = null,
 };
 
 const BuildBindingsCApi = struct {
-    imports_array: ?[*]const ?*const Extern,
+    imports_array: ?[]const ?*const Extern,
 
     fn buildImpl(ctx: *anyopaque, arena_alloc: std.mem.Allocator, bytes: []const u8, store: *Store) anyerror!?[]const runtime_instance_import.ImportBinding {
         const self: *BuildBindingsCApi = @ptrCast(@alignCast(ctx));
