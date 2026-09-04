@@ -2,7 +2,8 @@
 //! (ADR-0066 + Amendment §A1, D-142
 //! fix (A.3) + D-238/ADR-0185 (a) RBP frame-link).
 //!
-//! Each thunk is a 40-byte native code snippet that wraps a
+//! Each thunk is a fixed-size native code snippet (`thunk_bytes`; the count
+//! lives there, not restated here — it has moved three times) that wraps a
 //! call-and-return around the callee's JIT entry. It does three
 //! things: **(1)** establishes a standard `PUSH RBP; MOV RBP,RSP`
 //! frame so the cross-instance EH unwinder can walk THROUGH the
@@ -24,13 +25,13 @@
 //! 0x00    55                                  PUSH RBP           ; frame link (saved importer RBP)
 //! 0x01    48 89 E5                            MOV  RBP, RSP      ; [RBP,8] = importer retaddr
 //! 0x04    41 57                               PUSH R15           ; save caller's R15 (= caller_rt)
-//! 0x06    48 83 EC 08                         SUB  RSP, 8        ; alignment pad
-//! 0x0A    48 BF <callee_rt LE 8 bytes>        MOV  RDI, imm64    ; SysV arg0
+//! 0x06    48 83 EC <pad>                      SUB  RSP, pad      ; align (+ Win64 shadow)
+//! 0x0A    48 B{7,9} <callee_rt LE 8 bytes>    MOV  arg0, imm64   ; RDI SysV / RCX Win64
 //! 0x14    45 31 D2                            XOR  R10D, R10D    ; #381 entry clear
-//! 0x17    4C 89 97 <40 LE4>                   MOV  [RDI+40], R10 ; clear callee trap_flag|kind
+//! 0x17    4C 89 {97,91} <40 LE4>              MOV  [arg0+40], R10; clear callee trap_flag|kind
 //! 0x1E    48 B8 <callee_entry LE 8 bytes>     MOV  RAX, imm64
 //! 0x28    FF D0                               CALL RAX           ; SysV CALL (RSP 16-aligned here)
-//! 0x2A    48 83 C4 08                         ADD  RSP, 8        ; undo pad
+//! 0x2A    48 83 C4 <pad>                      ADD  RSP, pad      ; undo pad
 //! 0x2E    41 5F                               POP  R15           ; restore caller's R15
 //! 0x30    49 BB <callee_rt LE 8 bytes>        MOV  R11, imm64    ; #381 trap relay: callee_rt
 //! 0x3A    4D 8B 93 <40 LE4>                   MOV  R10, [R11+40] ; trap_flag|trap_kind pair
@@ -77,21 +78,34 @@
 //! (`op_call.zig:reloadHomedCallerSaved`), so clobbering them here is free.
 //! The return-value registers (RAX/RDX/XMM0/XMM1) are untouched.
 //!
-//! **This encoder is SysV-only, and that is a live Win64 defect (#385).**
-//! `MOV RDI, callee_rt` is entry-arg0 under SysV; under Win64 entry-arg0 is
-//! RCX (`abi.win64.entry_arg0_gpr`), and `op_call.zig:emitImportDispatch`
-//! leaves the IMPORTER's runtime there on the way into this thunk — so on
-//! Windows the callee's prologue snapshots the importer's runtime, not the
-//! exporter's. Two more Cc gaps ride along: RDI is callee-saved AND
-//! allocatable under Win64 (`abi.win64.allocatable_gprs`), so writing it here
-//! destroys a live importer register; and the CALL below reserves no Win64
-//! shadow space, whose home area would land on this thunk's own saved
-//! RBP/R15 and return address. All three predate the #381 relay and are
-//! tracked in #385 rather than widened into it — the relay is unaffected
-//! (it addresses the callee's runtime by immediate, not by arg register),
-//! but a green Windows CI leg on a cross-module trap test is NOT evidence
-//! that the callee ran on its own runtime: the trap reaches the importer
-//! either way, because on Win64 it was the importer's runtime all along.
+//! **Cc-aware since #385.** The encoder used to write `MOV RDI, callee_rt`
+//! unconditionally — entry-arg0 under SysV only. Under Win64 entry-arg0 is RCX
+//! (`abi.win64.entry_arg0_gpr`) and `op_call.zig:emitImportDispatch` leaves the
+//! IMPORTER's runtime there on the way in, so the callee's prologue snapshotted
+//! the importer's runtime and the exporter's body ran against the wrong
+//! instance's globals, memory, tables and WASI host. Two more Cc gaps rode
+//! along: RDI is callee-saved AND allocatable under Win64
+//! (`abi.win64.allocatable_gprs` adds it for that reason), so writing it
+//! destroyed a live importer register; and the CALL reserved no Win64 shadow
+//! space, whose 32-byte home area starts at this thunk's own RSP and covers
+//! its saved R15, saved RBP and return address.
+//!
+//! All three are one root — a SysV-shaped encoder — and all three go away by
+//! deriving from `abi.current`: the runtime pointer lands in
+//! `entry_arg0_gpr`, RDI is never touched under Win64, and the frame pad is
+//! `shadow_space_bytes + 8` rather than a bare 8. The byte COUNT is identical
+//! under both conventions (the register change keeps every encoding the same
+//! length and the pad is an imm8 either way), so `thunk_bytes` is Cc-agnostic
+//! and the layout below reads for both.
+//!
+//! `emitThunkCc` takes the convention as a comptime parameter so the Win64
+//! layout is testable from a SysV host. It has to be: nothing in the tree
+//! exercised this path on Windows, and the cross-module tests that traverse it
+//! pass there for the wrong reason — `i32.const 42` never touches a runtime,
+//! and a trap raised on the importer's runtime is exactly where the caller
+//! looks. The test that finally told the two apart routes a guest `proc_exit`
+//! through the exporter and reads the WASI host it reached
+//! (`test/c_api_conformance/wasi_exit_code.c`).
 //!
 //! SysV AMD64 §3.2.1 invariant: RBX, RBP, R12..R15 are callee-saved.
 //! v2's JIT prologue (per ADR-0026 Cc-pivot) overwrites R15 with the
@@ -101,23 +115,36 @@
 //! bridge thunk pays the save/restore cost on the caller's behalf.
 //! Same discipline pattern as arm64 X19; see ADR-0066 §A1.
 //!
-//! Stack-alignment note (D-238 changed this): SysV requires
+//! Stack-alignment note (D-238 changed this): both conventions require
 //! `RSP % 16 == 0` at the point of CALL. The importer's CALL into the
 //! thunk leaves entry RSP ≡ 8 mod 16 (pushed return address). The two
 //! pushes (`PUSH RBP` → ≡0, `PUSH R15` → ≡8) would leave `CALL RAX`
-//! misaligned, so the explicit `SUB RSP, 8` pad restores ≡0 before the
-//! CALL (and `ADD RSP, 8` undoes it after). The OLD 27-byte single-push
+//! misaligned, so the explicit `SUB RSP, pad` restores ≡0 before the
+//! CALL (and `ADD RSP, pad` undoes it after). The OLD 27-byte single-push
 //! thunk aligned by luck (one push: ≡8 → ≡0); adding the RBP frame-link
 //! needs the pad. Load-bearing for SSE/AVX in the callee.
+//!
+//! #385 — `pad` is `shadow_space_bytes + 8`: 8 under SysV, 40 under Win64,
+//! where the low 32 bytes are the home area the callee may spill its four
+//! register args into (Microsoft x64 §"Stack allocation"). Without it that
+//! home area starts at this thunk's RSP and covers its saved R15, saved RBP
+//! and return address. The alignment holds for both because
+//! `shadow_space_bytes` is a multiple of 16 — asserted at comptime below.
 //!
 //! Zone 2 (`src/engine/codegen/x86_64/`) — must NOT import
 //! `src/engine/codegen/arm64/` per ROADMAP §A3.
 
 const std = @import("std");
 const inst = @import("inst.zig");
+const abi = @import("abi.zig");
 const jit_abi = @import("../shared/jit_abi.zig");
 
 comptime {
+    // #385 — the frame pad below is `shadow_space_bytes + 8`, which lands the
+    // CALL on a 16-byte boundary only while the shadow itself is a multiple
+    // of 16. Both conventions satisfy it today (0 and 32).
+    if (abi.sysv.shadow_space_bytes % 16 != 0 or abi.win64.shadow_space_bytes % 16 != 0)
+        @compileError("bridge thunk frame pad assumes a 16-multiple shadow space");
     // The relay below copies `trap_flag` and `trap_kind` as one 8-byte pair.
     if (jit_abi.trap_kind_off != jit_abi.trap_flag_off + 4)
         @compileError("bridge thunk relays trap_flag|trap_kind as one 8-byte pair; they are no longer adjacent");
@@ -129,7 +156,10 @@ comptime {
 /// R15 [2] + SUB RSP,8 [4] + MOV RDI imm64 [10] + MOV RAX imm64 [10]
 /// + #381 entry clear [3+7 = 10] + MOV RAX imm64 [10] + CALL RAX [2] +
 /// ADD RSP,8 [4] + POP R15 [2] + #381 trap relay [10+7+3+2+7 = 29] +
-/// POP RBP [1] + RET [1] = 79). Stable across all callee signatures.
+/// POP RBP [1] + RET [1] = 79). One shape for every callee, which bounds the
+/// bridge as much as it simplifies it: it takes no signature, so it can only
+/// be right for callees whose arguments and results all travel in registers.
+/// See the signature-agnostic note on `emitThunkCc`.
 pub const thunk_bytes: usize = 79;
 
 /// Emit one bridge thunk into `buf[0..thunk_bytes]`. `buf` MUST be
@@ -137,10 +167,49 @@ pub const thunk_bytes: usize = 79;
 /// allocating it inside an RX-mappable arena.
 ///
 /// `callee_rt`    — the callee instance's `*JitRuntime` value
-///                  to install in RDI before the CALL.
+///                  to install in the entry-arg0 register before the CALL
+///                  (RDI under SysV, RCX under Win64 — #385).
 /// `callee_entry` — the callee's JIT entry point.
 pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize) void {
+    emitThunkCc(abi.current_cc, buf, callee_rt, callee_entry);
+}
+
+/// **Signature-agnostic, and the ABI is not.** The bridge receives no callee
+/// signature, so two shapes are wrong through it under either convention, and
+/// both predate this encoder:
+///
+/// - an **overflow stack argument** — the callee reads it at
+///   `[RBP + 16 + …]` relative to ITS frame (`emit.zig`), while the importer
+///   wrote it relative to the importer's RSP; this thunk's own frame sits in
+///   between and shifts it. arm64 is the same shape (`[X29, #16 + …]`).
+/// - a **MEMORY-class return** (results.len > 2) — the hidden result pointer
+///   belongs in entry-arg0 with the runtime moved to arg1, but
+///   `op_call.zig:emitImportDispatch` overwrites entry-arg0 with the runtime
+///   and this encoder overwrites it again.
+///
+/// Fixing either means making bridge emission signature-aware, which changes
+/// D-225's target-resolution contract rather than this encoder's ABI
+/// derivation. Tracked separately.
+///
+/// #385 — the body of `emitThunk`, with the calling convention as a comptime
+/// parameter. Production always passes `abi.current_cc`; the tests pass both,
+/// so the Win64 layout is checked from a SysV host. It has to be checkable
+/// that way — the Windows leg is the only instrument that runs this code, and
+/// the cross-module tests that traverse it pass there even when the callee
+/// receives the wrong runtime.
+pub fn emitThunkCc(comptime cc: abi.Cc, buf: []u8, callee_rt: usize, callee_entry: usize) void {
     std.debug.assert(buf.len == thunk_bytes);
+    const tables = switch (cc) {
+        .sysv => abi.sysv,
+        .win64 => abi.win64,
+    };
+    // The register the callee's prologue snapshots its runtime pointer from
+    // (`emit.zig`'s `MOV R15, <entry_arg0>`): RDI under SysV, RCX under Win64.
+    const entry_arg0 = tables.entry_arg0_gpr;
+    // Alignment pad + the Win64 home area the callee may spill its register
+    // args into. Never touches RDI under Win64, where it is callee-saved and
+    // in the allocatable pool.
+    const frame_pad: i8 = @intCast(tables.shadow_space_bytes + 8);
     // PUSH RBP — establish the frame link so the cross-instance EH
     // unwinder can walk through the thunk (D-238 / ADR-0185 a).
     @memcpy(buf[0..1], inst.encPushR(.rbp).slice());
@@ -148,24 +217,25 @@ pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize) void {
     @memcpy(buf[1..4], inst.encMovRR(.q, .rbp, .rsp).slice());
     // PUSH R15 — save caller's R15 = caller_rt (D-142 cohort save).
     @memcpy(buf[4..6], inst.encPushR(.r15).slice());
-    // SUB RSP, 8 — alignment pad (two pushes left RSP ≡ 8; restore ≡ 0
-    // so the CALL below is SysV 16-aligned).
-    @memcpy(buf[6..10], inst.encSubRSpImm8(8).slice());
+    // SUB RSP, pad — alignment (two pushes left RSP ≡ 8; restore ≡ 0 so the
+    // CALL below is 16-aligned) plus the Win64 shadow space (#385).
+    @memcpy(buf[6..10], inst.encSubRSpImm8(frame_pad).slice());
     const flag_off: i32 = jit_abi.trap_flag_off;
-    // MOV RDI, callee_rt — SysV arg0 (= *JitRuntime).
-    @memcpy(buf[10..20], inst.encMovImm64Q(.rdi, callee_rt).slice());
-    // #381 entry clear — zero the callee's trap_flag|trap_kind pair while RDI
-    // still holds callee_rt, so the relay below reads THIS call's outcome and
-    // not a trap the exporter kept from an earlier one.
+    // MOV <entry_arg0>, callee_rt — the callee's `*JitRuntime` in the register
+    // its prologue reads (#385; RDI under SysV, RCX under Win64).
+    @memcpy(buf[10..20], inst.encMovImm64Q(entry_arg0, callee_rt).slice());
+    // #381 entry clear — zero the callee's trap_flag|trap_kind pair while the
+    // entry-arg0 register still holds callee_rt, so the relay below reads THIS
+    // call's outcome and not a trap the exporter kept from an earlier one.
     @memcpy(buf[20..23], inst.encXorRR(.d, .r10, .r10).slice());
-    @memcpy(buf[23..30], inst.encStoreR64MemDisp32(.r10, .rdi, flag_off).slice());
+    @memcpy(buf[23..30], inst.encStoreR64MemDisp32(.r10, entry_arg0, flag_off).slice());
     // MOV RAX, callee_entry.
     @memcpy(buf[30..40], inst.encMovImm64Q(.rax, callee_entry).slice());
     // CALL RAX — SysV CALL (not JMP); pushes post-CALL RIP so the
     // callee's RET returns here.
     @memcpy(buf[40..42], inst.encCallReg(.rax).slice());
-    // ADD RSP, 8 — undo the alignment pad.
-    @memcpy(buf[42..46], inst.encAddRSpImm8(8).slice());
+    // ADD RSP, pad — undo the alignment + shadow allocation.
+    @memcpy(buf[42..46], inst.encAddRSpImm8(frame_pad).slice());
     // POP R15 — RESTORE caller's R15. Everything below relays onto it, so it
     // must come after this and not before.
     @memcpy(buf[46..48], inst.encPopR(.r15).slice());
@@ -206,11 +276,82 @@ pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize) void {
 
 const testing = std.testing;
 
+// #385 — the Win64 layout, checked from whatever host runs the tests. Nothing
+// in the tree exercised this encoder on Windows, and the cross-module tests
+// that traverse it pass there even when the callee receives the importer's
+// runtime (`i32.const 42` touches no runtime; a trap raised on the importer's
+// runtime is where the caller looks). So the encoding is pinned here rather
+// than left to the one CI leg that runs it.
+test "emitThunkCc: the Win64 layout differs in exactly the Cc-dependent slots (#385)" {
+    var sysv: [thunk_bytes]u8 = undefined;
+    var win: [thunk_bytes]u8 = undefined;
+    const callee_rt: usize = 0xDEADBEEF_CAFEBABE;
+    const callee_entry: usize = 0x12345678_9ABCDEF0;
+    emitThunkCc(.sysv, &sysv, callee_rt, callee_entry);
+    emitThunkCc(.win64, &win, callee_rt, callee_entry);
+
+    // The runtime pointer goes to the register the callee's prologue reads:
+    // MOV RDI (48 BF) vs MOV RCX (48 B9), same length, same literal.
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0xBF }, sysv[10..12]);
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0xB9 }, win[10..12]);
+    try testing.expectEqual(callee_rt, std.mem.readInt(u64, win[12..20], .little));
+
+    // The #381 entry clear stores through that same register: modrm rm=rdi(7)
+    // -> 0x97 vs rm=rcx(1) -> 0x91.
+    try testing.expectEqualSlices(u8, &.{ 0x4C, 0x89, 0x97 }, sysv[23..26]);
+    try testing.expectEqualSlices(u8, &.{ 0x4C, 0x89, 0x91 }, win[23..26]);
+
+    // The frame pad carries the Win64 home area: SUB/ADD RSP, 8 vs 40.
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0x83, 0xEC, 0x08 }, sysv[6..10]);
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0x83, 0xEC, 0x28 }, win[6..10]);
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0x83, 0xC4, 0x08 }, sysv[42..46]);
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0x83, 0xC4, 0x28 }, win[42..46]);
+
+    // Everything else is Cc-invariant, which is why `thunk_bytes` is one number.
+    try testing.expectEqualSlices(u8, sysv[0..6], win[0..6]); // frame + PUSH R15
+    try testing.expectEqualSlices(u8, sysv[20..23], win[20..23]); // XOR R10D,R10D
+    try testing.expectEqualSlices(u8, sysv[26..30], win[26..30]); // the disp32
+    try testing.expectEqualSlices(u8, sysv[30..42], win[30..42]); // MOV RAX + CALL
+    try testing.expectEqualSlices(u8, sysv[46..thunk_bytes], win[46..thunk_bytes]); // POP + relay + RET
+}
+
+// #385 — RDI is callee-saved under Win64 AND in its allocatable pool
+// (`abi.win64.allocatable_gprs` adds RDI/RSI for exactly that reason), so an
+// importer may hold a live value there across the call. The Win64 thunk must
+// not write it. Stated as its own property because the byte-exact test above
+// would still pass if a future edit moved an RDI write somewhere else.
+test "emitThunkCc: the Win64 thunk never writes RDI (#385)" {
+    var win: [thunk_bytes]u8 = undefined;
+    emitThunkCc(.win64, &win, 0xAAAA_BBBB_CCCC_DDDD, 0xEEEE_FFFF_0000_1111);
+    // `MOV RDI, imm64` = REX.W + B8+rdi.low3(7).
+    try testing.expectEqual(@as(?usize, null), std.mem.find(u8, &win, &[_]u8{ 0x48, 0xBF }));
+    // A store through RDI as base: REX.W|R + 0x89 + mod=10 reg=r10 rm=rdi.
+    try testing.expectEqual(@as(?usize, null), std.mem.find(u8, &win, &[_]u8{ 0x4C, 0x89, 0x97 }));
+}
+
+// #385 — the Win64 CALL must leave 32 bytes below it for the callee's home
+// area. Without them the callee's spill of its four register args starts at
+// this thunk's RSP and covers its saved R15, saved RBP and return address.
+test "emitThunkCc: Win64 reserves the 32-byte home area below the CALL (#385)" {
+    var win: [thunk_bytes]u8 = undefined;
+    emitThunkCc(.win64, &win, 0, 0);
+    const pad: i8 = @bitCast(win[9]); // the imm8 of SUB RSP, imm8
+    try testing.expect(pad >= @as(i8, @intCast(abi.win64.shadow_space_bytes)));
+    // …and the pad still lands the CALL on a 16-byte boundary: entry RSP ≡ 8,
+    // two pushes → ≡ 8, minus the pad → ≡ 0.
+    try testing.expectEqual(@as(i32, 0), @mod(8 - @as(i32, pad), 16));
+    try testing.expectEqual(win[9], win[45]); // the ADD undoes exactly the SUB
+}
+
+// These three assert the SysV bytes by construction, so they pin the
+// convention explicitly (#385): `emitThunk` follows `abi.current_cc`, and
+// on the Windows leg that is Win64 — where `48 BF` (MOV RDI) and
+// `48 83 EC 08` (SUB RSP,8) are exactly the bytes this PR replaces.
 test "emitThunk: byte-exact layout for known constants (D-238 RBP frame-link)" {
     var buf: [thunk_bytes]u8 = undefined;
     const callee_rt: usize = 0xDEADBEEF_CAFEBABE;
     const callee_entry: usize = 0x12345678_9ABCDEF0;
-    emitThunk(&buf, callee_rt, callee_entry);
+    emitThunkCc(.sysv, &buf, callee_rt, callee_entry);
 
     try testing.expectEqual(@as(u8, 0x55), buf[0]); // PUSH RBP
     try testing.expectEqualSlices(u8, &.{ 0x48, 0x89, 0xE5 }, buf[1..4]); // MOV RBP,RSP
@@ -264,7 +405,7 @@ test "emitThunk: byte-exact layout for known constants (D-238 RBP frame-link)" {
 // while the load reads the callee's, at the SAME offset.
 test "emitThunk: the trap relay reads the callee's runtime and writes the caller's (#381)" {
     var buf: [thunk_bytes]u8 = undefined;
-    emitThunk(&buf, 0, 0);
+    emitThunkCc(.sysv, &buf, 0, 0);
     const flag_off: i32 = jit_abi.trap_flag_off;
     const load = inst.encMovR64FromMemDisp32(.r10, .r11, flag_off);
     const store = inst.encStoreR64MemDisp32(.r10, .r15, flag_off);
@@ -289,7 +430,7 @@ test "emitThunk: the trap relay reads the callee's runtime and writes the caller
 
 test "emitThunk: round-trip literals at zero" {
     var buf: [thunk_bytes]u8 = undefined;
-    emitThunk(&buf, 0, 0);
+    emitThunkCc(.sysv, &buf, 0, 0);
     // Frame + opcode bytes unchanged; both imm64 fields all-zero.
     try testing.expectEqual(@as(u8, 0x55), buf[0]);
     try testing.expectEqualSlices(u8, &.{ 0x48, 0x89, 0xE5 }, buf[1..4]);

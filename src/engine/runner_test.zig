@@ -1,4 +1,4 @@
-// FILE-SIZE-EXEMPT: append-only e2e JIT test aggregator (per ADR-0099 D1).
+// FILE-SIZE-EXEMPT: (cap=2700) append-only e2e JIT test aggregator (per ADR-0099 D1); #385 adds the one cross-module case that can tell the callee's runtime apart, beside the D-225 cases it contrasts with.
 // One self-contained test per behaviour (inline .wasm bytes + wat comment);
 // splitting by concept would scatter the runI32Export harness + duplicate
 // imports for negligible gain (N4 test-dup); growth is by independent test
@@ -1055,6 +1055,62 @@ test "JitInstance.initLinked: cross-module FUNC import dispatches to exporter (D
 // `trap_flag` and the importer runs on past a call that never returned a value.
 // The kind is asserted too: a fix that carries the flag but not the kind would
 // report a trap of kind 0 for an `unreachable`.
+// #385 — does the callee run on its OWN runtime? Every other cross-module test
+// answers `() -> i32` with a constant, which never touches a runtime and so
+// passes whichever one the callee receives. This one makes the two
+// distinguishable: both modules define a mutable global at index 0 with
+// different values, and the exporter returns `global.get 0`. Reading the
+// importer's globals array yields 9; reading its own yields 7.
+//
+// That is the observable of the Win64 defect. `op_call.zig:emitImportDispatch`
+// puts the IMPORTER's runtime in the entry-arg0 register before calling the
+// bridge thunk; if the thunk does not overwrite it with the callee's, the
+// callee's prologue snapshots the importer's runtime and `globals_base` comes
+// from the wrong instance. The thunk wrote RDI unconditionally, which is
+// entry-arg0 under SysV only — so this reads 9 on Windows and 7 elsewhere.
+//
+// No `skip.phaseEnd(.win64)` guard: the Windows leg is the only instrument
+// that executes the Win64 encoding, so this test must run there.
+test "JitInstance.initLinked: the cross-module callee runs on its OWN runtime (#385)" {
+    const gpa = testing.allocator;
+    // (module (global (mut i32) (i32.const 7))
+    //         (func (export "get") (result i32) global.get 0))
+    const b_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
+        0x02, 0x01, 0x00,
+        0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x07, 0x0b, // global0 = (mut i32) 7
+        0x07, 0x07, 0x01, 0x03, 0x67, 0x65, 0x74, 0x00,
+        0x00,
+        0x0a, 0x06, 0x01, 0x04, 0x00, 0x23, 0x00, 0x0b, // global.get 0
+    };
+    // (module (import "b" "get" (func (result i32)))
+    //         (global (mut i32) (i32.const 9))
+    //         (func (export "test") (result i32) call 0))
+    const a_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x02,
+        0x09, 0x01, 0x01, 0x62, 0x03, 0x67, 0x65, 0x74,
+        0x00, 0x00, 0x03, 0x02, 0x01, 0x00,
+        0x06, 0x06, 0x01, 0x7f, 0x01, 0x41, 0x09, 0x0b, // global0 = (mut i32) 9
+        0x07, 0x08, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74,
+        0x00, 0x01,
+        0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b, // call 0
+    };
+    var b_inst = try JitInstance.init(gpa, &b_bytes);
+    defer b_inst.deinit(gpa);
+    // The exporter answers 7 when called directly — so a 9 below is the
+    // bridge handing it the wrong runtime, not a miscompiled body.
+    try testing.expectEqual(@as(?u64, 7), try b_inst.invoke(gpa, "get", &.{}));
+
+    const target = b_inst.exportedFuncTarget(gpa, "get") orelse return error.TestUnexpectedResult;
+    var a_inst = try JitInstance.initLinked(gpa, &a_bytes, &.{}, &.{target}, &.{}, &.{});
+    defer a_inst.deinit(gpa);
+    // 7 = the exporter's global; 9 would be the importer's, i.e. the callee
+    // running on the runtime the bridge failed to swap in.
+    try testing.expectEqual(@as(?u64, 7), try a_inst.invoke(gpa, "test", &.{}));
+}
+
 test "JitInstance.initLinked: a trap in the cross-module callee reaches the caller (#381)" {
     const gpa = testing.allocator;
     // (module (func (export "get") (result i32) unreachable))

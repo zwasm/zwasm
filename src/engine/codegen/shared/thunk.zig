@@ -35,8 +35,10 @@ const arch_thunk = switch (builtin.target.cpu.arch) {
 };
 
 /// Bridge thunk byte count for the current target architecture.
-/// Stable across all callee signatures — every thunk has the same
-/// shape; only the embedded literals differ.
+/// One shape for every callee — only the embedded literals differ. That is a
+/// bound, not just a convenience: the bridge takes no signature, so it can
+/// only be right for callees whose arguments and results all travel in
+/// registers (see the per-arch modules).
 ///
 /// The per-arch modules own the layout and its byte count; this
 /// facade deliberately does NOT restate either. Both numbers have
@@ -68,9 +70,9 @@ pub const thunk_bytes: usize = arch_thunk.thunk_bytes;
 ///                  `usize`, installed in the entry-arg0 register
 ///                  before the CALL so the callee's prologue
 ///                  snapshots it into its own runtime-ptr register.
-///                  X0 on AArch64; on x86_64 the encoder writes RDI
-///                  unconditionally, which is entry-arg0 under SysV
-///                  ONLY — see the x86_64 module's Win64 note.
+///                  X0 on AArch64; on x86_64 whichever register the
+///                  active convention names (`abi.current.entry_arg0_gpr`
+///                  — RDI under SysV, RCX under Win64, #385).
 /// `callee_entry` — the callee's JIT entry point address (the
 ///                  first instruction of the callee function's
 ///                  body in its module's JIT code block).

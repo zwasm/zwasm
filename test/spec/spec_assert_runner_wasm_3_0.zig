@@ -454,20 +454,21 @@ const jit_known_fail_x86_64_sysv: []const JitKnownFail = &.{
 
 /// x86_64-windows — measured 2026-09-02 by this lane's own first CI run.
 ///
-/// The same 8 float directives, plus one the SysV leg passes:
-/// `imported-mismatch` is a no-arg `-> i32:3` assert, so it is neither the
-/// float class above nor the Win64 float-register defect. The interpreter
-/// passes it on Windows, and the JIT passes it on Linux; only this
-/// combination fails. Tracked separately from #378 as #379.
-///
-/// This row is why the key is the TARGET and not the arch: keyed on arch
-/// alone, the Windows leg reports a regression on every run.
+/// The same 8 float directives. A ninth row, `imported-mismatch` (a no-arg
+/// `-> i32:3` assert, #379), stood here until #385: its `$imported-throw` is a
+/// func import from the `register`ed "test" module, so the call crosses the
+/// D-225 bridge thunk — which was SysV-only and handed the Win64 callee the
+/// IMPORTER's runtime. The thrown tag then compared against the wrong
+/// instance's identity and the inner `catch $e0` caught what `catch_all`
+/// should have. Measured by this gate's own stale signal: `0 stale` on
+/// main + #384, `1 stale` with the Cc-aware thunk. Keyed on the target and
+/// not the arch for the same reason as before: the Win64 float rows are
+/// theirs alone.
 const jit_known_fail_x86_64_windows: []const JitKnownFail = &.{
     .{ .key = "exception-handling/try_table/throw-catch-param-f32", .count = 2 },
     .{ .key = "exception-handling/try_table/throw-catch-param-f64", .count = 2 },
     .{ .key = "exception-handling/try_table/throw-catch_ref-param-f32", .count = 2 },
     .{ .key = "exception-handling/try_table/throw-catch_ref-param-f64", .count = 2 },
-    .{ .key = "exception-handling/try_table/imported-mismatch", .count = 1 },
 };
 
 /// aarch64 (the macOS leg) — measured 2026-09-02 by this lane's own first CI

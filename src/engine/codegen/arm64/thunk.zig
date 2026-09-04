@@ -121,7 +121,10 @@ comptime {
 }
 
 /// Total thunk size in bytes (26 instructions × 4 bytes + 2 quad
-/// literals × 8 bytes = 120). Stable across all callee signatures.
+/// literals × 8 bytes = 120). One shape for every callee — which bounds what
+/// the bridge can carry: a callee whose arguments overflow the registers reads
+/// them at `[X29, #16 + 8*idx]` relative to its own frame, and this thunk's
+/// frame sits in between. Same gap as the x86_64 encoder's; tracked there.
 /// D-144 grew the thunk from 56 → 96 bytes to cover the full
 /// six-register reserved-invariant cohort; #381's entry clear + trap
 /// relay grew it 96 → 120.
