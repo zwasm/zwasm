@@ -329,11 +329,123 @@ cleanup:
     return rc;
 }
 
+/* (module (func (export "sixth") (param i32 i32 i32 i32 i32 i32) (result i32)
+ *         local.get 5))
+ * Six integer parameters: one more than the JIT's SysV user arg registers
+ * (five — arg0 is the runtime pointer), so the sixth travels on the stack. */
+static const uint8_t kSixArgExporterWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0b, 0x01, 0x60, 0x06, 0x7f, 0x7f, 0x7f,
+    0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x09, 0x01, 0x05, 0x73, 0x69, 0x78,
+    0x74, 0x68, 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x20, 0x05, 0x0b,
+};
+
+/* (module (import "b" "sixth" (func (param i32 i32 i32 i32 i32 i32) (result i32)))
+ *         (func (export "test") (result i32)
+ *           i32.const 1 i32.const 2 i32.const 3 i32.const 4 i32.const 5 i32.const 6
+ *           call 0)) */
+static const uint8_t kSixArgImporterWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0f, 0x02, 0x60, 0x06, 0x7f, 0x7f, 0x7f,
+    0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x0b, 0x01, 0x01, 0x62, 0x05, 0x73,
+    0x69, 0x78, 0x74, 0x68, 0x00, 0x00, 0x03, 0x02, 0x01, 0x01, 0x07, 0x08, 0x01, 0x04, 0x74, 0x65,
+    0x73, 0x74, 0x00, 0x01, 0x0a, 0x12, 0x01, 0x10, 0x00, 0x41, 0x01, 0x41, 0x02, 0x41, 0x03, 0x41,
+    0x04, 0x41, 0x05, 0x41, 0x06, 0x10, 0x00, 0x0b,
+};
+
+/* A signature the cross-module bridge cannot carry. The bridge thunk takes no
+ * signature: an argument that overflows the register set is written by the
+ * importer relative to ITS stack, and the exporter reads it relative to its own
+ * frame — with the thunk's frame in between, it reads the wrong slot. The same
+ * holds for a result the ABI returns through a hidden buffer pointer.
+ *
+ * The contract this asserts is "declined or correct, never wrong": a JIT-backed
+ * engine may refuse to build the importer (NULL, as v2.6.0 did for every
+ * cross-module import), but if it does build it, the call must return 6. The
+ * interpreter, which has no bridge, must return 6. When the bridge learns to
+ * carry the shape, the NULL arm simply stops being taken. */
+static int declines_or_carries_six_args(uint8_t engine) {
+    int rc = 1;
+    const char* who = engine_name(engine);
+    wasm_module_t* exporter_module = NULL;
+    wasm_instance_t* exporter = NULL;
+    wasm_extern_vec_t exporter_exports = { 0, NULL };
+    wasm_module_t* importer_module = NULL;
+    wasm_instance_t* importer = NULL;
+    wasm_extern_vec_t importer_exports = { 0, NULL };
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+
+    wasm_byte_vec_t exporter_binary = { sizeof(kSixArgExporterWasm), (wasm_byte_t*) kSixArgExporterWasm };
+    exporter_module = wasm_module_new(store, &exporter_binary);
+    if (!exporter_module) { fprintf(stderr, "[%s] six-arg exporter failed to parse\n", who); goto cleanup; }
+    wasm_extern_vec_t no_imports = { 0, NULL };
+    wasm_trap_t* etrap = NULL;
+    exporter = zwasm_instance_new_ex(store, exporter_module, &no_imports, &etrap, engine);
+    if (etrap) wasm_trap_delete(etrap);
+    if (!exporter) { fprintf(stderr, "[%s] six-arg exporter failed to instantiate\n", who); goto cleanup; }
+    wasm_instance_exports(exporter, &exporter_exports);
+    if (exporter_exports.size < 1 || !exporter_exports.data[0]) {
+        fprintf(stderr, "[%s] six-arg exporter exposed nothing\n", who);
+        goto cleanup;
+    }
+
+    wasm_byte_vec_t importer_binary = { sizeof(kSixArgImporterWasm), (wasm_byte_t*) kSixArgImporterWasm };
+    importer_module = wasm_module_new(store, &importer_binary);
+    if (!importer_module) { fprintf(stderr, "[%s] six-arg importer failed to parse\n", who); goto cleanup; }
+    wasm_extern_t* import_externs[1] = { exporter_exports.data[0] };
+    wasm_extern_vec_t imports = { 1, import_externs };
+    wasm_trap_t* itrap = NULL;
+    importer = zwasm_instance_new_ex(store, importer_module, &imports, &itrap, engine);
+    if (itrap) wasm_trap_delete(itrap);
+    if (!importer) {
+        if (engine == ZWASM_ENGINE_INTERP) {
+            fprintf(stderr, "[interp] the six-arg importer failed to instantiate\n");
+            goto cleanup;
+        }
+        /* Declined: the shape is withheld rather than carried wrongly. */
+        fprintf(stderr, "[%s] six-arg cross-module import declined (withheld, not carried)\n", who);
+        rc = 0;
+        goto cleanup;
+    }
+    wasm_instance_exports(importer, &importer_exports);
+    if (importer_exports.size < 1 || !importer_exports.data[0]) {
+        fprintf(stderr, "[%s] the six-arg importer is missing its `test` export\n", who);
+        goto cleanup;
+    }
+    wasm_val_t results[1] = { { WASM_I32, { 0 } } };
+    wasm_val_vec_t no_args = { 0, NULL };
+    wasm_val_vec_t res = { 1, results };
+    wasm_trap_t* trap = wasm_func_call(wasm_extern_as_func(importer_exports.data[0]), &no_args, &res);
+    if (trap) {
+        fprintf(stderr, "[%s] the six-arg cross-module call trapped\n", who);
+        wasm_trap_delete(trap);
+        goto cleanup;
+    }
+    if (results[0].kind != WASM_I32 || results[0].of.i32 != 6) {
+        fprintf(stderr, "[%s] the bridge carried a six-arg call and got it WRONG: sixth arg read as %d, expected 6\n",
+                who, (int) results[0].of.i32);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (importer_exports.data) wasm_extern_vec_delete(&importer_exports);
+    if (importer) wasm_instance_delete(importer);
+    if (importer_module) wasm_module_delete(importer_module);
+    if (exporter_exports.data) wasm_extern_vec_delete(&exporter_exports);
+    if (exporter) wasm_instance_delete(exporter);
+    if (exporter_module) wasm_module_delete(exporter_module);
+    if (store) wasm_store_delete(store);
+    if (eng) wasm_engine_delete(eng);
+    return rc;
+}
+
 int main(void) {
     for (size_t i = 0; i < sizeof(kEngines) / sizeof(kEngines[0]); i++) {
         if (compose_on(kEngines[i]) != 0) return 1;
         if (outlives_exporter(kEngines[i]) != 0) return 1;
         if (outlives_module_bytes(kEngines[i]) != 0) return 1;
+        if (declines_or_carries_six_args(kEngines[i]) != 0) return 1;
     }
     return 0;
 }

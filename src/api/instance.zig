@@ -24,6 +24,7 @@
 //! zones (`interp/`, `wasi/`, `frontend/`, `ir/`, `util/`) freely.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const runtime = @import("../runtime/runtime.zig");
 const runtime_instance = @import("../runtime/instance/instance.zig");
@@ -890,9 +891,114 @@ fn crossModuleJitTarget(
     // surface. It is unsupported at `main` too, by the same route, so the
     // guard withholds an acceptance rather than removing one.
     if (hasConcreteHeapType(want_sig) or hasConcreteHeapType(src_sig)) return error.Unsupported;
+    // #390 — the bridge thunk takes no signature, so it can only carry a call
+    // whose arguments and results all travel in registers: an overflow stack
+    // argument is written by the importer relative to ITS stack and read by
+    // the exporter relative to its own frame, with the thunk's frame in
+    // between; a MEMORY-class result loses its hidden buffer pointer. Both are
+    // wrong answers, not rejections. Decline the shape instead — NULL, as
+    // `v2.6.0` returned for every cross-module import — until the bridge is
+    // signature-aware. Mirrors the host-func sibling above, whose
+    // `dispatchPtrFor` declines the signatures ITS bridge does not cover.
+    if (!bridgeCanCarry(want_sig)) return error.Unsupported;
     if (!validator_helpers.funcTypeImportCompatible(want_sig, src_sig, importer_types))
         return error.Unsupported;
     return source_jit.exportedFuncTarget(ta, it.name) orelse error.Unsupported;
+}
+
+/// #390 — the register budget the cross-module bridge can carry on the
+/// running target. Every number is the JIT call-site marshalling rule for the
+/// same target, cited per row; the bridge inherits those rules because it is
+/// a plain CALL between two JIT bodies. `int` covers i32/i64/ref (one GPR
+/// each), `fp` covers f32/f64. v128 is never carried (a hidden pointer under
+/// Win64, an XMM under SysV, unsupported as a JIT entry arg on arm64).
+const BridgeBudget = struct {
+    /// User integer argument registers with a non-MEMORY-class return.
+    int_regs: u32,
+    /// The same when the return is MEMORY-class (results.len > 2): the hidden
+    /// buffer pointer takes one more slot — and the bridge cannot carry the
+    /// MEMORY-class return at all, so that row only documents the ABI.
+    fp_regs: u32,
+    /// Win64 shares ONE position sequence between int and fp args
+    /// (`op_call.zig`: `n_total = n_int + n_v128 + n_fp` against the int
+    /// budget); SysV and AAPCS64 count the two classes separately.
+    shared_positions: bool,
+};
+
+fn bridgeBudgetFor(comptime arch: std.Target.Cpu.Arch, comptime os: std.Target.Os.Tag) BridgeBudget {
+    // `x86_64/op_call.zig` computeCallReturnBufferOff / marshalCallArgs:
+    // SysV — 5 user int regs (RSI..R9; RDI is the runtime), 8 XMM.
+    // Win64 — 3 user positions (RDX/R8/R9; RCX is the runtime), int and fp
+    // sharing them.
+    if (arch == .x86_64) {
+        return if (os == .windows)
+            .{ .int_regs = 3, .fp_regs = 3, .shared_positions = true }
+        else
+            .{ .int_regs = 5, .fp_regs = 8, .shared_positions = false };
+    }
+    // `arm64/emit.zig` multi-arg entry: X1..X7 (X0 is the runtime), V0..V7.
+    if (arch == .aarch64) return .{ .int_regs = 7, .fp_regs = 8, .shared_positions = false };
+    // No JIT on any other target (`shared/thunk.zig` refuses to compile one),
+    // so nothing is carried.
+    return .{ .int_regs = 0, .fp_regs = 0, .shared_positions = false };
+}
+
+fn bridgeCanCarryFor(comptime arch: std.Target.Cpu.Arch, comptime os: std.Target.Os.Tag, sig: zir.FuncType) bool {
+    const budget = bridgeBudgetFor(arch, os);
+    // A MEMORY-class return (results.len > 2) is returned through a hidden
+    // buffer pointer the bridge does not preserve (#390).
+    if (sig.results.len > 2) return false;
+    var n_int: u32 = 0;
+    var n_fp: u32 = 0;
+    for (sig.params) |vt| switch (vt) {
+        .i32, .i64, .ref => n_int += 1,
+        .f32, .f64 => n_fp += 1,
+        .v128 => return false,
+    };
+    if (budget.shared_positions) return n_int + n_fp <= budget.int_regs;
+    return n_int <= budget.int_regs and n_fp <= budget.fp_regs;
+}
+
+/// #390 — can the cross-module bridge carry this signature on the running
+/// target without an overflow stack argument or a MEMORY-class return?
+fn bridgeCanCarry(sig: zir.FuncType) bool {
+    return bridgeCanCarryFor(builtin.target.cpu.arch, builtin.target.os.tag, sig);
+}
+
+test "bridgeCanCarry: the register budget per target, both sides of each boundary (#390)" {
+    const i32s = [_]zir.ValType{.i32} ** 8;
+    const f64s = [_]zir.ValType{.f64} ** 9;
+    const one = [_]zir.ValType{.i32};
+    const three = [_]zir.ValType{.i32} ** 3;
+    const sig = struct {
+        fn of(params: []const zir.ValType, results: []const zir.ValType) zir.FuncType {
+            return .{ .params = params, .results = results };
+        }
+    };
+    // SysV x86_64: 5 int / 8 fp, classes counted separately.
+    try testing.expect(bridgeCanCarryFor(.x86_64, .linux, sig.of(i32s[0..5], &one)));
+    try testing.expect(!bridgeCanCarryFor(.x86_64, .linux, sig.of(i32s[0..6], &one)));
+    try testing.expect(bridgeCanCarryFor(.x86_64, .linux, sig.of(f64s[0..8], &one)));
+    try testing.expect(!bridgeCanCarryFor(.x86_64, .linux, sig.of(f64s[0..9], &one)));
+    // Win64: 3 positions shared by int and fp.
+    try testing.expect(bridgeCanCarryFor(.x86_64, .windows, sig.of(i32s[0..3], &one)));
+    try testing.expect(!bridgeCanCarryFor(.x86_64, .windows, sig.of(i32s[0..4], &one)));
+    try testing.expect(!bridgeCanCarryFor(.x86_64, .windows, sig.of(&[_]zir.ValType{ .i32, .i32, .f64, .i32 }, &one)));
+    try testing.expect(bridgeCanCarryFor(.x86_64, .windows, sig.of(&[_]zir.ValType{ .i32, .f64, .i32 }, &one)));
+    // arm64: X1..X7 and V0..V7.
+    try testing.expect(bridgeCanCarryFor(.aarch64, .macos, sig.of(i32s[0..7], &one)));
+    try testing.expect(!bridgeCanCarryFor(.aarch64, .macos, sig.of(i32s[0..8], &one)));
+    try testing.expect(bridgeCanCarryFor(.aarch64, .macos, sig.of(f64s[0..8], &one)));
+    try testing.expect(!bridgeCanCarryFor(.aarch64, .macos, sig.of(f64s[0..9], &one)));
+    // MEMORY-class results and v128 are never carried.
+    try testing.expect(bridgeCanCarryFor(.x86_64, .linux, sig.of(&one, &[_]zir.ValType{ .i32, .i32 })));
+    try testing.expect(!bridgeCanCarryFor(.x86_64, .linux, sig.of(&one, &three)));
+    try testing.expect(!bridgeCanCarryFor(.aarch64, .macos, sig.of(&one, &three)));
+    try testing.expect(!bridgeCanCarryFor(.x86_64, .linux, sig.of(&[_]zir.ValType{.v128}, &one)));
+    // The shape the conformance case uses: six ints, one result.
+    try testing.expect(!bridgeCanCarryFor(.x86_64, .linux, sig.of(i32s[0..6], &one)));
+    try testing.expect(!bridgeCanCarryFor(.x86_64, .windows, sig.of(i32s[0..6], &one)));
+    try testing.expect(bridgeCanCarryFor(.aarch64, .macos, sig.of(i32s[0..6], &one)));
 }
 
 /// #387 — does this signature name a type-section INDEX anywhere? Such a type
