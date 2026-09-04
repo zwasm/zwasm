@@ -134,7 +134,7 @@ fn homedCallerSavedSpillReload(ctx: *EmitCtx, dir: SpillDir) Error!void {
 /// `[SP, #N..N + n_results*8 - 1]`. v128 args are excluded
 /// (current callees' v128 args ride V0..V7 in-pool; future
 /// overflow-v128 needs its own 16 B aligned slot accounting).
-fn computeCallOverflowBytes(callee_sig: FuncType) u32 {
+pub fn computeCallOverflowBytes(callee_sig: FuncType) u32 {
     var n_int: u32 = 0;
     var n_fp: u32 = 0;
     for (callee_sig.params) |p| {

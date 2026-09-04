@@ -201,7 +201,7 @@ pub fn emitCallIndirectCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Erro
 /// v128 args excluded from SysV path (rare + 16B alignment
 /// complications). For non-MEMORY callees, return value is
 /// unused.
-fn computeCallReturnBufferOff(callee_sig: zir.FuncType) u32 {
+pub fn computeCallReturnBufferOff(callee_sig: zir.FuncType) u32 {
     var n_int: u32 = 0;
     var n_fp: u32 = 0;
     var n_v128: u32 = 0;

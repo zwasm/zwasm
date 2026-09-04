@@ -965,6 +965,62 @@ fn bridgeCanCarry(sig: zir.FuncType) bool {
     return bridgeCanCarryFor(builtin.target.cpu.arch, builtin.target.os.tag, sig);
 }
 
+// #390 — the budget above is a COPY of the call site's marshalling rule, and a
+// copy is where a defect hides (the #385 thunk was one). This pins that the
+// two agree on the host target: for every signature the fence looks at, it
+// carries exactly the ones the JIT call site marshals without an overflow
+// region — SysV: buffer offset 0; Win64: exactly the shadow space; arm64:
+// overflow bytes 0. v128 is excluded (the fence declines it unconditionally)
+// and results > 2 are asserted declined regardless of the call site.
+const call_site = switch (builtin.target.cpu.arch) {
+    .x86_64 => struct {
+        const op_call = @import("../engine/codegen/x86_64/op_call.zig");
+        const abi = @import("../engine/codegen/x86_64/abi.zig");
+        fn noOverflow(sig: zir.FuncType) bool {
+            return op_call.computeCallReturnBufferOff(sig) == abi.current.shadow_space_bytes;
+        }
+    },
+    .aarch64 => struct {
+        const op_call = @import("../engine/codegen/arm64/op_call.zig");
+        fn noOverflow(sig: zir.FuncType) bool {
+            return op_call.computeCallOverflowBytes(sig) == 0;
+        }
+    },
+    else => struct {
+        fn noOverflow(sig: zir.FuncType) bool {
+            _ = sig;
+            return false;
+        }
+    },
+};
+
+test "bridgeCanCarry agrees with the JIT call site's own overflow rule on this target (#390)" {
+    var params: [20]zir.ValType = undefined;
+    const one = [_]zir.ValType{.i32};
+    const three = [_]zir.ValType{ .i32, .i32, .i32 };
+    var n_int: usize = 0;
+    while (n_int <= 10) : (n_int += 1) {
+        var n_fp: usize = 0;
+        while (n_fp <= 10) : (n_fp += 1) {
+            // ints first, then fps: the class counts are what both rules read.
+            for (0..n_int) |k| params[k] = .i32;
+            for (0..n_fp) |k| params[n_int + k] = .f64;
+            const sig: zir.FuncType = .{ .params = params[0 .. n_int + n_fp], .results = &one };
+            try testing.expectEqual(call_site.noOverflow(sig), bridgeCanCarry(sig));
+            // A MEMORY-class result is declined whatever the call site says.
+            const mem_sig: zir.FuncType = .{ .params = params[0 .. n_int + n_fp], .results = &three };
+            try testing.expect(!bridgeCanCarry(mem_sig));
+        }
+    }
+    // refs share the integer class in both rules.
+    const refs = [_]zir.ValType{.{ .ref = zir.RefType.abs(.func, true) }} ** 9;
+    var n: usize = 0;
+    while (n <= 9) : (n += 1) {
+        const sig: zir.FuncType = .{ .params = refs[0..n], .results = &one };
+        try testing.expectEqual(call_site.noOverflow(sig), bridgeCanCarry(sig));
+    }
+}
+
 test "bridgeCanCarry: the register budget per target, both sides of each boundary (#390)" {
     const i32s = [_]zir.ValType{.i32} ** 8;
     const f64s = [_]zir.ValType{.f64} ** 9;
