@@ -110,6 +110,26 @@ pub const Module = extern struct {
     /// Cached borrowed `wasm_ref_t` view (`wasm_module_as_ref`, ADR-0158;
     /// payload = `@intFromPtr(self)`; freed in `wasm_module_delete`).
     ref_view: ?*handles.Ref = null,
+    /// #360 — JIT-backed instances built from this module. Their
+    /// `RuntimeOwned` aliases `bytes_ptr` (passive data / elem segment
+    /// descriptors point into it, per `setup.zig`'s contract that `wasm_bytes`
+    /// outlives the runtime), so while this is non-zero `wasm_module_delete`
+    /// hands the bytes to `Store.orphaned_module_bytes` instead of freeing
+    /// them.
+    ///
+    /// A borrow ends in exactly one way. A JIT instance is never freed at
+    /// `wasm_instance_delete` — it is PARKED on `Store.jit_zombies`
+    /// (importers may hold its address) — and the store-teardown cascade parks
+    /// too, so every borrower lives until `wasm_store_delete`'s reap, which
+    /// frees all parked runtimes and then all orphaned bytes in one sweep.
+    /// There is therefore no decrement anywhere: this only ever asks "has any
+    /// JIT instance aliased these bytes", and once one has, the bytes' free is
+    /// deferred to the store. Intended, not an oversight.
+    ///
+    /// Plain integer on purpose: a Store is single-threaded by design (the SDK
+    /// drops `Send`/`Sync` on it), so this is store-local and needs no atomic
+    /// and no mutex. Appended to the opaque handle; C never sees the layout.
+    jit_borrowers: u32 = 0,
 };
 
 // Instance + ExportType moved to src/runtime/instance/instance.zig
@@ -298,6 +318,11 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
         alloc.destroy(jit);
     }
     handle.jit_zombies.deinit(alloc);
+    // #360 — only now, with every parked runtime gone, may the module bytes
+    // those runtimes aliased be freed (`Module.jit_borrowers` explains why
+    // nothing frees them earlier).
+    for (handle.orphaned_module_bytes.items) |bytes| alloc.free(bytes);
+    handle.orphaned_module_bytes.deinit(alloc);
     // Free the cross-module instance registry (ADR-0065 §"Cat III").
     // Values are erased `*Instance` pointers (lifetimes managed by
     // the zombie list); keys are caller-owned. Only the hashmap's
@@ -521,10 +546,27 @@ pub export fn wasm_module_validate(s: ?*Store, binary: ?*const ByteVec) callconv
 pub export fn wasm_module_delete(m: ?*Module) callconv(.c) void {
     const handle = m orelse return;
     if (handle.host_info_finalizer) |fin| fin(handle.host_info);
+    handle.host_info_finalizer = null;
     const store = handle.store orelse return;
     const alloc = storeAllocator(store) orelse return;
     if (handle.ref_view) |rv| alloc.destroy(rv); // object-identity as_ref view (ADR-0158)
-    if (handle.bytes_ptr) |p| alloc.free(p[0..handle.bytes_len]);
+    handle.ref_view = null;
+    // #360 — a JIT-backed instance built from this module aliases `bytes_ptr`
+    // (alive or parked; see `Module.jit_borrowers`). wasm-c-api lets the
+    // embedder delete the module first, so the BYTES move to the store's
+    // deferred-free list; the HANDLE is destroyed exactly as before, so a
+    // use-after-delete of it keeps faulting instead of going quiet. This sits
+    // after the `store orelse return` above, so it adds no second leak path to
+    // that existing one.
+    if (handle.bytes_ptr) |p| {
+        const bytes = p[0..handle.bytes_len];
+        if (handle.jit_borrowers > 0) {
+            // EXEMPT-FALLBACK: ADR-0014 — deferral OOM accepts a byte-buffer leak over freeing memory a parked runtime aliases.
+            store.orphaned_module_bytes.append(alloc, bytes) catch {};
+        } else {
+            alloc.free(bytes);
+        }
+    }
     alloc.destroy(handle);
 }
 
@@ -1138,6 +1180,11 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     // D-174 live-instance registry so wasm_store_delete cascades teardown.
     // EXEMPT-FALLBACK: D-174 — append OOM degrades to forward-order-only teardown (matches interp path).
     store.live_instances.append(alloc, @ptrCast(inst)) catch {};
+    // #360 — this runtime aliases the module's bytes for as long as it exists,
+    // parked included (`Module.jit_borrowers`). Taken last, after every
+    // fallible step, so no failure path can leave it held — nothing to
+    // errdefer.
+    @constCast(module).jit_borrowers += 1;
     return inst;
 }
 

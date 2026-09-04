@@ -26,6 +26,8 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <wasm.h>
 #include <zwasm.h>
@@ -222,10 +224,116 @@ cleanup:
     return rc;
 }
 
+/* (module (memory 1)
+ *         (data "\x2a\x00\x00\x00\x00\x00\x00\x00")            ;; passive
+ *         (func (export "get") (result i32)
+ *           i32.const 0 i32.const 0 i32.const 8 memory.init 0
+ *           i32.const 0 i32.load))
+ * The exporter's answer comes from a PASSIVE data segment, i.e. from bytes
+ * that live in the module's own byte buffer until `memory.init` copies them. */
+static const uint8_t kPassiveDataExporterWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
+    0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x07, 0x01, 0x03, 0x67, 0x65, 0x74, 0x00,
+    0x00, 0x0c, 0x01, 0x01, 0x0a, 0x13, 0x01, 0x11, 0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x08, 0xfc,
+    0x08, 0x00, 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x0b, 0x0b, 0x0b, 0x01, 0x01, 0x08, 0x2a, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+/* The exporter's result is copied out of a passive data segment — bytes the JIT reads straight from the module's
+ * byte buffer (`setup.zig`: segment descriptors alias `wasm_bytes`). Deleting
+ * the exporter's module used to free that buffer while the parked JIT runtime
+ * still pointed into it; the importer's next call then copied whatever the
+ * allocator had reused it for (measured: -1431655766 for 42 on auto/jit). The
+ * module's bytes now outlive every JIT borrower. */
+static int outlives_module_bytes(uint8_t engine) {
+    int rc = 1;
+    const char* who = engine_name(engine);
+    wasm_module_t* exporter_module = NULL;
+    wasm_instance_t* exporter = NULL;
+    wasm_extern_vec_t exporter_exports = { 0, NULL };
+    wasm_module_t* importer_module = NULL;
+    wasm_instance_t* importer = NULL;
+    wasm_extern_vec_t importer_exports = { 0, NULL };
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+
+    wasm_byte_vec_t exporter_binary = { sizeof(kPassiveDataExporterWasm), (wasm_byte_t*) kPassiveDataExporterWasm };
+    exporter_module = wasm_module_new(store, &exporter_binary);
+    if (!exporter_module) { fprintf(stderr, "[%s] passive-data exporter failed to parse\n", who); goto cleanup; }
+    wasm_extern_vec_t no_imports = { 0, NULL };
+    wasm_trap_t* etrap = NULL;
+    exporter = zwasm_instance_new_ex(store, exporter_module, &no_imports, &etrap, engine);
+    if (etrap) wasm_trap_delete(etrap);
+    if (!exporter) { fprintf(stderr, "[%s] passive-data exporter failed to instantiate\n", who); goto cleanup; }
+    wasm_instance_exports(exporter, &exporter_exports);
+    if (exporter_exports.size < 1 || !exporter_exports.data[0]) {
+        fprintf(stderr, "[%s] passive-data exporter exposed nothing\n", who);
+        goto cleanup;
+    }
+
+    wasm_byte_vec_t importer_binary = { sizeof(kImporterWasm), (wasm_byte_t*) kImporterWasm };
+    importer_module = wasm_module_new(store, &importer_binary);
+    if (!importer_module) { fprintf(stderr, "[%s] importer failed to parse\n", who); goto cleanup; }
+    wasm_extern_t* import_externs[1] = { exporter_exports.data[0] };
+    wasm_extern_vec_t imports = { 1, import_externs };
+    wasm_trap_t* itrap = NULL;
+    importer = zwasm_instance_new_ex(store, importer_module, &imports, &itrap, engine);
+    if (itrap) wasm_trap_delete(itrap);
+    if (!importer) { fprintf(stderr, "[%s] the importer failed to instantiate\n", who); goto cleanup; }
+    wasm_instance_exports(importer, &importer_exports);
+    if (importer_exports.size < 1 || !importer_exports.data[0]) {
+        fprintf(stderr, "[%s] the importer is missing its `test` export\n", who);
+        goto cleanup;
+    }
+
+    /* The order wasm-c-api permits and that used to fault: the MODULE goes
+     * first while its instance is still alive; the instance is deleted after
+     * the call; the store last (cleanup below). The segment bytes are the
+     * point — they live in the module's buffer. */
+    wasm_module_delete(exporter_module);
+    exporter_module = NULL;
+    /* Churn the heap so a freed buffer would not still hold its old bytes. */
+    for (int k = 0; k < 64; k++) { void* junk = malloc(4096); if (junk) { memset(junk, 0xEE, 4096); free(junk); } }
+
+    wasm_val_t results[1] = { { WASM_I32, { 0 } } };
+    wasm_val_vec_t no_args = { 0, NULL };
+    wasm_val_vec_t res = { 1, results };
+    wasm_trap_t* trap = wasm_func_call(wasm_extern_as_func(importer_exports.data[0]), &no_args, &res);
+    if (trap) {
+        fprintf(stderr, "[%s] the call trapped after the exporter's module was deleted\n", who);
+        wasm_trap_delete(trap);
+        goto cleanup;
+    }
+    if (results[0].kind != WASM_I32 || results[0].of.i32 != 42) {
+        fprintf(stderr, "[%s] after deleting the exporter's module, memory.init copied %d, expected 42\n",
+                who, (int) results[0].of.i32);
+        goto cleanup;
+    }
+    /* Now the exporter instance, before the store. */
+    wasm_extern_vec_delete(&exporter_exports);
+    exporter_exports.data = NULL;
+    wasm_instance_delete(exporter);
+    exporter = NULL;
+    rc = 0;
+
+cleanup:
+    if (importer_exports.data) wasm_extern_vec_delete(&importer_exports);
+    if (importer) wasm_instance_delete(importer);
+    if (importer_module) wasm_module_delete(importer_module);
+    if (exporter_exports.data) wasm_extern_vec_delete(&exporter_exports);
+    if (exporter) wasm_instance_delete(exporter);
+    if (exporter_module) wasm_module_delete(exporter_module);
+    if (store) wasm_store_delete(store);
+    if (eng) wasm_engine_delete(eng);
+    return rc;
+}
+
 int main(void) {
     for (size_t i = 0; i < sizeof(kEngines) / sizeof(kEngines[0]); i++) {
         if (compose_on(kEngines[i]) != 0) return 1;
         if (outlives_exporter(kEngines[i]) != 0) return 1;
+        if (outlives_module_bytes(kEngines[i]) != 0) return 1;
     }
     return 0;
 }

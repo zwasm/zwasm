@@ -94,6 +94,15 @@ pub const Store = struct {
     /// MUST NOT import Zone-2 `engine/` — same discipline as
     /// `Instance.jit`; the Zone-3 store teardown casts back.
     jit_zombies: std.ArrayList(*anyopaque) = .empty,
+    /// #360 — byte buffers of modules the embedder deleted while a JIT-backed
+    /// instance built from them was alive or parked. `setup.zig`'s passive
+    /// data / elem segment descriptors alias the module's bytes (the
+    /// `wasm_bytes` outlives `RuntimeOwned` contract), so `wasm_module_delete`
+    /// moves the buffer here instead of freeing it — the handle itself is
+    /// destroyed as before, so a use-after-delete of the handle still faults
+    /// rather than going quiet. Freed by `wasm_store_delete` AFTER the
+    /// `jit_zombies` reap, by when no runtime aliases them.
+    orphaned_module_bytes: std.ArrayList([]u8) = .empty,
     /// Wasm 1.0 §4.5 cross-module instance registry per ADR-0065
     /// (Phase 9 Cat III §9.9-III scope). Spec testsuite uses
     /// `(register "M" $inst)` to bind a previously-instantiated
