@@ -413,14 +413,36 @@ pub fn compute(
                         }
                     }
                 }
+                // Mirror of `emitEndIntra`'s closing step. Whatever the
+                // arms above left, the frame closes to `[..base) ++
+                // results`, the shape the validator hands the enclosing
+                // frame: the top `result_arity` entries move down to
+                // `base`, anything between is dropped. The snapshot is
+                // one side of a comparison (`liveness_parity`), so it
+                // computes that shape rather than assume it. A body that
+                // never produced its results (it ended in a terminator
+                // with nothing on the stack) leaves the frame short; the
+                // emit names each missing result vreg 0, its dead-fall-
+                // through placeholder, and the snapshot carries the same
+                // id. The range extension a later pop of it records on
+                // vreg 0 is conservative.
+                //
+                // Before the first vreg is minted that id names nothing:
+                // the emit's own read of it is out of bounds
+                // (`regalloc.slot`), and pushing it here would move that
+                // read to the next pop. The snapshot stays short there,
+                // and the parity check reports the difference, which is
+                // a true statement about the emit.
+                const frame_base: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
+                const closed_len: usize = frame_base + @as(usize, fr.result_arity);
+                if (sim_len > closed_len) {
+                    const results: usize = fr.result_arity;
+                    std.mem.copyForwards(u32, sim_stack[frame_base..closed_len], sim_stack[sim_len - results .. sim_len]);
+                    sim_len = closed_len;
+                }
+                while (sim_len < closed_len and ranges.items.len != 0) : (sim_len += 1) sim_stack[sim_len] = 0;
                 block_stack_len -= 1;
             }
-            // Mid-function `end` (block/loop/if frame closer) is
-            // transparent at the liveness level — values produced
-            // inside the block stay on the operand stack and flow
-            // naturally to the next consumer. The Wasm validator
-            // already enforces stack-shape consistency at block
-            // boundaries.
             continue;
         }
 
@@ -616,29 +638,38 @@ pub fn compute(
         // the callee's params, marshalled by the emit layer, and
         // control never reaches subsequent ops at this PC).
         // ADR-0113 §A: is_terminator=true, n_successor_edges=0.
-        // "Drain" here means down to the innermost open frame's entry
-        // depth, not to 0 — see the body.
+        // "Drain" here closes ranges; the stack itself stays — see the body.
         if (instr.op == .@"return" or instr.op == .@"unreachable" or
             instr.op == .throw or instr.op == .throw_ref or
             instr.op == .return_call or instr.op == .return_call_indirect or
             instr.op == .return_call_ref)
         {
-            // Drain only to the innermost open frame's entry depth — the
-            // same rule the `br` handler below applies, for the same reason:
-            // control never falls through, but the next reachable code
-            // resumes at that frame's `.end`, so values below it are still
-            // read. The emit does not drain `pushed_vregs` on these ops at
-            // all (it sets `dead_code` and skips the rest of the body), so
-            // draining to 0 here would desync the two models and let the
-            // block-merge `.end` pad over slots it cannot reconstruct.
+            // The emit pops what the op itself consumes by value — the
+            // `throw_ref` exception, the `return_call_indirect` table index,
+            // the `return_call_ref` funcref — and then freezes
+            // `pushed_vregs` (it sets `dead_code`); `return`, `unreachable`
+            // and `return_call` read their operands in place. Mirror that:
+            // pop the same, close every range above the innermost open
+            // frame's entry depth (control never falls through, so this is
+            // their last read), and leave the rest of the stack for that
+            // frame's `.end` to close, exactly as the emit's frozen stack
+            // reaches its `emitEndIntra`.
+            if (instr.op == .throw_ref or instr.op == .return_call_indirect or
+                instr.op == .return_call_ref)
+            {
+                if (sim_len > 0) {
+                    sim_len -= 1;
+                    ranges.items[sim_stack[sim_len]].last_use_pc = pc;
+                }
+            }
             const innermost_entry_term: u32 = if (block_stack_len == 0)
                 0
             else
                 block_stack[block_stack_len - 1].entry_depth;
-            while (sim_len > @as(usize, innermost_entry_term)) {
-                sim_len -= 1;
-                const vreg = sim_stack[sim_len];
-                ranges.items[vreg].last_use_pc = pc;
+            var k: usize = sim_len;
+            while (k > @as(usize, innermost_entry_term)) {
+                k -= 1;
+                ranges.items[sim_stack[k]].last_use_pc = pc;
             }
             continue;
         }
@@ -681,16 +712,19 @@ pub fn compute(
             // across the enclosing block when the target was an outer
             // block, killing that lhs early -> regalloc aliased its reg
             // with the `$exit` fall-through const (got 25, expected 50).
-            // The emit mirrors this: its forward-`br` leaves `pushed_vregs`
-            // intact; only the per-block `.end` truncates.
+            // The emit's forward `br` leaves `pushed_vregs` intact; only the
+            // per-block `.end` truncates. So close the ranges here and leave
+            // the vregs where they are — the innermost frame's `.end` keeps
+            // the top `result_arity` of them as that frame's result, as the
+            // emit does, and the snapshot has to agree with it there.
             const innermost_entry: u32 = if (block_stack_len == 0)
                 0
             else
                 block_stack[block_stack_len - 1].entry_depth;
-            while (sim_len > @as(usize, innermost_entry)) {
-                sim_len -= 1;
-                const vreg = sim_stack[sim_len];
-                ranges.items[vreg].last_use_pc = pc;
+            var k: usize = sim_len;
+            while (k > @as(usize, innermost_entry)) {
+                k -= 1;
+                ranges.items[sim_stack[k]].last_use_pc = pc;
             }
             continue;
         }
@@ -983,7 +1017,10 @@ test "compute: D-093 (d-3) local.tee keeps the input vreg alive across the tee" 
 
 test "compute: br closes all live vregs at branch site (sub-7.5c-iv)" {
     // (i32.const 1) (br) (end) — `br` is now handled, not rejected.
-    // The const's vreg should have last_use_pc == br's pc.
+    // With no frame open the `br` is the function-level return: it
+    // reads the const's vreg in place and the emit keeps it on
+    // `pushed_vregs`, so the function-level `end` reads it once more
+    // and the range closes there (pc 2), not at the `br`.
     var f = try buildFunc(testing.allocator, &.{
         .{ .op = .@"i32.const", .payload = 1 },
         .{ .op = .br },
@@ -994,7 +1031,7 @@ test "compute: br closes all live vregs at branch site (sub-7.5c-iv)" {
     const live = try compute(testing.allocator, &f, &.{}, &.{});
     defer deinit(testing.allocator, live);
     try testing.expectEqual(@as(usize, 1), live.ranges.len);
-    try testing.expectEqual(@as(u32, 1), live.ranges[0].last_use_pc); // br at pc=1
+    try testing.expectEqual(@as(u32, 2), live.ranges[0].last_use_pc);
 }
 
 test "compute: pop on empty stack is tolerant (validator-cleared dead-code path)" {
@@ -1075,4 +1112,80 @@ test "compute: install onto ZirFunc.liveness slot round-trips" {
 
     try testing.expect(f.liveness != null);
     try testing.expectEqual(@as(usize, 1), f.liveness.?.ranges.len);
+}
+
+test "compute: a frame whose body ended in a terminator closes to its result shape" {
+    // loop (result i32) ; local.get 0 ; return ; end ; i32.const 1 ; i32.add ; end
+    // `return` reads vreg 0 in place and the emit freezes its stack, so
+    // the loop's `.end` hands vreg 0 on as the loop's result and the
+    // `i32.add` pops it. Its range must reach the add (pre-fix the
+    // terminator drained it and the range stopped at the `return`).
+    var f = try buildFunc(testing.allocator, &.{
+        .{ .op = .loop, .extra = 1 },
+        .{ .op = .@"local.get", .payload = 0 },
+        .{ .op = .@"return" },
+        .{ .op = .end },
+        .{ .op = .@"i32.const", .payload = 1 },
+        .{ .op = .@"i32.add" },
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(usize, 3), live.ranges.len);
+    try testing.expectEqual(@as(u32, 5), live.ranges[0].last_use_pc);
+}
+
+test "compute: the snapshot carries a frame's results past a br-only body" {
+    // `(block (result i32) (loop (result i32) i32.const 5 br 1))` lowers,
+    // with the constant hoisted into a local, to
+    //   block ; i32.const ; local.set 0 ; loop ; local.get 0 ; br 1 ; end ; end ; end
+    // Entering the block's `.end` (pc 7) the emit's stack is `{ 1 }`: the
+    // loop closed to its one result. The snapshot must read the same.
+    dbg.initFromEnv("liveverify");
+    defer dbg.resetForTest();
+    var f = try buildFunc(testing.allocator, &.{
+        .{ .op = .block, .extra = 1 },
+        .{ .op = .@"i32.const", .payload = 5 },
+        .{ .op = .@"local.set", .payload = 0 },
+        .{ .op = .loop, .extra = 1 },
+        .{ .op = .@"local.get", .payload = 0 },
+        .{ .op = .br, .payload = 1 },
+        .{ .op = .end },
+        .{ .op = .end },
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(u32, 1), live.stack_depth[7]);
+    try testing.expectEqual(snapshotDigest(&.{1}), live.stack_digest[7]);
+    try testing.expectEqual(@as(u32, 1), live.stack_depth[8]);
+    try testing.expectEqual(snapshotDigest(&.{1}), live.stack_digest[8]);
+}
+
+test "compute: a frame closed before any vreg exists leaves the snapshot short" {
+    // block (result i32) ; unreachable ; end ; end — nothing mints a vreg,
+    // so the emit's placeholder vreg 0 names nothing. Liveness must not
+    // push it (the function-level `end` would then index an empty
+    // `ranges`); the snapshot stays one short of the emit's `{ 0 }`.
+    dbg.initFromEnv("liveverify");
+    defer dbg.resetForTest();
+    var f = try buildFunc(testing.allocator, &.{
+        .{ .op = .block, .extra = 1 },
+        .{ .op = .@"unreachable" },
+        .{ .op = .end },
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(usize, 0), live.ranges.len);
+    try testing.expectEqual(@as(u32, 0), live.stack_depth[3]);
 }
