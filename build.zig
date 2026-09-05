@@ -690,6 +690,22 @@ pub fn build(b: *std.Build) void {
     const test_spec_wasm_3_0_assert_step = b.step("test-spec-wasm-3.0-assert", "Run Wasm 3.0 spec assertion runner on both engines (§10 / 10.T-2b; 6 sub-corpora enumerated)");
     test_spec_wasm_3_0_assert_step.dependOn(&run_wasm_3_0_assert.step);
     test_spec_wasm_3_0_assert_step.dependOn(&run_wasm_3_0_assert_jit.step);
+    // ADR-0226 — the JIT lane once more with the D-596 liveness parity check
+    // on. Same runner, same corpus, one extra env; the runner attributes each
+    // residual to its module and gates on `liveverifyKnown()` in both
+    // directions, so this run is red on a new liveness/emit divergence AND
+    // on a listed one that stopped firing. Both env vars are pinned for the
+    // reason given on the interp run above. This is the ONLY place the build
+    // sets `ZWASM_DEBUG=liveverify`: `test-all` under that env is unsupported,
+    // because any active dbg channel makes AOT produce refuse and the AOT
+    // unit tests fail by design
+    // (`.dev/lessons/2026-08-24-measurement-scaffolding-hid-the-product-gate.md`).
+    const run_wasm_3_0_assert_lv = b.addRunArtifact(wasm_3_0_assert_runner_exe);
+    run_wasm_3_0_assert_lv.addArg(b.pathFromRoot("test/spec/wasm-3.0-assert"));
+    run_wasm_3_0_assert_lv.setEnvironmentVariable("ZWASM_SPEC_ENGINE", "jit");
+    run_wasm_3_0_assert_lv.setEnvironmentVariable("ZWASM_DEBUG", "liveverify");
+    const test_spec_wasm_3_0_lv_step = b.step("test-spec-wasm-3.0-assert-liveverify", "Run the wasm-3.0 JIT lane with the liveness parity check on; gates on liveverifyKnown() (ADR-0226)");
+    test_spec_wasm_3_0_lv_step.dependOn(&run_wasm_3_0_assert_lv.step);
 
     // In-source test of the runner skeleton (covers PROPOSALS list).
     const wasm_3_0_assert_unit_mod = createSanitizedModule(b, sanitize_opts, .{
@@ -1584,6 +1600,7 @@ pub fn build(b: *std.Build) void {
     // 10.M / 10.R / 10.TC / 10.E / 10.G land.
     test_all_step.dependOn(&run_wasm_3_0_assert.step);
     test_all_step.dependOn(&run_wasm_3_0_assert_jit.step);
+    test_all_step.dependOn(&run_wasm_3_0_assert_lv.step); // ADR-0226 liveverify lane
     // The wasm-3.0 runner's embedded unit tests (§1 JIT-corpus
     // eligibility + manifest parse) were wired only into `test` — so
     // the per-chunk gate (`mac_gate.sh` → test-all) never ran them and
