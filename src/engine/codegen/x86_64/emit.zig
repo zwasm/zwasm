@@ -910,7 +910,7 @@ pub fn compile(
         // D-596 — liveness's operand-stack simulation must still agree with
         // what this loop does to `pushed_vregs`. Off unless the diagnostic is.
         if (parity_on) {
-            liveness_parity.check(func, pc, ins.op, pushed_vregs.items, labels.items, dead_code);
+            liveness_parity.check(func, pc, ins.op, pushed_vregs.items, labels.items);
         }
         // `end` / `else` always exit the dead region — emit's own
         // bookkeeping (label-stack pop / arm switch) must run.
