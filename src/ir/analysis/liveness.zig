@@ -304,8 +304,16 @@ pub fn compute(
                         // vregs captured at `.else`) IS the if's result. Emit
                         // never dropped them from `pushed_vregs`; restore them
                         // here so the post-if consumer pops the canonical vreg.
+                        // A terminator drains only to the innermost open
+                        // frame's entry depth (the `return` / `br` arms
+                        // below), so nothing lowers `sim_len` past this
+                        // frame's base. The pad that once filled that gap
+                        // wrote a vreg it could not reconstruct over an
+                        // enclosing frame's record; the invariant is
+                        // asserted instead
+                        // (`.claude/rules/comment_as_invariant.md`).
+                        std.debug.assert(sim_len >= entry);
                         if (sim_len > entry) sim_len = entry;
-                        while (sim_len < entry) : (sim_len += 1) sim_stack[sim_len] = fr.merge_vregs[0];
                         var i: usize = 0;
                         while (i < arity) : (i += 1) {
                             if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
@@ -334,8 +342,9 @@ pub fn compute(
                     const arity: usize = fr.result_arity;
                     const entry: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
                     if (sim_len < entry + arity) {
+                        // Same invariant as the if-merge arm above.
+                        std.debug.assert(sim_len >= entry);
                         if (sim_len > entry) sim_len = entry;
-                        while (sim_len < entry) : (sim_len += 1) sim_stack[sim_len] = fr.param_vregs[0];
                         var i: usize = 0;
                         while (i < arity) : (i += 1) {
                             if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
@@ -384,8 +393,9 @@ pub fn compute(
                         // push, which then aliases the block's result
                         // (AssemblyScript `~lib/rt/tlsf.ts` insertBlock's
                         // `slMap[fl] |= 1 << sl` read 1 instead of 0).
+                        // Same invariant as the if-merge arm above.
+                        std.debug.assert(sim_len >= entry);
                         if (sim_len > entry) sim_len = entry;
-                        while (sim_len < entry) : (sim_len += 1) sim_stack[sim_len] = fr.merge_vregs[0];
                         var i: usize = 0;
                         while (i < arity) : (i += 1) {
                             if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
