@@ -133,7 +133,7 @@ test "compile: function with 1 local + (i32.const 42) (local.set 0) (local.get 0
     try f.instrs.append(testing.allocator, .{ .op = .@"local.set", .payload = 0 });
     try f.instrs.append(testing.allocator, .{ .op = .@"local.get", .payload = 0 });
     try f.instrs.append(testing.allocator, .{ .op = .end });
-    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{});
+    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{});
     defer if (f.liveness) |lv| liveness.deinit(testing.allocator, lv);
     const alloc = try regalloc.compute(testing.allocator, &f);
     defer regalloc.deinit(testing.allocator, alloc);
@@ -171,7 +171,7 @@ test "compile: local.tee preserves stack — uses top vreg without popping" {
     try f.instrs.append(testing.allocator, .{ .op = .@"i32.const", .payload = 7 });
     try f.instrs.append(testing.allocator, .{ .op = .@"local.tee", .payload = 0 });
     try f.instrs.append(testing.allocator, .{ .op = .end });
-    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{});
+    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{});
     defer if (f.liveness) |lv| liveness.deinit(testing.allocator, lv);
     const alloc = try regalloc.compute(testing.allocator, &f);
     defer regalloc.deinit(testing.allocator, alloc);

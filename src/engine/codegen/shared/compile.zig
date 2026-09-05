@@ -231,7 +231,7 @@ pub fn compileOne(
     }
 
     trace.passEnter(func_idx, .liveness);
-    const lv = try liveness.compute(allocator, &func, func_sigs, module_types);
+    const lv = try liveness.compute(allocator, &func, func_sigs, module_types, tag_param_counts);
     func.liveness = lv;
     // ZirFunc.deinit does NOT walk into the (optional) liveness
     // slot — that slot is owned by the FuncResult, freed via
