@@ -12,17 +12,21 @@
 //! D-330, #245 and two of #253's three shapes are depth-neutral and only show
 //! up as a differing vreg id.
 //!
-//! Two places where the models legitimately differ, both reconstructible from
+//! One place where the models legitimately differ, reconstructible from
 //! state the emit already holds:
 //!
-//!   1. Dead code. An unconditional terminator drains liveness's `sim_stack`;
-//!      the emit sets `dead_code` and freezes `pushed_vregs` until the `.end`
-//!      or `.else` that clears it. Skipped via the caller's own flag.
-//!   2. The else arm of an `if (result T…)` with no params. `emitElse`
+//!   1. The else arm of an `if (result T…)` with no params. `emitElse`
 //!      captures the then-arm's top `result_arity` vregs as the merge target
 //!      and leaves them ON `pushed_vregs`; liveness's `.else` truncates to the
 //!      frame's entry depth and drops them. `expected()` deletes them again,
 //!      driven by the emit's own label stack.
+//!
+//! Dead code is not one of them any more. A terminator pops what the op
+//! consumes and then leaves the stack alone on both sides — the emit by
+//! freezing `pushed_vregs` under `dead_code`, liveness by closing ranges
+//! without popping — so the `.end` or `.else` that clears the flag (the
+//! next pc, since the lowerer prunes the dead body) sees one frozen stack
+//! on each side and is compared like any other pc.
 //!
 //! Zone 2 (`engine/`); reads Zone 1 `ir/` downward, which the layering allows.
 
@@ -69,10 +73,8 @@ pub fn check(
     op: zir.ZirOp,
     pushed_vregs: []const u32,
     labels: anytype,
-    dead_code: bool,
 ) void {
     if (!compiled_in) return;
-    if (dead_code) return;
     const lv = func.liveness orelse return;
     if (pc >= lv.stack_depth.len) return;
 
