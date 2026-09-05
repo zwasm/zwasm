@@ -556,7 +556,9 @@ const LvKnown = struct {
 
 /// x86_64 SysV — measured 2026-09-05 on x86_64-linux at `main` 7c7e434ea
 /// (ADR-0226 D2), by this lane's red-first run with the table empty:
-/// 69 residual lines over 10 modules, `0 enumerated, 10 unexpected`. Each
+/// 69 residual lines over 10 modules, `0 enumerated, 10 unexpected`; CI's
+/// Linux leg (run 33939200603, job 101233144116) then read the same ten
+/// rows as `10 enumerated, 0 unexpected, 0 stale`. Each
 /// row names its #400 table row; the funcs are the `func[N]` of its stderr
 /// lines. #400's own module list was taken with #398 applied, so a module
 /// (or func) absent from it is in #398's `.end` / `return` class by that
@@ -585,14 +587,45 @@ const lv_known_x86_64_sysv: []const LvKnown = &.{
     .{ .key = "function-references/br_on_null/br_on_null.2.wasm", .count = 1 },
 };
 
-/// x86_64-windows — seeded from this lane's own first CI run (ADR-0226 D2):
-/// the Win64 emit is not the SysV one, so a copied SysV row would describe
-/// nothing CI runs. Empty until that run names the rows.
-const lv_known_x86_64_windows: []const LvKnown = &.{};
+/// x86_64-windows — measured 2026-09-05 by this lane's own first CI run
+/// (run 33939200603, job 101233144158; ADR-0226 D2), with the table empty:
+/// `0 enumerated, 10 unexpected, 0 stale`. Written from that output, not
+/// copied from SysV: the Win64 emit is not the SysV one, so a copied row
+/// would have described nothing CI runs. That the rows came out identical
+/// — same ten modules, same counts, on the Linux leg too — is itself the
+/// measurement: the divergence is on the liveness side, which is
+/// arch-independent, not in either emit. Per-row attribution as the SysV
+/// table.
+const lv_known_x86_64_windows: []const LvKnown = &.{
+    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 25 },
+    .{ .key = "exception-handling/try_table/try_table.1.wasm", .count = 9 },
+    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 13 },
+    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 1 },
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 11 },
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 2 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 3 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.1.wasm", .count = 3 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.2.wasm", .count = 1 },
+    .{ .key = "function-references/br_on_null/br_on_null.2.wasm", .count = 1 },
+};
 
-/// aarch64 (the macOS leg) — seeded from this lane's own first CI run, for
-/// the same reason. Empty until that run names the rows.
-const lv_known_aarch64: []const LvKnown = &.{};
+/// aarch64 (the macOS leg) — measured 2026-09-05 by the same first CI run
+/// (job 101233144280), table empty: `0 enumerated, 10 unexpected, 0 stale`.
+/// Identical to the two x86_64 tables, for the reason given above; a second
+/// backend agreeing with the first against liveness is what rules the emit
+/// out. Per-row attribution as the SysV table.
+const lv_known_aarch64: []const LvKnown = &.{
+    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 25 },
+    .{ .key = "exception-handling/try_table/try_table.1.wasm", .count = 9 },
+    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 13 },
+    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 1 },
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 11 },
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 2 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 3 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.1.wasm", .count = 3 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.2.wasm", .count = 1 },
+    .{ .key = "function-references/br_on_null/br_on_null.2.wasm", .count = 1 },
+};
 
 comptime {
     // A duplicated key would be counted once by `countFor` and twice in
