@@ -1,3 +1,4 @@
+// DBG-INIT-EXEMPT: addTest target in build.zig — only the in-file test blocks run; this main is never executed.
 //! GC stress runner skeleton (10.T-3; impl-body lands with 10.G).
 //!
 //! Per Phase 10 design plan §3.5 — once `feature/gc/heap.zig` +
