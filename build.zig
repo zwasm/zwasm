@@ -482,9 +482,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/zwasm.zig"),
         .target = target,
         // ADR-0177 (Revision 2026-06-14): the Component Model spec runner
-        // (`comp_spec_runner`, 158-manifest corpus in `test-all`) is an
-        // integration runner — floor it at ReleaseSafe like `core_rs`, else a
-        // plain Debug `zig build test-all` runs the whole CM corpus ~100× slower.
+        // (`comp_spec_runner`, the `test-component-spec` lane; its summary
+        // prints the corpus size as `(over N manifests)`) is an integration
+        // runner — floor it at ReleaseSafe like `core_rs`, else a plain Debug
+        // `zig build test-all` runs the whole CM corpus ~100× slower.
         // `core_comp` is consumed ONLY by that runner (no production component
         // exe), so the floor never costs a real Debug build.
         .optimize = runner_optimize,
