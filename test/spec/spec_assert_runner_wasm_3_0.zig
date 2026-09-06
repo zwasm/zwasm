@@ -538,9 +538,10 @@ const JitFailLog = struct {
 /// for, enumerated so the liveverify lane can gate on an exact match the way
 /// `jitKnownFails` does.
 ///
-/// Same contract as that list: NOT a suppression. An unlisted module turns
-/// the lane red, and so does a listed one that stopped firing (`stale`) — a
-/// fix removes its row in the same PR. Every row has its line in #400's
+/// Same contract as that list: NOT a suppression. A module no row names turns
+/// the lane red, so does a listed one firing more than its row enumerates
+/// (both `unexpected`), and so does one firing fewer (`stale`) — a fix lowers
+/// or removes its row in the same PR. Every row has its line in #400's
 /// table; a new drift lands as a row here AND a row there (ADR-0226 D4).
 const LvKnown = struct {
     /// `<proposal>/<manifest-dir>/<module>.wasm` — the path the runner's
@@ -562,7 +563,8 @@ const LvKnown = struct {
 /// row names its #400 table row; the funcs are the `func[N]` of its stderr
 /// lines. #400's own module list was taken with #398 applied, so a module
 /// (or func) absent from it is in #398's `.end` / `return` class by that
-/// measurement and its row drops when #398 lands — re-take the table then,
+/// measurement: a row wholly of that class drops when #398 lands, a mixed
+/// row's count falls — re-take the table then,
 /// do not edit it by hand.
 const lv_known_x86_64_sysv: []const LvKnown = &.{
     // `.end` ×20, `i32.add` ×4, `drop` ×1 over 17 funcs — #398's class.
@@ -636,6 +638,12 @@ comptime {
                 if (std.mem.eql(u8, a.key, b.key)) {
                     @compileError("liveverify table lists '" ++ a.key ++ "' twice");
                 }
+            }
+            // `record` is called only for n > 0 and `countFor` returns 0 when
+            // absent, so a zero row matches whether the module fires or not:
+            // it can never red the lane, and it inflates `enumerated`.
+            if (a.count == 0) {
+                @compileError("liveverify row '" ++ a.key ++ "' has count 0 — it can never fire; delete the row");
             }
         }
     }
@@ -777,6 +785,24 @@ pub fn main(init: std.process.Init) !void {
     // of the jit lane: with the env unset, or on the interp lane, none of the
     // `lv_mode` branches run and the lane's output is what it is without them.
     const lv_mode = jit_mode and liveness_parity.on();
+    // The gate below lives entirely inside `if (lv_mode)`, down to its summary
+    // line, so a dark channel is not a quieter lane — it is this step exiting 0
+    // having compared nothing, with no line saying so. `compiled_in` is false
+    // in ReleaseFast / ReleaseSmall and `core_rs` takes `-Doptimize` above
+    // Debug, so `zig build test-all -Doptimize=ReleaseFast` reaches it today.
+    // The step asked for the channel; if it is not on, that is the failure.
+    if (jit_mode and !lv_mode) {
+        if (init.environ_map.get("ZWASM_DEBUG")) |v| {
+            if (std.mem.indexOf(u8, v, "liveverify") != null) {
+                try stdout.print(
+                    "LIVEVERIFY-CHANNEL-DARK  ZWASM_DEBUG={s} asked for the channel and liveness_parity.on() is false (compiled_in={}, mode={s}) — this lane would have compared nothing and exited 0\n",
+                    .{ v, liveness_parity.compiled_in, @tagName(builtin.mode) },
+                );
+                try stdout.flush();
+                std.process.exit(1);
+            }
+        }
+    }
 
     const cwd = std.Io.Dir.cwd();
     var dir = cwd.openDir(io, corpus_root, .{}) catch |err| {
@@ -1245,9 +1271,10 @@ pub fn main(init: std.process.Init) !void {
                                 break :blk pp;
                             };
                             // ADR-0226 D3 — attribute this module's residuals.
-                            // The counter is read here and nowhere else, so a
-                            // residual fired outside a module compile is carried
-                            // into the next module's count, where it reds the
+                            // Read here per module, and once more after the
+                            // loop for what fired outside any compile, so a
+                            // residual is carried into the next module's count,
+                            // where it reds the
                             // lane as unexpected or stale, instead of being
                             // dropped. Read after `initLinked` whether or not it
                             // succeeded: the emit ran either way.
@@ -2185,9 +2212,19 @@ pub fn main(init: std.process.Init) !void {
         for (known) |kf| {
             const seen = jit_fail_log.countFor(kf.key);
             if (seen == kf.count) continue;
+            // Same split as the liveverify block below: a rise is a regression
+            // on an enumerated key, not a row that stopped firing.
+            if (seen > kf.count) {
+                jit_unexpected += 1;
+                try stdout.print(
+                    "JIT-UNEXPECTED-FAIL  {s}: {d} failing directive(s) against the {d} its row enumerates — the JIT got more wrong here than the row claims\n",
+                    .{ kf.key, seen, kf.count },
+                );
+                continue;
+            }
             jit_stale += 1;
             try stdout.print(
-                "JIT-EXPECTATION-STALE  {s}: enumerated {d} failing directive(s), observed {d} — correct the {s} row in spec_assert_runner_wasm_3_0.zig\n",
+                "JIT-EXPECTATION-STALE  {s}: enumerated {d} failing directive(s), observed {d} — the row over-claims; lower the {s} row in spec_assert_runner_wasm_3_0.zig\n",
                 .{ kf.key, kf.count, seen, jit_target_label },
             );
         }
@@ -2220,9 +2257,22 @@ pub fn main(init: std.process.Init) !void {
         for (known) |k| {
             const seen = lv_log.countFor(k.key);
             if (seen == k.count) continue;
+            // A row can miss in two directions and they call for opposite work.
+            // Fewer lines than enumerated is the ratchet: the row over-claims,
+            // lower it. More is a divergence this list never saw, on a module
+            // that happens to be listed — the same event as an unlisted module
+            // firing, so it counts as that and the text says so.
+            if (seen > k.count) {
+                lv_unexpected += 1;
+                try stdout.print(
+                    "LIVEVERIFY-UNEXPECTED  {s}: {d} residual line(s) against the {d} its row enumerates — a new liveness/emit divergence on an enumerated module; fix it or add its funcs to #400 before the {s} row moves\n",
+                    .{ k.key, seen, k.count, jit_target_label },
+                );
+                continue;
+            }
             lv_stale += 1;
             try stdout.print(
-                "LIVEVERIFY-EXPECTATION-STALE  {s}: enumerated {d} residual line(s), observed {d} — correct the {s} row in spec_assert_runner_wasm_3_0.zig and its line on #400\n",
+                "LIVEVERIFY-EXPECTATION-STALE  {s}: enumerated {d} residual line(s), observed {d} — the row over-claims; lower the {s} row in spec_assert_runner_wasm_3_0.zig and retire its line on #400\n",
                 .{ k.key, k.count, seen, jit_target_label },
             );
         }
@@ -2487,4 +2537,23 @@ test "wasm-3.0-assert §1: JIT error classification — unwired-shape → skip, 
     // observable behaviour → genuine fail (the meaningful both-backends
     // RED signal). `error.Trap` and any unanticipated error stay fail.
     try std.testing.expect(!jitErrorIsUnwiredShape(error.Trap));
+}
+
+test "ADR-0226: LvLog sums a module's residuals and reports 0 for one that never fired" {
+    // `record`'s accumulate branch has no counterpart in `JitFailLog` (which
+    // stores one entry per fail), and both halves of the exact-match gate
+    // read through it: a module counted twice would red the lane as a false
+    // regression, and an absent key returning anything but 0 would hide a
+    // stale row.
+    var log: LvLog = .{ .gpa = std.testing.allocator };
+    defer log.deinit();
+
+    try log.record("gc", "br_on_cast", "br_on_cast.0.wasm", 4);
+    try log.record("gc", "br_on_cast", "br_on_cast.0.wasm", 9);
+    try log.record("gc", "br_on_cast", "br_on_cast.1.wasm", 1);
+
+    try std.testing.expectEqual(@as(usize, 2), log.entries.items.len);
+    try std.testing.expectEqual(@as(u32, 13), log.countFor("gc/br_on_cast/br_on_cast.0.wasm"));
+    try std.testing.expectEqual(@as(u32, 1), log.countFor("gc/br_on_cast/br_on_cast.1.wasm"));
+    try std.testing.expectEqual(@as(u32, 0), log.countFor("gc/br_on_cast/br_on_cast.2.wasm"));
 }
