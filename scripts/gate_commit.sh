@@ -11,7 +11,9 @@
 #   9. scripts/check_fallback_patterns.sh (report)          — info; skipped on docs-only.
 #  10. scripts/check_invariant_comments.sh --strict         — gate (ADR-0077, B128); skipped on docs-only.
 #  11. scripts/check_engine_default_claims.sh --gate        — gate; ALWAYS (docs are the thing it guards).
-#  12. zig build test (Mac native)                          — skipped on docs-only.
+#  12. scripts/check_wasi03_coverage_claims.sh --gate       — gate; ALWAYS (same reason).
+#  13. scripts/check_doc_fossils.sh --gate                  — gate; ALWAYS (same reason).
+#  14. zig build test (Mac native)                          — skipped on docs-only.
 #
 # Per the A6 gate consolidation study (§9.12-A / A6), docs/config-only
 # diffs cannot move src/-related gate outcomes, so they short-circuit.
@@ -141,10 +143,19 @@ else
     echo "(no src/*.zig yet — skipping fmt)"
 fi
 
-# --- gate: engine-default claims (always — docs are exactly what rots) --
+# --- gates: prose-truth checks (always — docs are exactly what rots) ----
+#
+# The three checks CI's `doc-truth` job runs on every PR, doc-only included.
+# They sit ABOVE the docs-only short-circuit for the reason that job exists:
+# their subject is the prose the short-circuit would otherwise skip. Each
+# writes its findings to stderr, so `> /dev/null` hides only the OK chatter.
 
 echo "[gate_commit] check_engine_default_claims --gate ..."
 bash scripts/check_engine_default_claims.sh --gate > /dev/null
+echo "[gate_commit] check_wasi03_coverage_claims --gate ..."
+bash scripts/check_wasi03_coverage_claims.sh --gate > /dev/null
+echo "[gate_commit] check_doc_fossils --gate ..."
+bash scripts/check_doc_fossils.sh --gate > /dev/null
 
 # --- gates: zone + file_size + skip_adrs (skipped on docs-only) ---------
 

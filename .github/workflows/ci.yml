@@ -9,11 +9,11 @@
 # script — `test-wasi-p1-official`, whose own block below says why it sits
 # here. And `gate_merge.sh` does not invoke `ci_gate.sh` at all: it runs
 # `gate_commit.sh` locally and `run_remote_*.sh test-all` on the two remote
-# hosts, so it approximates the leg rather than reproducing it. Workflow-wide
-# the same already holds for `doc-truth`, which blocks through `ci-required`
-# while its `check_wasi03_coverage_claims` / `check_doc_fossils` have no local
-# counterpart. `ci-required` is authoritative; the local scripts are
-# pre-flight (ADR-0076 D9).
+# hosts, so it approximates the leg rather than reproducing it — its header
+# names what it leaves out. The `doc-truth` job's three checks do have a local
+# counterpart: `gate_commit.sh` runs them above its docs-only short-circuit.
+# `ci-required` is authoritative; the local scripts are pre-flight
+# (ADR-0076 D9).
 #
 # Triggers: pull_request (any target) + push to `main` + manual dispatch.
 # `main` is the trunk and is ruleset-protected: no direct pushes — every change
