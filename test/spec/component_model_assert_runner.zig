@@ -87,6 +87,7 @@ pub fn main(init: std.process.Init) !void {
     var failed: u32 = 0;
     var skipped: u32 = 0;
     var skipped_adr: u32 = 0;
+    var manifest_count: u32 = 0;
 
     var engine = try zwasm.Engine.init(gpa, .{});
     defer engine.deinit();
@@ -104,13 +105,14 @@ pub fn main(init: std.process.Init) !void {
     var it = root.iterate();
     while (try it.next(io)) |dir_entry| {
         if (dir_entry.kind != .directory) continue;
+        manifest_count += 1;
         runCorpus(io, gpa, &engine, &root, dir_entry.name, stdout, &passed, &failed, &skipped, &skipped_adr) catch |err| {
             try stdout.print("FAIL  {s}: corpus error {s}\n", .{ dir_entry.name, @errorName(err) });
             failed += 1;
         };
     }
 
-    try stdout.print("\ncomponent_model_assert_runner: {d} passed, {d} failed, {d} skipped (= {d} skip-impl + {d} skip-adr)\n", .{ passed, failed, skipped + skipped_adr, skipped, skipped_adr });
+    try stdout.print("\ncomponent_model_assert_runner: {d} passed, {d} failed, {d} skipped (= {d} skip-impl + {d} skip-adr) (over {d} manifests)\n", .{ passed, failed, skipped + skipped_adr, skipped, skipped_adr, manifest_count });
     try stdout.flush();
     if (failed != 0) std.process.exit(1);
 }
