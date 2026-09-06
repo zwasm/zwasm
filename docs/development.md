@@ -184,9 +184,10 @@ toolchains — see [`.dev/toolchain_provisioning.md`](../.dev/toolchain_provisio
 ## Things you may see referenced but do NOT need
 
 - **Remote pre-flight scripts** (`scripts/gate_merge.sh`,
-  `scripts/run_remote_*.sh`): an *optional* local mirror of the CI matrix for
-  anyone with spare x86_64 Linux / Windows machines. CI is the authoritative
-  gate — you never need these. To use them, copy
+  `scripts/run_remote_*.sh`): an *optional* way to run `zig build test-all`
+  on spare x86_64 Linux / Windows machines before opening a PR. That is one
+  step of each CI leg, not the leg — the script's header names what it leaves
+  out. CI is the authoritative gate — you never need these. To use them, copy
   [`scripts/dev_hosts.env.example`](../scripts/dev_hosts.env.example) to
   `scripts/dev_hosts.env` (gitignored) and point the three values at your own
   hosts; every remote-gate script sources it. No host name is baked into the
