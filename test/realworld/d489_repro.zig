@@ -1,3 +1,4 @@
+// DBG-INIT-EXEMPT: manual D-489 isolation harness (zig build d489-repro), in no test lane — the guard exists for lanes whose channels went dark unnoticed, and this one is run by hand for a single investigation.
 //! Minimal D-489 repro — isolates WHY tinygo_json's JIT output is correct (90B)
 //! via the direct CLI but wrong (130B) via the diff-runner. Both use the SAME
 //! `runWasmJitCaptured`; argv/limits/preopen/env are all ruled out. Remaining

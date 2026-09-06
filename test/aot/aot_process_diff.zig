@@ -1,3 +1,4 @@
+// DBG-INIT-EXEMPT: no zwasm import — the engine runs in the spawned CLI, which reads ZWASM_DEBUG itself (cli/main.zig). Kept dark on purpose: dbg.anyActive() makes produceFromCompiledWasm refuse, so the compile lane cannot run under any channel and test-aot-diff takes no ZWASM_DEBUG.
 //! CROSS-PROCESS `.wasm`-vs-`.cwasm` differential (AOT-full-fidelity
 //! campaign Phase II; see
 //! `.dev/meta_audits/2026-07-09-aot-full-fidelity-investigation.md`).
