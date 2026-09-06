@@ -27,6 +27,7 @@ const builtin = @import("builtin");
 const manifest_parser = @import("wasm_3_0_manifest.zig");
 const zwasm = @import("zwasm");
 const TypedResult = zwasm.engine.runner.TypedResult;
+const liveness_parity = zwasm.engine.codegen.shared.liveness_parity;
 
 /// Widen a multi-value `TypedResult` slot to the u64 carrier
 /// `jitScalarResultMatches` compares (i32/f32 zero-extended in the low 32).
@@ -532,6 +533,167 @@ const JitFailLog = struct {
     }
 };
 
+/// ADR-0226 — one module whose JIT compile the D-596 liveness parity check
+/// (`ZWASM_DEBUG=liveverify`, `liveness_parity.check`) reports residuals
+/// for, enumerated so the liveverify lane can gate on an exact match the way
+/// `jitKnownFails` does.
+///
+/// Same contract as that list: NOT a suppression. An unlisted module turns
+/// the lane red, and so does a listed one that stopped firing (`stale`) — a
+/// fix removes its row in the same PR. Every row has its line in #400's
+/// table; a new drift lands as a row here AND a row there (ADR-0226 D4).
+const LvKnown = struct {
+    /// `<proposal>/<manifest-dir>/<module>.wasm` — the path the runner's
+    /// `[liveverify] module …` line prints, so a new row is copied off the
+    /// output. A `.wasm`, not a directive triple: residuals fire at compile
+    /// time, before any directive runs.
+    key: []const u8,
+    /// Residual LINES for that module (one per `[liveverify] func[N] …`
+    /// print on stderr), not distinct funcs: per row so "one func fixed,
+    /// one regressed" in the same module is visible (ADR-0225's reason).
+    count: u32,
+};
+
+/// x86_64 SysV — measured 2026-09-05 on x86_64-linux at `main` 7c7e434ea
+/// (ADR-0226 D2), by this lane's red-first run with the table empty:
+/// 69 residual lines over 10 modules, `0 enumerated, 10 unexpected`; CI's
+/// Linux leg (run 33939200603, job 101233144116) then read the same ten
+/// rows as `10 enumerated, 0 unexpected, 0 stale`. Each
+/// row names its #400 table row; the funcs are the `func[N]` of its stderr
+/// lines. #400's own module list was taken with #398 applied, so a module
+/// (or func) absent from it is in #398's `.end` / `return` class by that
+/// measurement and its row drops when #398 lands — re-take the table then,
+/// do not edit it by hand.
+const lv_known_x86_64_sysv: []const LvKnown = &.{
+    // `.end` ×20, `i32.add` ×4, `drop` ×1 over 17 funcs — #398's class.
+    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 25 },
+    // `return` ×9 (funcs 8–15, 19) — #398's class.
+    .{ .key = "exception-handling/try_table/try_table.1.wasm", .count = 9 },
+    // #400 `br_on_cast` row (funcs 3, 4); funcs 5, 6 are #398's class.
+    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 13 },
+    // #400 `br_on_cast` row (func 1).
+    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 1 },
+    // #400 `br_on_cast_fail` row (funcs 2, 3); funcs 4–6 are #398's class.
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 11 },
+    // #400 `br_on_cast_fail` row (funcs 1, 2).
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 2 },
+    // #400 `br_on_null` / `br_on_non_null` row (funcs 0, 1, 6) — the traced mechanism.
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 3 },
+    // `drop` ×3 (funcs 0–2), absent from #400's list — #398's class.
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.1.wasm", .count = 3 },
+    // #400 `br_on_null` / `br_on_non_null` row (func 1).
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.2.wasm", .count = 1 },
+    // #400 `br_on_null` / `br_on_non_null` row (func 1).
+    .{ .key = "function-references/br_on_null/br_on_null.2.wasm", .count = 1 },
+};
+
+/// x86_64-windows — measured 2026-09-05 by this lane's own first CI run
+/// (run 33939200603, job 101233144158; ADR-0226 D2), with the table empty:
+/// `0 enumerated, 10 unexpected, 0 stale`. Written from that output, not
+/// copied from SysV: the Win64 emit is not the SysV one, so a copied row
+/// would have described nothing CI runs. That the rows came out identical
+/// — same ten modules, same counts, on the Linux leg too — is itself the
+/// measurement: the divergence is on the liveness side, which is
+/// arch-independent, not in either emit. Per-row attribution as the SysV
+/// table.
+const lv_known_x86_64_windows: []const LvKnown = &.{
+    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 25 },
+    .{ .key = "exception-handling/try_table/try_table.1.wasm", .count = 9 },
+    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 13 },
+    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 1 },
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 11 },
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 2 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 3 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.1.wasm", .count = 3 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.2.wasm", .count = 1 },
+    .{ .key = "function-references/br_on_null/br_on_null.2.wasm", .count = 1 },
+};
+
+/// aarch64 (the macOS leg) — measured 2026-09-05 by the same first CI run
+/// (job 101233144280), table empty: `0 enumerated, 10 unexpected, 0 stale`.
+/// Identical to the two x86_64 tables, for the reason given above; a second
+/// backend agreeing with the first against liveness is what rules the emit
+/// out. Per-row attribution as the SysV table.
+const lv_known_aarch64: []const LvKnown = &.{
+    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 25 },
+    .{ .key = "exception-handling/try_table/try_table.1.wasm", .count = 9 },
+    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 13 },
+    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 1 },
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 11 },
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 2 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 3 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.1.wasm", .count = 3 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.2.wasm", .count = 1 },
+    .{ .key = "function-references/br_on_null/br_on_null.2.wasm", .count = 1 },
+};
+
+comptime {
+    // A duplicated key would be counted once by `countFor` and twice in
+    // `enumerated`; the table would then claim more than it checks.
+    for ([_][]const LvKnown{ lv_known_x86_64_sysv, lv_known_x86_64_windows, lv_known_aarch64 }) |table| {
+        for (table, 0..) |a, i| {
+            for (table[i + 1 ..]) |b| {
+                if (std.mem.eql(u8, a.key, b.key)) {
+                    @compileError("liveverify table lists '" ++ a.key ++ "' twice");
+                }
+            }
+        }
+    }
+}
+
+/// Selected the way `jitKnownFails` selects, with the same loud default: a
+/// target with no row expects ZERO residuals and reports every one it sees.
+fn liveverifyKnown() []const LvKnown {
+    return switch (builtin.cpu.arch) {
+        .x86_64 => if (builtin.os.tag == .windows)
+            lv_known_x86_64_windows
+        else
+            lv_known_x86_64_sysv,
+        .aarch64 => lv_known_aarch64,
+        else => &.{},
+    };
+}
+
+/// Every module the liveverify run attributed residuals to, with the count.
+/// One entry per module, not one per residual — the count is the row's unit
+/// — which is the one shape difference from `JitFailLog`.
+const LvLog = struct {
+    gpa: std.mem.Allocator,
+    entries: std.ArrayList(Entry) = .empty,
+
+    const Entry = struct { key: []const u8, count: u32 };
+
+    fn record(self: *LvLog, proposal: []const u8, manifest: []const u8, module_path: []const u8, n: u32) !void {
+        // The manifest name is borrowed from a directory iterator whose
+        // buffer is reused, so the key is copied rather than referenced.
+        const key = try std.fmt.allocPrint(self.gpa, "{s}/{s}/{s}", .{ proposal, manifest, module_path });
+        errdefer self.gpa.free(key);
+        // A manifest that names the same module twice compiles it twice;
+        // the row counts the module, so the second compile adds to it.
+        for (self.entries.items) |*e| {
+            if (std.mem.eql(u8, e.key, key)) {
+                e.count += n;
+                self.gpa.free(key);
+                return;
+            }
+        }
+        try self.entries.append(self.gpa, .{ .key = key, .count = n });
+    }
+
+    fn deinit(self: *LvLog) void {
+        for (self.entries.items) |e| self.gpa.free(e.key);
+        self.entries.deinit(self.gpa);
+    }
+
+    /// 0 when absent — a listed module that never fired is `stale`.
+    fn countFor(self: LvLog, key: []const u8) u32 {
+        for (self.entries.items) |e| {
+            if (std.mem.eql(u8, e.key, key)) return e.count;
+        }
+        return 0;
+    }
+};
+
 /// Shared catch-classifier for the §1 JIT no-arg dispatch arms (i32 / i64 /
 /// f32 / f64): compile/setup rejects → an enumerated skip (the JIT never
 /// executed this shape), execution-stage outcomes (e.g. `error.Trap`) → fail.
@@ -608,6 +770,13 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, v, "jit")
     else
         false;
+    // ADR-0226 — the liveverify lane: the jit lane run once more with the
+    // D-596 parity check on. `ZWASM_DEBUG=liveverify` is set by the
+    // `test-spec-wasm-3.0-assert-liveverify` build step and nowhere else.
+    // The check fires only inside JIT compilation, so the mode is a property
+    // of the jit lane: with the env unset, or on the interp lane, none of the
+    // `lv_mode` branches run and the lane's output is what it is without them.
+    const lv_mode = jit_mode and liveness_parity.on();
 
     const cwd = std.Io.Dir.cwd();
     var dir = cwd.openDir(io, corpus_root, .{}) catch |err| {
@@ -633,6 +802,11 @@ pub fn main(init: std.process.Init) !void {
     // the run accumulates and then has to reconcile before it may exit 0.
     var jit_fail_log: JitFailLog = .{ .gpa = gpa };
     defer jit_fail_log.deinit();
+    // ADR-0226 — same kind of thing for the liveverify lane: one entry per
+    // module the parity check reported on, reconciled against
+    // `liveverifyKnown()` after the loop.
+    var lv_log: LvLog = .{ .gpa = gpa };
+    defer lv_log.deinit();
 
     for (PROPOSALS) |proposal| {
         var summary: ProposalSummary = .{ .name = proposal };
@@ -1070,6 +1244,20 @@ pub fn main(init: std.process.Init) !void {
                                     zwasm.engine.runner.eh_registry.registerThunkArena(@intFromPtr(a.bytes.ptr), a.bytes.len);
                                 break :blk pp;
                             };
+                            // ADR-0226 D3 — attribute this module's residuals.
+                            // The counter is read here and nowhere else, so a
+                            // residual fired outside a module compile is carried
+                            // into the next module's count, where it reds the
+                            // lane as unexpected or stale, instead of being
+                            // dropped. Read after `initLinked` whether or not it
+                            // succeeded: the emit ran either way.
+                            if (lv_mode) {
+                                const n = liveness_parity.takeResiduals();
+                                if (n > 0) {
+                                    try stdout.print("[liveverify] module {s}/{s}/{s}: {d} residual line(s)\n", .{ proposal, entry.name, d.module_path, n });
+                                    try lv_log.record(proposal, entry.name, d.module_path, n);
+                                }
+                            }
                         }
                         // 10.M-D195b cycle 71 — compile + instantiate
                         // against the shared engine + linker, then
@@ -2020,6 +2208,51 @@ pub fn main(init: std.process.Init) !void {
             .{ jit_target_label, known.len, jit_unexpected, jit_stale },
         );
     }
+
+    // ADR-0226 — the liveverify lane's exact-match gate, the block above in
+    // its second instance, over the parity check's residuals per module.
+    // Both directions for the same reasons; the failure text names the row
+    // to edit, since a red of this kind is new to the lane.
+    var lv_unexpected: u32 = 0;
+    var lv_stale: u32 = 0;
+    if (lv_mode) {
+        const known = liveverifyKnown();
+        for (known) |k| {
+            const seen = lv_log.countFor(k.key);
+            if (seen == k.count) continue;
+            lv_stale += 1;
+            try stdout.print(
+                "LIVEVERIFY-EXPECTATION-STALE  {s}: enumerated {d} residual line(s), observed {d} — correct the {s} row in spec_assert_runner_wasm_3_0.zig and its line on #400\n",
+                .{ k.key, k.count, seen, jit_target_label },
+            );
+        }
+        for (lv_log.entries.items) |e| {
+            var listed = false;
+            for (known) |k| {
+                if (std.mem.eql(u8, k.key, e.key)) listed = true;
+            }
+            if (listed) continue;
+            lv_unexpected += 1;
+            try stdout.print(
+                "LIVEVERIFY-UNEXPECTED  {s}: {d} residual line(s) and no row enumerates it — liveness and the emit diverge on this module; add the {s} row and a line on #400\n",
+                .{ e.key, e.count, jit_target_label },
+            );
+        }
+        // Residuals after the last module compile have no module to be
+        // carried into; they would otherwise vanish.
+        const stray = liveness_parity.takeResiduals();
+        if (stray > 0) {
+            lv_unexpected += 1;
+            try stdout.print(
+                "LIVEVERIFY-UNEXPECTED  (after the last module): {d} residual line(s) fired outside a module compile, so nothing could attribute them\n",
+                .{stray},
+            );
+        }
+        try stdout.print(
+            "[wasm-3.0-assert] liveverify ({s}): {d} enumerated, {d} unexpected, {d} stale\n",
+            .{ jit_target_label, known.len, lv_unexpected, lv_stale },
+        );
+    }
     try stdout.flush();
 
     // ADR-0174 — GATE on declarative-assert fails (close the "OK-verdict-hides-
@@ -2030,8 +2263,10 @@ pub fn main(init: std.process.Init) !void {
     // In jit mode `ret.fail` is the JIT verdict, and every one of those fails
     // is either enumerated above or already counted as unexpected — summing
     // it here as well would gate the same fail twice and make the enumerated
-    // ones permanently red. The reconciliation IS the gate for this lane.
-    const ret_fail_unaccounted = if (jit_mode) jit_unexpected + jit_stale else grand.ret.fail;
+    // ones permanently red. The reconciliation IS the gate for this lane —
+    // and the liveverify reconciliation joins it the same way (ADR-0226; its
+    // two terms are 0 unless `lv_mode`).
+    const ret_fail_unaccounted = if (jit_mode) jit_unexpected + jit_stale + lv_unexpected + lv_stale else grand.ret.fail;
     const grand_assert_fail = ret_fail_unaccounted + grand.trap.fail +
         grand.invalid.fail + grand.unlinkable.fail + grand.uninstantiable.fail +
         grand.malformed.fail + grand.exception.fail;

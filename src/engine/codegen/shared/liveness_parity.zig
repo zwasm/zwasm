@@ -40,11 +40,12 @@ pub const compiled_in: bool =
 
 /// Hoist this out of the emit loop; `dbg.on` is a whitelist walk.
 ///
-/// Reach: the CLI, today. `dbg.initFromEnv` is called from `cli/main.zig` and
-/// `api/instance.zig` only, and no test runner reaches either, so the channel
-/// is dark for the whole of `zig build test-all`. Lane coverage arrives when
-/// that gap closes; this module does not read the env itself, which Zone 2
-/// cannot do without pulling `std.c.getenv` out of its one Zone 3 call site.
+/// Reach: the CLI, the C API, and every test runner (each calls
+/// `dbg.initFromEnv` at startup). One lane runs with it on:
+/// `test-spec-wasm-3.0-assert-liveverify` (ADR-0226), which reads
+/// `takeResiduals` below and gates on the count. This module does not read
+/// the env itself, which Zone 2 cannot do without pulling `std.c.getenv` out
+/// of its one Zone 3 call site.
 pub fn on() bool {
     if (!compiled_in) return false;
     return dbg.on("liveverify");
@@ -57,8 +58,23 @@ pub fn on() bool {
 const max_stack: usize = liveness.max_simulated_stack;
 const digest = liveness.snapshotDigest;
 
-/// Compare the operand stack entering instr `pc`. Prints and returns on a
-/// mismatch — a diagnostic, not a gate, mirroring `ZWASM_DEBUG=regverify`.
+/// Residual lines printed since the last `takeResiduals`. Written only on
+/// the mismatch path of `check`, read by the spec runner after each module's
+/// compile (ADR-0226 D3). Single-threaded by construction: the JIT compiles
+/// one module at a time and the runner reads between modules.
+var residuals: u32 = 0;
+
+/// Read-and-reset. The count is what the liveverify lane gates on; `check`'s
+/// print stays for the person fixing the row.
+pub fn takeResiduals() u32 {
+    const n = residuals;
+    residuals = 0;
+    return n;
+}
+
+/// Compare the operand stack entering instr `pc`. Prints, counts and returns
+/// on a mismatch — the print is a diagnostic mirroring `ZWASM_DEBUG=regverify`,
+/// the count is the lane's (ADR-0226).
 ///
 /// `labels` is the emit's own label stack; both arches' `Label` carries the
 /// same `kind` / `merge_captured` / `result_arity` / `param_arity` /
@@ -100,6 +116,7 @@ pub fn check(
 
     if (len == lv.stack_depth[pc] and digest(expect[0..len]) == lv.stack_digest[pc]) return;
 
+    residuals += 1;
     std.debug.print(
         "[liveverify] func[{d}] pc={d} op={s}: liveness depth={d} digest={x}, emit depth={d} digest={x} (raw {d})\n",
         .{

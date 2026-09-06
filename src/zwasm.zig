@@ -240,6 +240,7 @@ pub const engine = struct {
             pub const canonical_type = @import("engine/codegen/shared/canonical_type.zig");
             pub const result_abi = @import("engine/codegen/shared/result_abi.zig");
             pub const wrapper_thunk = @import("engine/codegen/shared/wrapper_thunk.zig");
+            pub const liveness_parity = @import("engine/codegen/shared/liveness_parity.zig");
         };
         pub const arm64 = struct {
             pub const inst = @import("engine/codegen/arm64/inst.zig");
