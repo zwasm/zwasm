@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
-# OPTIONAL local pre-PR pre-flight that MIRRORS CI. Runs the commit gate plus a
-# three-host test:
-#   - zig build test-all on Mac native
-#   - zig build test-all on the configured Linux x86_64 SSH host
-#     (`ZWASM_UBUNTU_HOST`; per ADR-0067 native, not OrbStack-Rosetta)
-#   - zig build test-all on the configured Windows SSH host
-#     (`ZWASM_WINDOWS_HOST`, if reachable)
+# OPTIONAL local pre-PR pre-flight. Runs the commit gate here, then
+# `zig build test-all` on three hosts:
+#   - Mac native
+#   - the configured Linux x86_64 SSH host (`ZWASM_UBUNTU_HOST`; per ADR-0067
+#     native, not OrbStack-Rosetta)
+#   - the configured Windows SSH host (`ZWASM_WINDOWS_HOST`, if reachable)
 #
 # `main` is ruleset-protected (no direct pushes) — changes land via a
 # develop/<slug> branch → PR → CI. The AUTHORITATIVE 3-OS merge gate is the
-# server-side `ci-required` status check on the PR. This script is a
-# convenience: it mirrors that same `scripts/ci_gate.sh` matrix on real
-# hardware so a maintainer CAN verify locally before opening a PR — but it is
-# not required, and green here is not a substitute for green ci-required.
+# server-side `ci-required` status check on the PR, whose legs run
+# `scripts/ci_gate.sh` (ADR-0076 D9). This script does NOT invoke
+# `ci_gate.sh`: it runs `gate_commit.sh` locally and `test-all` on each host,
+# so it approximates a leg rather than reproducing it. Blocking in CI and run
+# by nothing below — a green run here cannot predict a red PR on these:
+#   - `zig build bench-latency-build`         (ci_gate.sh core, every leg)
+#   - `check_test_discovery --gate`           (ci_gate.sh core, every leg;
+#                                              host-dependent, so one local
+#                                              run covers one arch)
+#   - `zig build test -Doptimize=ReleaseSafe` (ci_gate.sh, Linux leg)
+#   - `zig build run-rust-host`               (ci_gate.sh, Linux leg)
+#   - `zig build test-wasi-p1-official`       (a leg step outside ci_gate.sh;
+#                                              not in test-all)
+# The prose-truth checks of CI's `doc-truth` job run once, in gate_commit.sh.
+# Green here is not a substitute for green ci-required.
 #
 # An unconfigured or unreachable SSH host → WARN and continue (the local Mac
 # gate is the firm floor).
@@ -23,8 +33,8 @@
 #   - test-realworld       (§9.6 / 6.1 chunk a; 50 fixtures, parse)
 #   - test-realworld-run   (§9.6 / 6.1 chunk b; 50 fixtures, run)
 #   - test-spec / test-spec-wasm-2.0 / test-c-api / test-wasi-p1
-# The same layers run in CI's ci-required matrix, which is what actually gates
-# a merge to `main`; this local run just previews that outcome.
+# The same step runs inside `ci_gate.sh` on each CI leg; this local run
+# previews that one step's outcome per host, not the leg's.
 #
 # Exits non-zero on any host that built but had a failed test, on any
 # commit-gate failure, or on missing tools (ssh) — as a local preview signal,
