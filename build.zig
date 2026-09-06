@@ -693,8 +693,10 @@ pub fn build(b: *std.Build) void {
     // ADR-0226 — the JIT lane once more with the D-596 liveness parity check
     // on. Same runner, same corpus, one extra env; the runner attributes each
     // residual to its module and gates on `liveverifyKnown()` in both
-    // directions, so this run is red on a new liveness/emit divergence AND
-    // on a listed one that stopped firing. Both env vars are pinned for the
+    // directions, so this run is red on a new liveness/emit divergence — on a
+    // listed module as well as an unlisted one — AND on a listed one that
+    // stopped firing. It is also red if the channel it sets is not on, which
+    // ReleaseFast / ReleaseSmall would otherwise make a silent exit 0. Both env vars are pinned for the
     // reason given on the interp run above. This is the ONLY place the build
     // sets `ZWASM_DEBUG=liveverify`: `test-all` under that env is unsupported,
     // because any active dbg channel makes AOT produce refuse and the AOT
