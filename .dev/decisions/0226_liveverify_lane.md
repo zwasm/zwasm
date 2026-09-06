@@ -30,11 +30,13 @@ six sub-corpora):
 | | wall | `[liveverify]` residual lines, JIT lane |
 |---|---|---|
 | gate off | 7.46 s | 0 |
-| gate on | 7.61 s | **68** |
+| gate on | 7.61 s | **69 over 10 modules** |
 
-By the op the divergence is first seen at: `end` 21, `return` 16,
+That pair is the check's own overhead inside one lane, not what this decision
+costs; D1 carries that figure. The ten commonest ops the divergence is first
+seen at: `end` 21, `return` 16,
 `i32.const` 8, `i32.add` 4, `drop` 4, `call_ref` 4, `unreachable` 3,
-`struct.get_s` 2, `br_on_cast` 2, `block` 2. #269 measured 178 on the spec
+`struct.get_s` 2, `br_on_cast` 2, `block` 2 (66 of the 69). #269 measured 178 on the spec
 corpus; #398 (open) takes the `end` / `return` class next. Every residual so
 far has been found by hand and filed as its own issue — eight numbers for
 one root, which #400 now holds as a table.
@@ -59,10 +61,23 @@ A step beside `test-spec-wasm-3.0-assert`'s JIT run — same runner, same
 corpus, `ZWASM_SPEC_ENGINE=jit`, the product gate `dbg.on("liveverify")`
 on — joins `test-all` and therefore the core `ci-required` gate on all three
 legs. It exits non-zero when the residuals it observes differ from a named
-list: a residual not on the list is `unexpected`, a listed module that
-produces none is `stale`, and either reds the PR. Cost is 2 % of a 7.5 s
-step, which is #376's own argument for the core gate rather than
-`ZWASM_CI_EXTENDED`, and the extended set covers only the Unix legs.
+list: a residual on a module no row names is `unexpected`, and so is a listed
+module that fires MORE than its row enumerates — a divergence the list has not
+seen, on a module that happens to be listed. A listed module that fires fewer,
+none included, is `stale`: the row over-claims and must come down. All three
+red the PR.
+
+The cost is the run, not the check: turning the gate on inside a lane is 2 %
+(the table above), but D1 is a second full JIT lane, so `test-all` grows by one
+JIT lane — the same order as the step it sits beside. That is #376's argument
+for the core gate rather than `ZWASM_CI_EXTENDED`, whose extended set covers
+only the Unix legs.
+
+The step must fail if the channel it asks for is not on. `liveness_parity` is
+comptime-dead in ReleaseFast / ReleaseSmall, and every branch of this gate —
+down to its summary line — is inside `if (lv_mode)`, so a dark channel is an
+exit 0 with nothing printed rather than a quieter lane. The runner says
+`LIVEVERIFY-CHANNEL-DARK` and exits non-zero instead.
 
 ### D2 — The list names modules, per target, and is held in both directions
 
@@ -75,7 +90,7 @@ count is per row so that "one func fixed, one regressed" in the same module
 is visible; the list carries no total.
 
 The seeds are taken the way #376 took its Windows row: the x86_64 SysV table
-is seeded from this host (the 68 above, re-taken on the PR's base), and the
+is seeded from this host (the 69 above, re-taken on the PR's base), and the
 x86_64 Win64 and aarch64 tables start **empty**, so the PR's first CI run
 reports every residual on those legs as `unexpected` and names them. Those
 names are copied into the tables and pushed; the second run is the proof
@@ -116,8 +131,8 @@ is #400's move 2 and is not decided here.
 - **Why not chosen**: `continue-on-error` rewrites `conclusion` to
   `success`, which is what `ci-required` reads — #307 item 6 and ADR-0225's
   Context are the record of a check that reported and was not read. The
-  list mechanism already makes day-one blocking safe: 68 rows are debt made
-  visible, not red PRs. **This is the maintainer's call, not a rejection**:
+  list mechanism already makes day-one blocking safe: 10 rows carrying 69
+  lines are debt made visible, not red PRs. **This is the maintainer's call, not a rejection**:
   if A is preferred, D1 gains the `continue-on-error` and a promotion
   threshold, and the Status line records it.
 
@@ -139,12 +154,17 @@ is #400's move 2 and is not decided here.
 
 - **Positive**: a liveness/emit divergence becomes a red PR on the commit
   that introduces it, on every target CI runs, instead of an issue filed
-  after someone runs the check by hand. The 68 become load-bearing: each
-  is a row someone must retire, and #398's rows must go in #398.
+  after someone runs the check by hand. The 10 rows become load-bearing:
+  each is one someone must retire, and #398's rows must go in #398.
 - **Negative**: a divergence with no demonstrated wrong answer still reds a
   PR until it is listed. That is the point of an invariant gate, but it is
   a new kind of red for this lane and the failure message must say which
   row to add.
+- **Negative**: a row's unit is the module, so a fix and a new divergence in
+  the same module cancel and the gate stays quiet — the objection Alternative
+  C is rejected for, one level down. The residual lines carry `func[N]`, so the
+  granularity to close it exists; it is not spent here because a per-func list
+  is a table an order of magnitude longer for a debt that only ratchets down.
 - **Neutral / follow-ups**: the arm64 and Win64 seeds are taken from CI's
   own legs, not from a Linux host; ADR-0225 D2's "the table describes CI's
   runner" applies. The 2.0 corpus is not in this lane; whether it should be
