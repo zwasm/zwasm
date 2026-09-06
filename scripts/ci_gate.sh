@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # scripts/ci_gate.sh — single source of truth for the HOST-LOCAL verification
-# gate. Both CI (.github/workflows/ci.yml, once per matrix OS) and the local
-# maintainer flow (gate_merge.sh mirrors these same steps) run this, so CI can
-# never verify LESS than the per-host gate. It checks the CURRENT host only;
-# multi-host fan-out is the caller's job (the CI matrix / gate_merge's SSH legs).
+# gate. CI (.github/workflows/ci.yml, once per matrix OS) runs this; the local
+# pre-flight (gate_merge.sh) does NOT — it runs `test-all` per host, and its
+# header names the steps below it leaves out. It checks the CURRENT host only;
+# multi-host fan-out is the caller's job (the CI matrix).
 #
 #   Core — every OS: zig fmt --check (src/ + bench/latency/ + tools/) +
 #     zig build test-all + bench-latency-build + test-discovery guard +

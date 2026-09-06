@@ -22,7 +22,8 @@ zwasm v2 is a ground-up redesign of zwasm (v1 git history at commit 517cc5a).
   push, PR required, and the `ci-required` status check (CI's 3-OS gate) must be
   green to merge; only the repo admin can bypass. Doc-only PRs auto-skip the
   heavy gate (still green via `ci-required`). The local `scripts/gate_merge.sh`
-  (3-host SSH fan-out) is an **optional** pre-PR pre-flight mirroring CI
+  (3-host SSH fan-out) is an **optional** pre-PR pre-flight that runs
+  `test-all` per host, not the CI leg — its header names what it leaves out
   (ADR-0076 D9) — CI's `ci-required` is authoritative. `--force`
   always forbidden. Root is kept lean (ADR-mirroring the CW layout): this file
   is `.claude/CLAUDE.md`; community-health files (CONTRIBUTING / CODE_OF_CONDUCT /
@@ -90,9 +91,11 @@ text or code identifiers.
   would dominate every PR's wall-clock (rationale in `ci.yml`).
   Doc-only PRs auto-skip the heavy legs (still green via `ci-required`). The
   local `scripts/gate_merge.sh` (3-host SSH fan-out) + `scripts/gate_commit.sh`
-  (pre-commit) are now **optional pre-PR pre-flight** mirroring CI — no longer
-  load-bearing for merge safety. The campaign-era Windows-BATCHED / `--suspend`
-  cadence is RETIRED (its scripts are deleted; ADR-0174 superseded-in-part).
+  (pre-commit) are now **optional pre-PR pre-flight** — a preview of part of
+  the leg, not a reproduction of it (`gate_merge.sh`'s header names what it
+  leaves out); no longer load-bearing for merge safety. The campaign-era
+  Windows-BATCHED / `--suspend` cadence is RETIRED (its scripts are deleted;
+  ADR-0174 superseded-in-part).
   Per-machine host aliases for the optional fan-out live in
   `scripts/dev_hosts.env` (gitignored; template `dev_hosts.env.example` —
   ADR-0206).
@@ -213,7 +216,8 @@ call it before `git commit`.
 
 The **authoritative** merge gate is CI's `ci-required` 3-OS `scripts/ci_gate.sh`
 run on every PR. [`scripts/gate_merge.sh`](../scripts/gate_merge.sh) (local
-3-host SSH fan-out) is now an **optional** pre-PR pre-flight that mirrors CI
+3-host SSH fan-out) is now an **optional** pre-PR pre-flight that runs
+`test-all` per host, not `ci_gate.sh` — its header names what it leaves out
 (ADR-0076 D9) — not required for merge safety.
 
 ## References
