@@ -10,8 +10,9 @@
 #       justified allowlist (a new runner that forgot the floor), OR
 #   (a2) a runner is handed the Debug `exe` as a SPAWNED BINARY — the channel
 #       (a) cannot see, because the runner imports no zwasm module at all.
-#   (b) `core_comp` (the Component Model spec runner's module, 158-manifest
-#       corpus in test-all) regresses from `runner_optimize` back to raw
+#   (b) `core_comp` (the Component Model spec runner's module; the
+#       `test-component-spec` summary prints its corpus size as
+#       `(over N manifests)`) regresses from `runner_optimize` back to raw
 #       `optimize` (= Debug) — the 2026-06-14 gap.
 #
 # Honours-`-Doptimize` allowlist (verified intentional): `core` itself
@@ -69,7 +70,8 @@ done < <(grep -nE 'add[A-Za-z]*Arg\([^)]*\bexe\b[^)]*\)|\bexe\.getEmittedBin\(' 
 core_comp_block=$(awk '/const core_comp = b\.createModule/{f=1} f{print} /\}\);/{if(f) exit}' "$BUILD")
 if ! grep -qE '\.optimize = runner_optimize' <<<"$core_comp_block"; then
   echo "[check_releasesafe_runners] BLOCK — core_comp is not on \`.optimize = runner_optimize\`."
-  echo "  The Component Model spec runner (158-manifest corpus in test-all) would run Debug."
+  echo "  The Component Model spec runner (the \`test-component-spec\` lane; its summary"
+  echo "  prints the corpus size as \`(over N manifests)\`) would run Debug."
   echo "  Fix: \`.optimize = runner_optimize\` (ADR-0177 Revision 2026-06-14)."
   fail=1
 fi
