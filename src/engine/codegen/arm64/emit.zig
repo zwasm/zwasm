@@ -879,7 +879,7 @@ pub fn compile(
     for (func.instrs.items, 0..) |ins, pc| {
         // D-596 — mirror of the x86_64 call; see `shared/liveness_parity.zig`.
         if (parity_on) {
-            liveness_parity.check(func, pc, ins.op, pushed_vregs.items, labels.items, dead_code);
+            liveness_parity.check(func, pc, ins.op, pushed_vregs.items, labels.items);
         }
         // Diagnostic surface: on any error return
         // from the per-op switch below, surface the failing op

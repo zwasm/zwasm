@@ -155,6 +155,30 @@ fn captureBlockMergeVregs(
     fr.merge_captured = true;
 }
 
+/// The signature a call-shaped op pops its arguments against: `call` /
+/// `return_call` index `func_sigs` by func index, the indirect and ref
+/// forms index `module_types` by type index. Shared by the `call` arm and
+/// the tail-call terminators so both pop the same count.
+fn calleeSig(
+    instr: ZirInstr,
+    func_sigs: []const zir.FuncType,
+    module_types: []const zir.FuncType,
+    func_idx: u32,
+) Error!zir.FuncType {
+    if (instr.op == .call or instr.op == .return_call) {
+        if (instr.payload >= func_sigs.len) {
+            std.debug.print("liveness: UnsupportedOp[call-payload-OOB] payload={d} func_sigs.len={d} func_idx={d}\n", .{ instr.payload, func_sigs.len, func_idx });
+            return Error.UnsupportedOp;
+        }
+        return func_sigs[instr.payload];
+    }
+    if (instr.payload >= module_types.len) {
+        std.debug.print("liveness: UnsupportedOp[call_indirect/call_ref-payload-OOB] payload={d} types.len={d} func_idx={d}\n", .{ instr.payload, module_types.len, func_idx });
+        return Error.UnsupportedOp;
+    }
+    return module_types[instr.payload];
+}
+
 fn isControlFlow(op: ZirOp) bool {
     // After sub-7.5c-iv, every Wasm 1.0 control-flow op is
     // handled explicitly in `compute`. The function exists
@@ -184,8 +208,10 @@ fn isControlFlow(op: ZirOp) bool {
 /// `func_sigs` indexes function signatures by func_idx; consulted
 /// by `call N` to determine the pop/push count. `module_types`
 /// indexes type signatures by typeidx; consulted by
-/// `call_indirect type_idx`. Pass empty slices when the function
-/// has no calls (the existing straight-line tests).
+/// `call_indirect type_idx`. `tag_param_counts` indexes a tag's
+/// payload count by tag index; consulted by `throw`, with the emit's
+/// fallback of 0 for an index past the end. Pass empty slices when
+/// the function has no calls or throws (the straight-line tests).
 ///
 /// **Phase 7.5 scope**: extends Phase-5's straight-line MVP +
 /// conversions + sat_trunc (sub-h5) with `call` + `call_indirect`.
@@ -197,6 +223,7 @@ pub fn compute(
     func: *const ZirFunc,
     func_sigs: []const zir.FuncType,
     module_types: []const zir.FuncType,
+    tag_param_counts: []const u32,
 ) Error!Liveness {
     var ranges: std.ArrayList(LiveRange) = .empty;
     errdefer ranges.deinit(allocator);
@@ -304,8 +331,16 @@ pub fn compute(
                         // vregs captured at `.else`) IS the if's result. Emit
                         // never dropped them from `pushed_vregs`; restore them
                         // here so the post-if consumer pops the canonical vreg.
+                        // A terminator drains only to the innermost open
+                        // frame's entry depth (the `return` / `br` arms
+                        // below), so nothing lowers `sim_len` past this
+                        // frame's base. The pad that once filled that gap
+                        // wrote a vreg it could not reconstruct over an
+                        // enclosing frame's record; the invariant is
+                        // asserted instead
+                        // (`.claude/rules/comment_as_invariant.md`).
+                        std.debug.assert(sim_len >= entry);
                         if (sim_len > entry) sim_len = entry;
-                        while (sim_len < entry) : (sim_len += 1) sim_stack[sim_len] = fr.merge_vregs[0];
                         var i: usize = 0;
                         while (i < arity) : (i += 1) {
                             if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
@@ -334,8 +369,9 @@ pub fn compute(
                     const arity: usize = fr.result_arity;
                     const entry: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
                     if (sim_len < entry + arity) {
+                        // Same invariant as the if-merge arm above.
+                        std.debug.assert(sim_len >= entry);
                         if (sim_len > entry) sim_len = entry;
-                        while (sim_len < entry) : (sim_len += 1) sim_stack[sim_len] = fr.param_vregs[0];
                         var i: usize = 0;
                         while (i < arity) : (i += 1) {
                             if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
@@ -384,8 +420,9 @@ pub fn compute(
                         // push, which then aliases the block's result
                         // (AssemblyScript `~lib/rt/tlsf.ts` insertBlock's
                         // `slMap[fl] |= 1 << sl` read 1 instead of 0).
+                        // Same invariant as the if-merge arm above.
+                        std.debug.assert(sim_len >= entry);
                         if (sim_len > entry) sim_len = entry;
-                        while (sim_len < entry) : (sim_len += 1) sim_stack[sim_len] = fr.merge_vregs[0];
                         var i: usize = 0;
                         while (i < arity) : (i += 1) {
                             if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
@@ -403,14 +440,36 @@ pub fn compute(
                         }
                     }
                 }
+                // Mirror of `emitEndIntra`'s closing step. Whatever the
+                // arms above left, the frame closes to `[..base) ++
+                // results`, the shape the validator hands the enclosing
+                // frame: the top `result_arity` entries move down to
+                // `base`, anything between is dropped. The snapshot is
+                // one side of a comparison (`liveness_parity`), so it
+                // computes that shape rather than assume it. A body that
+                // never produced its results (it ended in a terminator
+                // with nothing on the stack) leaves the frame short; the
+                // emit names each missing result vreg 0, its dead-fall-
+                // through placeholder, and the snapshot carries the same
+                // id. The range extension a later pop of it records on
+                // vreg 0 is conservative.
+                //
+                // Before the first vreg is minted that id names nothing:
+                // the emit's own read of it is out of bounds
+                // (`regalloc.slot`), and pushing it here would move that
+                // read to the next pop. The snapshot stays short there,
+                // and the parity check reports the difference, which is
+                // a true statement about the emit.
+                const frame_base: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
+                const closed_len: usize = frame_base + @as(usize, fr.result_arity);
+                if (sim_len > closed_len) {
+                    const results: usize = fr.result_arity;
+                    std.mem.copyForwards(u32, sim_stack[frame_base..closed_len], sim_stack[sim_len - results .. sim_len]);
+                    sim_len = closed_len;
+                }
+                while (sim_len < closed_len and ranges.items.len != 0) : (sim_len += 1) sim_stack[sim_len] = 0;
                 block_stack_len -= 1;
             }
-            // Mid-function `end` (block/loop/if frame closer) is
-            // transparent at the liveness level — values produced
-            // inside the block stay on the operand stack and flow
-            // naturally to the next consumer. The Wasm validator
-            // already enforces stack-shape consistency at block
-            // boundaries.
             continue;
         }
 
@@ -606,29 +665,47 @@ pub fn compute(
         // the callee's params, marshalled by the emit layer, and
         // control never reaches subsequent ops at this PC).
         // ADR-0113 §A: is_terminator=true, n_successor_edges=0.
-        // "Drain" here means down to the innermost open frame's entry
-        // depth, not to 0 — see the body.
+        // "Drain" here closes ranges; the stack itself stays — see the body.
         if (instr.op == .@"return" or instr.op == .@"unreachable" or
             instr.op == .throw or instr.op == .throw_ref or
             instr.op == .return_call or instr.op == .return_call_indirect or
             instr.op == .return_call_ref)
         {
-            // Drain only to the innermost open frame's entry depth — the
-            // same rule the `br` handler below applies, for the same reason:
-            // control never falls through, but the next reachable code
-            // resumes at that frame's `.end`, so values below it are still
-            // read. The emit does not drain `pushed_vregs` on these ops at
-            // all (it sets `dead_code` and skips the rest of the body), so
-            // draining to 0 here would desync the two models and let the
-            // block-merge `.end` pad over slots it cannot reconstruct.
+            // The emit pops what the op consumes and then freezes
+            // `pushed_vregs` (it sets `dead_code`): a `throw` pops its tag's
+            // payload, `throw_ref` the exception, the tail calls their
+            // callee's arguments — after the table index (`return_call_
+            // indirect`) or funcref (`return_call_ref`) on top; `return`
+            // and `unreachable` read in place and pop nothing. Mirror the
+            // pops, close every range above the innermost open frame's
+            // entry depth (control never falls through, so this is their
+            // last read), and leave the rest of the stack for that frame's
+            // `.end` to close, exactly as the emit's frozen stack reaches
+            // its `emitEndIntra`. Pops are tolerant like the `call` arm's.
+            var n_pop: usize = 0;
+            if (instr.op == .throw) {
+                n_pop = if (instr.payload < tag_param_counts.len) tag_param_counts[instr.payload] else 0;
+            } else if (instr.op == .throw_ref) {
+                n_pop = 1;
+            } else if (instr.op != .@"return" and instr.op != .@"unreachable") {
+                if (instr.op != .return_call and sim_len > 0) {
+                    sim_len -= 1;
+                    ranges.items[sim_stack[sim_len]].last_use_pc = pc;
+                }
+                n_pop = (try calleeSig(instr, func_sigs, module_types, func.func_idx)).params.len;
+            }
+            while (n_pop > 0 and sim_len > 0) : (n_pop -= 1) {
+                sim_len -= 1;
+                ranges.items[sim_stack[sim_len]].last_use_pc = pc;
+            }
             const innermost_entry_term: u32 = if (block_stack_len == 0)
                 0
             else
                 block_stack[block_stack_len - 1].entry_depth;
-            while (sim_len > @as(usize, innermost_entry_term)) {
-                sim_len -= 1;
-                const vreg = sim_stack[sim_len];
-                ranges.items[vreg].last_use_pc = pc;
+            var k: usize = sim_len;
+            while (k > @as(usize, innermost_entry_term)) {
+                k -= 1;
+                ranges.items[sim_stack[k]].last_use_pc = pc;
             }
             continue;
         }
@@ -671,16 +748,19 @@ pub fn compute(
             // across the enclosing block when the target was an outer
             // block, killing that lhs early -> regalloc aliased its reg
             // with the `$exit` fall-through const (got 25, expected 50).
-            // The emit mirrors this: its forward-`br` leaves `pushed_vregs`
-            // intact; only the per-block `.end` truncates.
+            // The emit's forward `br` leaves `pushed_vregs` intact; only the
+            // per-block `.end` truncates. So close the ranges here and leave
+            // the vregs where they are — the innermost frame's `.end` keeps
+            // the top `result_arity` of them as that frame's result, as the
+            // emit does, and the snapshot has to agree with it there.
             const innermost_entry: u32 = if (block_stack_len == 0)
                 0
             else
                 block_stack[block_stack_len - 1].entry_depth;
-            while (sim_len > @as(usize, innermost_entry)) {
-                sim_len -= 1;
-                const vreg = sim_stack[sim_len];
-                ranges.items[vreg].last_use_pc = pc;
+            var k: usize = sim_len;
+            while (k > @as(usize, innermost_entry)) {
+                k -= 1;
+                ranges.items[sim_stack[k]].last_use_pc = pc;
             }
             continue;
         }
@@ -771,21 +851,7 @@ pub fn compute(
         // pops a funcref off the top before the params (like
         // call_indirect pops the table index). NON-terminator.
         if (instr.op == .call or instr.op == .call_indirect or instr.op == .call_ref) {
-            const callee_sig: zir.FuncType = blk: {
-                if (instr.op == .call) {
-                    if (instr.payload >= func_sigs.len) {
-                        std.debug.print("liveness: UnsupportedOp[call-payload-OOB] payload={d} func_sigs.len={d} func_idx={d}\n", .{ instr.payload, func_sigs.len, func.func_idx });
-                        return Error.UnsupportedOp;
-                    }
-                    break :blk func_sigs[instr.payload];
-                } else {
-                    if (instr.payload >= module_types.len) {
-                        std.debug.print("liveness: UnsupportedOp[call_indirect/call_ref-payload-OOB] payload={d} types.len={d} func_idx={d}\n", .{ instr.payload, module_types.len, func.func_idx });
-                        return Error.UnsupportedOp;
-                    }
-                    break :blk module_types[instr.payload];
-                }
-            };
+            const callee_sig = try calleeSig(instr, func_sigs, module_types, func.func_idx);
             // call_indirect's stack at entry is [args..., idx]; call_ref's
             // is [args..., funcref]. Pop that top operand first. Tolerant:
             // dead-code pops are no-ops (validator proved shape).
@@ -915,7 +981,7 @@ test "compute: straight-line i32.const + i32.const + i32.add + drop + end" {
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(usize, 3), live.ranges.len);
@@ -938,7 +1004,7 @@ test "compute: function-level end closes the still-live vreg" {
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(usize, 1), live.ranges.len);
@@ -956,7 +1022,7 @@ test "compute: D-093 (d-3) local.tee keeps the input vreg alive across the tee" 
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     // local.tee is operand-stack-transparent (matches emit's
@@ -973,7 +1039,10 @@ test "compute: D-093 (d-3) local.tee keeps the input vreg alive across the tee" 
 
 test "compute: br closes all live vregs at branch site (sub-7.5c-iv)" {
     // (i32.const 1) (br) (end) — `br` is now handled, not rejected.
-    // The const's vreg should have last_use_pc == br's pc.
+    // With no frame open the `br` is the function-level return: it
+    // reads the const's vreg in place and the emit keeps it on
+    // `pushed_vregs`, so the function-level `end` reads it once more
+    // and the range closes there (pc 2), not at the `br`.
     var f = try buildFunc(testing.allocator, &.{
         .{ .op = .@"i32.const", .payload = 1 },
         .{ .op = .br },
@@ -981,10 +1050,10 @@ test "compute: br closes all live vregs at branch site (sub-7.5c-iv)" {
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
     try testing.expectEqual(@as(usize, 1), live.ranges.len);
-    try testing.expectEqual(@as(u32, 1), live.ranges[0].last_use_pc); // br at pc=1
+    try testing.expectEqual(@as(u32, 2), live.ranges[0].last_use_pc);
 }
 
 test "compute: pop on empty stack is tolerant (validator-cleared dead-code path)" {
@@ -998,7 +1067,7 @@ test "compute: pop on empty stack is tolerant (validator-cleared dead-code path)
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
     try testing.expectEqual(@as(usize, 0), live.ranges.len);
 }
@@ -1022,7 +1091,7 @@ test "compute: dead code after `br 0` does not underflow" {
 
     // Should compute successfully — no underflow on the dead
     // i32.const after the br.
-    const live = try compute(testing.allocator, &f, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
     // Two i32.const pushes → 2 vreg ranges.
     try testing.expectEqual(@as(usize, 2), live.ranges.len);
@@ -1040,7 +1109,7 @@ test "compute: select consumes 3 vregs and produces 1" {
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(usize, 4), live.ranges.len);
@@ -1060,9 +1129,137 @@ test "compute: install onto ZirFunc.liveness slot round-trips" {
     });
     defer f.deinit(testing.allocator);
 
-    f.liveness = try compute(testing.allocator, &f, &.{}, &.{});
+    f.liveness = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
     defer if (f.liveness) |li| deinit(testing.allocator, li);
 
     try testing.expect(f.liveness != null);
     try testing.expectEqual(@as(usize, 1), f.liveness.?.ranges.len);
+}
+
+test "compute: a frame whose body ended in a terminator closes to its result shape" {
+    // loop (result i32) ; local.get 0 ; return ; end ; i32.const 1 ; i32.add ; end
+    // `return` reads vreg 0 in place and the emit freezes its stack, so
+    // the loop's `.end` hands vreg 0 on as the loop's result and the
+    // `i32.add` pops it. Its range must reach the add (pre-fix the
+    // terminator drained it and the range stopped at the `return`).
+    var f = try buildFunc(testing.allocator, &.{
+        .{ .op = .loop, .extra = 1 },
+        .{ .op = .@"local.get", .payload = 0 },
+        .{ .op = .@"return" },
+        .{ .op = .end },
+        .{ .op = .@"i32.const", .payload = 1 },
+        .{ .op = .@"i32.add" },
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(usize, 3), live.ranges.len);
+    try testing.expectEqual(@as(u32, 5), live.ranges[0].last_use_pc);
+}
+
+test "compute: the snapshot carries a frame's results past a br-only body" {
+    // `(block (result i32) (loop (result i32) i32.const 5 br 1))` lowers,
+    // with the constant hoisted into a local, to
+    //   block ; i32.const ; local.set 0 ; loop ; local.get 0 ; br 1 ; end ; end ; end
+    // Entering the block's `.end` (pc 7) the emit's stack is `{ 1 }`: the
+    // loop closed to its one result. The snapshot must read the same.
+    dbg.initFromEnv("liveverify");
+    defer dbg.resetForTest();
+    var f = try buildFunc(testing.allocator, &.{
+        .{ .op = .block, .extra = 1 },
+        .{ .op = .@"i32.const", .payload = 5 },
+        .{ .op = .@"local.set", .payload = 0 },
+        .{ .op = .loop, .extra = 1 },
+        .{ .op = .@"local.get", .payload = 0 },
+        .{ .op = .br, .payload = 1 },
+        .{ .op = .end },
+        .{ .op = .end },
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(u32, 1), live.stack_depth[7]);
+    try testing.expectEqual(snapshotDigest(&.{1}), live.stack_digest[7]);
+    try testing.expectEqual(@as(u32, 1), live.stack_depth[8]);
+    try testing.expectEqual(snapshotDigest(&.{1}), live.stack_digest[8]);
+}
+
+test "compute: a frame closed before any vreg exists leaves the snapshot short" {
+    // block (result i32) ; unreachable ; end ; end — nothing mints a vreg,
+    // so the emit's placeholder vreg 0 names nothing. Liveness must not
+    // push it (the function-level `end` would then index an empty
+    // `ranges`); the snapshot stays one short of the emit's `{ 0 }`.
+    dbg.initFromEnv("liveverify");
+    defer dbg.resetForTest();
+    var f = try buildFunc(testing.allocator, &.{
+        .{ .op = .block, .extra = 1 },
+        .{ .op = .@"unreachable" },
+        .{ .op = .end },
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(usize, 0), live.ranges.len);
+    try testing.expectEqual(@as(u32, 0), live.stack_depth[3]);
+}
+
+test "compute: a tail call pops its arguments before the stack freezes" {
+    // block (result i32) ; i32.const ; i32.const ; return_call 0 ; end ; i32.eqz ; end
+    // with func 0 taking two i32s. The emit's `marshalCallArgs` pops both
+    // arguments before `dead_code`, so the block closes short and takes the
+    // placeholder: entering `i32.eqz` (pc 5) the stack is `{ 0 }`, not the
+    // second constant.
+    dbg.initFromEnv("liveverify");
+    defer dbg.resetForTest();
+    var f = try buildFunc(testing.allocator, &.{
+        .{ .op = .block, .extra = 1 },
+        .{ .op = .@"i32.const", .payload = 1 },
+        .{ .op = .@"i32.const", .payload = 2 },
+        .{ .op = .return_call, .payload = 0 },
+        .{ .op = .end },
+        .{ .op = .@"i32.eqz" },
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+    const sigs = [_]zir.FuncType{.{ .params = &.{ .i32, .i32 }, .results = &.{.i32} }};
+
+    const live = try compute(testing.allocator, &f, &sigs, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(u32, 3), live.ranges[1].last_use_pc);
+    try testing.expectEqual(@as(u32, 1), live.stack_depth[5]);
+    try testing.expectEqual(snapshotDigest(&.{0}), live.stack_digest[5]);
+}
+
+test "compute: a throw pops its tag's payload before the stack freezes" {
+    // Same shape with `throw 0` and a one-i32 tag: the emit pops the
+    // payload only, so the first constant survives as the block's result.
+    dbg.initFromEnv("liveverify");
+    defer dbg.resetForTest();
+    var f = try buildFunc(testing.allocator, &.{
+        .{ .op = .block, .extra = 1 },
+        .{ .op = .@"i32.const", .payload = 1 },
+        .{ .op = .@"i32.const", .payload = 2 },
+        .{ .op = .throw, .payload = 0 },
+        .{ .op = .end },
+        .{ .op = .@"i32.eqz" },
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{1});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(u32, 3), live.ranges[1].last_use_pc);
+    try testing.expectEqual(@as(u32, 1), live.stack_depth[5]);
+    try testing.expectEqual(snapshotDigest(&.{0}), live.stack_digest[5]);
 }
