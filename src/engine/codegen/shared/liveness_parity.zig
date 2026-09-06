@@ -40,12 +40,13 @@ pub const compiled_in: bool =
 
 /// Hoist this out of the emit loop; `dbg.on` is a whitelist walk.
 ///
-/// Reach: the CLI, the C API, and every test runner (each calls
-/// `dbg.initFromEnv` at startup). One lane runs with it on:
-/// `test-spec-wasm-3.0-assert-liveverify` (ADR-0226), which reads
-/// `takeResiduals` below and gates on the count. This module does not read
-/// the env itself, which Zone 2 cannot do without pulling `std.c.getenv` out
-/// of its one Zone 3 call site.
+/// Reach: the CLI, the C API, and the test runners that call `dbg.initFromEnv`
+/// at startup — `scripts/check_runner_dbg_init.sh` holds that line, and the
+/// files it exempts say why in their first lines. One lane runs with the
+/// channel on: `test-spec-wasm-3.0-assert-liveverify` (ADR-0226); its runner
+/// reads `takeResiduals` below and gates on the count. This module does not
+/// read the env itself, which Zone 2 cannot do without pulling `std.c.getenv`
+/// out of its one Zone 3 call site.
 pub fn on() bool {
     if (!compiled_in) return false;
     return dbg.on("liveverify");
