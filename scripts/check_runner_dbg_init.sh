@@ -37,7 +37,10 @@ while IFS= read -r f; do
         exempt=$((exempt + 1))
         continue
     fi
-    if ! grep -q 'dbg\.initFromEnv(' "$f"; then
+    # Anchored to the start of a statement line: a call inside a `//` comment
+    # or a string literal is text, not a call, and must not satisfy the gate.
+    # Zig has no block comments, so the line anchor is exact.
+    if ! grep -qE '^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*\.)*dbg\.initFromEnv\(' "$f"; then
         echo "DARK-RUNNER: $f — owns pub fn main(init: std.process.Init) but never calls dbg.initFromEnv" >&2
         findings=$((findings + 1))
     fi
