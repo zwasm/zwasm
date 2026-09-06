@@ -1,3 +1,4 @@
+// DBG-INIT-EXEMPT: addTest target in build.zig — only the in-file test blocks run; this main is never executed.
 //! EH frequency runner skeleton (10.T-3; benchmark scaffolding
 //! pending Phase 8b).
 //!
