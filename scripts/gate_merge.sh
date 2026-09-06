@@ -17,6 +17,7 @@
 #   - `check_test_discovery --gate`           (ci_gate.sh core, every leg;
 #                                              host-dependent, so one local
 #                                              run covers one arch)
+#   - `check_runner_dbg_init --gate`          (ci_gate.sh core, every leg)
 #   - `zig build test -Doptimize=ReleaseSafe` (ci_gate.sh, Linux leg)
 #   - `zig build run-rust-host`               (ci_gate.sh, Linux leg)
 #   - `zig build test-wasi-p1-official`       (a leg step outside ci_gate.sh;
