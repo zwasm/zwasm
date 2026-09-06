@@ -99,6 +99,15 @@ fi
 echo "[ci_gate] test-discovery guard (check_test_discovery --gate)"
 bash scripts/check_test_discovery.sh --gate
 
+# Runner dbg-init guard (issue #329; the #268 class). A test/ runner that owns
+# its own `main(init: std.process.Init)` reaches `dbg.initFromEnv` only if it
+# calls it, and one that does not runs every ZWASM_DEBUG channel dark with no
+# lane going red. A grep over test/, under 0.1 s, so core rather than
+# extended. Output kept for the same reason as check_spec_manifest_shape
+# below: the finding is the file name.
+echo "[ci_gate] runner dbg-init guard (check_runner_dbg_init --gate)"
+bash scripts/check_runner_dbg_init.sh --gate
+
 # Spec-manifest shape guard (ADR-0210). The spec runners print an
 # enumeration denominator whose whole value is that a third party can
 # re-derive it with `wc -l`. That only holds while the corpora stay one

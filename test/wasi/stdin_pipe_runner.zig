@@ -1,3 +1,4 @@
+// DBG-INIT-EXEMPT: no zwasm import — the engine runs in the spawned CLI, which reads ZWASM_DEBUG itself (cli/main.zig); std.process.spawn with no environ_map hands the child this process's environment, so a channel set on this lane reaches it.
 //! CLI stdin regression (issue #257): `zwasm run` must hand a core module
 //! the process stdin. Spawns the REAL CLI with bytes piped into fd 0 and
 //! checks the `stdin_echo.wasm` guest echoes them back (stdout = the bytes,
