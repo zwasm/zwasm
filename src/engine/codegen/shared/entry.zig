@@ -176,6 +176,18 @@ pub const jit_cohort_clobbers: if (builtin.target.cpu.arch == .aarch64 or builti
         .r15 = true,
         .rdi = true,
         .rsi = true,
+        // EXPERIMENT (#286): Win64 makes XMM6-XMM15 non-volatile and the JIT
+        // allocates xmm8-xmm13 with xmm14/xmm15 staging spills, saving none.
+        .xmm6 = true,
+        .xmm7 = true,
+        .xmm8 = true,
+        .xmm9 = true,
+        .xmm10 = true,
+        .xmm11 = true,
+        .xmm12 = true,
+        .xmm13 = true,
+        .xmm14 = true,
+        .xmm15 = true,
         .memory = true,
     } else if (builtin.target.cpu.arch == .x86_64) .{
         .rbx = true,
