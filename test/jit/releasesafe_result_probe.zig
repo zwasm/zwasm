@@ -93,6 +93,93 @@ fn probeOnce(alloc: std.mem.Allocator) !void {
     }
 }
 
+// `(module (func (export "g") (result f64) (local f64 x8) ...8 live f64s...
+//    summed pairwise))` — eight simultaneously-live f64 locals, one more than
+// the JIT's FP pool (`abi.allocatable_xmms` = xmm8..xmm13, six wide), so the
+// body is forced through the whole pool rather than a corner of it.
+const wasm_g_f64 = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+    0x00, 0x01, 0x7c, 0x03, 0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, 0x67,
+    0x00, 0x00, 0x0a, 0x75, 0x01, 0x73, 0x01, 0x08, 0x7c, 0x44, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xf8, 0x3f, 0x21, 0x00, 0x44, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x02, 0x40, 0x21, 0x01, 0x44, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x09, 0x40, 0x21, 0x02, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x40, 0x10, 0x40, 0x21, 0x03, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20,
+    0x14, 0x40, 0x21, 0x04, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x18,
+    0x40, 0x21, 0x05, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x1c, 0x40,
+    0x21, 0x06, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x20, 0x40, 0x21,
+    0x07, 0x20, 0x00, 0x20, 0x01, 0xa0, 0x20, 0x02, 0x20, 0x03, 0xa0, 0xa0,
+    0x20, 0x04, 0x20, 0x05, 0xa0, 0x20, 0x06, 0x20, 0x07, 0xa0, 0xa0, 0xa0,
+    0x0b,
+};
+
+/// #286 — Win64 makes XMM6-XMM15 non-volatile, the JIT allocates vregs from
+/// xmm8-xmm13 with xmm14/xmm15 as its spill stage, and `prologue.zig` emits no
+/// XMM save of any kind. The GPR arm above cannot see it: it holds slice bases,
+/// which live in general-purpose registers.
+///
+/// The precondition is the same one that makes a register non-volatile useful
+/// in the first place — a value live ACROSS a call goes there. So the probe
+/// holds twelve independent f64s across `runF64Export`, more than Win64's ten
+/// non-volatile XMMs, and reads each one back. Separate scalars rather than an
+/// array: an array is a memory object, and a value the host spilled to its own
+/// stack is one the guest cannot reach.
+///
+/// #286 says of itself: "A host that keeps a float or vector live across a JIT
+/// call on Windows, then reads it back. Nothing in the corpora does that
+/// today." This is that.
+/// A runtime seed the optimiser cannot see through, so the twelve values below
+/// are neither constants it can rematerialise after the call nor loads it can
+/// sink past it. Written once per iteration by `main`.
+var fp_seed: f64 = 0;
+
+fn probeFpOnce() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    const s = fp_seed;
+    // Twelve independent scalars, more than Win64's ten non-volatile XMMs.
+    // Separate locals rather than an array: an array is a memory object, and a
+    // value the host spilled to its own stack is one the guest cannot reach.
+    var a: f64 = s + 1.0625;
+    var b: f64 = s + 2.125;
+    var c: f64 = s + 3.1875;
+    var d: f64 = s + 4.25;
+    var e: f64 = s + 5.3125;
+    var f: f64 = s + 6.375;
+    var g: f64 = s + 7.4375;
+    var h: f64 = s + 8.5;
+    var i: f64 = s + 9.5625;
+    var j: f64 = s + 10.625;
+    var k: f64 = s + 11.6875;
+    var l: f64 = s + 12.75;
+    inline for (.{ &a, &b, &c, &d, &e, &f, &g, &h, &i, &j, &k, &l }) |ptr| {
+        ptr.* += 0.0; // a mutation the value survives, so each stays a `var`
+        std.mem.doNotOptimizeAway(ptr);
+    }
+
+    const result = try runner.runF64Export(alloc, &wasm_g_f64, "g");
+
+    // Recomputed from the seed AFTER the call: the freshly computed side is
+    // correct by construction, so a difference is the held register.
+    const want = [_]f64{ s + 1.0625, s + 2.125, s + 3.1875, s + 4.25, s + 5.3125, s + 6.375, s + 7.4375, s + 8.5, s + 9.5625, s + 10.625, s + 11.6875, s + 12.75 };
+    const got = [_]f64{ a, b, c, d, e, f, g, h, i, j, k, l };
+    for (got, want, 0..) |gv, wv, idx| {
+        if (gv != wv) {
+            std.debug.print("[probe] fp slot[{d}] corrupted: {d} != {d}\n", .{ idx, gv, wv });
+            return error.FpSentinelCorrupted;
+        }
+    }
+
+    // 1.5+2.25+3.125+4.0625+5.03125+6.015625+7.0078125+8.00390625
+    const expect: f64 = 36.99609375;
+    if (result != expect) {
+        std.debug.print("[probe] FAIL: runF64Export returned {d}, expected {d}\n", .{ result, expect });
+        return error.WrongResult;
+    }
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -106,4 +193,11 @@ pub fn main() !void {
         try @call(.never_inline, probeOnce, .{alloc});
     }
     std.debug.print("[probe] OK: runI32Export == 42, sentinels intact x64 (D-245 result path)\n", .{});
+
+    var m: u32 = 0;
+    while (m < 64) : (m += 1) {
+        fp_seed = @as(f64, @floatFromInt(m)) * 0.5;
+        try @call(.never_inline, probeFpOnce, .{});
+    }
+    std.debug.print("[probe] OK: runF64Export == 36.99609375, fp sentinels intact x64 (#286 XMM cohort)\n", .{});
 }
