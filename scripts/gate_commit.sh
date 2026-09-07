@@ -13,6 +13,7 @@
 #  11. scripts/check_engine_default_claims.sh --gate        — gate; ALWAYS (docs are the thing it guards).
 #  12. scripts/check_wasi03_coverage_claims.sh --gate       — gate; ALWAYS (same reason).
 #  13. scripts/check_doc_fossils.sh --gate                  — gate; ALWAYS (same reason).
+#  14. scripts/check_ci_changes_detect.sh --gate            — gate; ALWAYS (it guards the doc-only short-circuit itself).
 #  14. zig build test (Mac native)                          — skipped on docs-only.
 #
 # Per the A6 gate consolidation study (§9.12-A / A6), docs/config-only
@@ -156,6 +157,8 @@ echo "[gate_commit] check_wasi03_coverage_claims --gate ..."
 bash scripts/check_wasi03_coverage_claims.sh --gate > /dev/null
 echo "[gate_commit] check_doc_fossils --gate ..."
 bash scripts/check_doc_fossils.sh --gate > /dev/null
+echo "[gate_commit] check_ci_changes_detect --gate ..."
+bash scripts/check_ci_changes_detect.sh --gate > /dev/null
 
 # --- gates: zone + file_size + skip_adrs (skipped on docs-only) ---------
 

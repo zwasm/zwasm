@@ -46,8 +46,6 @@ name: ci
 
 on:
   pull_request:
-  # A merge queue dispatches this; unfiltered, as wasmtime's does. Inert while
-  # no queue is enabled (ADR-0227 D3).
   merge_group:
   push:
     branches: [main]
@@ -107,13 +105,10 @@ jobs:
           if [ "$EVENT" = "pull_request" ]; then
             range="${PR_BASE}...${PR_HEAD}"
           elif [ "$EVENT" = "merge_group" ]; then
-            # Without this arm the `else` below runs the 3-OS gate for every
-            # queue entry, so a doc-only PR would pay in the queue what it is
-            # excused from on its PR. The group's head contains its base, so
-            # the two-dot range is the push analogue, and it covers the whole
-            # group when more than one entry is batched. Same fail-closed guard
-            # as the push arm: an unreachable base means the range cannot be
-            # computed, and an uncomputed range must not read as doc-only.
+            # The group's head contains its base, so the two-dot range is the
+            # push analogue, and it covers the whole group when entries are
+            # batched. Same fail-closed guard as the push arm: an uncomputable
+            # range must not read as doc-only.
             if [ -z "$MG_BASE" ] || ! git cat-file -e "${MG_BASE}^{commit}" 2>/dev/null; then
               echo "code=true" >> "$GITHUB_OUTPUT"; echo "merge_group base unreachable -> run gate"; exit 0
             fi
@@ -165,6 +160,11 @@ jobs:
       - name: Doc fossils (prerelease pins + dead script refs)
         shell: bash
         run: bash scripts/check_doc_fossils.sh --gate
+      # Here and not in `ci_gate.sh`: the check needs `yq`, which the macOS and
+      # Windows legs do not carry, so there it would SKIP and gate nothing.
+      - name: The changes job's own doc-only decision
+        shell: bash
+        run: bash scripts/check_ci_changes_detect.sh --gate
 
   gate:
     name: gate (${{ matrix.name }})

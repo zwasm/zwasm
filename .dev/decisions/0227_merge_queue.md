@@ -27,13 +27,15 @@ not cover.
 GitHub's documentation states the mechanism plainly: a merge queue "provides
 the same benefits as the **Require branches to be up to date before merging**
 branch protection, but does not require a pull request author to update their
-pull request branch." The guarantee moves rather than weakens — the queue
-tests the *result* of merging each entry.
+pull request branch and wait for status checks to finish before trying to
+merge." The guarantee moves rather than weakens — the queue tests the *result*
+of merging each entry, and the tail of that sentence is the cost this ADR is
+about.
 
 Three facts about this repository decide the rest.
 
-**The workflow does not run on `merge_group`.** `ci.yml`'s triggers are
-`pull_request`, `push` to `main` and `workflow_dispatch`. GitHub's
+**The workflow did not run on `merge_group`.** `ci.yml`'s triggers were
+`pull_request`, `push` to `main` and `workflow_dispatch`; D3 adds it. GitHub's
 documentation: "You **must** use the `merge_group` event to trigger your
 GitHub Actions workflow when a pull request is added to a merge queue", and
 "the `merge_group` event is separate from the `pull_request` and `push`
@@ -45,8 +47,10 @@ change without which enabling a queue makes the repository unmergeable.
 **The doc-only skip does not survive the queue on its own.** The `changes`
 job branches on `pull_request` and `push`, and its `else` arm sets
 `code=true`. A `merge_group` run would take that arm, so a doc-only PR would
-pay a full 3-OS gate in the queue that it is excused from on its own PR. Four
-of the last six merges were docs or scripts.
+pay a full 3-OS gate in the queue that it is excused from on its own PR. Two
+of the last six merges are doc-only under that filter — it excludes `.md`,
+`docs/`, `.dev/`, `.claude/` and `LICENSE`, and not `scripts/` or `test/`, so
+the hit rate is smaller than the shape of the merge log suggests.
 
 **The concurrency group already handles it.** The key is
 `ci-<workflow>-<ref>`, and a merge-group run's ref is the queue's own
@@ -67,7 +71,7 @@ Settings, each with the measurement or the documented meaning behind it:
 
 | parameter | value | why |
 |---|---|---|
-| `check_response_timeout_minutes` | 60 | Checks that have not reported by then are assumed failed. The macOS leg's measured max is 39.7 min, and an entry also waits for a runner; 60 leaves headroom without letting a genuinely stuck entry sit. |
+| `check_response_timeout_minutes` | 60 | Checks that have not reported by then are assumed failed. The macOS leg's measured max is 39.7 min, and an entry also waits for a runner; 60 leaves headroom without letting a genuinely stuck entry sit. Note the asymmetry: the `gate` job's own `timeout-minutes` is 120, so a run that lands between the two has its entry ejected while it is still working — recovery is re-queueing, not waiting. |
 | `grouping_strategy` | `ALLGREEN` | Each PR's own merge commit must pass. `HEADGREEN` checks only the group head, which is a weaker guarantee than `ci-required` gives today. |
 | `max_entries_to_build` | 1 | No speculation to begin with. Speculative builds multiply concurrent macOS jobs at ~33 min each; whether that trades queue latency for runner starvation is a measurement, and it should be taken after the queue is real. |
 | `min_entries_to_merge` | 1 | Merges arrive a median 50 min apart and an entry costs ~32 min, so waiting to group costs more than it saves. |
@@ -79,10 +83,18 @@ Settings, each with the measurement or the documented meaning behind it:
 
 This is the parameter #299's follow-up listed and did not price, and it
 decides a question that reads as separate. `squash_merge_commit_message` is
-`COMMIT_MESSAGES`, and the last fifteen commits on `main` carry curated
+`COMMIT_MESSAGES`, and fourteen of the last fifteen commits on `main` carry
 6–23 line bodies that are neither concatenated branch commits nor PR bodies:
-they are written at merge time through `gh pr merge --body-file`. A queue
-merges automatically, so that override is gone — but only under `SQUASH`.
+they are written at merge time through `gh pr merge --body-file`. The
+fifteenth, `67772ed72`, is a 45-line PR body carrying `## Sign-off` and
+`## Why this does not red main` — the artefact the next bullet rejects
+`SQUASH` + `PR_BODY` to avoid, already in `main` under the current setup. The
+discipline is a habit, not a mechanism, which is worth knowing before choosing
+what replaces it.
+
+A queue merges automatically, so the `--body-file` override is gone under
+every method. What takes its place differs: under `SQUASH` it is
+`squash_merge_commit_message`, today `COMMIT_MESSAGES`.
 
 - `SQUASH` + `PR_BODY` puts the PR body in `main`. PR bodies here are decision
   documents, with tables and options; that is not what the history should
@@ -110,6 +122,14 @@ Two, both inert until a queue exists:
   applies to a queue entry as it does to a PR. Fail-closed like the push arm:
   an absent or unreachable base runs the gate rather than reading as
   doc-only.
+
+And `scripts/check_ci_changes_detect.sh`, in the `doc-truth` job and the
+pre-commit gate: the `merge_group` arm does not run until a queue exists, so
+CI cannot be what proves it, and under a queue its answer is acted on with
+nobody looking. The check reads the step out of `ci.yml` rather than copying
+it and runs eleven event × path-class cases against a throwaway repository.
+It also pins #297's `docs/examples/` case, whose guard until now was a
+sentence in a comment asking the next person not to forget.
 
 `ZWASM_CI_EXTENDED` is untouched. It keys on `github.event_name == 'push'`,
 and a queue still produces a push to `main` on merge, so the extended checks
@@ -146,7 +166,25 @@ rules with `strict=false`, and `deletion` / `non_fast_forward` /
 `pull_request` / `name` / `target` / `enforcement` / `conditions` /
 `bypass_actors` diffed clean against the original. The `PUT` was not run.
 
-To undo, `PUT` the saved `/tmp/ruleset.json` back.
+**`strict` and `merge_queue` come off together, as they went on.** The
+intermediate — `strict: false` with no queue — is the one state in this
+change's blast radius that is genuinely weaker than today: a branch based on a
+month-old `main` merges on a `ci-required` that never saw the merge result.
+Removing only the `merge_queue` rule reaches it. The reverse transform,
+written out so it does not depend on a `/tmp` file surviving the weeks in
+between:
+
+```sh
+gh api repos/zwasm/zwasm/rulesets/13308987 > /tmp/ruleset.json
+
+jq '(.rules[] | select(.type=="required_status_checks")
+       | .parameters.strict_required_status_checks_policy) = true
+    | .rules |= map(select(.type != "merge_queue"))
+    | {name, target, enforcement, conditions, bypass_actors, rules}' \
+  /tmp/ruleset.json > /tmp/ruleset-unqueued.json
+
+gh api --method PUT repos/zwasm/zwasm/rulesets/13308987 --input /tmp/ruleset-unqueued.json
+```
 
 ## Alternatives rejected
 
@@ -178,8 +216,8 @@ To undo, `PUT` the saved `/tmp/ruleset.json` back.
 ## References
 
 - #299 (the row, and the parameter measurements this ADR rests on), #298
-  (the content-keyed skip), #312 (cancelled `main` runs — why the concurrency
-  key is shaped as it is)
+  (the content-keyed skip), #312 direction 2 (done in #363) — why the `main`
+  concurrency key carries the SHA
 - ADR-0212 D1 (gate definitions need sign-off; apparatus does not),
   ADR-0076 D9 (CI is authoritative)
 - GitHub docs: "Managing a merge queue"; the `merge_queue` rule parameters in
