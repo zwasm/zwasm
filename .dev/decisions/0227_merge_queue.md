@@ -2,8 +2,8 @@
 
 - **Status**: Proposed (gate definition per ADR-0212 D1 — D1 and D2 flip to
   Accepted on the maintainer's word on the PR that carries them, the way
-  ADR-0225 did on #380. D3 is apparatus-internal and needs no sign-off; it
-  lands either way, inert until a queue exists.)
+  ADR-0225 did on #380. D4 rides with D2. D3 is apparatus-internal and needs
+  no sign-off; it lands either way, inert until a queue exists.)
 - **Date**: 2026-09-07
 - **Author**: chaploud
 - **Tags**: ci, gate, merge-queue, process
@@ -134,6 +134,100 @@ sentence in a comment asking the next person not to forget.
 `ZWASM_CI_EXTENDED` is untouched. It keys on `github.event_name == 'push'`,
 and a queue still produces a push to `main` on merge, so the extended checks
 keep running exactly where they run now.
+
+### D4 — `--force-with-lease` is allowed on an unmerged topic branch
+
+**Lands with D2 or not at all.** Under any other `merge_method` the branch's
+commits are not what `main` reads, and this carve-out has no motivation.
+
+ROADMAP §14 reads, today:
+
+```
+❌ git push --force / --force-with-lease to any branch
+```
+
+It becomes:
+
+```
+❌ git push --force to any branch
+❌ git push --force-with-lease to `main`, or to a branch someone else is
+   working on
+```
+
+D2 moves where a commit message is written. Today the branch's commits are
+scaffolding — `gh pr merge --body-file` replaces them at merge time, and
+fourteen of the last fifteen commits on `main` were written that way. Under
+`REBASE` the branch's commits are the record, and a queue merges without a
+dialog, so there is no later point at which they can be corrected.
+
+That leaves three ways to handle a branch whose review left a chain of
+fixups, and only one of them is a real option:
+
+- **Accept the chain.** `main` stops reading the way it does today, which is
+  what D2 was chosen to preserve. It defeats D2.
+- **Stop iterating on a PR once it is open.** Reviews here routinely change
+  the shape of a change — #380, #398 and #406 all did. Not an option.
+- **Tidy the branch before it merges**, which needs a non-fast-forward push.
+
+## Scope
+
+| | |
+|---|---|
+| allowed | `--force-with-lease` to an unmerged `develop/*` branch you pushed |
+| still forbidden | `--force` in any form, anywhere |
+| still forbidden | any non-fast-forward push to `main` — the ruleset's `non_fast_forward` rule enforces this independently |
+| still forbidden | a branch another worktree or session is working on |
+
+`--force-with-lease` and not `--force`: the lease fails the push when the
+remote moved since the last fetch, which is the case this repository actually
+produces — several worktrees under `.claude/worktrees/` share a clone, and a
+session pushing between a fetch and a force would otherwise be overwritten
+silently. `--force` removes exactly the check that catches that, so it stays
+on the list.
+
+## The mechanism, since §14 keeps the usual one out
+
+`git rebase -i` stays forbidden, and the parenthetical says why — it is
+interactive, and the environment this project runs in has no editor to open.
+That is a tooling constraint, not a position on tidying a branch, so the
+amendment leaves it alone and names the non-interactive equivalent here.
+
+```sh
+git reset --soft "$(git merge-base HEAD origin/main)"
+git commit -F <message-file>
+git push --force-with-lease origin develop/<slug>
+```
+
+`--soft` moves the branch pointer to where the branch left `main` and touches
+neither the working tree nor the index, so every change the branch made is
+still staged and one `git commit` collects it. `❌ git reset --hard discarding
+committed work` stays on the list unchanged: it names `--hard`, and the reason
+it gives — discarding work — is the thing `--soft` does not do.
+
+Only the third line needs this decision. The first two are permitted today.
+
+## Measured, so the amendment does not leave a false statement behind
+
+Nothing in the harness blocks this today. `.claude/settings.json` carries four
+`permissions.deny` rules and none concerns `push` or `force`; the ban is
+ROADMAP §14 alone.
+
+Two other files state otherwise, and both are retired campaign machinery kept
+as historical reference (`.claude/CLAUDE.md` References): `continue/LOOP.md:270`
+("denied at the harness level too") and `continue/STOP_BUCKETS.md:138`
+("denied"). Neither is synced under §18.2 step 3 — they record what the loop
+did, and the loop is gone. No live document cites the amended line.
+
+## Alternatives rejected
+
+- **Cut a fresh branch and re-apply the work.** Reaches the same history
+  without a non-fast-forward push, and costs a new branch, a new PR, and the
+  review thread. It is the same operation billed at a higher price.
+- **Keep the ban and choose `SQUASH` instead.** A defensible pair, but it
+  gives up the 6–23 line bodies D2's own analysis calls the more useful half.
+  If D2 goes to `SQUASH`, D4 comes off with it.
+- **Relax the ban generally.** The lease is what makes this safe against the
+  multi-worktree layout this project uses; a general relaxation drops it.
 
 ## Applying D1
 
