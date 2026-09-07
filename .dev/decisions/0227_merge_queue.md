@@ -1,9 +1,9 @@
 # 0227 — `main` merges through a queue; `strict` comes off and the workflow gains `merge_group`
 
-- **Status**: Proposed (gate definition per ADR-0212 D1 — D1 and D2 flip to
-  Accepted on the maintainer's word on the PR that carries them, the way
-  ADR-0225 did on #380. D4 rides with D2. D3 is apparatus-internal and needs
-  no sign-off; it lands either way, inert until a queue exists.)
+- **Status**: Accepted (2026-09-07 — maintainer sign-off on PR #408, on the
+  #299 measurements in Context; D1, D2 and D4 as written. D3 is
+  apparatus-internal and needed none. The ruleset itself is a settings action
+  and is not part of this merge.)
 - **Date**: 2026-09-07
 - **Author**: chaploud
 - **Tags**: ci, gate, merge-queue, process
