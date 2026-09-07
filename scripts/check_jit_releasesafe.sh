@@ -11,8 +11,9 @@
 # SIMD, so this forces the JIT execute path). A non-zero exit = the
 # callee-saved-clobber SEGV regressed. Cheap to read, ~minutes to build.
 #
-# Where this runs: `ci_gate.sh` invokes it inside the ZWASM_CI_EXTENDED leg,
-# which fires on the push to `main` and NOT on a pull request. A regression in
+# Where this runs: `ci_gate.sh` invokes it for ZWASM_CI_EXTENDED (the Unix
+# legs) and for ZWASM_CI_JIT_RELEASESAFE (the Windows leg, #303). Both fire on
+# the push to `main` and NOT on a pull request. A regression in
 # this class therefore reaches `main` before any lane reports it — the same
 # shape of gap that let the original defect ship. The cost is the reason: this
 # is a full cold ReleaseSafe build, and the PR gate is already the slowest
@@ -40,11 +41,17 @@ fi
 # no live host slice was corrupted by the cohort clobber. Non-zero exit = the
 # RESULT-path trampoline regressed.
 echo "[check_jit_releasesafe] zig build jit-result-probe-releasesafe (RESULT path) ..."
-if zig build jit-result-probe-releasesafe >/dev/null 2>&1; then
-    echo "[check_jit_releasesafe] OK — runI32Export preserves the host cohort in ReleaseSafe (D-245 result path fixed)."
+# Grep the probe's own lines rather than trust the exit code: the exe carries
+# two arms and a zero exit does not say both ran. Dropping the FP arm would
+# otherwise leave this step printing a guarantee it stopped checking.
+probe_out=$(zig build jit-result-probe-releasesafe 2>&1) && probe_rc=0 || probe_rc=$?
+if [ "$probe_rc" -eq 0 ] &&
+   printf '%s\n' "$probe_out" | grep -q 'sentinels intact' &&
+   printf '%s\n' "$probe_out" | grep -q 'fp sentinels intact'; then
+    echo "[check_jit_releasesafe] OK — the GPR cohort survives on every host, and the XMM cohort where Win64 makes it non-volatile (D-245 result path; #286)."
 else
-    rc=$?
-    echo "[check_jit_releasesafe] FAIL (exit $rc) — runI32Export crashed/mismatched in ReleaseSafe; D-245 RESULT-path preservation regressed (see src/engine/codegen/shared/entry.zig jitTrampoline / invokeAndCheck)." >&2
+    echo "[check_jit_releasesafe] FAIL (exit $probe_rc) — the ReleaseSafe result-path probe did not report both arms; its own [probe] lines below say which (D-245 GPR cohort, or #286's Win64 XMM cohort)." >&2
+    printf '%s\n' "$probe_out" | grep '\[probe\]' >&2 || true
     exit 1
 fi
 

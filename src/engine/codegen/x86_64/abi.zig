@@ -225,10 +225,23 @@ pub const allocatable_xmms = [_]Xmm{
 pub const spill_stage_gprs = [_]Gpr{ .r10, .r11 };
 
 /// XMM-class counterpart of `spill_stage_gprs`. XMM14/XMM15 are
-/// caller-saved in both SysV (§3.2.3) and Win64 (XMM6..XMM15 are
-/// callee-saved on Win64, so XMM14/XMM15 require save/restore
-/// across calls).
+/// caller-saved under SysV (§3.2.3) and callee-saved under Win64, where
+/// XMM6-XMM15 all are; the JIT saves none of them, so both host→JIT seams
+/// carry the whole range — `entry.jit_cohort_clobbers` for the trampoline and
+/// `entry.x86_64_win64_call_clobbers` for the mixed-result thunks (#286).
 pub const fp_spill_stage_xmms = [_]Xmm{ .xmm14, .xmm15 };
+
+/// The Microsoft x64 ABI's non-volatile XMMs. Pure data, so a containment
+/// check against the pools compiles on any host — which is what lets the
+/// cohort coverage test in `entry.zig` run somewhere other than Windows.
+/// Every register the JIT may touch has to be inside this set for the
+/// host→JIT seams to be able to cover it: the regalloc pool, the spill stage,
+/// `xmm7` (the SIMD scratch this file reserves above) and `xmm6` (the
+/// conversion scratch in `op_convert.zig`).
+pub const win64_nonvolatile_xmms = [_]Xmm{
+    .xmm6,  .xmm7,  .xmm8,  .xmm9,  .xmm10,
+    .xmm11, .xmm12, .xmm13, .xmm14, .xmm15,
+};
 
 /// Translate a regalloc slot id (from `engine/codegen/shared/
 /// regalloc.compute`) into a concrete GPR via the allocatable

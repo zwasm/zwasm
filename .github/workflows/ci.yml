@@ -163,6 +163,11 @@ jobs:
           - name: x86_64-windows
             runs-on: windows-2022
             zig-dir: zig-x86_64-windows-0.16.0
+            # #303 — not `extended` (~20 cold ReleaseSafe builds), but the one
+            # check in that set whose value is host-specific: nothing else runs
+            # the Win64 entry thunks optimised, and Windows is where the JIT is
+            # the default engine.
+            jit_releasesafe: true
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -295,6 +300,7 @@ jobs:
         shell: bash
         env:
           ZWASM_CI_EXTENDED: ${{ (github.event_name == 'push' && matrix.extended) && '1' || '0' }}
+          ZWASM_CI_JIT_RELEASESAFE: ${{ (github.event_name == 'push' && matrix.jit_releasesafe) && '1' || '0' }}
         run: bash scripts/ci_gate.sh
 
       # Official wasi-testsuite wasm32-wasip1 corpus (D-582). BLOCKING, with
