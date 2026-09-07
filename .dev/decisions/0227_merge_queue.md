@@ -2,8 +2,8 @@
 
 - **Status**: Proposed (gate definition per ADR-0212 D1 — D1 and D2 flip to
   Accepted on the maintainer's word on the PR that carries them, the way
-  ADR-0225 did on #380. D3 is apparatus-internal and needs no sign-off; it
-  lands either way, inert until a queue exists.)
+  ADR-0225 did on #380. D4 rides with D2. D3 is apparatus-internal and needs
+  no sign-off; it lands either way, inert until a queue exists.)
 - **Date**: 2026-09-07
 - **Author**: chaploud
 - **Tags**: ci, gate, merge-queue, process
@@ -134,6 +134,58 @@ sentence in a comment asking the next person not to forget.
 `ZWASM_CI_EXTENDED` is untouched. It keys on `github.event_name == 'push'`,
 and a queue still produces a push to `main` on merge, so the extended checks
 keep running exactly where they run now.
+
+### D4 — a topic branch may be tidied before it merges
+
+Rides with D2. Under any other `merge_method` the branch's commits are not
+what `main` reads, and this has no motivation.
+
+`REBASE` makes them the record, and a queue merges without a dialog, so a
+branch whose review left a chain of fixups has no later point at which it can
+be corrected — and reviews here routinely reshape a change (#380, #398, #406).
+ROADMAP §14's `git push --force / --force-with-lease to any branch` becomes:
+
+```
+❌ git push --force anywhere
+❌ git push --force-with-lease to main, to a branch another worktree holds, or without a pinned <ref>:<sha>
+```
+
+**A lease is not enough on its own.** Both forms compare against
+`refs/remotes/origin/<branch>`, and the worktrees share one set of those refs.
+git's documentation calls the bare form "trivially defeated if some background
+process is updating refs in the background"; pinning only makes the same
+assumption explicit — that the ref's value is evidence the content was seen.
+If another worktree pushed and fetched first, the pin captures *its* commit,
+the rewrite omits it, and the push is accepted because the remote really is
+where the pin says. So the lease is the second half; the first is a
+precondition that refuses to rewrite unless the remote tip is already here.
+
+`git rebase -i` and `git reset --hard` stay on §14 unchanged — the first is
+interactive and this environment has no editor, the second names `--hard`, and
+discarding work is what `--soft` does not do. The non-interactive procedure:
+
+```sh
+git fetch origin "develop/<slug>"
+git merge-base --is-ancestor "origin/develop/<slug>" HEAD || exit 1
+expected=$(git rev-parse "origin/develop/<slug>")
+git reset --soft "$(git merge-base HEAD origin/main)"
+git commit -F <message-file>
+git push --force-with-lease="refs/heads/develop/<slug>:$expected" origin "develop/<slug>"
+```
+
+Only the last line needs this decision; the second is what makes it safe, and
+it fails closed.
+
+§18.2 step 3 syncs one live document: `.claude/CLAUDE.md` summarised the old
+§14 line as "`--force` always forbidden", which now reads as banning the
+carve-out too. `continue/LOOP.md` and `continue/STOP_BUCKETS.md` say the
+harness denies this and are retired campaign machinery; nothing enforced it in
+any case — `.claude/settings.json` has four `permissions.deny` rules and none
+concerns push.
+
+Rejected: cutting a fresh branch instead reaches the same history at the price
+of a new PR and review thread; keeping the ban and taking `SQUASH` is coherent
+but gives up the recorded reasoning D2 calls the more useful half.
 
 ## Applying D1
 
