@@ -2162,7 +2162,7 @@ that's fine, but the act of typing it is the act of re-deciding.
 ```
 ❌ Pushing directly to main (PR-only; ruleset-protected)
 ❌ git push --force anywhere
-❌ git push --force-with-lease to main, or to a branch another worktree holds
+❌ git push --force-with-lease to main, to a branch another worktree holds, or without a pinned <ref>:<sha>
 ❌ git reset --hard discarding committed work
 ❌ git commit --no-verify
 ❌ git rebase -i (interactive, unsupported in CI)

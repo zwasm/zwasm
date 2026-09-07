@@ -135,99 +135,47 @@ sentence in a comment asking the next person not to forget.
 and a queue still produces a push to `main` on merge, so the extended checks
 keep running exactly where they run now.
 
-### D4 — `--force-with-lease` is allowed on an unmerged topic branch
+### D4 — a topic branch may be tidied before it merges
 
-**Lands with D2 or not at all.** Under any other `merge_method` the branch's
-commits are not what `main` reads, and this carve-out has no motivation.
+Rides with D2. Under any other `merge_method` the branch's commits are not
+what `main` reads, and this has no motivation.
 
-ROADMAP §14 reads, today:
-
-```
-❌ git push --force / --force-with-lease to any branch
-```
-
-It becomes:
+`REBASE` makes them the record, and a queue merges without a dialog, so a
+branch whose review left a chain of fixups has no later point at which it can
+be corrected — and reviews here routinely reshape a change (#380, #398, #406).
+ROADMAP §14's `git push --force / --force-with-lease to any branch` becomes:
 
 ```
-❌ git push --force to any branch
-❌ git push --force-with-lease to `main`, or to a branch someone else is
-   working on
+❌ git push --force anywhere
+❌ git push --force-with-lease to main, to a branch another worktree holds, or without a pinned <ref>:<sha>
 ```
 
-D2 moves where a commit message is written. Today the branch's commits are
-scaffolding — `gh pr merge --body-file` replaces them at merge time, and
-fourteen of the last fifteen commits on `main` were written that way. Under
-`REBASE` the branch's commits are the record, and a queue merges without a
-dialog, so there is no later point at which they can be corrected.
+**Pinned, not bare.** `--force-with-lease` with no argument compares against
+`refs/remotes/origin/<branch>`, which the worktrees under `.claude/worktrees/`
+share; git's documentation calls that protection "trivially defeated if some
+background process is updating refs in the background", and sessions here
+fetch as a matter of course. Reading the SHA first removes the heuristic.
 
-That leaves three ways to handle a branch whose review left a chain of
-fixups, and only one of them is a real option:
-
-- **Accept the chain.** `main` stops reading the way it does today, which is
-  what D2 was chosen to preserve. It defeats D2.
-- **Stop iterating on a PR once it is open.** Reviews here routinely change
-  the shape of a change — #380, #398 and #406 all did. Not an option.
-- **Tidy the branch before it merges**, which needs a non-fast-forward push.
-
-## Scope
-
-| | |
-|---|---|
-| allowed | `--force-with-lease` to an unmerged `develop/*` branch you pushed |
-| still forbidden | `--force` in any form, anywhere |
-| still forbidden | any non-fast-forward push to `main` — the ruleset's `non_fast_forward` rule enforces this independently |
-| still forbidden | a branch another worktree or session is working on |
-
-`--force-with-lease` and not `--force`: the lease fails the push when the
-remote moved since the last fetch, which is the case this repository actually
-produces — several worktrees under `.claude/worktrees/` share a clone, and a
-session pushing between a fetch and a force would otherwise be overwritten
-silently. `--force` removes exactly the check that catches that, so it stays
-on the list.
-
-## The mechanism, since §14 keeps the usual one out
-
-`git rebase -i` stays forbidden, and the parenthetical says why — it is
-interactive, and the environment this project runs in has no editor to open.
-That is a tooling constraint, not a position on tidying a branch, so the
-amendment leaves it alone and names the non-interactive equivalent here.
+`git rebase -i` and `git reset --hard` stay on §14 unchanged — the first is
+interactive and this environment has no editor, the second names `--hard`, and
+discarding work is what `--soft` does not do. The non-interactive procedure:
 
 ```sh
+expected=$(git rev-parse "origin/develop/<slug>")   # before anything is rewritten
 git reset --soft "$(git merge-base HEAD origin/main)"
 git commit -F <message-file>
-git push --force-with-lease origin develop/<slug>
+git push --force-with-lease="refs/heads/develop/<slug>:$expected" origin develop/<slug>
 ```
 
-`--soft` moves the branch pointer to where the branch left `main` and touches
-neither the working tree nor the index, so every change the branch made is
-still staged and one `git commit` collects it. `❌ git reset --hard discarding
-committed work` stays on the list unchanged: it names `--hard`, and the reason
-it gives — discarding work — is the thing `--soft` does not do.
+Only the last line needs this decision.
 
-Only the third line needs this decision. The first two are permitted today.
-
-## Measured, so the amendment does not leave a false statement behind
-
-Nothing in the harness blocks this today. `.claude/settings.json` carries four
-`permissions.deny` rules and none concerns `push` or `force`; the ban is
-ROADMAP §14 alone.
-
-Two other files state otherwise, and both are retired campaign machinery kept
-as historical reference (`.claude/CLAUDE.md` References): `continue/LOOP.md:270`
-("denied at the harness level too") and `continue/STOP_BUCKETS.md:138`
-("denied"). Neither is synced under §18.2 step 3 — they record what the loop
-did, and the loop is gone. No live document cites the amended line.
-
-## Alternatives rejected
-
-- **Cut a fresh branch and re-apply the work.** Reaches the same history
-  without a non-fast-forward push, and costs a new branch, a new PR, and the
-  review thread. It is the same operation billed at a higher price.
-- **Keep the ban and choose `SQUASH` instead.** A defensible pair, but it
-  gives up the 6–23 line bodies D2's own analysis calls the more useful half.
-  If D2 goes to `SQUASH`, D4 comes off with it.
-- **Relax the ban generally.** The lease is what makes this safe against the
-  multi-worktree layout this project uses; a general relaxation drops it.
+Rejected: cutting a fresh branch instead reaches the same history at the price
+of a new PR and review thread; keeping the ban and taking `SQUASH` is coherent
+but gives up the recorded reasoning D2 calls the more useful half. Nothing in
+the harness enforced the old line — `.claude/settings.json` has four
+`permissions.deny` rules and none concerns push — so §18.2 step 3 has no live
+target; `continue/LOOP.md` and `continue/STOP_BUCKETS.md` say otherwise and are
+retired campaign machinery.
 
 ## Applying D1
 
