@@ -25,7 +25,8 @@ zwasm v2 is a ground-up redesign of zwasm (v1 git history at commit 517cc5a).
   (3-host SSH fan-out) is an **optional** pre-PR pre-flight that runs
   `test-all` per host, not the CI leg — its header names what it leaves out
   (ADR-0076 D9) — CI's `ci-required` is authoritative. `--force`
-  always forbidden. Root is kept lean (ADR-mirroring the CW layout): this file
+  always forbidden; `--force-with-lease` only in the pinned form ROADMAP §14
+  permits. Root is kept lean (ADR-mirroring the CW layout): this file
   is `.claude/CLAUDE.md`; community-health files (CONTRIBUTING / CODE_OF_CONDUCT /
   SECURITY) are in `.github/`; `THIRD_PARTY.md` is in `legal/`; `examples/` is
   under `docs/examples/`. Only README / LICENSE / CHANGELOG / build+flake files
