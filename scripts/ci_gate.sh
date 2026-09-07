@@ -15,6 +15,8 @@
 #     ABI-compatible with zig's native libzwasm.a). Listed separately because
 #     "every OS" above is load-bearing: anything added here is verified on
 #     ONE leg.
+#   ReleaseSafe JIT smoke: ZWASM_CI_EXTENDED (Unix legs) or
+#     ZWASM_CI_JIT_RELEASESAFE (the Windows leg; #303).
 #   Extended (ZWASM_CI_EXTENDED=1; Unix legs): lint + build-option DCE +
 #     ReleaseSafe JIT smoke (D-245) + AOT cross-compile portability +
 #     external system-linker consumer (test_extlink.sh) + zone_check +
@@ -130,15 +132,19 @@ bash scripts/check_spec_manifest_shape.sh --gate
 echo "[ci_gate] ReleaseSafe-runner floor (check_releasesafe_runners)"
 bash scripts/check_releasesafe_runners.sh
 
+# Also reachable through ZWASM_CI_JIT_RELEASESAFE, which `ci.yml` sets for the
+# Windows leg alone — see the matrix row there for why (#303).
+if [ "${ZWASM_CI_EXTENDED:-0}" = "1" ] || [ "${ZWASM_CI_JIT_RELEASESAFE:-0}" = "1" ]; then
+    echo "[ci_gate] --engine=jit ReleaseSafe smoke (D-245 GPR + #286 Win64 XMM)"
+    bash scripts/check_jit_releasesafe.sh
+fi
+
 if [ "${ZWASM_CI_EXTENDED:-0}" = "1" ]; then
     echo "[ci_gate] extended: zig build lint"
     zig build lint -- --max-warnings 0
 
     echo "[ci_gate] extended: build-option DCE / level-separation (9 combos)"
     bash scripts/check_build_dce.sh --gate
-
-    echo "[ci_gate] extended: --engine=jit ReleaseSafe smoke (D-245)"
-    bash scripts/check_jit_releasesafe.sh
 
     echo "[ci_gate] extended: AOT cross-compile portability (§12.3)"
     bash scripts/check_aot_cross_compile.sh

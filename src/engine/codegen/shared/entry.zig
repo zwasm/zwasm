@@ -116,14 +116,17 @@ const x86_64_sysv_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and buil
 /// via hidden RCX pointer when > 8 bytes). The thunk performs the
 /// CALL in inline-asm, passes rt in RCX (Win64 first int arg), and
 /// captures the result registers directly. Lists every Win64
-/// caller-saved (volatile) GPR + XMM0–XMM5. XMM6–XMM15 are non-volatile
-/// under Win64 and the JIT does NOT preserve them: its pool takes xmm8-xmm13
-/// with xmm14/xmm15 as the spill stage (`x86_64/abi.zig`), and
-/// `x86_64/prologue.zig` emits no XMM save at all. Listing them here is what
-/// would make the compiler preserve a host value held in one across the asm;
-/// they are omitted, so that exposure is open. Tracked in #286.
-const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) std.builtin.assembly.Clobbers else void =
-    if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) .{
+/// caller-saved (volatile) GPR + the whole Win64 non-volatile XMM range. The
+/// JIT preserves none of the latter and `x86_64/prologue.zig` emits no XMM
+/// save at all, so listing them is what makes the compiler preserve a host
+/// value held in one across the asm — the same job `jit_cohort_clobbers` does
+/// for the trampoline seam (#286). This is the second Win64 host→JIT seam:
+/// these three thunks CALL from inline asm rather than through
+/// `jitTrampoline`, so they need their own copy.
+/// Built on any x86_64 host so the coverage test can assert it there; the asm
+/// sites that consume it are inside Windows-only branches.
+const x86_64_win64_call_clobbers_all: if (builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
+    if (builtin.target.cpu.arch == .x86_64) .{
         .rax = true,
         .rcx = true,
         .rdx = true,
@@ -137,9 +140,26 @@ const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and bui
         .xmm3 = true,
         .xmm4 = true,
         .xmm5 = true,
+        // The non-volatile range, for the same reason `jit_cohort_clobbers`
+        // carries it: nothing else preserves it across this CALL (#286).
+        .xmm6 = true,
+        .xmm7 = true,
+        .xmm8 = true,
+        .xmm9 = true,
+        .xmm10 = true,
+        .xmm11 = true,
+        .xmm12 = true,
+        .xmm13 = true,
+        .xmm14 = true,
+        .xmm15 = true,
         .cc = true,
         .memory = true,
-    } else {
+    } else {};
+
+const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) std.builtin.assembly.Clobbers else void =
+    if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows)
+        x86_64_win64_call_clobbers_all
+    else {
         // non-Win64 hosts: const value collapses to void.
     };
 
@@ -151,10 +171,54 @@ const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and bui
 /// so ITS prologue/epilogue saves & restores the cohort around the call,
 /// masking the JIT's clobber. On Win64 the regalloc pool also holds RDI and
 /// RSI, which that ABI makes callee-saved, so they join the list there
-/// (SysV treats them as caller-saved and needs nothing). One exposure this
-/// list does not cover: Win64 XMM6-15 are non-volatile and the JIT saves
-/// none of them (#286). The SysV/AAPCS64 FP cohort is caller-saved, so it
-/// needs nothing here.
+/// (SysV treats them as caller-saved and needs nothing). Win64 also makes
+/// XMM6-XMM15 non-volatile and the JIT saves none of them, so the whole range
+/// joins the list there too (#286). Neither of the other two needs an FP
+/// entry, for different reasons: SysV makes the whole XMM bank caller-saved,
+/// and AAPCS64 does make V8-V15 callee-saved but the JIT allocates from
+/// V16-V28 and scratches in V29-V31, all of which are caller-saved
+/// (`arm64/abi.zig`).
+/// The x86_64 arms as named values rather than inline literals: the field set
+/// of `Clobbers` is fixed by the architecture, not by the OS, so both can be
+/// built — and asserted — from any x86_64 host. Without that, the Win64 arm is
+/// only checkable on Windows, which is how the FP half of this cohort went
+/// unnoticed while its GPR half was under test (#287 vs #286).
+const x86_64_win64_jit_cohort: if (builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
+    if (builtin.target.cpu.arch == .x86_64) .{
+        .rbx = true,
+        .r12 = true,
+        .r13 = true,
+        .r14 = true,
+        .r15 = true,
+        .rdi = true,
+        .rsi = true,
+        // The whole Win64 non-volatile XMM range, not just the regalloc pool:
+        // `xmm7` is the emit's SIMD scratch and `xmm6` its conversion scratch,
+        // neither of which appears in any pool table, and a register missed
+        // here corrupts a host value silently.
+        .xmm6 = true,
+        .xmm7 = true,
+        .xmm8 = true,
+        .xmm9 = true,
+        .xmm10 = true,
+        .xmm11 = true,
+        .xmm12 = true,
+        .xmm13 = true,
+        .xmm14 = true,
+        .xmm15 = true,
+        .memory = true,
+    } else {};
+
+const x86_64_sysv_jit_cohort: if (builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
+    if (builtin.target.cpu.arch == .x86_64) .{
+        .rbx = true,
+        .r12 = true,
+        .r13 = true,
+        .r14 = true,
+        .r15 = true,
+        .memory = true,
+    } else {};
+
 pub const jit_cohort_clobbers: if (builtin.target.cpu.arch == .aarch64 or builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .aarch64) .{
         .x19 = true,
@@ -168,23 +232,11 @@ pub const jit_cohort_clobbers: if (builtin.target.cpu.arch == .aarch64 or builti
         .x27 = true,
         .x28 = true,
         .memory = true,
-    } else if (builtin.target.cpu.arch == .x86_64 and builtin.os.tag == .windows) .{
-        .rbx = true,
-        .r12 = true,
-        .r13 = true,
-        .r14 = true,
-        .r15 = true,
-        .rdi = true,
-        .rsi = true,
-        .memory = true,
-    } else if (builtin.target.cpu.arch == .x86_64) .{
-        .rbx = true,
-        .r12 = true,
-        .r13 = true,
-        .r14 = true,
-        .r15 = true,
-        .memory = true,
-    } else {
+    } else if (builtin.target.cpu.arch == .x86_64 and builtin.os.tag == .windows)
+        x86_64_win64_jit_cohort
+    else if (builtin.target.cpu.arch == .x86_64)
+        x86_64_sysv_jit_cohort
+    else {
         // other arches: no JIT cohort clobber; the const collapses to void.
     };
 
@@ -3360,6 +3412,36 @@ test "entry: br_on_cast matches i31 → branch carries the ref → i31.get_s = 7
         .host_dispatch_count = 0,
     };
     try testing.expectEqual(@as(u32, 7), try callI32NoArgs(module, 0, &rt));
+}
+
+test "every XMM the x86_64 emit may touch is Win64 non-volatile (#286)" {
+    // Pure data on both sides, so this arm holds on every host including
+    // aarch64: if a pool grows past the ABI's non-volatile set, the seams
+    // below cannot cover it and the claim they make stops being true.
+    const abi = @import("../x86_64/abi.zig");
+    inline for (abi.allocatable_xmms ++ abi.fp_spill_stage_xmms) |x| {
+        comptime var found = false;
+        inline for (abi.win64_nonvolatile_xmms) |nv| {
+            if (x == nv) found = true;
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "both Win64 host→JIT seams clobber the non-volatile XMMs (#286)" {
+    // There are two seams and the GPR half of this cohort was only ever
+    // asserted for one of them, which is how the FP half went unnoticed while
+    // #287 was under test. `Clobbers`' field set is fixed by the architecture
+    // rather than the OS, so the Win64 literals build — and assert — from any
+    // x86_64 host, not only from the one where the corruption happens.
+    // SIBLING-AT: src/engine/codegen/shared/entry.zig (the #287 GPR test below)
+    if (comptime builtin.target.cpu.arch != .x86_64) return;
+    const abi = @import("../x86_64/abi.zig");
+    inline for (.{ x86_64_win64_jit_cohort, x86_64_win64_call_clobbers_all }) |cohort| {
+        inline for (abi.win64_nonvolatile_xmms) |x| {
+            try std.testing.expect(@field(cohort, @tagName(x)));
+        }
+    }
 }
 
 test "jit_cohort_clobbers covers every GPR the x86_64 regalloc pool may hand out (#287)" {
