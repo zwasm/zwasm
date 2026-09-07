@@ -36,7 +36,7 @@ change lands the same way:
    Doc-only changes (Markdown, `docs/`, `.dev/`, `.claude/`, `LICENSE`) skip the
    heavy 3-OS build/test automatically, so a docs PR goes green in seconds — but
    still merges through the same gate.
-4. Squash-merge when green; the branch is auto-deleted.
+4. Merge when it is green; the branch is auto-deleted.
 
 Releases (tags / published artifacts) are cut manually by the maintainer only.
 
