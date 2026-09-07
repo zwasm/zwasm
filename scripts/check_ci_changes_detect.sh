@@ -93,14 +93,18 @@ check() { # name event base head want
   local out
   : > "$TMP/gh_output"
   # `-C` is not available for the step's own `git diff`, so the working
-  # directory has to be the throwaway repo — `env -C` keeps that to the child.
-  env -C "$REPO" \
+  # directory has to be the throwaway repo. A subshell and not `env -C` — that
+  # option is GNU coreutils only and macOS's BSD `env` rejects it. `$TMP` and
+  # `$REPO` are absolute, so the paths below survive the `cd`.
+  (
+    cd "$REPO"
     EVENT="$2" \
     PR_BASE="$3" PR_HEAD="$4" \
     PUSH_BEFORE="$3" PUSH_HEAD="$4" \
     MG_BASE="$3" MG_HEAD="$4" \
     GITHUB_OUTPUT="$TMP/gh_output" \
-    bash "$TMP/detect.sh" >/dev/null 2>&1 || true
+    bash "$TMP/detect.sh" >/dev/null 2>&1
+  ) || true
   out=$(grep -o 'code=[a-z]*' "$TMP/gh_output" | tail -1 || true)
   if [ "$out" != "code=$5" ]; then
     # No output means the step itself died on this input — a case that cannot
