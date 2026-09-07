@@ -150,24 +150,31 @@ ROADMAP §14's `git push --force / --force-with-lease to any branch` becomes:
 ❌ git push --force-with-lease to main, to a branch another worktree holds, or without a pinned <ref>:<sha>
 ```
 
-**Pinned, not bare.** `--force-with-lease` with no argument compares against
-`refs/remotes/origin/<branch>`, which the worktrees under `.claude/worktrees/`
-share; git's documentation calls that protection "trivially defeated if some
-background process is updating refs in the background", and sessions here
-fetch as a matter of course. Reading the SHA first removes the heuristic.
+**A lease is not enough on its own.** Both forms compare against
+`refs/remotes/origin/<branch>`, and the worktrees share one set of those refs.
+git's documentation calls the bare form "trivially defeated if some background
+process is updating refs in the background"; pinning only makes the same
+assumption explicit — that the ref's value is evidence the content was seen.
+If another worktree pushed and fetched first, the pin captures *its* commit,
+the rewrite omits it, and the push is accepted because the remote really is
+where the pin says. So the lease is the second half; the first is a
+precondition that refuses to rewrite unless the remote tip is already here.
 
 `git rebase -i` and `git reset --hard` stay on §14 unchanged — the first is
 interactive and this environment has no editor, the second names `--hard`, and
 discarding work is what `--soft` does not do. The non-interactive procedure:
 
 ```sh
-expected=$(git rev-parse "origin/develop/<slug>")   # before anything is rewritten
+git fetch origin "develop/<slug>"
+git merge-base --is-ancestor "origin/develop/<slug>" HEAD || exit 1
+expected=$(git rev-parse "origin/develop/<slug>")
 git reset --soft "$(git merge-base HEAD origin/main)"
 git commit -F <message-file>
-git push --force-with-lease="refs/heads/develop/<slug>:$expected" origin develop/<slug>
+git push --force-with-lease="refs/heads/develop/<slug>:$expected" origin "develop/<slug>"
 ```
 
-Only the last line needs this decision.
+Only the last line needs this decision; the second is what makes it safe, and
+it fails closed.
 
 §18.2 step 3 syncs one live document: `.claude/CLAUDE.md` summarised the old
 §14 line as "`--force` always forbidden", which now reads as banning the
