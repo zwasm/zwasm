@@ -15,7 +15,12 @@
 # `ci-required` is authoritative; the local scripts are pre-flight
 # (ADR-0076 D9).
 #
-# Triggers: pull_request (any target) + push to `main` + manual dispatch.
+# Triggers: pull_request (any target) + merge_group + push to `main` + manual
+# dispatch. `merge_group` is what a merge queue dispatches, and a required
+# check that does not run on it never reports, so every queue entry would be
+# ejected on the ruleset's `check_response_timeout_minutes` as an assumed
+# failure (ADR-0227 D3). It fires only while a queue is enabled, so the
+# trigger is inert until then.
 # `main` is the trunk and is ruleset-protected: no direct pushes — every change
 # lands via a `develop/*` branch → PR → this gate must pass → merge. A push to
 # `main` is therefore a merged PR (its `push` run does the extended checks).
@@ -41,6 +46,9 @@ name: ci
 
 on:
   pull_request:
+  # A merge queue dispatches this; unfiltered, as wasmtime's does. Inert while
+  # no queue is enabled (ADR-0227 D3).
+  merge_group:
   push:
     branches: [main]
   workflow_dispatch:
@@ -59,6 +67,10 @@ permissions:
 # only the newest pending run per group, so a burst of merges would still
 # drop the middle ones. The event name is part of the key so that a manual
 # dispatch on `main` (core-only) cannot cancel the push run for the same SHA.
+# A merge-group run needs no special case: its ref is the queue's own
+# `refs/heads/gh-readonly-queue/...`, distinct per entry, so entries never
+# cancel each other — including the speculative ones a `max_entries_to_build`
+# above 1 would create.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}-{1}', github.event_name, github.sha) || '' }}
   cancel-in-progress: true
@@ -87,11 +99,25 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           PUSH_BEFORE: ${{ github.event.before }}
           PUSH_HEAD: ${{ github.sha }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD: ${{ github.event.merge_group.head_sha }}
         shell: bash
         run: |
           set -euo pipefail
           if [ "$EVENT" = "pull_request" ]; then
             range="${PR_BASE}...${PR_HEAD}"
+          elif [ "$EVENT" = "merge_group" ]; then
+            # Without this arm the `else` below runs the 3-OS gate for every
+            # queue entry, so a doc-only PR would pay in the queue what it is
+            # excused from on its PR. The group's head contains its base, so
+            # the two-dot range is the push analogue, and it covers the whole
+            # group when more than one entry is batched. Same fail-closed guard
+            # as the push arm: an unreachable base means the range cannot be
+            # computed, and an uncomputed range must not read as doc-only.
+            if [ -z "$MG_BASE" ] || ! git cat-file -e "${MG_BASE}^{commit}" 2>/dev/null; then
+              echo "code=true" >> "$GITHUB_OUTPUT"; echo "merge_group base unreachable -> run gate"; exit 0
+            fi
+            range="${MG_BASE}..${MG_HEAD}"
           elif [ "$EVENT" = "push" ]; then
             if ! git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
               echo "code=true" >> "$GITHUB_OUTPUT"; echo "new-branch push -> run gate"; exit 0
