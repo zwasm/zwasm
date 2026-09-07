@@ -169,13 +169,16 @@ git push --force-with-lease="refs/heads/develop/<slug>:$expected" origin develop
 
 Only the last line needs this decision.
 
+§18.2 step 3 syncs one live document: `.claude/CLAUDE.md` summarised the old
+§14 line as "`--force` always forbidden", which now reads as banning the
+carve-out too. `continue/LOOP.md` and `continue/STOP_BUCKETS.md` say the
+harness denies this and are retired campaign machinery; nothing enforced it in
+any case — `.claude/settings.json` has four `permissions.deny` rules and none
+concerns push.
+
 Rejected: cutting a fresh branch instead reaches the same history at the price
 of a new PR and review thread; keeping the ban and taking `SQUASH` is coherent
-but gives up the recorded reasoning D2 calls the more useful half. Nothing in
-the harness enforced the old line — `.claude/settings.json` has four
-`permissions.deny` rules and none concerns push — so §18.2 step 3 has no live
-target; `continue/LOOP.md` and `continue/STOP_BUCKETS.md` say otherwise and are
-retired campaign machinery.
+but gives up the recorded reasoning D2 calls the more useful half.
 
 ## Applying D1
 
