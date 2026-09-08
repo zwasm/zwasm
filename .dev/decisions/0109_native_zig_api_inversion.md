@@ -1,6 +1,6 @@
 # 0109 — Native Zig API inversion: Engine + Linker + TypedFunc
 
-- **Status**: Accepted 2026-05-25 (user collab review at Phase 10 open; cw v1 dogfooding feedback unblocked the deferral; D-075 re-scoped from "blocked-by Accept" to impl tracker; ROADMAP §10 / 10.J carries the 6-8 implementation cycles)
+- **Status**: Closed (implemented) 2026-09-08 — Removal condition met: the rewrite shipped 2026-05-25 (`017193bc`..`05c47829`, J.2..J.7) and cw v1 dogfooded it from v2.0 through v2.5.0 with no shape problem surfaced; the feedback that will come has come (ClojureWasm wound down 2026-09-06, #407). Previously Accepted 2026-05-25.
 - **Date**: 2026-05-24
 - **Author**: claude (autonomous loop, cycle 36)
 - **Tags**: zwasm.zig, facade, api, Engine, Linker, TypedFunc, cw-v1, dogfooding, D-075
@@ -381,3 +381,9 @@ superseded by a follow-on ADR.
   cw v1 dogfooding feedback per this ADR's Removal condition;
   D-075 status tightened to "dogfooding gate only" (impl tracker
   duty discharged at this commit).
+- 2026-09-08 — **Status: Accepted → Closed (implemented)**. Removal
+  condition met: the rewrite shipped 2026-05-25 and cw v1 dogfooded it
+  across v2.0→v2.5.0 (≥ 1 minor version) without surfacing a fundamental
+  shape problem. ClojureWasm wound down 2026-09-06 (#407), so no further
+  consumer feedback will arrive — the wait D-075 held open is over; D-075
+  retires in the same commit.

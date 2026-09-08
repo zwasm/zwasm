@@ -1951,14 +1951,15 @@ entries:
     front: B-hardening
   - id: "D-075"
     layer: "code"
-    status: "blocked-by"
+    status: "resolved"
     description: |-
+      DISCHARGED 2026-09-08: ADR-0109 flipped Accepted → Closed (implemented) — its Removal condition is met (rewrite shipped 2026-05-25; cw v1 dogfooded v2.0→v2.5.0 with no shape problem) and the feedback the barrier waited for will not grow: ClojureWasm wound down 2026-09-06 (#407). History below.
       Re-walk 2026-08-12 (sweep S4): the ">=1 minor version" wait has elapsed (v2.0->v2.5); flipping ADR-0109 to Closed is a user decision — barrier is now user-input, not time.
       blocked-by: cw v1 dogfooding feedback over ≥ 1 minor version per ADR-0109 Removal condition. **Implementation tracker duty discharged J.close 2026-05-25** (ROADMAP §10 / 10.J `[x]` 6 cycles J.2..J.7: `017193bc` / `698c23ce` / `995270cf` / `b10922d2` / `97434726` / `05c47829`). Discharge predicate tightened: ADR-0109 Status flips `Accepted → Closed (implemented)` after cw v1 dogfooding survives ≥ 1 minor version cycle without surfacing a fundamental shape problem; this debt row then retires. | **Native Zig API (ADR-0109) — dogfooding gate only**: implementation landed across 6 cycles J.2..J.7 per ROADMAP §10 / 10.J `[x]`. Engine + Linker + TypedFunc(comptime Sig) + Memory + Caller + full 12-variant Trap set + allocator strict-pass + defineWasi skeleton all shipped + tested (T1.1..T1.13). Coverage matrix audit at J.close: every shipped public symbol carries ≥ 1 Tier-1 test; `defineGlobal` / `defineTable` / `Instance.global` / `.table` / `Instance.call` sugar / `engine.linker()` factory / `Module.exports().imports()` iterators carved out as Phase 11 D6 follow-up (plan §4.2 "deferred" + S-4 reframe). Remaining barrier is the dogfooding wait per ADR-0109 Removal condition; D-075 retires when ADR-0109 flips Closed.
     first_raised: "2026-05-11"
-    last_reviewed: "2026-08-12"
+    last_reviewed: "2026-09-08"
     refs: |-
-      ADR-0109 (Accepted 2026-05-25; impl-complete Revision row 2026-05-25), `docs/zig_api_design.md`, ROADMAP §10 / 10.J `[x]`, `src/zwasm/{engine,module,instance,typed_func,memory,linker,caller,host_func_marshal}.zig`, `test/api/zig_facade_runner.zig`, plan §4.2 audit
+      ADR-0109 (Closed (implemented) 2026-09-08; Accepted 2026-05-25; impl-complete Revision row 2026-05-25), `docs/zig_api_design.md`, ROADMAP §10 / 10.J `[x]`, `src/zwasm/{engine,module,instance,typed_func,memory,linker,caller,host_func_marshal}.zig`, `test/api/zig_facade_runner.zig`, plan §4.2 audit
     front: C-dogfooding
   - id: "D-082"
     layer: "code"
