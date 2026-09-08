@@ -1048,6 +1048,71 @@ test "JitInstance.initLinked: cross-module FUNC import dispatches to exporter (D
     try testing.expectEqual(@as(?u64, 42), try a_inst.invoke(gpa, "test", &.{}));
 }
 
+// #388 — a three-module chain: B re-exports A's func, C imports it from B.
+// `exportedFuncTarget` on B answers with the target B itself resolved, so C's
+// thunk enters A directly. B is deinit'd BEFORE C is called: nothing in the
+// call walks through B (link-time folding, ADR-0228). A stays alive — its
+// runtime, arena and bytes are what C's thunk names.
+test "JitInstance.initLinked: a re-exported import resolves to the defining instance (#388)" {
+    const gpa = testing.allocator;
+    // (module (func (export "get") (result i32) i32.const 42))
+    const a_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+        0x00, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x67,
+        0x65, 0x74, 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x2a, 0x0b,
+    };
+    // (module (import "a" "get" (func $get (result i32))) (export "get" (func $get)))
+    const b_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+        0x00, 0x01, 0x7f, 0x02, 0x09, 0x01, 0x01, 0x61, 0x03, 0x67, 0x65, 0x74,
+        0x00, 0x00, 0x07, 0x07, 0x01, 0x03, 0x67, 0x65, 0x74, 0x00, 0x00,
+    };
+    // (module (import "b" "get" (func $get (result i32)))
+    //         (func (export "test") (result i32) call $get))
+    const c_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+        0x00, 0x01, 0x7f, 0x02, 0x09, 0x01, 0x01, 0x62, 0x03, 0x67, 0x65, 0x74,
+        0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x74, 0x65,
+        0x73, 0x74, 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,
+    };
+    var a_inst = try JitInstance.init(gpa, &a_bytes);
+    defer a_inst.deinit(gpa);
+    const t_a = a_inst.exportedFuncTarget(gpa, "get") orelse return error.TestUnexpectedResult;
+
+    var b_inst = try JitInstance.initLinked(gpa, &b_bytes, &.{}, &.{t_a}, &.{}, &.{});
+    const t_b = b_inst.exportedFuncTarget(gpa, "get") orelse {
+        b_inst.deinit(gpa);
+        return error.TestUnexpectedResult;
+    };
+    // Folded at link time: B hands out A's entry, runtime and signature.
+    try testing.expectEqual(t_a.callee_entry, t_b.callee_entry);
+    try testing.expectEqual(t_a.callee_rt, t_b.callee_rt);
+    try testing.expectEqual(@as(usize, 1), t_b.sig.results.len);
+
+    var c_inst = try JitInstance.initLinked(gpa, &c_bytes, &.{}, &.{t_b}, &.{}, &.{});
+    defer c_inst.deinit(gpa);
+    b_inst.deinit(gpa);
+    try testing.expectEqual(@as(?u64, 42), try c_inst.invoke(gpa, "test", &.{}));
+}
+
+// #388 — the same B, but its import was never resolved (no A handed in). B
+// re-exports an import it cannot dispatch, so it must not hand out a target.
+test "JitInstance.exportedFuncTarget: a re-exported UNRESOLVED import is null (#388)" {
+    const gpa = testing.allocator;
+    const b_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+        0x00, 0x01, 0x7f, 0x02, 0x09, 0x01, 0x01, 0x61, 0x03, 0x67, 0x65, 0x74,
+        0x00, 0x00, 0x07, 0x07, 0x01, 0x03, 0x67, 0x65, 0x74, 0x00, 0x00,
+    };
+    var b_inst = try JitInstance.initLinked(gpa, &b_bytes, &.{}, &.{.{}}, &.{}, &.{});
+    defer b_inst.deinit(gpa);
+    try testing.expect(b_inst.exportedFuncTarget(gpa, "get") == null);
+    // And with no target slice at all (the plain `init` shape).
+    var b2 = try JitInstance.init(gpa, &b_bytes);
+    defer b2.deinit(gpa);
+    try testing.expect(b2.exportedFuncTarget(gpa, "get") == null);
+}
+
 // #381 — the same public `initLinked` path, but the EXPORTER traps. A JIT trap
 // is a flag on the runtime the trap stub sees, and the bridge thunk runs the
 // callee with the callee's runtime pointer installed, so without propagation

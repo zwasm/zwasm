@@ -369,6 +369,15 @@ fn parkAsZombie(
 /// bridge thunk (D-225), so the exporter's `JitInstance` must outlive every
 /// importer. Parking defers the free to `wasm_store_delete`, by when nothing
 /// can call in. Takes the erased pointer the `Instance.jit` field carries.
+///
+/// ADR-0228 — "exporter" means the DEFINING instance, not the one the
+/// embedder passed the extern from: a re-exported import resolves to the
+/// module that defines the function (`JitInstance.exportedFuncTarget`), so
+/// in a chain A→B→C, C's thunk names A, and A must live as long as C even
+/// after B is gone. Nothing counts the takers; the unconditional park here
+/// and the byte deferral in `wasm_module_delete` are what keep A alive, and
+/// `test/c_api_conformance/cross_module_reexport.c` deletes A and B before
+/// calling C to hold them to it.
 fn parkJitAsZombie(
     store_alloc: std.mem.Allocator,
     store: *Store,
