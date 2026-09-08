@@ -328,7 +328,16 @@ entries:
       was already true for JIT-body targets; it now also reaches host imports
       placed in a table (a `path_open`-shaped WASI import is the realistic
       case). Only `results.len > 2` is rejected at emit time; parameter count
-      is not checked anywhere. (g) FIXED by ADR-0228 (#390): an imported
+      is not checked anywhere. Measured 2026-09-08 on `main` (x86_64 SysV,
+      one module, a 7 × i32 callee, `JitInstance.init`): `return_call` returns
+      garbage, `return_call_indirect` traps, `return_call_ref` dies with
+      SIGSEGV — so the direct form is broken too, and the funcref form kills
+      the process. ADR-0228's bridge copies overflow words from ITS caller's
+      frame, so a cross-module import reached by a tail call inherits this
+      (Devin on #419); the #391 fence had declined such signatures only as a
+      side effect. The fix is tail-call forwarding (or an emit-time decline
+      of every tail form whose signature overflows), and it is the same fix
+      for all three routes. (g) FIXED by ADR-0228 (#390): an imported
       callee with a MEMORY-class return (`results.len > 2`) was called with the
       wrong pointer in arg0 — `emitCall` / `emitCallIndirect` LEA'd the hidden
       return buffer into arg0, then the bridge thunk overwrote arg0 with
