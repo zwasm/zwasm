@@ -185,7 +185,12 @@ pub fn runWasmJitCaptured(
     // `multi_out` (TypedResult[]); each value is printed on its own line, like
     // the interp path (`invoke_args.invokeFormatted`) + wasmtime.
     var multi_buf: [16]runner.TypedResult = undefined;
-    var multi_out: ?[]runner.TypedResult = null;
+    // A default entry gets the whole buffer: the runner knows the arity, and
+    // nothing on this path prints the values (`if (invoke_name != null)`
+    // below). Without a buffer a `() -> (i32 i32)` `_start` fell through to
+    // instantiate-only, so its trap or `proc_exit` never happened here while
+    // the `.wasm` default ran it (#220).
+    var multi_out: ?[]runner.TypedResult = if (invoke_name == null) multi_buf[0..] else null;
     if (invoke_name) |name| {
         if (export_lookup.getExportFuncType(alloc, wasm_view, name)) |ft| {
             defer {
