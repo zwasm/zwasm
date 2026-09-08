@@ -286,6 +286,7 @@ pub const patchRel32 = inst_branch.patchRel32;
 pub const encRet = inst_branch.encRet;
 pub const encNop = inst_branch.encNop;
 pub const encPushR = inst_branch.encPushR;
+pub const encPushMem64 = inst_branch.encPushMem64;
 pub const encPopR = inst_branch.encPopR;
 pub const encCdq = inst_branch.encCdq;
 pub const encCqo = inst_branch.encCqo;
@@ -566,6 +567,11 @@ test "encPushR: push rbp → 55" {
 test "encPushR: push r12 → 41 54 (REX.B)" {
     const enc = encPushR(.r12);
     try testing.expectEqualSlices(u8, &.{ 0x41, 0x54 }, enc.slice());
+}
+
+test "encPushMem64: push qword [r10] → 41 ff 32 (REX.B, /6); [rax] → ff 30" {
+    try std.testing.expectEqualSlices(u8, &.{ 0x41, 0xFF, 0x32 }, encPushMem64(.r10).slice());
+    try std.testing.expectEqualSlices(u8, &.{ 0xFF, 0x30 }, encPushMem64(.rax).slice());
 }
 
 test "encPopR: pop rbp → 5d" {

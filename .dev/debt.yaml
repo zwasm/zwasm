@@ -328,36 +328,26 @@ entries:
       was already true for JIT-body targets; it now also reaches host imports
       placed in a table (a `path_open`-shaped WASI import is the realistic
       case). Only `results.len > 2` is rejected at emit time; parameter count
-      is not checked anywhere. (g) SEPARATE, PRE-EXISTING, own PR: an imported
-      callee with a MEMORY-class return (`results.len > 2`) is called with the
-      wrong pointer in arg0. `emitCall` / `emitCallIndirect` LEA the hidden
-      return buffer into arg0 unconditionally; the bridge thunk then overwrites
-      arg0 with `callee_rt`, and `emitImportDispatch` does the same on the
-      direct path. The callee writes its results through the runtime pointer.
-      This predates (1): `table.set`, `table.grow` and
-      `applyTableInitForTable`'s `global.get` form already copied
-      `fe.funcptr` — the thunk — for such an import, so three of the four table
-      routes reached it before this row existed. (1) changes only the fourth:
-      the elem-segment route stops crashing on a null and joins them.
-      Two attempted fixes are recorded as rejected. Guarding the elem-segment
-      mirror write alone left the other three routes open. Guarding the origin
-      (skip the thunk, leave `hostDispatchTrap`) is WORSE: that stub is
-      `fn(rt: *JitRuntime)` and reads arg0 as the runtime pointer, so for this
-      exact shape it stores into the caller's return buffer, never sets
-      `trap_flag`, and the call proceeds with garbage results. A trap stub
-      cannot be the fallback for a signature whose arg0 is not `rt`.
-      Candidates for the real fix: zero `fe.funcptr` at its origin AND
-      null-test the four `call_ref` sites (b); an arch-aware MEMORY-class trap
-      stub (x86_64 needs `rt` in arg1, arm64 already has it in X0); or refuse
-      to JIT a module with such an import, mirroring `jit_host_bridge`'s
-      existing `results.len != 1` interp fallback. (h) NOTHING EXERCISES THIS.
-      The shape needs a cross-module wasm import with 3+ results in a table.
-      `runVoidExportWasi` cannot build it (one module, no registry) and the
-      vendored 3.0 corpus does not contain it — the lane reported an identical
-      `pass=10853 fail=1 skip=435` with no guard, with the elem-only guard and
-      with the origin guard, so no test distinguishes any of them. Review found
-      this class by reading the code, never by running it. (g)'s PR has to
-      solve the fixture problem too, or it ships unverifiable.
+      is not checked anywhere. (g) FIXED by ADR-0228 (#390): an imported
+      callee with a MEMORY-class return (`results.len > 2`) was called with the
+      wrong pointer in arg0 — `emitCall` / `emitCallIndirect` LEA'd the hidden
+      return buffer into arg0, then the bridge thunk overwrote arg0 with
+      `callee_rt`, and `emitImportDispatch` did the same on the direct path,
+      so the callee wrote its results through the runtime pointer. Every table
+      route reached it (`table.set`, `table.grow`, both `applyTableInitForTable`
+      forms after (1)). The thunk now carries the callee's signature and puts
+      the runtime where that signature reserves it (arg1 when arg0 is the
+      hidden pointer; arm64 keeps X0 and never touches X8), and
+      `emitImportDispatch` does the same. Two rejected fixes stay on record:
+      guarding the elem-segment mirror write alone left the other three routes
+      open; guarding the origin (skip the thunk, leave `hostDispatchTrap`) was
+      WORSE — that stub reads arg0 as the runtime pointer, so for this exact
+      shape it stored into the caller's return buffer, never set `trap_flag`,
+      and the call proceeded with garbage. (h) was "nothing exercises this":
+      `runner_test.zig` (three results, with and without overflow, through
+      `call`, `call_indirect` on an imported table element and `call_ref`)
+      and `test/c_api_conformance/cross_module_abi.c` (the same, on every
+      engine with `interp` as the oracle) now do.
     first_raised: "2026-08-14"
     last_reviewed: "2026-08-15"
     refs: |-

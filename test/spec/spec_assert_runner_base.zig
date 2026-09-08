@@ -1593,7 +1593,7 @@ pub fn resolveCrossModuleImports(
         // exporter compile left us in RX. Safe on empty arena
         // (caller-checked slot_idx<arena_slot_count, so arena.len>0).
         jit_mem.setWritable(thunk_arena) catch return ResolverError.OutOfMemory;
-        shared_thunk.emitThunk(slot, @intFromPtr(callee_rt), callee_entry_addr);
+        shared_thunk.emitThunk(slot, @intFromPtr(callee_rt), callee_entry_addr, compiled.func_sigs[callee_funcidx]);
 
         // Plant the thunk's address into the importer's dispatch
         // slot (host_dispatch_base[import_idx] view).

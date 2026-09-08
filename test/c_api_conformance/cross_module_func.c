@@ -351,18 +351,14 @@ static const uint8_t kSixArgImporterWasm[] = {
     0x04, 0x41, 0x05, 0x41, 0x06, 0x10, 0x00, 0x0b,
 };
 
-/* A signature the cross-module bridge cannot carry. The bridge thunk takes no
- * signature: an argument that overflows the register set is written by the
- * importer relative to ITS stack, and the exporter reads it relative to its own
- * frame — with the thunk's frame in between, it reads the wrong slot. The same
- * holds for a result the ABI returns through a hidden buffer pointer.
- *
- * The contract this asserts is "declined or correct, never wrong": a JIT-backed
- * engine may refuse to build the importer (NULL, as v2.6.0 did for every
- * cross-module import), but if it does build it, the call must return 6. The
- * interpreter, which has no bridge, must return 6. When the bridge learns to
- * carry the shape, the NULL arm simply stops being taken. */
-static int declines_or_carries_six_args(uint8_t engine) {
+/* Six integer arguments: one past the SysV user registers (five — arg0 is the
+ * runtime pointer), so the sixth travels on the stack. Until ADR-0228 the
+ * bridge thunk took no signature and could not carry it (#390 — the #391 fence
+ * declined the shape with NULL); it now copies the importer's overflow
+ * arguments into its own outgoing area, so every engine must return 6. The
+ * fuller ABI matrix (7 and 9 ints, mixed int/fp, three results, the indirect
+ * routes) is `cross_module_abi.c`. */
+static int carries_six_args(uint8_t engine) {
     int rc = 1;
     const char* who = engine_name(engine);
     wasm_module_t* exporter_module = NULL;
@@ -398,13 +394,7 @@ static int declines_or_carries_six_args(uint8_t engine) {
     importer = zwasm_instance_new_ex(store, importer_module, &imports, &itrap, engine);
     if (itrap) wasm_trap_delete(itrap);
     if (!importer) {
-        if (engine == ZWASM_ENGINE_INTERP) {
-            fprintf(stderr, "[interp] the six-arg importer failed to instantiate\n");
-            goto cleanup;
-        }
-        /* Declined: the shape is withheld rather than carried wrongly. */
-        fprintf(stderr, "[%s] six-arg cross-module import declined (withheld, not carried)\n", who);
-        rc = 0;
+        fprintf(stderr, "[%s] the six-arg importer failed to instantiate\n", who);
         goto cleanup;
     }
     wasm_instance_exports(importer, &importer_exports);
@@ -422,7 +412,7 @@ static int declines_or_carries_six_args(uint8_t engine) {
         goto cleanup;
     }
     if (results[0].kind != WASM_I32 || results[0].of.i32 != 6) {
-        fprintf(stderr, "[%s] the bridge carried a six-arg call and got it WRONG: sixth arg read as %d, expected 6\n",
+        fprintf(stderr, "[%s] six-arg call: sixth arg read as %d, expected 6\n",
                 who, (int) results[0].of.i32);
         goto cleanup;
     }
@@ -445,7 +435,7 @@ int main(void) {
         if (compose_on(kEngines[i]) != 0) return 1;
         if (outlives_exporter(kEngines[i]) != 0) return 1;
         if (outlives_module_bytes(kEngines[i]) != 0) return 1;
-        if (declines_or_carries_six_args(kEngines[i]) != 0) return 1;
+        if (carries_six_args(kEngines[i]) != 0) return 1;
     }
     return 0;
 }

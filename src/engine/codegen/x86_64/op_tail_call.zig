@@ -196,7 +196,7 @@ fn emitCrossModuleReturnCall(
         ctx.spill_base_off,
         callee_sig,
     );
-    try op_call.emitImportDispatch(ctx.allocator, ctx.buf, ctx.outgoing_max_bytes, @intCast(ins.payload));
+    try op_call.emitImportDispatch(ctx.allocator, ctx.buf, ctx.outgoing_max_bytes, @intCast(ins.payload), false);
     try frame_teardown.emit(ctx.allocator, ctx.buf, .{
         .frame_bytes = ctx.frame_bytes,
         .uses_runtime_ptr = ctx.uses_runtime_ptr,
