@@ -598,7 +598,7 @@ const lv_known_x86_64_sysv: []const LvKnown = &.{
     .{ .key = "function-references/br_on_null/br_on_null.2.wasm", .count = 1 },
 };
 
-/// x86_64-windows — measured 2026-09-05 by this lane's own first CI run
+/// x86_64-windows — seeded 2026-09-05 by this lane's own first CI run
 /// (run 33939200603, job 101233144158; ADR-0226 D2), with the table empty:
 /// `0 enumerated, 10 unexpected, 0 stale`. Written from that output, not
 /// copied from SysV: the Win64 emit is not the SysV one, so a copied row
@@ -607,33 +607,38 @@ const lv_known_x86_64_sysv: []const LvKnown = &.{
 /// measurement: the divergence is on the liveness side, which is
 /// arch-independent, not in either emit. Per-row attribution as the SysV
 /// table.
+///
+/// Re-taken 2026-09-08 the same way, by the leg's run on the SysV re-take
+/// (run 34200535507, job 101978122541) against the seed rows:
+/// `10 enumerated, 4 unexpected, 3 stale`, the same seven moves the SysV
+/// table made, to the same counts.
 const lv_known_x86_64_windows: []const LvKnown = &.{
-    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 25 },
-    .{ .key = "exception-handling/try_table/try_table.1.wasm", .count = 9 },
-    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 13 },
-    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 1 },
-    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 11 },
-    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 2 },
+    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 1 },
+    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 15 },
+    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 2 },
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 18 },
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 4 },
     .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 3 },
-    .{ .key = "function-references/br_on_non_null/br_on_non_null.1.wasm", .count = 3 },
     .{ .key = "function-references/br_on_non_null/br_on_non_null.2.wasm", .count = 1 },
     .{ .key = "function-references/br_on_null/br_on_null.2.wasm", .count = 1 },
 };
 
-/// aarch64 (the macOS leg) — measured 2026-09-05 by the same first CI run
+/// aarch64 (the macOS leg) — seeded 2026-09-05 by the same first CI run
 /// (job 101233144280), table empty: `0 enumerated, 10 unexpected, 0 stale`.
 /// Identical to the two x86_64 tables, for the reason given above; a second
 /// backend agreeing with the first against liveness is what rules the emit
 /// out. Per-row attribution as the SysV table.
+///
+/// Re-taken 2026-09-08 by the same run as the Win64 table (job
+/// 101978122561): `10 enumerated, 4 unexpected, 3 stale`, the same seven
+/// moves to the same counts — the third backend agreeing on #398's effect.
 const lv_known_aarch64: []const LvKnown = &.{
-    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 25 },
-    .{ .key = "exception-handling/try_table/try_table.1.wasm", .count = 9 },
-    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 13 },
-    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 1 },
-    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 11 },
-    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 2 },
+    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 1 },
+    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 15 },
+    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 2 },
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 18 },
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 4 },
     .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 3 },
-    .{ .key = "function-references/br_on_non_null/br_on_non_null.1.wasm", .count = 3 },
     .{ .key = "function-references/br_on_non_null/br_on_non_null.2.wasm", .count = 1 },
     .{ .key = "function-references/br_on_null/br_on_null.2.wasm", .count = 1 },
 };
