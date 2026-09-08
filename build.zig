@@ -1290,6 +1290,26 @@ pub fn build(b: *std.Build) void {
     const test_cli_argv0_step = b.step("test-cli-argv0", "Run `zwasm run` on a path with a directory component and check the guest's argv[0] is the base name (issue #256)");
     test_cli_argv0_step.dependOn(&run_cli_argv0.step);
 
+    // `zig build test-cli-default-entry` — issue #220: the `.wasm` default and
+    // the `.cwasm` / `--engine jit` driver must give the same module the same
+    // exit code and stderr. Subprocess by necessity: only `main.zig` picks the
+    // driver, and the artifact only exists through `zwasm compile`.
+    const cli_default_entry_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/runners/default_entry_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const cli_default_entry_exe = b.addExecutable(.{
+        .name = "zwasm-cli-default-entry",
+        .root_module = cli_default_entry_mod,
+    });
+    const run_cli_default_entry = b.addRunArtifact(cli_default_entry_exe);
+    run_cli_default_entry.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
+    run_cli_default_entry.addArg(b.pathFromRoot("test/runners/fixtures/default_entry"));
+    run_cli_default_entry.has_side_effects = true;
+    const test_cli_default_entry_step = b.step("test-cli-default-entry", "Run each default-entry fixture as .wasm, --engine=jit and .cwasm and require the same exit code, stdout and stderr (issue #220)");
+    test_cli_default_entry_step.dependOn(&run_cli_default_entry.step);
+
     // `zig build test-wasi-p1-official` — the OFFICIAL wasi-testsuite
     // wasm32-wasip1 corpus (D-582). Deliberately NOT in `test-all` yet: the
     // corpus is not green on every OS (D-583 carries the live count — no copy
@@ -1642,6 +1662,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_aot_diff.step); // AOT campaign Phase II cross-process .wasm-vs-.cwasm differential (toolchain-free, 3-host)
     test_all_step.dependOn(&run_cli_stdin.step); // issue #257 CLI stdin → guest fd 0
     test_all_step.dependOn(&run_cli_argv0.step); // issue #256 CLI argv[0] = base name
+    test_all_step.dependOn(&run_cli_default_entry.step); // issue #220 default-entry parity across the two run drivers
     test_all_step.dependOn(&run_wasi_p1.step);
     // §9.7 / 7.8 row close (D-045 chunks 1-14 fully discharged):
     // wire test-spec-assert into test-all on ALL hosts. Three-host

@@ -777,12 +777,12 @@ fn runWasiLenientArgsCore(
     }
     // D-477: multi-arg (params > 0) host invoke via the generalized buffer-write
     // thunk. Single scalar/void result fills `result_out`; a MULTI result (≥2,
-    // when `multi_out` is provided + sized to the result arity) fills `multi_out`
-    // (TypedResult[], same decode as `invokeMulti`). Only shapes for which
-    // `wrapper_thunk.emit` produced a thunk (hasThunk) qualify; FP/v128/>N-param
-    // shapes have no thunk → fall through to the reject below. `args` are the
-    // pre-packed u64 carriers.
-    const can_multi = sig.results.len >= 2 and multi_out != null and multi_out.?.len == sig.results.len;
+    // when `multi_out` is provided and holds at least the result arity) fills
+    // `multi_out[0..arity]` (TypedResult[], same decode as `invokeMulti`). Only
+    // shapes for which `wrapper_thunk.emit` produced a thunk (hasThunk) qualify;
+    // FP/v128/>N-param shapes have no thunk → fall through to the reject below.
+    // `args` are the pre-packed u64 carriers.
+    const can_multi = sig.results.len >= 2 and multi_out != null and multi_out.?.len >= sig.results.len;
     if (sig.params.len == args.len and
         (sig.results.len == 0 or (sig.results.len == 1 and scalarKey(sig.results[0]) != null) or can_multi) and
         compiled.module.hasThunk(idx))
@@ -800,7 +800,7 @@ fn runWasiLenientArgsCore(
         if (sig.results.len == 1) {
             if (result_out) |ro| ro.* = decodeScalarResult(sig.results[0], rbuf[0]);
         } else if (can_multi) {
-            for (multi_out.?, 0..) |*res, i| {
+            for (multi_out.?[0..sig.results.len], 0..) |*res, i| {
                 res.* = switch (resultKind(sig.results[i]) orelse return Error.UnsupportedEntrySignature) {
                     .i32 => .{ .i32 = @truncate(rbuf[i]) },
                     .i64 => .{ .i64 = rbuf[i] },
