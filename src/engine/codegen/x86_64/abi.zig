@@ -122,7 +122,8 @@ pub const runtime_ptr_save_gpr: Gpr = .r15;
 /// invariants (vm_base / mem_limit / funcptr_base / table_size
 /// / typeidx_base) reload from `[R15 + offset]` at point of use
 /// rather than holding callee-saved slots — the arm64 mirror
-/// model (6 reserved regs) is unworkable on x86_64 because
+/// model (`arm64/abi.zig::reserved_invariant_gprs`) is
+/// unworkable on x86_64 because
 /// only 6 callee-saved GPRs exist total and `frame_pointer`
 /// (RBP) takes one. See ADR-0026 §"Decision".
 pub const reserved_invariant_gprs = [_]Gpr{runtime_ptr_save_gpr};

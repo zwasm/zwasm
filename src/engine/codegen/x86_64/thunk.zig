@@ -134,6 +134,14 @@ comptime {
         @compileError("bridge thunk relays trap_flag|trap_kind as one 8-byte pair; they are no longer adjacent");
     if (jit_abi.trap_flag_off % 8 != 0)
         @compileError("bridge thunk relays trap_flag|trap_kind as one 8-byte pair; trap_flag_off is no longer 8-aligned");
+    // R15 is written literally in the PUSH/POP below, in the trap relay's
+    // store, and in this file's byte offsets, under both conventions.
+    // `x86_64/abi.zig` asserts the same thing, but whoever moves the
+    // reservation edits that file and its tests together; the assumption
+    // lives here, so the failure has to name this file.
+    if (abi.reserved_invariant_gprs.len != 1 or abi.runtime_ptr_save_gpr != .r15 or
+        abi.sysv.runtime_ptr_save_gpr != .r15 or abi.win64.runtime_ptr_save_gpr != .r15)
+        @compileError("bridge thunk hard-codes R15 as the whole reserved-invariant set; it has moved or grown");
 }
 
 /// Total thunk size in bytes — see the layout table. One shape for every
