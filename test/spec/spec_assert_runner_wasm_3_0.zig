@@ -555,34 +555,43 @@ const LvKnown = struct {
     count: u32,
 };
 
-/// x86_64 SysV — measured 2026-09-05 on x86_64-linux at `main` 7c7e434ea
+/// x86_64 SysV — seeded 2026-09-05 on x86_64-linux at `main` 7c7e434ea
 /// (ADR-0226 D2), by this lane's red-first run with the table empty:
 /// 69 residual lines over 10 modules, `0 enumerated, 10 unexpected`; CI's
 /// Linux leg (run 33939200603, job 101233144116) then read the same ten
-/// rows as `10 enumerated, 0 unexpected, 0 stale`. Each
-/// row names its #400 table row; the funcs are the `func[N]` of its stderr
-/// lines. #400's own module list was taken with #398 applied, so a module
-/// (or func) absent from it is in #398's `.end` / `return` class by that
-/// measurement: a row wholly of that class drops when #398 lands, a mixed
-/// row's count falls — re-take the table then,
-/// do not edit it by hand.
+/// rows as `10 enumerated, 0 unexpected, 0 stale`.
+///
+/// Re-taken 2026-09-07 at `main` 5e989fe22, with #398 (494b297b7 through
+/// b5bbf89c9) landed: 45 lines over 8 modules. Against the seed the lane
+/// read `4 unexpected, 3 stale`: three rows fell to 0 and left, four rose,
+/// three held. Of the twelve lines the rises add, ten are `end`: #398's last
+/// commit compares at the `.end` that closes a dead body, so a func already
+/// off after its `return` or `unreachable` prints that `.end` too. The other
+/// two are named on their row. No func fires that did not fire at the seed.
+/// Each row names its #400 line; the funcs are the `func[N]` of its stderr
+/// lines, taken one module per run. Re-take the table, do not edit it by
+/// hand.
 const lv_known_x86_64_sysv: []const LvKnown = &.{
-    // `.end` ×20, `i32.add` ×4, `drop` ×1 over 17 funcs — #398's class.
-    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 25 },
-    // `return` ×9 (funcs 8–15, 19) — #398's class.
-    .{ .key = "exception-handling/try_table/try_table.1.wasm", .count = 9 },
-    // #400 `br_on_cast` row (funcs 3, 4); funcs 5, 6 are #398's class.
-    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 13 },
-    // #400 `br_on_cast` row (func 1).
-    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 1 },
-    // #400 `br_on_cast_fail` row (funcs 2, 3); funcs 4–6 are #398's class.
-    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 11 },
-    // #400 `br_on_cast_fail` row (funcs 1, 2).
-    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 2 },
+    // Func 70 alone, of the 25 the seed had: `drop` after the `.end` of a
+    // dead body (`unreachable`, `br_table`, `end`), liveness depth 0 against
+    // the emit's 1 — not the `.end` / `return` shape #398 took, and not the
+    // capture shape of #400's rows. Its ledger line is not written yet.
+    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 1 },
+    // #400 `br_on_cast` row, funcs 3–6; 5 and 6 fire as 3 and 4 do (equal
+    // depth, liveness one vreg above the emit). +2 on the seed: the `.end`
+    // after `return` in funcs 4 and 6.
+    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 15 },
+    // #400 `br_on_cast` row (func 1). +1: the `.end` after `unreachable`.
+    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 2 },
+    // #400 `br_on_cast_fail` row, funcs 2–6; 4–6 fire as 2 and 3 do. +7 on
+    // the seed: the `.end` after `return` in each of the five, and func 4's
+    // `i32.const` / `array.get_u`, which #398's first two commits brought in.
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 18 },
+    // #400 `br_on_cast_fail` row (funcs 1, 2). +2: the `.end` after
+    // `unreachable` in each.
+    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 4 },
     // #400 `br_on_null` / `br_on_non_null` row (funcs 0, 1, 6) — the traced mechanism.
     .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 3 },
-    // `drop` ×3 (funcs 0–2), absent from #400's list — #398's class.
-    .{ .key = "function-references/br_on_non_null/br_on_non_null.1.wasm", .count = 3 },
     // #400 `br_on_null` / `br_on_non_null` row (func 1).
     .{ .key = "function-references/br_on_non_null/br_on_non_null.2.wasm", .count = 1 },
     // #400 `br_on_null` / `br_on_non_null` row (func 1).
