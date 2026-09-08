@@ -93,6 +93,12 @@ pub fn computeOutgoingMaxBytes(
         const sig: ?zir.FuncType = switch (ins.op) {
             .call => if (ins.payload < func_sigs.len) func_sigs[ins.payload] else null,
             .call_indirect => if (ins.payload < module_types.len) module_types[ins.payload] else null,
+            // `call_ref` marshals through the same outgoing region (`emitCallRef`);
+            // left out, a function whose only call is a `call_ref` reserved no
+            // region and its overflow words landed on its locals — and under
+            // Win64 the per-call shadow SUB then moved them out from under the
+            // callee (ADR-0228, found by the #390 funcref test on the Windows leg).
+            .call_ref => if (ins.payload < module_types.len) module_types[ins.payload] else null,
             else => null,
         };
         const callee_sig = sig orelse continue;

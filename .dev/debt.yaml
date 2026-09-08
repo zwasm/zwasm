@@ -338,12 +338,15 @@ entries:
       forms after (1)). The thunk now carries the callee's signature and puts
       the runtime where that signature reserves it (arg1 when arg0 is the
       hidden pointer; arm64 keeps X0 and never touches X8), and
-      `emitImportDispatch` does the same. Two rejected fixes stay on record:
-      guarding the elem-segment mirror write alone left the other three routes
-      open; guarding the origin (skip the thunk, leave `hostDispatchTrap`) was
-      WORSE — that stub reads arg0 as the runtime pointer, so for this exact
-      shape it stored into the caller's return buffer, never set `trap_flag`,
-      and the call proceeded with garbage. (h) was "nothing exercises this":
+      `emitImportDispatch` does the same. The arch-aware trap stub this row
+      listed as a candidate landed with it: an UNRESOLVED import of that shape
+      now holds `hostDispatchTrapMemoryClass` (x86_64 reads the runtime from
+      arg1; arm64 needs no twin), chosen per signature at pre-seed, so the
+      fallback traps on every route instead of writing `trap_flag` into the
+      caller's result buffer — which is why guarding the origin (skip the
+      thunk, leave the old stub) had been rejected. Guarding the elem-segment
+      mirror write alone had left the other three routes open. (h) was
+      "nothing exercises this":
       `runner_test.zig` (three results, with and without overflow, through
       `call`, `call_indirect` on an imported table element and `call_ref`)
       and `test/c_api_conformance/cross_module_abi.c` (the same, on every

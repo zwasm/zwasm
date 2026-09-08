@@ -6,6 +6,7 @@
 // Zone 2 (`src/engine/`); same import boundaries as runner.zig.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const parser = @import("../parse/parser.zig");
@@ -344,7 +345,7 @@ pub fn setupRuntimeLinked(
 ) Error!RuntimeOwned {
     const dispatch = try allocator.alloc(usize, compiled.num_imports);
     errdefer allocator.free(dispatch);
-    for (dispatch) |*slot| slot.* = @intFromPtr(&hostDispatchTrap);
+    for (dispatch, 0..) |*slot, j| slot.* = trapStubFor(compiled.func_sigs[j]);
     // D-225 — cross-module FUNC import bridge thunks land here (set below).
     var thunk_arena: ?jit_mem.JitBlock = null;
     errdefer if (thunk_arena) |a| shared_thunk.freeArena(a);
@@ -1278,10 +1279,34 @@ pub fn setupRuntimeLinked(
 /// has no per-import signature, only a fail-safe sink. This
 /// works because the C ABI on both AAPCS64 and SysV / Win64
 /// permits a callee to read fewer args than the caller passed
-/// without faulting.
+/// without faulting. The one shape where arg0 is NOT the runtime
+/// gets its own stub (`hostDispatchTrapMemoryClass`, chosen by
+/// `trapStubFor`).
 pub fn hostDispatchTrap(rt: *entry.JitRuntime) callconv(.c) u64 {
     rt.trap_flag = 1;
     return 0;
+}
+
+/// ADR-0228 — `hostDispatchTrap` for a MEMORY-class callee (results.len > 2)
+/// on x86_64. The call site puts the hidden result-buffer pointer in
+/// entry-arg0 and the runtime in arg1 for that shape (`op_call.zig`, both the
+/// same-module CALL and `emitImportDispatch`), so a stub that read arg0 as
+/// the runtime would set `trap_flag` inside the caller's result buffer and
+/// return as if the call had succeeded (D-586 (g)). arm64 keeps the runtime
+/// in X0 for every shape (X8 carries the pointer), so it needs no twin.
+pub fn hostDispatchTrapMemoryClass(hidden_result_ptr: *anyopaque, rt: *entry.JitRuntime) callconv(.c) u64 {
+    _ = hidden_result_ptr;
+    rt.trap_flag = 1;
+    return 0;
+}
+
+/// The trap stub an unresolved import slot holds, chosen by the import's
+/// signature so the stub reads the runtime from the slot the call site puts
+/// it in (see `hostDispatchTrapMemoryClass`).
+fn trapStubFor(sig: zir.FuncType) usize {
+    if (builtin.target.cpu.arch == .x86_64 and sig.results.len > 2)
+        return @intFromPtr(&hostDispatchTrapMemoryClass);
+    return @intFromPtr(&hostDispatchTrap);
 }
 
 // ============================================================

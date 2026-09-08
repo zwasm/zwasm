@@ -38,7 +38,7 @@
 //! 0x38    SUB SP, SP, #cb                   ; outgoing area for the copied words
 //! 0x3C    MOVZ X9, #n                       ; words left to copy
 //! 0x40    CBZ  X9, +7                       ; n == 0 → BLR
-//! 0x44    ADD  X10, X29, #16                ; importer's overflow word 0
+//! 0x44    ADD  X10, X29, #80                ; importer's overflow word 0 (above this frame)
 //! 0x48    ADD  X11, SP, #0                  ; this frame's word 0
 //! 0x4C    SUB  X9, X9, #1                   ; loop:
 //! 0x50    LDR  X17, [X10, X9, LSL #3]
@@ -67,11 +67,12 @@
 //! to the literal pool (0x98) — distance = 116 bytes.
 //!
 //! Overflow copy (ADR-0228, #390 shape 1): the importer wrote overflow word
-//! `k` at `[SP, #8k]` and BLR'd; after the frame link it sits at
-//! `[X29, #16 + 8k]`. The callee's prologue (`STP X29, X30, [SP, #-16]!;
-//! MOV X29, SP`) reads word `k` at `[X29_callee, #16 + 8k]` =
-//! `[SP_at_BLR, #8k]`, so the words are copied to the bottom of this frame
-//! before the BLR. `n` counts 8-byte words per `computeCallOverflowBytes`;
+//! `k` at `[SP, #8k]` and BLR'd; this thunk's 80-byte frame now sits below
+//! it, so it is at `[X29, #80 + 8k]` (`frame_bytes`, not the 16 of a plain
+//! FP/LR frame — the aarch64-macos leg caught that one). The callee's
+//! prologue (`STP X29, X30, [SP, #-16]!; MOV X29, SP`) reads word `k` at
+//! `[X29_callee, #16 + 8k]` = `[SP_at_BLR, #8k]`, so the words are copied to
+//! the bottom of this frame before the BLR. `n` counts 8-byte words per `computeCallOverflowBytes`;
 //! on Apple targets the importer packs narrower scalars naturally
 //! (`marshalCallArgs`), so `8n` is an upper bound of the region and the copy
 //! carries the packed bytes unchanged — it is a byte copy, not a re-marshal.
@@ -195,12 +196,13 @@ pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize, sig: zir.Func
     // LDR X16, [X16, #8] — X16 ← callee_entry.
     put(buf, &off, inst.encLdrImm(16, 16, 8));
     // Overflow copy (ADR-0228): SUB SP for the words, then copy them from
-    // the importer's outgoing area ([X29, #16 ..]) to this frame's ([SP ..]),
-    // highest word first, counting X9 down. Skipped when n == 0.
+    // the importer's outgoing area — above this frame, [X29, #frame ..] —
+    // to this frame's ([SP ..]), highest word first, counting X9 down.
+    // Skipped when n == 0.
     put(buf, &off, inst.encSubImm12(inst.sp_reg, inst.sp_reg, @intCast(copy_bytes)));
     put(buf, &off, inst.encMovzImm16(9, @intCast(n_words)));
     put(buf, &off, inst.encCbz(9, 7)); // → BLR
-    put(buf, &off, inst.encAddImm12(10, 29, cohort_base));
+    put(buf, &off, inst.encAddImm12(10, 29, frame_bytes));
     put(buf, &off, inst.encAddImm12(11, inst.sp_reg, 0));
     put(buf, &off, inst.encSubImm12(9, 9, 1)); // loop:
     put(buf, &off, inst.encLdrXRegLsl3(17, 10, 9));
@@ -298,7 +300,7 @@ test "emitThunk: encoding round-trip via helpers" {
     try testing.expectEqual(inst.encCbz(9, 7), wordAt(&buf, i));
     const cbz_at = i;
     i += 1;
-    try testing.expectEqual(inst.encAddImm12(10, 29, 16), wordAt(&buf, i));
+    try testing.expectEqual(inst.encAddImm12(10, 29, frame_bytes), wordAt(&buf, i)); // importer's words sit ABOVE this frame
     i += 1;
     try testing.expectEqual(inst.encAddImm12(11, inst.sp_reg, 0), wordAt(&buf, i));
     i += 1;
