@@ -4,7 +4,7 @@
 //! no-arg VOID path (`runVoidExport`). This probe drives the i32 RESULT path
 //! (`runner.runI32Export` → `entry.invokeAndCheck`), which has its own
 //! host→JIT seam: the JIT prologue MOV-installs the pinned callee-saved
-//! cohort (arm64 X19/X24-X28; x86_64 RBX/R12-R15) from `rt` WITHOUT
+//! cohort (arm64 X19/X23-X28; x86_64 RBX/R12-R15) from `rt` WITHOUT
 //! stack-saving the caller's values, so a plain `@call` clobbers the host's
 //! live callee-saved registers. In ReleaseSafe the optimized host keeps live
 //! values there → heap-corruption SEGV; Debug keeps nothing live → no crash.
@@ -48,7 +48,7 @@ const wasm_f_42 = [_]u8{
 
 /// Hold a cohort's-worth of independent live pointers across the JIT call so
 /// ReleaseSafe is forced to keep some of them in the callee-saved registers
-/// the JIT prologue clobbers (arm64 X19/X24-X28; x86_64 RBX/R12-R15). Each
+/// the JIT prologue clobbers (arm64 X19/X23-X28; x86_64 RBX/R12-R15). Each
 /// pointer is dereferenced BOTH before and after the call, and the result
 /// feeds back into the assertion, so the optimizer cannot sink/hoist them out
 /// of the live range. `.never_inline` gives this frame its own register

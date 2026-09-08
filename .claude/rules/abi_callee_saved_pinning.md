@@ -21,9 +21,10 @@ paths:
 
 ## Invariant (PRESERVE — cost 6-cycle root-causes D-142 / D-206 / D-210)
 
-- The **pinned runtime cohort** — arm64 **X19** + **X24–X28**; x86_64 **R15** —
-  is installed by the prologue (ADR-0017 sub-2d-ii: MOV-install from the rt, not
-  stack-save). Any path that **clobbers** a cohort reg across a call to a
+- The **pinned runtime cohort** is `abi.zig::reserved_invariant_gprs` — read it,
+  do not restate it. It is installed by the prologue (ADR-0017 sub-2d-ii:
+  installed from the rt, not stack-saved). Any path that **clobbers** a cohort
+  reg across a call to a
   DIFFERENT runtime (cross-module bridge thunk, frame-consuming tail-jump
   `BR X16` / `JMP R11`) MUST restore the cohort first, else a same-module
   grand-caller's pinned values are corrupted and it traps on garbage.
@@ -37,9 +38,10 @@ paths:
 
 ## Enforcement
 
-Reviewer discipline (no mechanical gate) + the 3-host gate (cohort corruption
-surfaces as a cross-module SEGV / wrong value, esp. x86_64 SysV). Cross-module +
-tail-call fixtures are the regression net.
+Both thunks are gated against the array: arm64 decodes the emitted words,
+x86_64 stops the build. Everything else is reviewer discipline + the 3-host
+gate (cohort corruption surfaces as a cross-module SEGV / wrong value, esp.
+x86_64 SysV). Cross-module + tail-call fixtures are the regression net.
 
 ## Key cases
 

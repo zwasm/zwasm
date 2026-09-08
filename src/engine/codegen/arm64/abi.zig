@@ -103,30 +103,34 @@ pub const platform_gpr: Xn = 18;
 /// Callee-saved (non-volatile) GPRs per AAPCS64 §6.4.1.
 /// Callee must preserve these across calls; saved in prologue,
 /// restored in epilogue. The full callee-saved range is
-/// X19..X28; `reserved_invariant_gprs` carves out X24..X28 for
-/// JitRuntime-derived invariants (per ADR-0017 / 0018), leaving
-/// `allocatable_callee_saved_gprs` (X19..X23) available to the
+/// X19..X28; `reserved_invariant_gprs` carves out the
+/// JitRuntime-derived invariants (per ADR-0017 / 0018 / 0027) and
+/// `allocatable_callee_saved_gprs` is what is left for the
 /// regalloc.
 pub const callee_saved_gprs = [_]Xn{ 19, 20, 21, 22, 23, 24, 25, 26, 27, 28 };
 
 /// Registers reserved for runtime invariants (per ADR-0017 +
-/// ADR-0018):
+/// ADR-0018 + ADR-0027):
 ///   X28 — vm_base       (linear-memory base pointer)
 ///   X27 — mem_limit     (linear-memory size in bytes)
 ///   X26 — funcptr_base  (table 0 — array of u64 funcptrs)
 ///   X25 — table_size    (W25 = u32 count of entries)
 ///   X24 — typeidx_base  (parallel array of u32 typeidx values)
+///   X23 — globals_base  (the globals array; see the alias below)
 ///   X19 — runtime_ptr   (saved copy of *const JitRuntime; the
 ///                        ADR-0017 sub-2d-ii amendment — used to
 ///                        restore X0 before each BL/BLR since
 ///                        AAPCS64 caller-saves X0)
 ///
-/// The function prologue LDRs the first five from `*X0`, then
-/// MOVs X0 → X19 to preserve the runtime ptr across calls. They
-/// are excluded from the regalloc pool by construction —
-/// `allocatable_gprs` is defined as the complement, so a future
-/// reorganisation that adds or removes a reserved reg
-/// automatically propagates.
+/// The function prologue LDRs X24..X28 from `*X0` and MOVs X0 → X19
+/// to preserve the runtime ptr across calls; X23 is loaded only where
+/// the prescan found a global op (ADR-0027).
+///
+/// A reservation added or removed here reaches everything DERIVED from
+/// this array — `allocatable_gprs` is its complement, and the arm64
+/// bridge thunk's save block iterates it (ADR-0228 D4). A consumer that
+/// writes the members out instead does not follow: the thunk's
+/// hand-written list omitted X23 from the day it was written (#413).
 pub const reserved_invariant_gprs = [_]Xn{ 19, 23, 24, 25, 26, 27, 28 };
 
 /// Mnemonic alias for the X19 = runtime_ptr_save reservation
@@ -137,7 +141,7 @@ pub const runtime_ptr_save_gpr: Xn = 19;
 
 /// Mnemonic alias for the X23 = globals_base_save reservation
 /// (per ADR-0027). Functions touching `global.get` / `global.set`
-/// pre-load `[X19 + globals_base_off]` into X23 at function
+/// pre-load `[X0 + globals_base_off]` into X23 at function
 /// prologue (after the existing 5-invariant load), then the
 /// global op handlers emit `LDR Rd, [X23, Ridx, LSL #3]` etc.
 /// Functions without globals skip the X23 prologue load
@@ -165,14 +169,14 @@ pub const link_register: Xn = 30;
 ///   - X16/X17 (IP0/IP1, used as op-handler scratches per
 ///     `single_slot_dual_meaning.md`)
 ///   - X18 (Apple/Darwin platform-reserved)
-///   - X24..X28 (`reserved_invariant_gprs` per ADR-0017+0018)
+///   - `reserved_invariant_gprs` (ADR-0017 / 0018 / 0027)
 ///   - X29 (FP), X30 (LR), X31 (SP/XZR)
 ///
-/// Pool size: 10 (was 17 pre-ADR-0018). A function with > 10
-/// concurrently-live vregs spills to the function's spill frame
-/// per ADR-0018. Slot ids 0..9 resolve via this table; slot ids
-/// 10+ resolve to `Slot.spill` byte offsets (consumed by the
-/// emit pass via `regalloc.Allocation.slot()`).
+/// A function with more concurrently-live vregs than the pool holds
+/// spills to the function's spill frame per ADR-0018: slot ids below
+/// `allocatable_gprs.len` resolve via this table, the rest resolve to
+/// `Slot.spill` byte offsets (consumed by the emit pass via
+/// `regalloc.Allocation.slot()`). The length is pinned by a test below.
 pub const allocatable_gprs = allocatable_caller_saved_scratch_gprs ++ allocatable_callee_saved_gprs;
 
 // Compile-time invariant: allocatable / reserved / spill_stage
