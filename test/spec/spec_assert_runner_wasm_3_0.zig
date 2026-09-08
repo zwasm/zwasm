@@ -802,7 +802,7 @@ pub fn main(init: std.process.Init) !void {
     // The step asked for the channel; if it is not on, that is the failure.
     if (jit_mode and !lv_mode) {
         if (init.environ_map.get("ZWASM_DEBUG")) |v| {
-            if (std.mem.indexOf(u8, v, "liveverify") != null) {
+            if (std.mem.find(u8, v, "liveverify") != null) {
                 try stdout.print(
                     "LIVEVERIFY-CHANNEL-DARK  ZWASM_DEBUG={s} asked for the channel and liveness_parity.on() is false (compiled_in={}, mode={s}) — this lane would have compared nothing and exited 0\n",
                     .{ v, liveness_parity.compiled_in, @tagName(builtin.mode) },
