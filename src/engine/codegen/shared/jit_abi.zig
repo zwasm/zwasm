@@ -3,15 +3,16 @@
 //!
 //! `JitRuntime` is the extern struct passed to every JIT-compiled
 //! Wasm function via X0 (ARM64) / RDI (x86_64 System V). The
-//! function's prologue LDRs the five invariants from `*X0` once
-//! per call, then the body uses them via the
-//! `reserved_invariant_gprs` (ADR-0018):
+//! function's prologue loads these from `*X0` once per call,
+//! then the body uses them via the
+//! `reserved_invariant_gprs` (ADR-0018 / ADR-0027):
 //!
 //!   X28 ← vm_base       (linear-memory base ptr)
 //!   X27 ← mem_limit     (linear-memory size in bytes)
 //!   X26 ← funcptr_base  (table 0 funcptr array)
 //!   X25 ← table_size    (table 0 entry count, X-width u64 — D-475 table64)
 //!   X24 ← typeidx_base  (parallel u32 typeidx side-array)
+//!   X23 ← globals_base  (only where the function uses a global)
 //!
 //! `extern struct` keeps the layout deterministic across Zig
 //! versions and across the ABI boundary the prologue depends on.

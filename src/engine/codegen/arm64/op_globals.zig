@@ -5,7 +5,7 @@
 //! globals_base_save_gpr]`. Scalar globals (i32/i64/f32/f64/refs)
 //! use 8-byte slots and the legacy `idx*8` offset; v128 globals
 //! use 16-byte slots aligned to 16 bytes, addressed via Q-form
-//! LDR/STR. X23 is pre-loaded from `[X19 + globals_base_off]` at
+//! LDR/STR. X23 is pre-loaded from `[X0 + globals_base_off]` at
 //! the function prologue when the function actually touches a
 //! global op (prescan-driven; functions without globals skip the
 //! X23 load).

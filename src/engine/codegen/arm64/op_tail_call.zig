@@ -165,7 +165,7 @@ pub fn emitDirectReturnCall(
 /// Cross-module `return_call $import` (ADR-0112 Amendment 2026-05-30,
 /// D-206 step 2). Lowered as **call-and-return** through the ADR-0066
 /// bridge thunk (planted in `host_dispatch_base[idx]`, which
-/// save/restores the full pinned cohort X19 + X24-X28 across its BLR)
+/// save/restores `abi.reserved_invariant_gprs` across its BLR)
 /// followed by the normal frame teardown + RET — i.e. the emit shape
 /// of `call $import` immediately followed by the function epilogue:
 ///
@@ -174,9 +174,9 @@ pub fn emitDirectReturnCall(
 ///       result lands in X0/V0 and the thunk restores A's cohort
 ///   (3) frame_teardown (ADD SP + LDP X29,X30) + RET
 ///
-/// NOT frame-consuming on the cross-module path: arm64 MOV-installs
-/// X19 and LOADs X24-X28 from the rt (it does not stack-save the
-/// cohort), so a frame-consuming `BR X16` to a different-rt callee
+/// NOT frame-consuming on the cross-module path: arm64 installs the
+/// cohort from the rt and never stack-saves it, so a
+/// frame-consuming `BR X16` to a different-rt callee
 /// would leave the callee's cohort installed when control returns to
 /// a same-module grand-caller — the D-142 corruption class in
 /// tail-call form. The thunk's call-and-return preserves the cohort.
@@ -240,7 +240,7 @@ fn emitCrossModuleReturnCall(
 /// when control reaches a same-module grand-caller. Whatever
 /// `dispatch[i]` holds returns the cohort intact, but for two
 /// DIFFERENT reasons. A cross-module wasm import holds the ADR-0066
-/// thunk, which STRs X19/X24, BLRs, LDRs them back and RETs
+/// thunk, which STRs the reserved cohort, BLRs, LDRs it back and RETs
 /// (`shared/thunk.zig`) — an explicit save list, load-bearing rather
 /// than incidental: an earlier 56-byte thunk saved only X19, left X24
 /// stale, and surfaced as an `imports.1.wasm` sig mismatch. A WASI

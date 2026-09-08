@@ -165,10 +165,10 @@ const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and bui
         // non-Win64 hosts: const value collapses to void.
     };
 
-/// D-245 — the callee-saved GPRs the JIT prologue clobbers.
-/// The prologue MOV-installs the pinned cohort (arm64 X19/X24-X28; x86_64
-/// RBX/R12-R14 plus the reserved R15) from `rt` WITHOUT stack-saving the caller's values, so a plain
-/// host→JIT `@call` lets ReleaseSafe's optimized host lose any live value it
+/// D-245 — the callee-saved GPRs the JIT prologue clobbers. arm64 installs the
+/// reserved cohort from `rt` and stack-saves none of it; x86_64 pushes its one reserved
+/// register and the regalloc hands RBX/R12-R14 to vregs unsaved. Either way
+/// a plain host→JIT `@call` lets ReleaseSafe's optimized host lose any live value it
 /// kept there → heap-corruption SEGV. `jitTrampoline` clobber-lists this set
 /// so ITS prologue/epilogue saves & restores the cohort around the call,
 /// masking the JIT's clobber. On Win64 the regalloc pool also holds RDI and
@@ -333,7 +333,7 @@ inline fn invokeAndCheckVoid(
     stack_limit_mod.diagOnceWithRt(rt, jit_abi.stack_limit_off, rt.stack_limit);
     if (comptime builtin.target.cpu.arch == .aarch64 and args.len == 0) {
         // D-245: the JIT prologue MOV-installs the pinned cohort (X19 +
-        // X24-X28) from `rt` WITHOUT saving the caller's values
+        // X23-X28) from `rt` WITHOUT saving the caller's values
         // (ADR-0017 / D-210), so it clobbers the host's callee-saved
         // X19-X28 and its epilogue can't restore them. A plain `@call`
         // leaves the host's live X19-X28 unprotected → SEGV in ReleaseSafe.
