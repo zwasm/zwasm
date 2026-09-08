@@ -154,7 +154,9 @@ const x86_64_win64_call_clobbers_all: if (builtin.target.cpu.arch == .x86_64) st
         .xmm15 = true,
         .cc = true,
         .memory = true,
-    } else {};
+    } else {
+        // void: this constant has no value on other targets
+    };
 
 const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) std.builtin.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows)
@@ -207,7 +209,9 @@ const x86_64_win64_jit_cohort: if (builtin.target.cpu.arch == .x86_64) std.built
         .xmm14 = true,
         .xmm15 = true,
         .memory = true,
-    } else {};
+    } else {
+        // void: this constant has no value on other targets
+    };
 
 const x86_64_sysv_jit_cohort: if (builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .x86_64) .{
@@ -217,7 +221,9 @@ const x86_64_sysv_jit_cohort: if (builtin.target.cpu.arch == .x86_64) std.builti
         .r14 = true,
         .r15 = true,
         .memory = true,
-    } else {};
+    } else {
+        // void: this constant has no value on other targets
+    };
 
 pub const jit_cohort_clobbers: if (builtin.target.cpu.arch == .aarch64 or builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .aarch64) .{
