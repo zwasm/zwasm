@@ -478,10 +478,11 @@ pub fn setupRuntimeLinked(
     // D-225 — cross-module FUNC dispatch: for each func import the caller
     // resolved to an exporter JitInstance, emit a cohort-safe bridge thunk
     // (ADR-0066 `emitThunk`: swap runtime_ptr→callee_rt, BLR/CALL callee_entry,
-    // RET) into a per-instance arena and plant the slot in `dispatch[N]`
-    // (func-import-indexed). Without this an imported-func call hits
-    // `hostDispatchTrap`. allocArena flips this thread writable (Mac per-thread
-    // W^X) → finalizeArena flips back; nothing executes in between.
+    // RET; ADR-0228: laid out for the callee's signature) into a per-instance
+    // arena and plant the slot in `dispatch[N]` (func-import-indexed). Without
+    // this an imported-func call hits `hostDispatchTrap`. allocArena flips this
+    // thread writable (Mac per-thread W^X) → finalizeArena flips back; nothing
+    // executes in between.
     if (func_import_targets.len > 0 and num_func_imports > 0) {
         var any_resolved = false;
         for (func_import_targets) |t| {
@@ -493,7 +494,7 @@ pub fn setupRuntimeLinked(
             for (func_import_targets, 0..) |t, j| {
                 if (j >= num_func_imports or t.callee_entry == 0) continue;
                 const slot = shared_thunk.thunkSlot(arena, j);
-                shared_thunk.emitThunk(slot, t.callee_rt, t.callee_entry);
+                shared_thunk.emitThunk(slot, t.callee_rt, t.callee_entry, t.sig);
                 dispatch[j] = @intFromPtr(slot.ptr);
             }
             try shared_thunk.finalizeArena(arena);

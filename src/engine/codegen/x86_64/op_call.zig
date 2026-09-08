@@ -192,16 +192,20 @@ pub fn emitCallIndirectCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Erro
 /// **Scope**: i32 args + i32 / void return only. f32/f64/i64
 /// args + return surface as UnsupportedOp (lifted alongside
 /// 7.7-fp / globals i64 chunks).
-/// ADR-0069 §Phase 2 chunk (b)-e-3 / D-165 close 2026-05-23 —
-/// returns the byte offset within THIS call's outgoing-args
-/// footprint where the MEMORY-class return buffer is placed.
-/// SysV §3.2.3: buffer immediately above the overflow-args region
-/// at the bottom of outgoing-args. Win64 (D-165): buffer at top
-/// of outgoing-args, above shadow(32) + overflow + v128 scratch.
-/// v128 args excluded from SysV path (rare + 16B alignment
-/// complications). For non-MEMORY callees, return value is
-/// unused.
-pub fn computeCallReturnBufferOff(callee_sig: zir.FuncType) u32 {
+/// ADR-0228 — bytes of overflow (stack) arguments this call writes under
+/// `cc`, i.e. the region `marshalCallArgs` fills at `[RSP + shadow ..]` and the
+/// callee reads back at `[RBP + 16 + r15_save + shadow ..]` (`emit.zig`). One
+/// 8-byte word per overflowed scalar. The convention is a parameter so the
+/// bridge thunk can be checked for Win64 from a SysV host (`thunk.zig`);
+/// production callers go through `computeCallOverflowBytes`.
+///
+/// SysV: MEMORY-class callees (results.len > 2) consume 2 slots (RDI=buffer,
+/// RSI=rt) → 4 user int regs (RDX/CX/R8/R9); non-MEMORY 5 (RSI..R9); 8 XMM,
+/// counted separately. v128 is NOT counted on SysV (its overflow takes two
+/// 16-aligned eightbytes and is excluded from this path — see
+/// `marshalCallArgs`). Win64: int, fp and v128 (a hidden pointer) share ONE
+/// position sequence; 3 user positions, 2 when MEMORY-class (D-165).
+pub fn computeCallOverflowBytesCc(comptime cc: abi.Cc, callee_sig: zir.FuncType) u32 {
     var n_int: u32 = 0;
     var n_fp: u32 = 0;
     var n_v128: u32 = 0;
@@ -213,26 +217,45 @@ pub fn computeCallReturnBufferOff(callee_sig: zir.FuncType) u32 {
         }
     }
     const callee_is_memory_class = callee_sig.results.len > 2;
-    return switch (abi.current_cc) {
+    return switch (cc) {
         .sysv => blk: {
-            // SysV: MEMORY callees consume 2 slots (RDI=buffer,
-            // RSI=rt) → 4 user int regs (RDX/RCX/R8/R9); non-MEMORY
-            // 5 user int regs (RSI..R9).
             const n_user_int_regs: u32 = if (callee_is_memory_class) 4 else 5;
             const n_int_overflow: u32 = if (n_int > n_user_int_regs) n_int - n_user_int_regs else 0;
             const n_fp_overflow: u32 = if (n_fp > 8) n_fp - 8 else 0;
             break :blk (n_int_overflow + n_fp_overflow) * 8;
         },
         .win64 => blk: {
-            // Win64 D-165: mirror of SysV with 2-slot shift for
-            // MEMORY (RCX=buffer, RDX=rt) → 2 user int regs
-            // (R8/R9); non-MEMORY 3 user int regs (RDX/R8/R9).
-            // Buffer sits above shadow + overflow + v128 scratch.
-            const n_int_w = n_int + n_v128;
-            const n_total = n_int_w + n_fp;
+            const n_total = n_int + n_v128 + n_fp;
             const n_user_int_regs: u32 = if (callee_is_memory_class) 2 else 3;
             const n_overflow: u32 = if (n_total > n_user_int_regs) n_total - n_user_int_regs else 0;
-            const shadow_and_overflow = abi.current.shadow_space_bytes + n_overflow * 8;
+            break :blk n_overflow * 8;
+        },
+    };
+}
+
+/// `computeCallOverflowBytesCc` for the running convention.
+pub fn computeCallOverflowBytes(callee_sig: zir.FuncType) u32 {
+    return computeCallOverflowBytesCc(abi.current_cc, callee_sig);
+}
+
+/// ADR-0069 §Phase 2 chunk (b)-e-3 / D-165 close 2026-05-23 —
+/// returns the byte offset within THIS call's outgoing-args
+/// footprint where the MEMORY-class return buffer is placed.
+/// SysV §3.2.3: buffer immediately above the overflow-args region
+/// at the bottom of outgoing-args. Win64 (D-165): buffer at top
+/// of outgoing-args, above shadow(32) + overflow + v128 scratch.
+/// The overflow size itself is `computeCallOverflowBytes`'s. For
+/// non-MEMORY callees, return value is unused.
+pub fn computeCallReturnBufferOff(callee_sig: zir.FuncType) u32 {
+    const overflow = computeCallOverflowBytes(callee_sig);
+    return switch (abi.current_cc) {
+        .sysv => overflow,
+        .win64 => blk: {
+            var n_v128: u32 = 0;
+            for (callee_sig.params) |p| {
+                if (p == .v128) n_v128 += 1;
+            }
+            const shadow_and_overflow = abi.current.shadow_space_bytes + overflow;
             const scratch_base = (shadow_and_overflow + 15) & ~@as(u32, 15);
             break :blk scratch_base + n_v128 * 16;
         },
@@ -285,7 +308,7 @@ pub fn emitCall(
         // `fn(rt: *JitRuntime, ...wasm_args) callconv(.c)`).
         //
         //   (see emitImportDispatch for the sequence)
-        try emitImportDispatch(allocator, buf, outgoing_max_bytes, callee_idx);
+        try emitImportDispatch(allocator, buf, outgoing_max_bytes, callee_idx, memory_class_return);
         try captureCallResult(allocator, buf, alloc, pushed_vregs, next_vreg, spill_base_off, callee_sig, memory_class_return, return_buffer_off);
         return;
     }
@@ -336,7 +359,7 @@ pub fn emitCall(
 ///
 ///   MOV RAX, [R15 + host_dispatch_base_off]   ; ptr-of-ptrs
 ///   MOV RAX, [RAX + idx*8]                     ; actual fn / thunk ptr
-///   MOV <entry_arg0>, R15                      ; restore rt_ptr
+///   MOV <rt slot>, R15                         ; restore rt_ptr
 ///   [Win64: SUB RSP, 32 — shadow space]
 ///   CALL RAX
 ///   [Win64: ADD RSP, 32]
@@ -348,18 +371,27 @@ pub fn emitCall(
 /// `return_call` call-and-return path, ADR-0112 Amendment 2026-05-30).
 /// `idx * 8` must fit the disp32 budget (≤ 0x7FFF_FFFF) —
 /// UnsupportedOp otherwise.
+///
+/// The runtime goes where the callee's signature puts it, exactly as the
+/// same-module CALL below does (ADR-0026 / D-165): slot 0 (`entry_arg0`)
+/// normally; slot 1 (RSI / RDX) when the return is MEMORY-class, because
+/// slot 0 then carries the hidden result-buffer pointer `emitCall` LEA'd
+/// just before. Until ADR-0228 this wrote slot 0 unconditionally and
+/// destroyed that pointer (#390 shape 2).
 pub fn emitImportDispatch(
     allocator: Allocator,
     buf: *std.ArrayList(u8),
     outgoing_max_bytes: u32,
     import_idx: u32,
+    memory_class_return: bool,
 ) Error!void {
     const idx_byte_off_u: u64 = @as(u64, import_idx) * 8;
     if (idx_byte_off_u > 0x7FFF_FFFF) return Error.UnsupportedOp;
     const idx_byte_off: i32 = @intCast(idx_byte_off_u);
     try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.rax, abi.runtime_ptr_save_gpr, jit_abi.host_dispatch_base_off).slice());
     try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.rax, .rax, idx_byte_off).slice());
-    try buf.appendSlice(allocator, inst.encMovRR(.q, abi.current.entry_arg0_gpr, abi.runtime_ptr_save_gpr).slice());
+    const rt_dst_gpr: abi.Gpr = if (memory_class_return) abi.current.arg_gprs[1] else abi.current.entry_arg0_gpr;
+    try buf.appendSlice(allocator, inst.encMovRR(.q, rt_dst_gpr, abi.runtime_ptr_save_gpr).slice());
     try emitShadowAlloc(allocator, buf, outgoing_max_bytes);
     try buf.appendSlice(allocator, inst.encCallReg(.rax).slice());
     try emitShadowFree(allocator, buf, outgoing_max_bytes);

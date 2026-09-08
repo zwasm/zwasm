@@ -27,6 +27,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const jit_mem = @import("../../../platform/jit_mem.zig");
+const zir = @import("../../../ir/zir.zig");
 
 const arch_thunk = switch (builtin.target.cpu.arch) {
     .aarch64 => @import("../arm64/thunk.zig"),
@@ -35,15 +36,15 @@ const arch_thunk = switch (builtin.target.cpu.arch) {
 };
 
 /// Bridge thunk byte count for the current target architecture.
-/// One shape for every callee — only the embedded literals differ. That is a
-/// bound, not just a convenience: the bridge takes no signature, so it can
-/// only be right for callees whose arguments and results all travel in
-/// registers (see the per-arch modules).
+/// One shape for every callee: the signature (ADR-0228) changes only
+/// immediates and same-length register numbers, so the arena stays
+/// slot-indexed and `thunkSlot` needs no offset table.
 ///
 /// The per-arch modules own the layout and its byte count; this
 /// facade deliberately does NOT restate either. Both numbers have
-/// moved three times (D-144 grew arm64 56 → 96; D-238 / ADR-0185 a
-/// grew x86_64 27 → 40; #381 grew x86_64 40 → 79) and the copy
+/// moved four times (D-144 grew arm64 56 → 96; D-238 / ADR-0185 a
+/// grew x86_64 27 → 40; #381 grew x86_64 40 → 79 and arm64 96 → 120;
+/// ADR-0228 grew x86_64 79 → 126 and arm64 120 → 168) and the copy
 /// here was stale for two of them.
 ///
 /// What IS this facade's contract, and holds on both arches:
@@ -58,6 +59,11 @@ const arch_thunk = switch (builtin.target.cpu.arch) {
 ///   post-call check.
 /// - An RBP / X29 frame-link makes the thunk frame a chain link for
 ///   the cross-instance EH unwinder (D-238 / ADR-0185 a, ADR-0134 D1).
+/// - The callee's signature decides the frame (ADR-0228, #390): the
+///   importer's overflow arguments are copied into the thunk's own
+///   outgoing area, and a MEMORY-class callee's runtime goes to arg1
+///   so the hidden result pointer in entry-arg0 survives. The sizes
+///   come from the call site's own rule (`op_call.zig`), not a copy.
 pub const thunk_bytes: usize = arch_thunk.thunk_bytes;
 
 /// Emit one bridge thunk into `buf[0..thunk_bytes]`. `buf` MUST
@@ -67,22 +73,26 @@ pub const thunk_bytes: usize = arch_thunk.thunk_bytes;
 /// (c)-2.2 thunk-arena lifecycle chunk).
 ///
 /// `callee_rt`    — the callee instance's `*JitRuntime` cast to
-///                  `usize`, installed in the entry-arg0 register
-///                  before the CALL so the callee's prologue
-///                  snapshots it into its own runtime-ptr register.
-///                  X0 on AArch64; on x86_64 whichever register the
-///                  active convention names (`abi.current.entry_arg0_gpr`
-///                  — RDI under SysV, RCX under Win64, #385).
+///                  `usize`, installed in the register the callee's
+///                  signature reserves for the runtime before the
+///                  CALL, so the callee's prologue snapshots it into
+///                  its own runtime-ptr register. X0 on AArch64; on
+///                  x86_64 whichever register the active convention
+///                  names (`abi.current.entry_arg0_gpr` — RDI under
+///                  SysV, RCX under Win64, #385 — or arg1 when the
+///                  return is MEMORY-class, ADR-0228).
 /// `callee_entry` — the callee's JIT entry point address (the
 ///                  first instruction of the callee function's
 ///                  body in its module's JIT code block).
+/// `sig`          — the CALLEE's signature (`FuncImportTarget.sig`,
+///                  filled by the defining instance).
 ///
 /// The emitted thunk is position-independent on both targets
 /// (AArch64 uses PC-relative ADR; x86_64 embeds the literals
 /// in MOV imm64), so it can be relocated to any RX page
 /// without patching after emit.
-pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize) void {
-    arch_thunk.emitThunk(buf, callee_rt, callee_entry);
+pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize, sig: zir.FuncType) void {
+    arch_thunk.emitThunk(buf, callee_rt, callee_entry, sig);
 }
 
 // ============================================================
@@ -202,10 +212,12 @@ pub fn unfinalizeArena(arena: jit_mem.JitBlock) jit_mem.Error!void {
 
 const testing = std.testing;
 
+const test_sig: zir.FuncType = .{ .params = &.{}, .results = &.{.i32} };
+
 test "thunk_bytes: matches arch-specific constant" {
     switch (builtin.target.cpu.arch) {
-        .aarch64 => try testing.expectEqual(@as(usize, 120), thunk_bytes), // #381: 96→120 (trap relay)
-        .x86_64 => try testing.expectEqual(@as(usize, 79), thunk_bytes), // D-238/ADR-0185 a: 27→40 (RBP frame-link); #381: 40→79 (entry clear + trap relay)
+        .aarch64 => try testing.expectEqual(@as(usize, 168), thunk_bytes), // #381: 96→120 (trap relay); ADR-0228: 120→168 (overflow copy)
+        .x86_64 => try testing.expectEqual(@as(usize, 126), thunk_bytes), // D-238/ADR-0185 a: 27→40 (RBP frame-link); #381: 40→79 (entry clear + trap relay); ADR-0228: 79→126 (overflow copy)
         else => unreachable,
     }
 }
@@ -216,7 +228,7 @@ test "emitThunk: writes exactly thunk_bytes bytes (no over/under-fill)" {
     const guard_byte: u8 = 0xAA;
     var buf: [thunk_bytes + 2]u8 = undefined;
     @memset(&buf, guard_byte);
-    emitThunk(buf[1 .. 1 + thunk_bytes], 0x1234_5678_9ABC_DEF0, 0xFEDC_BA98_7654_3210);
+    emitThunk(buf[1 .. 1 + thunk_bytes], 0x1234_5678_9ABC_DEF0, 0xFEDC_BA98_7654_3210, test_sig);
     try testing.expectEqual(guard_byte, buf[0]);
     try testing.expectEqual(guard_byte, buf[buf.len - 1]);
 }
@@ -224,8 +236,8 @@ test "emitThunk: writes exactly thunk_bytes bytes (no over/under-fill)" {
 test "emitThunk: distinct callee pairs produce distinct thunks" {
     var a: [thunk_bytes]u8 = undefined;
     var b: [thunk_bytes]u8 = undefined;
-    emitThunk(&a, 0x1, 0x2);
-    emitThunk(&b, 0x3, 0x4);
+    emitThunk(&a, 0x1, 0x2, test_sig);
+    emitThunk(&b, 0x3, 0x4, test_sig);
     try testing.expect(!std.mem.eql(u8, &a, &b));
 }
 
@@ -281,8 +293,8 @@ test "thunk arena lifecycle: emit → finalize → bytes readable; unfinalize �
     const ep0: usize = 0x1234_5678_9ABC_DEF0;
     const rt1: usize = 0xAAAA_BBBB_CCCC_DDDD;
     const ep1: usize = 0xEEEE_FFFF_0000_1111;
-    emitThunk(thunkSlot(arena, 0), rt0, ep0);
-    emitThunk(thunkSlot(arena, 1), rt1, ep1);
+    emitThunk(thunkSlot(arena, 0), rt0, ep0, test_sig);
+    emitThunk(thunkSlot(arena, 1), rt1, ep1, test_sig);
 
     try finalizeArena(arena);
 
@@ -293,8 +305,8 @@ test "thunk arena lifecycle: emit → finalize → bytes readable; unfinalize �
     // protection).
     var ref0: [thunk_bytes]u8 = undefined;
     var ref1: [thunk_bytes]u8 = undefined;
-    emitThunk(&ref0, rt0, ep0);
-    emitThunk(&ref1, rt1, ep1);
+    emitThunk(&ref0, rt0, ep0, test_sig);
+    emitThunk(&ref1, rt1, ep1, test_sig);
 
     // Toggle back to writable so we can readback compare. On Mac
     // aarch64 the page is RX after finalize; setWritable flips

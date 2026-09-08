@@ -8,6 +8,7 @@
 //! `src/engine/codegen/arm64/` per ROADMAP §A3 (Zone-2 inter-arch
 //! isolation).
 
+const std = @import("std");
 const inst = @import("inst.zig");
 const reg_class = @import("reg_class.zig");
 
@@ -199,6 +200,19 @@ pub fn encPushR(reg: Gpr) EncodedInsn {
     var enc: EncodedInsn = .{};
     if (reg.extBit() == 1) enc.push(encodeRex(false, 0, 0, 1));
     enc.push(0x50 | @as(u8, reg.low3()));
+    return enc;
+}
+
+/// `PUSH r/m64` (opcode 0xFF /6, mod=00) — push the 64-bit word at
+/// `[base]`. `base` must not need a SIB byte or a displacement in the mod=00
+/// form (RSP/R12 and RBP/R13 do), so it is asserted to be none of those.
+/// Used by the bridge thunk's overflow-argument copy loop (ADR-0228).
+pub fn encPushMem64(base: Gpr) EncodedInsn {
+    std.debug.assert(base.low3() != 4 and base.low3() != 5);
+    var enc: EncodedInsn = .{};
+    if (base.extBit() == 1) enc.push(encodeRex(false, 0, 0, 1));
+    enc.push(0xFF);
+    enc.push(encodeModrm(0b00, 6, base.low3())); // /6 = PUSH
     return enc;
 }
 

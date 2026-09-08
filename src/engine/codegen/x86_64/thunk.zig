@@ -1,135 +1,118 @@
 //! x86_64 cross-module import bridge thunk encoder
-//! (ADR-0066 + Amendment §A1, D-142
-//! fix (A.3) + D-238/ADR-0185 (a) RBP frame-link).
+//! (ADR-0066 + Amendment §A1, D-142 fix (A.3), D-238/ADR-0185 (a) RBP
+//! frame-link, ADR-0228 signature-aware bridge).
 //!
-//! Each thunk is a fixed-size native code snippet (`thunk_bytes`; the count
-//! lives there, not restated here — it has moved three times) that wraps a
-//! call-and-return around the callee's JIT entry. It does three
-//! things: **(1)** establishes a standard `PUSH RBP; MOV RBP,RSP`
-//! frame so the cross-instance EH unwinder can walk THROUGH the
-//! thunk (D-238 — `[RBP,0]`=saved importer RBP, `[RBP,8]`=importer
-//! return address, making the thunk frame a chain link); **(2)**
-//! **saves the caller's R15** (`runtime_ptr_save_gpr` per ADR-0026
-//! Cc-pivot) across the CALL so the importer's runtime-ptr survives
-//! the callee's prologue overwrite (the D-142 cohort discipline);
-//! **(3)** keeps `CALL RAX` 16-byte aligned via an explicit pad.
-//! Mirrors the arm64 `MOV X29,SP` thunk frame-link (`4f73d9ee`).
-//! See `.dev/lessons/2026-05-17-gamma3d-dispatch-write-segv-bisect.md`
-//! for the D-142 chain, `.claude/rules/abi_callee_saved_pinning.md`
-//! for the cohort discipline, ADR-0185 for the EH frame-walk.
+//! Each thunk is a fixed-size native code snippet (`thunk_bytes`) that wraps
+//! a call-and-return around the callee's JIT entry. It: **(1)** establishes
+//! a standard `PUSH RBP; MOV RBP,RSP` frame so the cross-instance EH unwinder
+//! can walk THROUGH the thunk (D-238 — `[RBP,0]`=saved importer RBP,
+//! `[RBP,8]`=importer return address, making the thunk frame a chain link);
+//! **(2)** saves the caller's R15 (`runtime_ptr_save_gpr`) across the CALL;
+//! **(3)** copies the importer's overflow (stack) arguments into its own
+//! outgoing area, so the callee finds them where its prologue looks
+//! (`emit.zig`: `[RBP + 16 + r15_save + 8*slot]`, i.e. directly above the
+//! frame of whoever CALLed it — which is this thunk, not the importer);
+//! **(4)** installs the callee's runtime in the slot the callee's signature
+//! reserves for it — entry-arg0 normally, arg1 when the return is
+//! MEMORY-class and entry-arg0 carries the hidden result-buffer pointer the
+//! importer LEA'd (`op_call.zig:emitCall`); **(5)** clears and relays the
+//! callee's trap fields (#381); **(6)** keeps `CALL RAX` 16-byte aligned.
+//! Mirrors the arm64 thunk (`arm64/thunk.zig`).
 //!
-//! Layout:
+//! Layout (`sh` = `shadow_space_bytes`: 0 SysV / 32 Win64; `n` = overflow
+//! words per `op_call.computeCallOverflowBytesCc`; `ap` = 8 when `n` is
+//! even, 0 when odd; `rt` = the runtime's register, see (4)):
 //!
 //! ```text
 //! offset  encoding                            disassembly
 //! 0x00    55                                  PUSH RBP           ; frame link (saved importer RBP)
 //! 0x01    48 89 E5                            MOV  RBP, RSP      ; [RBP,8] = importer retaddr
 //! 0x04    41 57                               PUSH R15           ; save caller's R15 (= caller_rt)
-//! 0x06    48 83 EC <pad>                      SUB  RSP, pad      ; align (+ Win64 shadow)
-//! 0x0A    48 B{7,9} <callee_rt LE 8 bytes>    MOV  arg0, imm64   ; RDI SysV / RCX Win64
-//! 0x14    45 31 D2                            XOR  R10D, R10D    ; #381 entry clear
-//! 0x17    4C 89 {97,91} <40 LE4>              MOV  [arg0+40], R10; clear callee trap_flag|kind
-//! 0x1E    48 B8 <callee_entry LE 8 bytes>     MOV  RAX, imm64
-//! 0x28    FF D0                               CALL RAX           ; SysV CALL (RSP 16-aligned here)
-//! 0x2A    48 83 C4 <pad>                      ADD  RSP, pad      ; undo pad
-//! 0x2E    41 5F                               POP  R15           ; restore caller's R15
-//! 0x30    49 BB <callee_rt LE 8 bytes>        MOV  R11, imm64    ; #381 trap relay: callee_rt
-//! 0x3A    4D 8B 93 <40 LE4>                   MOV  R10, [R11+40] ; trap_flag|trap_kind pair
-//! 0x41    4D 85 D2                            TEST R10, R10
-//! 0x44    74 07                               JE   +7            ; no trap -> skip
-//! 0x46    4D 89 97 <40 LE4>                   MOV  [R15+40], R10 ; relay onto the CALLER
-//! 0x4D    5D                                  POP  RBP           ; restore importer's RBP
-//! 0x4E    C3                                  RET                ; return to importer
+//! 0x06    48 81 EC <ap LE4>                   SUB  RSP, ap       ; parity pad: n pushes + ap → 16-aligned
+//! 0x0D    4C 8D 9D <16+sh LE4>                LEA  R11, [RBP+16+sh]     ; importer's overflow word 0
+//! 0x14    4C 8D 95 <16+sh+8n LE4>             LEA  R10, [RBP+16+sh+8n]  ; one past its last word
+//! 0x1B    4D 39 DA                            CMP  R10, R11
+//! 0x1E    74 0F                               JE   +15           ; n == 0 → no copy
+//! 0x20    49 81 C2 F8 FF FF FF                ADD  R10, -8       ; loop: previous word
+//! 0x27    41 FF 32                            PUSH qword [R10]   ; copy it down (highest first)
+//! 0x2A    4D 39 DA                            CMP  R10, R11
+//! 0x2D    75 F1                               JNE  -15           ; until word 0 is pushed
+//! 0x2F    48 81 EC <sh LE4>                   SUB  RSP, sh       ; Win64 home area below the copy
+//! 0x36    45 31 D2                            XOR  R10D, R10D    ; #381 entry clear
+//! 0x39    48 B? <callee_rt LE 8 bytes>        MOV  rt, imm64     ; RDI/RCX, or RSI/RDX when MEMORY-class
+//! 0x43    4C 89 ?? <40 LE4>                   MOV  [rt+40], R10  ; clear callee trap_flag|kind
+//! 0x4A    48 B8 <callee_entry LE 8 bytes>     MOV  RAX, imm64
+//! 0x54    FF D0                               CALL RAX           ; RSP ≡ 0 (mod 16) here
+//! 0x56    48 81 C4 <sh+8n+ap LE4>             ADD  RSP, sh+8n+ap ; drop copy + pads
+//! 0x5D    41 5F                               POP  R15           ; restore caller's R15
+//! 0x5F    49 BB <callee_rt LE 8 bytes>        MOV  R11, imm64    ; #381 trap relay: callee_rt
+//! 0x69    4D 8B 93 <40 LE4>                   MOV  R10, [R11+40] ; trap_flag|trap_kind pair
+//! 0x70    4D 85 D2                            TEST R10, R10
+//! 0x73    74 07                               JE   +7            ; no trap -> skip
+//! 0x75    4D 89 97 <40 LE4>                   MOV  [R15+40], R10 ; relay onto the CALLER
+//! 0x7C    5D                                  POP  RBP           ; restore importer's RBP
+//! 0x7D    C3                                  RET                ; return to importer
 //! ```
 //!
-//! 1 + 3 + 2 + 4 + 10 + 3 + 7 + 10 + 2 + 4 + 2 + 10 + 7 + 3 + 2 + 7 + 1 + 1 =
-//! 79 bytes total. The literals are embedded directly in the MOV imm64
-//! instructions (no separate pool), so the thunk is position-independent:
-//! relocate to any byte-aligned RX page without patching.
+//! 126 bytes. Every per-signature difference is an immediate or a register
+//! number of the same encoded length, so ONE `thunk_bytes` serves every
+//! callee and both conventions and the arena stays slot-indexed. The copy
+//! is a loop rather than `n` unrolled moves for the same reason: the arg cap
+//! is 128 (`marshalCallArgs`), and an unrolled copy at that size would be
+//! ~15× this thunk. The literals are embedded in the MOV imm64s (no pool),
+//! so the thunk is position-independent.
 //!
-//! Entry clear (#381): the thunk IS a JIT entry into another instance's
-//! runtime, and it was the only one that did not clear the trap fields on the
-//! way in — `entry.zig` does it for every host-driven entry, precisely so a
-//! previous run's flag cannot be read as this run's (#336 for the kind). The
-//! callee's `trap_flag`/`trap_kind` therefore stayed set after a cross-module
-//! trap, and once the relay below started READING them a later, successful
-//! call into that same exporter reported the old trap. Clearing on the way in
-//! is what makes the relay's read mean "this call".
+//! Overflow copy (ADR-0228, #390 shape 1): the importer wrote overflow word
+//! `k` at `[RSP + sh + 8k]` and CALLed, so at thunk entry it is at
+//! `[RSP + 8 + sh + 8k]` = `[RBP + 16 + sh + 8k]` after the frame link. The
+//! callee reads word `k` at `[RSP_at_CALL + sh + 8k]` (its `[RBP + 16 + 8 +
+//! sh + 8k]` after `PUSH RBP; PUSH R15`). Pushing the importer's words from
+//! the highest down rebuilds the region at the bottom of this frame; the
+//! Win64 home area is then reserved below it. Alignment: entry RSP ≡ 8, two
+//! pushes → ≡ 8, `ap` and `n` pushes together add a multiple of 16 (`ap` is 8
+//! exactly when `n` is even), and `sh` is a multiple of 16 — so the CALL lands
+//! on a 16-byte boundary for every `n`. For `n = 0` this is the pre-ADR-0228
+//! frame (`SUB RSP, sh + 8`), now in two instructions.
 //!
-//! Trap relay (#381): a JIT trap is a FLAG, not an unwind — the trap stub
-//! writes `[R15 + trap_flag_off]` and RETs (`op_control.zig:emitTrapExitStub`),
-//! and every call site re-reads that flag afterwards
-//! (`op_control.zig:emitPostCallTrapCheck`, ADR-0199 / D-468). Inside the
-//! thunk R15 is the CALLEE's runtime, so a trap raised in the callee lands in
-//! a runtime the importer never reads: `wasm_func_call` reported success and
-//! the importer ran on past a call that returned nothing. The five
-//! instructions at 0x26..0x42 copy the callee's flag onto the caller AFTER
-//! `POP R15` has restored `caller_rt`, so the importer's existing post-call
-//! check fires unchanged — no call-site codegen changes.
+//! A SysV v128 overflow argument is not counted by
+//! `computeCallOverflowBytesCc` (two 16-aligned eightbytes; excluded on the
+//! call site too), so the facade still declines any v128 parameter
+//! (`api/instance.zig`). Win64 passes v128 as a hidden pointer, which is a
+//! word like any other, but the decline is uniform.
 //!
-//! `trap_flag` (u32 @40) and `trap_kind` (u32 @44) are adjacent, so ONE
-//! 8-byte load/store carries both; the kind matters because a relay that
-//! moved only the flag would report every cross-module trap as kind 0. The
-//! adjacency is asserted at comptime below.
+//! MEMORY-class (#390 shape 2): `emitCall` LEAs the hidden buffer pointer
+//! into entry-arg0 and `emitImportDispatch` moves the runtime to arg1, as the
+//! same-module CALL does; this thunk writes the callee's runtime to the SAME
+//! slot and never touches entry-arg0, so the pointer reaches the callee's
+//! prologue intact.
 //!
-//! R10/R11 are volatile in BOTH SysV and Win64 and are not in the
-//! reserved-invariant set (`abi.zig:reserved_invariant_gprs` = {R15}), and the
-//! call site reloads its homed caller-saved registers AFTER the call returns
-//! (`op_call.zig:reloadHomedCallerSaved`), so clobbering them here is free.
-//! The return-value registers (RAX/RDX/XMM0/XMM1) are untouched.
+//! Entry clear + trap relay (#381): the thunk is a JIT entry into another
+//! instance's runtime; it zeroes the callee's `trap_flag`/`trap_kind` pair on
+//! the way in (through `rt`, which still holds callee_rt) so the relay reads
+//! THIS call's outcome, and after `POP R15` copies a set pair onto the
+//! CALLER's runtime so the importer's existing post-call check fires
+//! unchanged (`op_control.zig:emitPostCallTrapCheck`). The two u32 fields are
+//! adjacent, so one 8-byte load/store carries both — asserted at comptime.
 //!
-//! **Cc-aware since #385.** The encoder used to write `MOV RDI, callee_rt`
-//! unconditionally — entry-arg0 under SysV only. Under Win64 entry-arg0 is RCX
-//! (`abi.win64.entry_arg0_gpr`) and `op_call.zig:emitImportDispatch` leaves the
-//! IMPORTER's runtime there on the way in, so the callee's prologue snapshotted
-//! the importer's runtime and the exporter's body ran against the wrong
-//! instance's globals, memory, tables and WASI host. Two more Cc gaps rode
-//! along: RDI is callee-saved AND allocatable under Win64
-//! (`abi.win64.allocatable_gprs` adds it for that reason), so writing it
-//! destroyed a live importer register; and the CALL reserved no Win64 shadow
-//! space, whose 32-byte home area starts at this thunk's own RSP and covers
-//! its saved R15, saved RBP and return address.
+//! R10/R11 are volatile in BOTH SysV and Win64, outside the reserved set
+//! (`abi.zig:reserved_invariant_gprs` = {R15}) and reloaded by the call site
+//! after the call (`op_call.zig:reloadHomedCallerSaved`), so the loop and the
+//! relay may clobber them. RAX is loaded last, after the loop. The argument
+//! registers, XMM0..7 and the return registers are untouched.
 //!
-//! All three are one root — a SysV-shaped encoder — and all three go away by
-//! deriving from `abi.current`: the runtime pointer lands in
-//! `entry_arg0_gpr`, RDI is never touched under Win64, and the frame pad is
-//! `shadow_space_bytes + 8` rather than a bare 8. The byte COUNT is identical
-//! under both conventions (the register change keeps every encoding the same
-//! length and the pad is an imm8 either way), so `thunk_bytes` is Cc-agnostic
-//! and the layout below reads for both.
+//! R15: the callee's prologue PUSHes R15 before overwriting it
+//! (`emit.zig` `PUSH RBP; PUSH R15; MOV RBP,RSP`; `frame_teardown.zig` pops
+//! it), so a JIT callee returns it intact and the save here is belt and
+//! braces — it also keeps `[RBP-8]` = caller_rt readable for the unwinder's
+//! sniff (`frame_chain.zig`). arm64 differs: its callee does not save the
+//! cohort, so its thunk must (`arm64/thunk.zig`, #413).
 //!
-//! `emitThunkCc` takes the convention as a comptime parameter so the Win64
-//! layout is testable from a SysV host. It has to be: nothing in the tree
-//! exercised this path on Windows, and the cross-module tests that traverse it
-//! pass there for the wrong reason — `i32.const 42` never touches a runtime,
-//! and a trap raised on the importer's runtime is exactly where the caller
-//! looks. The test that finally told the two apart routes a guest `proc_exit`
-//! through the exporter and reads the WASI host it reached
-//! (`test/c_api_conformance/wasi_exit_code.c`).
-//!
-//! SysV AMD64 §3.2.1 invariant: RBX, RBP, R12..R15 are callee-saved.
-//! v2's JIT prologue (per ADR-0026 Cc-pivot) overwrites R15 with the
-//! new `*JitRuntime` argument WITHOUT first stack-saving the caller's
-//! value. For same-module calls this is a no-op (caller_rt ≡ callee_rt)
-//! but for cross-module bridge thunks caller_rt ≠ callee_rt, so the
-//! bridge thunk pays the save/restore cost on the caller's behalf.
-//! Same discipline pattern as arm64 X19; see ADR-0066 §A1.
-//!
-//! Stack-alignment note (D-238 changed this): both conventions require
-//! `RSP % 16 == 0` at the point of CALL. The importer's CALL into the
-//! thunk leaves entry RSP ≡ 8 mod 16 (pushed return address). The two
-//! pushes (`PUSH RBP` → ≡0, `PUSH R15` → ≡8) would leave `CALL RAX`
-//! misaligned, so the explicit `SUB RSP, pad` restores ≡0 before the
-//! CALL (and `ADD RSP, pad` undoes it after). The OLD 27-byte single-push
-//! thunk aligned by luck (one push: ≡8 → ≡0); adding the RBP frame-link
-//! needs the pad. Load-bearing for SSE/AVX in the callee.
-//!
-//! #385 — `pad` is `shadow_space_bytes + 8`: 8 under SysV, 40 under Win64,
-//! where the low 32 bytes are the home area the callee may spill its four
-//! register args into (Microsoft x64 §"Stack allocation"). Without it that
-//! home area starts at this thunk's RSP and covers its saved R15, saved RBP
-//! and return address. The alignment holds for both because
-//! `shadow_space_bytes` is a multiple of 16 — asserted at comptime below.
+//! **Cc-aware since #385.** Everything convention-dependent derives from the
+//! `abi.sysv` / `abi.win64` tables: the runtime register, the shadow size,
+//! and (through `computeCallOverflowBytesCc`) where the overflow begins.
+//! `emitThunkCc` takes the convention at comptime so the Win64 layout is
+//! testable from a SysV host; the Windows CI leg is the only instrument that
+//! executes it.
 //!
 //! Zone 2 (`src/engine/codegen/x86_64/`) — must NOT import
 //! `src/engine/codegen/arm64/` per ROADMAP §A3.
@@ -137,12 +120,13 @@
 const std = @import("std");
 const inst = @import("inst.zig");
 const abi = @import("abi.zig");
+const op_call = @import("op_call.zig");
 const jit_abi = @import("../shared/jit_abi.zig");
+const zir = @import("../../../ir/zir.zig");
 
 comptime {
-    // #385 — the frame pad below is `shadow_space_bytes + 8`, which lands the
-    // CALL on a 16-byte boundary only while the shadow itself is a multiple
-    // of 16. Both conventions satisfy it today (0 and 32).
+    // The CALL alignment argument above needs a 16-multiple shadow. Both
+    // conventions satisfy it today (0 and 32).
     if (abi.sysv.shadow_space_bytes % 16 != 0 or abi.win64.shadow_space_bytes % 16 != 0)
         @compileError("bridge thunk frame pad assumes a 16-multiple shadow space");
     // The relay below copies `trap_flag` and `trap_kind` as one 8-byte pair.
@@ -152,121 +136,102 @@ comptime {
         @compileError("bridge thunk relays trap_flag|trap_kind as one 8-byte pair; trap_flag_off is no longer 8-aligned");
 }
 
-/// Total thunk size in bytes (PUSH RBP [1] + MOV RBP,RSP [3] + PUSH
-/// R15 [2] + SUB RSP,8 [4] + MOV RDI imm64 [10] + MOV RAX imm64 [10]
-/// + #381 entry clear [3+7 = 10] + MOV RAX imm64 [10] + CALL RAX [2] +
-/// ADD RSP,8 [4] + POP R15 [2] + #381 trap relay [10+7+3+2+7 = 29] +
-/// POP RBP [1] + RET [1] = 79). One shape for every callee, which bounds the
-/// bridge as much as it simplifies it: it takes no signature, so it can only
-/// be right for callees whose arguments and results all travel in registers.
-/// See the signature-agnostic note on `emitThunkCc`.
-pub const thunk_bytes: usize = 79;
+/// Total thunk size in bytes — see the layout table. One shape for every
+/// callee: the signature only changes immediates and same-length register
+/// numbers.
+pub const thunk_bytes: usize = 126;
 
-/// Emit one bridge thunk into `buf[0..thunk_bytes]`. `buf` MUST be
-/// exactly `thunk_bytes` long; the caller is responsible for
-/// allocating it inside an RX-mappable arena.
+/// Emit one bridge thunk into `buf[0..thunk_bytes]` for a callee of
+/// signature `sig`. `buf` MUST be exactly `thunk_bytes` long; the caller is
+/// responsible for allocating it inside an RX-mappable arena.
 ///
-/// `callee_rt`    — the callee instance's `*JitRuntime` value
-///                  to install in the entry-arg0 register before the CALL
-///                  (RDI under SysV, RCX under Win64 — #385).
+/// `callee_rt`    — the callee instance's `*JitRuntime` value, installed in
+///                  the register the callee's signature reserves for it.
 /// `callee_entry` — the callee's JIT entry point.
-pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize) void {
-    emitThunkCc(abi.current_cc, buf, callee_rt, callee_entry);
+/// `sig`          — the CALLEE's signature (`FuncImportTarget.sig`).
+pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize, sig: zir.FuncType) void {
+    emitThunkCc(abi.current_cc, buf, callee_rt, callee_entry, sig);
 }
 
-/// **Signature-agnostic, and the ABI is not.** The bridge receives no callee
-/// signature, so two shapes are wrong through it under either convention, and
-/// both predate this encoder:
-///
-/// - an **overflow stack argument** — the callee reads it at
-///   `[RBP + 16 + …]` relative to ITS frame (`emit.zig`), while the importer
-///   wrote it relative to the importer's RSP; this thunk's own frame sits in
-///   between and shifts it. arm64 is the same shape (`[X29, #16 + …]`).
-/// - a **MEMORY-class return** (results.len > 2) — the hidden result pointer
-///   belongs in entry-arg0 with the runtime moved to arg1, but
-///   `op_call.zig:emitImportDispatch` overwrites entry-arg0 with the runtime
-///   and this encoder overwrites it again.
-///
-/// Fixing either means making bridge emission signature-aware, which changes
-/// D-225's target-resolution contract rather than this encoder's ABI
-/// derivation. Tracked separately.
-///
-/// #385 — the body of `emitThunk`, with the calling convention as a comptime
-/// parameter. Production always passes `abi.current_cc`; the tests pass both,
-/// so the Win64 layout is checked from a SysV host. It has to be checkable
-/// that way — the Windows leg is the only instrument that runs this code, and
-/// the cross-module tests that traverse it pass there even when the callee
-/// receives the wrong runtime.
-pub fn emitThunkCc(comptime cc: abi.Cc, buf: []u8, callee_rt: usize, callee_entry: usize) void {
+/// The body of `emitThunk`, with the calling convention as a comptime
+/// parameter. Production always passes `abi.current_cc`; the tests pass
+/// both, so the Win64 layout is checked from a SysV host (#385).
+pub fn emitThunkCc(comptime cc: abi.Cc, buf: []u8, callee_rt: usize, callee_entry: usize, sig: zir.FuncType) void {
     std.debug.assert(buf.len == thunk_bytes);
     const tables = switch (cc) {
         .sysv => abi.sysv,
         .win64 => abi.win64,
     };
-    // The register the callee's prologue snapshots its runtime pointer from
-    // (`emit.zig`'s `MOV R15, <entry_arg0>`): RDI under SysV, RCX under Win64.
-    const entry_arg0 = tables.entry_arg0_gpr;
-    // Alignment pad + the Win64 home area the callee may spill its register
-    // args into. Never touches RDI under Win64, where it is callee-saved and
-    // in the allocatable pool.
-    const frame_pad: i8 = @intCast(tables.shadow_space_bytes + 8);
-    // PUSH RBP — establish the frame link so the cross-instance EH
-    // unwinder can walk through the thunk (D-238 / ADR-0185 a).
-    @memcpy(buf[0..1], inst.encPushR(.rbp).slice());
-    // MOV RBP, RSP — now [RBP,0]=saved RBP, [RBP,8]=importer retaddr.
-    @memcpy(buf[1..4], inst.encMovRR(.q, .rbp, .rsp).slice());
-    // PUSH R15 — save caller's R15 = caller_rt (D-142 cohort save).
-    @memcpy(buf[4..6], inst.encPushR(.r15).slice());
-    // SUB RSP, pad — alignment (two pushes left RSP ≡ 8; restore ≡ 0 so the
-    // CALL below is 16-aligned) plus the Win64 shadow space (#385).
-    @memcpy(buf[6..10], inst.encSubRSpImm8(frame_pad).slice());
+    const shadow: u32 = tables.shadow_space_bytes;
+    const overflow_bytes: u32 = op_call.computeCallOverflowBytesCc(cc, sig);
+    const n_words: u32 = overflow_bytes / 8;
+    // Parity pad: with `n` pushes, the CALL is 16-aligned exactly when
+    // `ap + 8n ≡ 8 (mod 16)` — see the alignment note in the header.
+    const align_pad: u32 = if (n_words % 2 == 0) 8 else 0;
+    // The register the callee's prologue snapshots its runtime pointer from:
+    // entry-arg0 (RDI / RCX), or arg1 (RSI / RDX) when entry-arg0 carries the
+    // hidden result-buffer pointer (`op_call.zig:emitCall`, MEMORY-class).
+    const rt_gpr: abi.Gpr = if (sig.results.len > 2) tables.arg_gprs[1] else tables.entry_arg0_gpr;
     const flag_off: i32 = jit_abi.trap_flag_off;
-    // MOV <entry_arg0>, callee_rt — the callee's `*JitRuntime` in the register
-    // its prologue reads (#385; RDI under SysV, RCX under Win64).
-    @memcpy(buf[10..20], inst.encMovImm64Q(entry_arg0, callee_rt).slice());
-    // #381 entry clear — zero the callee's trap_flag|trap_kind pair while the
-    // entry-arg0 register still holds callee_rt, so the relay below reads THIS
-    // call's outcome and not a trap the exporter kept from an earlier one.
-    @memcpy(buf[20..23], inst.encXorRR(.d, .r10, .r10).slice());
-    @memcpy(buf[23..30], inst.encStoreR64MemDisp32(.r10, entry_arg0, flag_off).slice());
-    // MOV RAX, callee_entry.
-    @memcpy(buf[30..40], inst.encMovImm64Q(.rax, callee_entry).slice());
-    // CALL RAX — SysV CALL (not JMP); pushes post-CALL RIP so the
-    // callee's RET returns here.
-    @memcpy(buf[40..42], inst.encCallReg(.rax).slice());
-    // ADD RSP, pad — undo the alignment + shadow allocation.
-    @memcpy(buf[42..46], inst.encAddRSpImm8(frame_pad).slice());
-    // POP R15 — RESTORE caller's R15. Everything below relays onto it, so it
-    // must come after this and not before.
-    @memcpy(buf[46..48], inst.encPopR(.r15).slice());
+    // Importer's overflow region, as seen from this frame: word 0 at
+    // `[RBP + 16 + shadow]` (16 = saved RBP + return address).
+    const src_start: i32 = @intCast(16 + shadow);
+    const src_end: i32 = src_start + @as(i32, @intCast(overflow_bytes));
 
-    // #381 trap relay. R11 <- callee_rt (RDI was clobbered by the callee);
-    // R10 <- the callee's trap_flag|trap_kind pair; store it onto the caller
-    // only when the callee actually trapped, so a clean return cannot clear a
-    // flag the caller already holds.
-    const relay_load = inst.encMovR64FromMemDisp32(.r10, .r11, flag_off);
-    const relay_test = inst.encTestRR(.q, .r10, .r10);
+    var off: usize = 0;
+    const put = struct {
+        fn put(b: []u8, o: *usize, e: inst.EncodedInsn) void {
+            @memcpy(b[o.*..][0..e.len], e.slice());
+            o.* += e.len;
+        }
+    }.put;
+
+    // Frame link (D-238 / ADR-0185 a) + caller R15 save (D-142 cohort).
+    put(buf, &off, inst.encPushR(.rbp));
+    put(buf, &off, inst.encMovRR(.q, .rbp, .rsp));
+    put(buf, &off, inst.encPushR(.r15));
+    put(buf, &off, inst.encSubRSpImm32(@intCast(align_pad)));
+    // Overflow copy loop: R11 = word 0, R10 = one past the last word; push
+    // downwards until R10 meets R11. Skipped entirely when n == 0.
+    put(buf, &off, inst.encLeaR64BaseDisp32(.r11, .rbp, src_start));
+    put(buf, &off, inst.encLeaR64BaseDisp32(.r10, .rbp, src_end));
+    const cmp = inst.encCmpRR(.q, .r10, .r11);
+    const step = inst.encAddR64Imm32(.r10, -8);
+    const push = inst.encPushMem64(.r10);
+    const loop_len: usize = step.len + push.len + cmp.len + 2; // + JNE rel8
+    put(buf, &off, cmp);
+    put(buf, &off, inst.encJccRel8(.e, @intCast(loop_len)));
+    const loop_start = off;
+    put(buf, &off, step);
+    put(buf, &off, push);
+    put(buf, &off, cmp);
+    put(buf, &off, inst.encJccRel8(.ne, @intCast(-@as(isize, @intCast(off + 2 - loop_start)))));
+    std.debug.assert(off - loop_start == loop_len);
+    // Win64 home area (#385) below the copied words; SUB RSP, 0 under SysV
+    // keeps the shape fixed.
+    put(buf, &off, inst.encSubRSpImm32(@intCast(shadow)));
+    // #381 entry clear through `rt`, which holds callee_rt until the CALL.
+    put(buf, &off, inst.encXorRR(.d, .r10, .r10));
+    put(buf, &off, inst.encMovImm64Q(rt_gpr, callee_rt));
+    put(buf, &off, inst.encStoreR64MemDisp32(.r10, rt_gpr, flag_off));
+    // CALL the callee (RSP ≡ 0 mod 16 here); its RET returns to the ADD.
+    put(buf, &off, inst.encMovImm64Q(.rax, callee_entry));
+    put(buf, &off, inst.encCallReg(.rax));
+    put(buf, &off, inst.encAddRSpImm32(@intCast(shadow + overflow_bytes + align_pad)));
+    // Restore caller's R15 FIRST — the relay below stores through it.
+    put(buf, &off, inst.encPopR(.r15));
+    // #381 trap relay: R11 <- callee_rt (every arg register was clobbered by
+    // the callee); R10 <- its trap_flag|trap_kind pair; store onto the caller
+    // only when set, so a clean return cannot clear a flag the caller holds.
     const relay_store = inst.encStoreR64MemDisp32(.r10, .r15, flag_off);
-    // JE skips exactly the store — its own encoded length, not a literal.
-    const relay_skip = inst.encJccRel8(.e, @intCast(relay_store.len));
-    var off: usize = 48;
-    for ([_]inst.EncodedInsn{
-        inst.encMovImm64Q(.r11, callee_rt),
-        relay_load,
-        relay_test,
-        relay_skip,
-        relay_store,
-    }) |e| {
-        @memcpy(buf[off..][0..e.len], e.slice());
-        off += e.len;
-    }
-
-    // POP RBP — RESTORE importer's RBP.
-    @memcpy(buf[off..][0..1], inst.encPopR(.rbp).slice());
-    off += 1;
-    // RET — return to importer's call site.
-    @memcpy(buf[off..][0..1], inst.encRet().slice());
-    off += 1;
+    put(buf, &off, inst.encMovImm64Q(.r11, callee_rt));
+    put(buf, &off, inst.encMovR64FromMemDisp32(.r10, .r11, flag_off));
+    put(buf, &off, inst.encTestRR(.q, .r10, .r10));
+    put(buf, &off, inst.encJccRel8(.e, @intCast(relay_store.len)));
+    put(buf, &off, relay_store);
+    // Restore importer's RBP; return to its call site.
+    put(buf, &off, inst.encPopR(.rbp));
+    put(buf, &off, inst.encRet());
     std.debug.assert(off == thunk_bytes);
 }
 
@@ -276,150 +241,223 @@ pub fn emitThunkCc(comptime cc: abi.Cc, buf: []u8, callee_rt: usize, callee_entr
 
 const testing = std.testing;
 
-// #385 — the Win64 layout, checked from whatever host runs the tests. Nothing
-// in the tree exercised this encoder on Windows, and the cross-module tests
-// that traverse it pass there even when the callee receives the importer's
-// runtime (`i32.const 42` touches no runtime; a trap raised on the importer's
-// runtime is where the caller looks). So the encoding is pinned here rather
-// than left to the one CI leg that runs it.
+const i32s = [_]zir.ValType{.i32} ** 12;
+const f64s = [_]zir.ValType{.f64} ** 12;
+const one = [_]zir.ValType{.i32};
+const three = [_]zir.ValType{ .i32, .i32, .i32 };
+
+fn sigOf(params: []const zir.ValType, results: []const zir.ValType) zir.FuncType {
+    return .{ .params = params, .results = results };
+}
+
+// Fixed offsets of the layout table, checked against the encoded lengths so
+// the table in the header cannot drift from the code.
+const off_sub_pad: usize = 6;
+const off_lea_start: usize = 13;
+const off_lea_end: usize = 20;
+const off_je_skip: usize = 30;
+const off_loop: usize = 32;
+const off_sub_shadow: usize = 47;
+const off_mov_rt: usize = 57;
+const off_clear_store: usize = 67;
+const off_mov_rax: usize = 74;
+const off_call: usize = 84;
+const off_add_rsp: usize = 86;
+const off_pop_r15: usize = 93;
+const off_relay: usize = 95;
+
+fn imm32At(buf: []const u8, at: usize) i32 {
+    return @bitCast(std.mem.readInt(u32, buf[at..][0..4], .little));
+}
+
+test "emitThunk: byte-exact layout for known constants (SysV, no overflow, one result)" {
+    var buf: [thunk_bytes]u8 = undefined;
+    const callee_rt: usize = 0xDEADBEEF_CAFEBABE;
+    const callee_entry: usize = 0x12345678_9ABCDEF0;
+    emitThunkCc(.sysv, &buf, callee_rt, callee_entry, sigOf(&.{}, &one));
+
+    try testing.expectEqual(@as(u8, 0x55), buf[0]); // PUSH RBP
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0x89, 0xE5 }, buf[1..4]); // MOV RBP,RSP
+    try testing.expectEqualSlices(u8, &.{ 0x41, 0x57 }, buf[4..6]); // PUSH R15
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0x81, 0xEC, 0x08, 0x00, 0x00, 0x00 }, buf[6..13]); // SUB RSP,8 (n=0 → even → pad 8)
+    try testing.expectEqualSlices(u8, &.{ 0x4C, 0x8D, 0x9D, 0x10, 0x00, 0x00, 0x00 }, buf[13..20]); // LEA R11,[RBP+16]
+    try testing.expectEqualSlices(u8, &.{ 0x4C, 0x8D, 0x95, 0x10, 0x00, 0x00, 0x00 }, buf[20..27]); // LEA R10,[RBP+16]
+    try testing.expectEqualSlices(u8, inst.encCmpRR(.q, .r10, .r11).slice(), buf[27..30]);
+    try testing.expectEqualSlices(u8, &.{ 0x74, 0x0F }, buf[30..32]); // JE +15 → SUB RSP,shadow
+    try testing.expectEqualSlices(u8, &.{ 0x49, 0x81, 0xC2, 0xF8, 0xFF, 0xFF, 0xFF }, buf[32..39]); // ADD R10,-8
+    try testing.expectEqualSlices(u8, &.{ 0x41, 0xFF, 0x32 }, buf[39..42]); // PUSH qword [R10]
+    try testing.expectEqualSlices(u8, inst.encCmpRR(.q, .r10, .r11).slice(), buf[42..45]);
+    try testing.expectEqualSlices(u8, &.{ 0x75, 0xF1 }, buf[45..47]); // JNE -15 → ADD R10,-8
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0x81, 0xEC, 0x00, 0x00, 0x00, 0x00 }, buf[47..54]); // SUB RSP,0 (SysV shadow)
+    try testing.expectEqualSlices(u8, &.{ 0x45, 0x31, 0xD2 }, buf[54..57]); // XOR R10D,R10D
+    // MOV RDI, callee_rt — REX.W (48) + B8+rdi.low3=7=BF + LE imm64
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0xBF, 0xBE, 0xBA, 0xFE, 0xCA, 0xEF, 0xBE, 0xAD, 0xDE }, buf[57..67]);
+    // MOV [RDI+40], R10 (REX.WR=4C, 89, mod=10 reg=r10(2) rm=rdi(7) = 97).
+    try testing.expectEqualSlices(u8, &.{ 0x4C, 0x89, 0x97, 0x28, 0x00, 0x00, 0x00 }, buf[67..74]);
+    // MOV RAX, callee_entry
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0xB8, 0xF0, 0xDE, 0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12 }, buf[74..84]);
+    try testing.expectEqualSlices(u8, &.{ 0xFF, 0xD0 }, buf[84..86]); // CALL RAX
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0x81, 0xC4, 0x08, 0x00, 0x00, 0x00 }, buf[86..93]); // ADD RSP,8
+    try testing.expectEqualSlices(u8, &.{ 0x41, 0x5F }, buf[93..95]); // POP R15
+    // #381 trap relay — MOV R11, callee_rt (REX.WB=49 + B8+r11.low3=3 = BB).
+    try testing.expectEqualSlices(u8, &.{ 0x49, 0xBB, 0xBE, 0xBA, 0xFE, 0xCA, 0xEF, 0xBE, 0xAD, 0xDE }, buf[95..105]);
+    try testing.expectEqualSlices(u8, &.{ 0x4D, 0x8B, 0x93, 0x28, 0x00, 0x00, 0x00 }, buf[105..112]); // MOV R10,[R11+40]
+    try testing.expectEqualSlices(u8, &.{ 0x4D, 0x85, 0xD2 }, buf[112..115]); // TEST R10,R10
+    try testing.expectEqualSlices(u8, &.{ 0x74, 0x07 }, buf[115..117]); // JE +7 (skips the store)
+    try testing.expectEqualSlices(u8, &.{ 0x4D, 0x89, 0x97, 0x28, 0x00, 0x00, 0x00 }, buf[117..124]); // MOV [R15+40],R10
+    try testing.expectEqual(@as(u8, 0x5D), buf[124]); // POP RBP
+    try testing.expectEqual(@as(u8, 0xC3), buf[125]); // RET
+}
+
+// #385 — the Win64 layout, checked from whatever host runs the tests. The
+// Windows leg is the only instrument that executes this encoder.
 test "emitThunkCc: the Win64 layout differs in exactly the Cc-dependent slots (#385)" {
     var sysv: [thunk_bytes]u8 = undefined;
     var win: [thunk_bytes]u8 = undefined;
     const callee_rt: usize = 0xDEADBEEF_CAFEBABE;
     const callee_entry: usize = 0x12345678_9ABCDEF0;
-    emitThunkCc(.sysv, &sysv, callee_rt, callee_entry);
-    emitThunkCc(.win64, &win, callee_rt, callee_entry);
+    const sig = sigOf(&.{}, &one);
+    emitThunkCc(.sysv, &sysv, callee_rt, callee_entry, sig);
+    emitThunkCc(.win64, &win, callee_rt, callee_entry, sig);
 
     // The runtime pointer goes to the register the callee's prologue reads:
     // MOV RDI (48 BF) vs MOV RCX (48 B9), same length, same literal.
-    try testing.expectEqualSlices(u8, &.{ 0x48, 0xBF }, sysv[10..12]);
-    try testing.expectEqualSlices(u8, &.{ 0x48, 0xB9 }, win[10..12]);
-    try testing.expectEqual(callee_rt, std.mem.readInt(u64, win[12..20], .little));
-
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0xBF }, sysv[off_mov_rt..][0..2]);
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0xB9 }, win[off_mov_rt..][0..2]);
+    try testing.expectEqual(callee_rt, std.mem.readInt(u64, win[off_mov_rt + 2 ..][0..8], .little));
     // The #381 entry clear stores through that same register: modrm rm=rdi(7)
     // -> 0x97 vs rm=rcx(1) -> 0x91.
-    try testing.expectEqualSlices(u8, &.{ 0x4C, 0x89, 0x97 }, sysv[23..26]);
-    try testing.expectEqualSlices(u8, &.{ 0x4C, 0x89, 0x91 }, win[23..26]);
-
-    // The frame pad carries the Win64 home area: SUB/ADD RSP, 8 vs 40.
-    try testing.expectEqualSlices(u8, &.{ 0x48, 0x83, 0xEC, 0x08 }, sysv[6..10]);
-    try testing.expectEqualSlices(u8, &.{ 0x48, 0x83, 0xEC, 0x28 }, win[6..10]);
-    try testing.expectEqualSlices(u8, &.{ 0x48, 0x83, 0xC4, 0x08 }, sysv[42..46]);
-    try testing.expectEqualSlices(u8, &.{ 0x48, 0x83, 0xC4, 0x28 }, win[42..46]);
-
+    try testing.expectEqualSlices(u8, &.{ 0x4C, 0x89, 0x97 }, sysv[off_clear_store..][0..3]);
+    try testing.expectEqualSlices(u8, &.{ 0x4C, 0x89, 0x91 }, win[off_clear_store..][0..3]);
+    // The overflow region starts above the Win64 home area: LEAs at +16 vs +48.
+    try testing.expectEqual(@as(i32, 16), imm32At(&sysv, off_lea_start + 3));
+    try testing.expectEqual(@as(i32, 48), imm32At(&win, off_lea_start + 3));
+    // The home area is reserved below the CALL and dropped after it: 0 vs 32,
+    // and the ADD undoes shadow + copy + pad.
+    try testing.expectEqual(@as(i32, 0), imm32At(&sysv, off_sub_shadow + 3));
+    try testing.expectEqual(@as(i32, 32), imm32At(&win, off_sub_shadow + 3));
+    try testing.expectEqual(@as(i32, 8), imm32At(&sysv, off_add_rsp + 3));
+    try testing.expectEqual(@as(i32, 40), imm32At(&win, off_add_rsp + 3));
     // Everything else is Cc-invariant, which is why `thunk_bytes` is one number.
-    try testing.expectEqualSlices(u8, sysv[0..6], win[0..6]); // frame + PUSH R15
-    try testing.expectEqualSlices(u8, sysv[20..23], win[20..23]); // XOR R10D,R10D
-    try testing.expectEqualSlices(u8, sysv[26..30], win[26..30]); // the disp32
-    try testing.expectEqualSlices(u8, sysv[30..42], win[30..42]); // MOV RAX + CALL
-    try testing.expectEqualSlices(u8, sysv[46..thunk_bytes], win[46..thunk_bytes]); // POP + relay + RET
+    try testing.expectEqualSlices(u8, sysv[0..off_lea_start], win[0..off_lea_start]);
+    try testing.expectEqualSlices(u8, sysv[off_je_skip..off_sub_shadow], win[off_je_skip..off_sub_shadow]);
+    try testing.expectEqualSlices(u8, sysv[off_mov_rax..off_add_rsp], win[off_mov_rax..off_add_rsp]);
+    try testing.expectEqualSlices(u8, sysv[off_pop_r15..], win[off_pop_r15..]);
 }
 
-// #385 — RDI is callee-saved under Win64 AND in its allocatable pool
-// (`abi.win64.allocatable_gprs` adds RDI/RSI for exactly that reason), so an
+// #385 — RDI is callee-saved under Win64 AND in its allocatable pool, so an
 // importer may hold a live value there across the call. The Win64 thunk must
-// not write it. Stated as its own property because the byte-exact test above
-// would still pass if a future edit moved an RDI write somewhere else.
+// not write it — with or without a MEMORY-class return.
 test "emitThunkCc: the Win64 thunk never writes RDI (#385)" {
-    var win: [thunk_bytes]u8 = undefined;
-    emitThunkCc(.win64, &win, 0xAAAA_BBBB_CCCC_DDDD, 0xEEEE_FFFF_0000_1111);
-    // `MOV RDI, imm64` = REX.W + B8+rdi.low3(7).
-    try testing.expectEqual(@as(?usize, null), std.mem.find(u8, &win, &[_]u8{ 0x48, 0xBF }));
-    // A store through RDI as base: REX.W|R + 0x89 + mod=10 reg=r10 rm=rdi.
-    try testing.expectEqual(@as(?usize, null), std.mem.find(u8, &win, &[_]u8{ 0x4C, 0x89, 0x97 }));
+    for ([_]zir.FuncType{ sigOf(i32s[0..2], &one), sigOf(i32s[0..6], &three) }) |sig| {
+        var win: [thunk_bytes]u8 = undefined;
+        emitThunkCc(.win64, &win, 0xAAAA_BBBB_CCCC_DDDD, 0xEEEE_FFFF_0000_1111, sig);
+        // `MOV RDI, imm64` = REX.W + B8+rdi.low3(7).
+        try testing.expectEqual(@as(?usize, null), std.mem.find(u8, &win, &[_]u8{ 0x48, 0xBF }));
+        // A store through RDI as base: REX.W|R + 0x89 + mod=10 reg=r10 rm=rdi.
+        try testing.expectEqual(@as(?usize, null), std.mem.find(u8, &win, &[_]u8{ 0x4C, 0x89, 0x97 }));
+    }
 }
 
-// #385 — the Win64 CALL must leave 32 bytes below it for the callee's home
-// area. Without them the callee's spill of its four register args starts at
-// this thunk's RSP and covers its saved R15, saved RBP and return address.
-test "emitThunkCc: Win64 reserves the 32-byte home area below the CALL (#385)" {
+// ADR-0228 / #390 shape 2 — a MEMORY-class callee gets its runtime in arg1
+// and entry-arg0 (the hidden buffer pointer the importer LEA'd) is left
+// alone: no MOV into it, no store through it.
+test "emitThunkCc: a MEMORY-class callee's runtime goes to arg1 and entry-arg0 is untouched (#390)" {
+    const sig = sigOf(i32s[0..2], &three);
+    var sysv: [thunk_bytes]u8 = undefined;
     var win: [thunk_bytes]u8 = undefined;
-    emitThunkCc(.win64, &win, 0, 0);
-    const pad: i8 = @bitCast(win[9]); // the imm8 of SUB RSP, imm8
-    try testing.expect(pad >= @as(i8, @intCast(abi.win64.shadow_space_bytes)));
-    // …and the pad still lands the CALL on a 16-byte boundary: entry RSP ≡ 8,
-    // two pushes → ≡ 8, minus the pad → ≡ 0.
-    try testing.expectEqual(@as(i32, 0), @mod(8 - @as(i32, pad), 16));
-    try testing.expectEqual(win[9], win[45]); // the ADD undoes exactly the SUB
+    emitThunkCc(.sysv, &sysv, 0x1111_2222_3333_4444, 0x5555_6666_7777_8888, sig);
+    emitThunkCc(.win64, &win, 0x1111_2222_3333_4444, 0x5555_6666_7777_8888, sig);
+    // SysV: MOV RSI (48 BE), clear through RSI (modrm 0x96); never RDI.
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0xBE }, sysv[off_mov_rt..][0..2]);
+    try testing.expectEqualSlices(u8, &.{ 0x4C, 0x89, 0x96 }, sysv[off_clear_store..][0..3]);
+    try testing.expectEqual(@as(?usize, null), std.mem.find(u8, &sysv, &[_]u8{ 0x48, 0xBF }));
+    try testing.expectEqual(@as(?usize, null), std.mem.find(u8, &sysv, &[_]u8{ 0x4C, 0x89, 0x97 }));
+    // Win64: MOV RDX (48 BA), clear through RDX (modrm 0x92); never RCX.
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0xBA }, win[off_mov_rt..][0..2]);
+    try testing.expectEqualSlices(u8, &.{ 0x4C, 0x89, 0x92 }, win[off_clear_store..][0..3]);
+    try testing.expectEqual(@as(?usize, null), std.mem.find(u8, &win, &[_]u8{ 0x48, 0xB9 }));
+    try testing.expectEqual(@as(?usize, null), std.mem.find(u8, &win, &[_]u8{ 0x4C, 0x89, 0x91 }));
+    // The register choice is the only difference from the non-MEMORY thunk.
+    var plain: [thunk_bytes]u8 = undefined;
+    emitThunkCc(.sysv, &plain, 0x1111_2222_3333_4444, 0x5555_6666_7777_8888, sigOf(i32s[0..2], &one));
+    try testing.expectEqualSlices(u8, plain[0..off_mov_rt], sysv[0..off_mov_rt]);
+    try testing.expectEqualSlices(u8, plain[off_mov_rax..], sysv[off_mov_rax..]);
 }
 
-// These three assert the SysV bytes by construction, so they pin the
-// convention explicitly (#385): `emitThunk` follows `abi.current_cc`, and
-// on the Windows leg that is Win64 — where `48 BF` (MOV RDI) and
-// `48 83 EC 08` (SUB RSP,8) are exactly the bytes this PR replaces.
-test "emitThunk: byte-exact layout for known constants (D-238 RBP frame-link)" {
+// ADR-0228 / #390 shape 1 — the overflow copy is sized by the call site's
+// own rule, the parity pad keeps the CALL 16-aligned for every `n`, and the
+// ADD after the CALL drops exactly what was pushed and reserved.
+test "emitThunkCc: the overflow copy follows computeCallOverflowBytesCc, and the CALL stays 16-aligned (#390)" {
+    inline for ([_]abi.Cc{ .sysv, .win64 }) |cc| {
+        const shadow: i32 = @intCast(switch (cc) {
+            .sysv => abi.sysv.shadow_space_bytes,
+            .win64 => abi.win64.shadow_space_bytes,
+        });
+        // int-only, fp-only, mixed and MEMORY-class shapes, up to 12 of a kind.
+        var n_params: usize = 0;
+        while (n_params <= 12) : (n_params += 1) {
+            for ([_]zir.FuncType{
+                sigOf(i32s[0..n_params], &one),
+                sigOf(f64s[0..n_params], &one),
+                sigOf(i32s[0..n_params], &three),
+            }) |sig| {
+                var buf: [thunk_bytes]u8 = undefined;
+                emitThunkCc(cc, &buf, 0, 0, sig);
+                const overflow: i32 = @intCast(op_call.computeCallOverflowBytesCc(cc, sig));
+                const n: i32 = @divExact(overflow, 8);
+                const pad: i32 = if (@mod(n, 2) == 0) 8 else 0;
+                try testing.expectEqual(pad, imm32At(&buf, off_sub_pad + 3));
+                try testing.expectEqual(16 + shadow, imm32At(&buf, off_lea_start + 3));
+                try testing.expectEqual(16 + shadow + overflow, imm32At(&buf, off_lea_end + 3));
+                try testing.expectEqual(shadow, imm32At(&buf, off_sub_shadow + 3));
+                try testing.expectEqual(shadow + overflow + pad, imm32At(&buf, off_add_rsp + 3));
+                // Entry RSP ≡ 8; PUSH RBP, PUSH R15, SUB pad, n pushes, SUB shadow.
+                const rsp_mod_16: i32 = @mod(8 - 8 - 8 - pad - 8 * n - shadow, 16);
+                try testing.expectEqual(@as(i32, 0), rsp_mod_16);
+            }
+        }
+    }
+    // A mixed SysV shape overflows per class: 6 ints (1 over) + 9 f64 (1 over).
+    var mixed: [15]zir.ValType = undefined;
+    for (0..6) |k| mixed[k] = .i32;
+    for (6..15) |k| mixed[k] = .f64;
     var buf: [thunk_bytes]u8 = undefined;
-    const callee_rt: usize = 0xDEADBEEF_CAFEBABE;
-    const callee_entry: usize = 0x12345678_9ABCDEF0;
-    emitThunkCc(.sysv, &buf, callee_rt, callee_entry);
-
-    try testing.expectEqual(@as(u8, 0x55), buf[0]); // PUSH RBP
-    try testing.expectEqualSlices(u8, &.{ 0x48, 0x89, 0xE5 }, buf[1..4]); // MOV RBP,RSP
-    try testing.expectEqualSlices(u8, &.{ 0x41, 0x57 }, buf[4..6]); // PUSH R15
-    try testing.expectEqualSlices(u8, &.{ 0x48, 0x83, 0xEC, 0x08 }, buf[6..10]); // SUB RSP,8
-    // MOV RDI, callee_rt — REX.W (48) + B8+rdi.low3=7=BF + LE imm64
-    try testing.expectEqualSlices(u8, &.{
-        0x48, 0xBF,
-        0xBE, 0xBA,
-        0xFE, 0xCA,
-        0xEF, 0xBE,
-        0xAD, 0xDE,
-    }, buf[10..20]);
-    // #381 entry clear — XOR R10D,R10D (REX.RB=45) then MOV [RDI+40], R10
-    // (REX.WR=4C, 89, mod=10 reg=r10(2) rm=rdi(7) = 97).
-    try testing.expectEqualSlices(u8, &.{ 0x45, 0x31, 0xD2 }, buf[20..23]);
-    try testing.expectEqualSlices(u8, &.{ 0x4C, 0x89, 0x97, 0x28, 0x00, 0x00, 0x00 }, buf[23..30]);
-    // MOV RAX, callee_entry — REX.W (48) + B8+rax.low3=0=B8 + LE imm64
-    try testing.expectEqualSlices(u8, &.{
-        0x48, 0xB8,
-        0xF0, 0xDE,
-        0xBC, 0x9A,
-        0x78, 0x56,
-        0x34, 0x12,
-    }, buf[30..40]);
-    try testing.expectEqualSlices(u8, &.{ 0xFF, 0xD0 }, buf[40..42]); // CALL RAX
-    try testing.expectEqualSlices(u8, &.{ 0x48, 0x83, 0xC4, 0x08 }, buf[42..46]); // ADD RSP,8
-    try testing.expectEqualSlices(u8, &.{ 0x41, 0x5F }, buf[46..48]); // POP R15
-    // #381 trap relay — MOV R11, callee_rt (REX.WB=49 + B8+r11.low3=3 = BB).
-    try testing.expectEqualSlices(u8, &.{
-        0x49, 0xBB,
-        0xBE, 0xBA,
-        0xFE, 0xCA,
-        0xEF, 0xBE,
-        0xAD, 0xDE,
-    }, buf[48..58]);
-    // MOV R10, [R11+40] — REX.WRB=4D, 8B, mod=10 reg=r10(2) rm=r11(3) = 93.
-    try testing.expectEqualSlices(u8, &.{ 0x4D, 0x8B, 0x93, 0x28, 0x00, 0x00, 0x00 }, buf[58..65]);
-    try testing.expectEqualSlices(u8, &.{ 0x4D, 0x85, 0xD2 }, buf[65..68]); // TEST R10,R10
-    try testing.expectEqualSlices(u8, &.{ 0x74, 0x07 }, buf[68..70]); // JE +7 (skips the store)
-    // MOV [R15+40], R10 — REX.WRB=4D, 89, mod=10 reg=r10(2) rm=r15(7) = 97.
-    try testing.expectEqualSlices(u8, &.{ 0x4D, 0x89, 0x97, 0x28, 0x00, 0x00, 0x00 }, buf[70..77]);
-    try testing.expectEqual(@as(u8, 0x5D), buf[77]); // POP RBP
-    try testing.expectEqual(@as(u8, 0xC3), buf[78]); // RET
+    emitThunkCc(.sysv, &buf, 0, 0, sigOf(&mixed, &one));
+    try testing.expectEqual(@as(i32, 16 + 16), imm32At(&buf, off_lea_end + 3));
+    // The same shape under Win64 shares positions: 15 - 3 = 12 words.
+    emitThunkCc(.win64, &buf, 0, 0, sigOf(&mixed, &one));
+    try testing.expectEqual(@as(i32, 48 + 96), imm32At(&buf, off_lea_end + 3));
 }
 
-// #381 — the relay's two load-bearing properties, stated apart from the
-// byte-exact layout so a future reshuffle that keeps the bytes but loses the
-// meaning still fails: the JE skips EXACTLY the store (a wrong displacement
-// lands mid-instruction), and the store targets the CALLER's runtime register
-// while the load reads the callee's, at the SAME offset.
+// The two short branches land on instruction boundaries: the JE skips the
+// whole loop (onto `SUB RSP, shadow`), the JNE returns to its first
+// instruction. A wrong displacement lands mid-instruction.
+test "emitThunkCc: the copy loop's branches land on instruction boundaries" {
+    var buf: [thunk_bytes]u8 = undefined;
+    emitThunkCc(.sysv, &buf, 0, 0, sigOf(i32s[0..7], &one));
+    const je_disp: i8 = @bitCast(buf[off_je_skip + 1]);
+    try testing.expectEqual(off_sub_shadow, off_je_skip + 2 + @as(usize, @intCast(je_disp)));
+    const jne_at = off_sub_shadow - 2;
+    const jne_disp: i8 = @bitCast(buf[jne_at + 1]);
+    try testing.expectEqual(off_loop, @as(usize, @intCast(@as(isize, @intCast(jne_at + 2)) + jne_disp)));
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0x81, 0xEC }, buf[off_sub_shadow..][0..3]); // SUB RSP, imm32
+}
+
+// #381 — the relay's two load-bearing properties, apart from the byte-exact
+// layout: the JE skips EXACTLY the store, and the store targets the CALLER's
+// runtime register while the load reads the callee's, at the SAME offset.
 test "emitThunk: the trap relay reads the callee's runtime and writes the caller's (#381)" {
     var buf: [thunk_bytes]u8 = undefined;
-    emitThunkCc(.sysv, &buf, 0, 0);
+    emitThunkCc(.sysv, &buf, 0, 0, sigOf(&.{}, &one));
     const flag_off: i32 = jit_abi.trap_flag_off;
     const load = inst.encMovR64FromMemDisp32(.r10, .r11, flag_off);
     const store = inst.encStoreR64MemDisp32(.r10, .r15, flag_off);
     const skip = inst.encJccRel8(.e, @intCast(store.len));
-    // The relay tail runs from `POP R15` to `POP RBP`, in this exact order.
-    const relay_start = 48 + inst.encMovImm64Q(.r11, 0).len;
-    // The entry clear zeroes the CALLEE's pair before the call, so the read
-    // above cannot see a trap the exporter kept from an earlier call.
-    try testing.expectEqualSlices(u8, inst.encXorRR(.d, .r10, .r10).slice(), buf[20..23]);
-    try testing.expectEqualSlices(
-        u8,
-        inst.encStoreR64MemDisp32(.r10, .rdi, flag_off).slice(),
-        buf[23..30],
-    );
+    const relay_start = off_relay + inst.encMovImm64Q(.r11, 0).len;
+    // The entry clear zeroes the CALLEE's pair before the call.
+    try testing.expectEqualSlices(u8, inst.encXorRR(.d, .r10, .r10).slice(), buf[off_sub_shadow + 7 ..][0..3]);
+    try testing.expectEqualSlices(u8, inst.encStoreR64MemDisp32(.r10, .rdi, flag_off).slice(), buf[off_clear_store..][0..7]);
     try testing.expectEqualSlices(u8, load.slice(), buf[relay_start..][0..load.len]);
     try testing.expectEqualSlices(u8, inst.encTestRR(.q, .r10, .r10).slice(), buf[relay_start + load.len ..][0..3]);
     try testing.expectEqualSlices(u8, skip.slice(), buf[relay_start + load.len + 3 ..][0..skip.len]);
@@ -428,56 +466,16 @@ test "emitThunk: the trap relay reads the callee's runtime and writes the caller
     try testing.expectEqual(@as(usize, thunk_bytes - 2), relay_start + load.len + 3 + skip.len + store.len);
 }
 
-test "emitThunk: round-trip literals at zero" {
-    var buf: [thunk_bytes]u8 = undefined;
-    emitThunkCc(.sysv, &buf, 0, 0);
-    // Frame + opcode bytes unchanged; both imm64 fields all-zero.
-    try testing.expectEqual(@as(u8, 0x55), buf[0]);
-    try testing.expectEqualSlices(u8, &.{ 0x48, 0x89, 0xE5 }, buf[1..4]);
-    try testing.expectEqualSlices(u8, &.{ 0x41, 0x57 }, buf[4..6]);
-    try testing.expectEqualSlices(u8, &.{ 0x48, 0x83, 0xEC, 0x08 }, buf[6..10]);
-    try testing.expectEqual(@as(u8, 0x48), buf[10]);
-    try testing.expectEqual(@as(u8, 0xBF), buf[11]);
-    try testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, buf[12..20], .little));
-    try testing.expectEqual(@as(u8, 0x48), buf[30]);
-    try testing.expectEqual(@as(u8, 0xB8), buf[31]);
-    try testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, buf[32..40], .little));
-    try testing.expectEqualSlices(u8, &.{ 0xFF, 0xD0 }, buf[40..42]);
-    try testing.expectEqualSlices(u8, &.{ 0x48, 0x83, 0xC4, 0x08 }, buf[42..46]);
-    try testing.expectEqualSlices(u8, &.{ 0x41, 0x5F }, buf[46..48]);
-    // #381 relay: the callee_rt literal is the third imm64 field and zeroes too.
-    try testing.expectEqualSlices(u8, &.{ 0x49, 0xBB }, buf[48..50]);
-    try testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, buf[50..58], .little));
-    try testing.expectEqual(@as(u8, 0x5D), buf[thunk_bytes - 2]);
-    try testing.expectEqual(@as(u8, 0xC3), buf[thunk_bytes - 1]);
-}
-
-test "emitThunk: opcode/frame bytes constant across two distinct callees" {
-    var buf_a: [thunk_bytes]u8 = undefined;
-    var buf_b: [thunk_bytes]u8 = undefined;
-    emitThunk(&buf_a, 0x1111_2222_3333_4444, 0x5555_6666_7777_8888);
-    emitThunk(&buf_b, 0xAAAA_BBBB_CCCC_DDDD, 0xEEEE_FFFF_0000_1111);
-    // Frame + opcode bytes at fixed offsets must match across thunks
-    // (ADR-0066 §A1 + ADR-0185 a invariant); only the imm64 literals differ.
-    try testing.expectEqualSlices(u8, buf_a[0..12], buf_b[0..12]); // frame + MOV RDI opcode
-    try testing.expectEqualSlices(u8, buf_a[20..32], buf_b[20..32]); // entry clear + MOV RAX opcode
-    try testing.expectEqualSlices(u8, buf_a[40..48], buf_b[40..48]); // CALL + ADD + POP R15
-    try testing.expectEqualSlices(u8, buf_a[58..79], buf_b[58..79]); // relay + POP RBP + RET
-}
-
 test "emitThunk: D-142 R15 save/restore + D-238 RBP frame around CALL" {
     // Structural assertion: a standard frame (PUSH RBP / MOV RBP,RSP /
     // POP RBP) wraps the body, and PUSH R15 / POP R15 wraps the CALL RAX.
-    // These are the load-bearing invariants — RBP frame for the EH unwind
-    // (D-238), R15 save for the cohort (D-142). A future encoder reshuffle
-    // that drops either fails here before the runtime SEGV / unwind break.
     var buf: [thunk_bytes]u8 = undefined;
-    emitThunk(&buf, 0xDEADBEEF, 0xCAFEBABE);
+    emitThunk(&buf, 0xDEADBEEF, 0xCAFEBABE, sigOf(i32s[0..9], &one));
     try testing.expectEqual(@as(u8, 0x55), buf[0]); // PUSH RBP
     try testing.expectEqualSlices(u8, &.{ 0x48, 0x89, 0xE5 }, buf[1..4]); // MOV RBP,RSP
     try testing.expectEqualSlices(u8, &.{ 0x41, 0x57 }, buf[4..6]); // PUSH R15
-    try testing.expectEqualSlices(u8, &.{ 0xFF, 0xD0 }, buf[40..42]); // CALL RAX
-    try testing.expectEqualSlices(u8, &.{ 0x41, 0x5F }, buf[46..48]); // POP R15
+    try testing.expectEqualSlices(u8, &.{ 0xFF, 0xD0 }, buf[off_call..][0..2]); // CALL RAX
+    try testing.expectEqualSlices(u8, &.{ 0x41, 0x5F }, buf[off_pop_r15..][0..2]); // POP R15
     try testing.expectEqual(@as(u8, 0x5D), buf[thunk_bytes - 2]); // POP RBP
     try testing.expectEqual(@as(u8, 0xC3), buf[thunk_bytes - 1]); // RET
 }

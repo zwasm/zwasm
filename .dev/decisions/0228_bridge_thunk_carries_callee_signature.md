@@ -43,13 +43,18 @@ optimisation layered on a correct thunk, not a replacement for one.
 ## Decision
 
 1. **`FuncImportTarget` carries the callee's signature.** The exporter fills
-   `sig` from its own `func_sigs`. The thunk is emitted per signature: it
-   copies the importer's overflow arguments into its own outgoing area and,
-   for a MEMORY-class result, keeps the hidden pointer in entry-arg0 and moves
-   the runtime to arg1. Overflow sizes and classes come from the call site's
-   own functions (`computeCallReturnBufferOff`, `computeCallOverflowBytes`),
-   not from a copy. Static `call` and the table / funcref routes go through
-   the same thunk.
+   `sig` from its own `func_sigs`. The thunk is emitted for that signature:
+   it copies the importer's overflow arguments into its own outgoing area
+   and, for a MEMORY-class result, keeps the hidden pointer in entry-arg0 and
+   moves the runtime to arg1 (arm64: X0 stays, X8 is untouched). Overflow
+   sizes come from the call site's own rule (`computeCallOverflowBytesCc` on
+   x86_64, `computeCallOverflowBytes` on arm64), not from a copy. Static
+   `call` and the table / funcref routes go through the same thunk. The
+   thunk stays **fixed-size**: the copy is a pointer-walk loop and every
+   per-signature difference is an immediate or a same-length register
+   number, so the arena stays slot-indexed (`thunkSlot`) and no offset table
+   is needed. Measured: 126 bytes on x86_64 (was 79) and 168 on arm64 (was
+   120); an unrolled copy at the 128-argument cap would be ~15× that.
 2. **Resolution folds at link time.** `JitInstance` keeps the targets it was
    linked with (`import_targets`). `exportedFuncTarget` on an import index
    returns that entry, so C's thunk names A directly; nothing is walked at
@@ -96,13 +101,17 @@ optimisation layered on a correct thunk, not a replacement for one.
 
 - **Positive**: three-module chains link; overflow arguments and MEMORY-class
   results cross the bridge; the #391 budget copy goes away with the fence.
-- **Negative**: the thunk grows and becomes per-signature (size measured in
-  the second PR); `FuncImportTarget.sig` borrows the exporter's compile arena,
-  which the retention statement already requires to be alive.
+- **Negative**: the thunk grows (x86_64 79 → 126, arm64 120 → 168 bytes) and
+  spends a short loop per call on the copy; `FuncImportTarget.sig` borrows
+  the exporter's compile arena, which the retention statement already
+  requires to be alive.
 - **Neutral / follow-ups**: the interpreter's binder has the same missing fold
   for a re-exported import (its thunk runs the re-exporter's `unreachable`
-  placeholder) — tracked separately. `fromCompiled` (`.cwasm`) still links no
-  cross-module imports.
+  placeholder) — tracked separately. A cross-module throw through the bridge
+  faults unless the caller registered its instances with `eh_registry`, which
+  `initLinked` never does — tracked separately. `fromCompiled` (`.cwasm`)
+  still links no cross-module imports. A v128 parameter is still declined
+  (SysV's overflow rule excludes it).
 
 ## References
 
