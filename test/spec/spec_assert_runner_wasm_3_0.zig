@@ -572,10 +572,10 @@ const LvKnown = struct {
 /// lines, taken one module per run. Re-take the table, do not edit it by
 /// hand.
 const lv_known_x86_64_sysv: []const LvKnown = &.{
-    // Func 70 alone, of the 25 the seed had: `drop` after the `.end` of a
-    // dead body (`unreachable`, `br_table`, `end`), liveness depth 0 against
-    // the emit's 1 — not the `.end` / `return` shape #398 took, and not the
-    // capture shape of #400's rows. Its ledger line is not written yet.
+    // #400's dead-body `br_table` row (func 70, the one line of the seed's
+    // 25 that #398 left): `drop` after the `.end` of a dead body
+    // (`unreachable`, `br_table`, `end`), liveness depth 0 against the
+    // emit's 1.
     .{ .key = "memory64/br_table/br_table.0.wasm", .count = 1 },
     // #400 `br_on_cast` row, funcs 3–6; 5 and 6 fire as 3 and 4 do (equal
     // depth, liveness one vreg above the emit). +2 on the seed: the `.end`
