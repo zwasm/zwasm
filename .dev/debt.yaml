@@ -3073,8 +3073,8 @@ conventions: |-
   - `B-hardening` — steady-state hardening / natural-discharge: external-blocked
     (upstream Zig / 3-host) + future-phase rows; a debt sweep re-walks
     each barrier and discharges what dissolved. **Default** for open rows.
-  - `C-dogfooding` — cw consumer-side dogfooding DONE (ADR-0168); further signal
-    only if the cw-from-scratch redesign adds a v2 consumer (D-264).
+  - `C-dogfooding` — cw consumer-side dogfooding DONE (ADR-0168); no further
+    signal will come — ClojureWasm wound down 2026-09-06 (#407). Front closed.
   - `D-wasi03` — **WASI 0.3 (Preview 3) campaign** (D-335): ratified 2026-06-11,
     CM-async-based, builds on the shipped CM substrate. Actionable feature front.
   - `future-bucket` — genuinely-future, demand-driven, NO version gate

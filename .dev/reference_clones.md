@@ -15,7 +15,6 @@ material, not project state.
 | Path                                             | What it is                                                             |
 |--------------------------------------------------|------------------------------------------------------------------------|
 | `~/Documents/MyProducts/zwasm/`                  | THIS repo (v2 on `main`; v1 frozen at tag `v1.11.1` in the same history — **read v1, never copy**) |
-| `~/Documents/MyProducts/ClojureWasm/`            | cljw — downstream consumer (pins zwasm by git tag-hash) + procedural template this project mirrored |
 | `~/Documents/OSS/wasmtime/`                      | wasmtime + cranelift (winch / regalloc2 reference)                     |
 | `~/Documents/OSS/zware/`                         | Zig idiomatic interpreter                                              |
 | `~/Documents/OSS/wasm3/`                         | wasm3 (M3 IR + tail-call dispatch interpreter)                         |

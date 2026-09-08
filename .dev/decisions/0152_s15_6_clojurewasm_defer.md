@@ -1,6 +1,6 @@
 # 0152 — §15.6 ClojureWasm CI validation deferred (consumer is genuinely-later external work)
 
-- **Status**: Accepted (2026-06-04; autonomous-with-ADR per ADR-0132 carve-out + user confirmation)
+- **Status**: Closed 2026-09-08 (the barrier will not dissolve — ClojureWasm wound down, #407; §15.6 closed as won't-happen)
 - **Date**: 2026-06-04
 - **Author**: claude (autonomous, /continue §15.6 Step 0 survey) — user-confirmed the consumer state
 - **Tags**: Phase 15, ClojureWasm, external-dependency, defer, ADR-0132 carve-out
@@ -58,3 +58,10 @@ than an intra-ROADMAP forward-ref, since the timeline is not ours to drive.
   (parity-vs-v1 + W45 loop measurement, D-263). Phase 15 can close with §15.6 forward-ref'd.
 - When cw-v1 lands its wasm-FFI consumer, D-264's barrier dissolves → re-open §15.6 (or fold it
   into a post-v0.1.0 integration phase, decided then with the real consumer in hand).
+
+## Revision history
+
+| Date       | SHA          | Note                                                           |
+|------------|--------------|----------------------------------------------------------------|
+| 2026-06-04 | `<backfill>` | Initial accepted version.                                      |
+| 2026-09-08 | `<backfill>` | Closed: barrier void (#407); §15.6 row closed as won't-happen. |

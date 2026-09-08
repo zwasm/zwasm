@@ -1,8 +1,10 @@
 # Org transfer plan — `clojurewasm/zwasm` → a dedicated `zwasm` org
 
-> **Doc-state**: ACTIVE. Written 2026-08-12, before the transfer. Phases 1-3
-> are done (the repo lives at `zwasm/zwasm`); phases 4-5 (tap split, cljw
-> wind-down) are still open. Retire it (ARCHIVED) once they are ticked too.
+> **Doc-state**: ARCHIVED-IN-PLACE 2026-09-08. Phases 1-4 and step 11 are done — the repo
+> lives at `zwasm/zwasm`, `zwasm/homebrew-tap` serves the formula (v2.6.0 today),
+> `clojurewasm/homebrew-tap` carries `tap_migrations.json`, and cljw's `build.zig.zon` pins
+> v2.5.0. Step 12 (cljw's own announcement) will not happen as planned; #407 is the notice
+> zwasm has. Do not edit.
 
 ## Context
 
