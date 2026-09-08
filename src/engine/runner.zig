@@ -514,14 +514,19 @@ fn resolveLenientEntryIdx(allocator: Allocator, wasm_bytes: []const u8) Error!?u
 /// the interp (`runWasmCaptured`) + the AOT CWAS lane: `--invoke NAME` → `_start`
 /// → `main` → first func export, else INSTANTIATE-ONLY (exit 0, wasmtime-aligned)
 /// — instead of strict `_start`-only → ExportNotFound on no-`_start` modules
-/// (D-284 nbody). A void entry runs via `callVoidNoArgs` (proc_exit code flows
-/// through the host); a no-arg `() -> i32` entry runs via `callI32NoArgs` and its
-/// i32 lands in `result_out` — it is NOT an exit status. The returned u32 is
-/// `JitRuntime.jit_executed_flag` on every path, so the process exit code comes
-/// from `proc_exit` (or 0), never from the entry's result (#220 (c)). Other
-/// default-entry shapes (params / non-i32 result) have no args to supply →
-/// instantiate-only. `--invoke` of an unsupported sig keeps the existing
-/// UnsupportedEntrySignature contract.
+/// (D-284 nbody). The resolved entry is gated by ARITY, then by whether a call
+/// helper exists for its shape: `() -> ()` runs via `callVoidNoArgs` (proc_exit
+/// code flows through the host); `() -> T` runs for T = i32 / i64 / f32 / f64
+/// (`dispatchNoArg`) and v128 (`callV128NoArgs`), the value landing in
+/// `result_out` — it is NOT an exit status; every other shape (params, ≥2
+/// results) runs through the buffer-write thunk when `args` covers the params,
+/// `multi_out` can hold the results and `hasThunk` says one was emitted. The
+/// returned u32 is `JitRuntime.jit_executed_flag` on every path, so the process
+/// exit code comes from `proc_exit` (or 0), never from the entry's result
+/// (#220 (c)). What is left — a lone ref result, params `args` does not cover
+/// (a default entry supplies none), a multi-result shape without a thunk — is
+/// instantiate-only for a default entry and UnsupportedEntrySignature for
+/// `--invoke`.
 /// ADR-0179 #3a-4 / D-314 — sandboxing limits the CLI threads into the JIT
 /// run path (the facade stays interp-only by design, so the JIT runner arms
 /// its JitRuntime directly). All optional; defaults = unmetered/uncapped.
