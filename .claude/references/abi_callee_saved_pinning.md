@@ -18,13 +18,15 @@ called function MUST preserve them across the call. The v2
 project pins some of these regs for project-specific invariant
 use:
 
-- **arm64**: X19 (runtime_ptr) + X24..X28 (typeidx_base /
-  table_size / funcptr_base / mem_limit / vm_base) per
-  ADR-0017 + ADR-0018. **Full six-register cohort** —
-  D-144 (2026-05-18) found §A1's X19-only thunk fix was
-  insufficient because X24-X28 are equally pinned-callee-
-  saved and equally violated by the same prologue shape.
-  The cohort is canonical in `abi.zig::reserved_invariant_gprs`.
+- **arm64**: X19 (runtime_ptr) + X23 (globals_base, ADR-0027) +
+  X24..X28 (typeidx_base / table_size / funcptr_base / mem_limit /
+  vm_base) per ADR-0017 + ADR-0018. D-144 (2026-05-18) found §A1's
+  X19-only thunk fix was insufficient because X24-X28 are equally
+  pinned-callee-saved and equally violated by the same prologue shape.
+  **The cohort is canonical in `abi.zig::reserved_invariant_gprs`, and a
+  boundary must read it rather than restate it** — #413 (2026-09-08) is
+  the second time an enumeration written beside a boundary went stale,
+  X23 having joined the array after the bridge thunk's list was written.
 - **x86_64**: R15 = runtime-ptr save (per ADR-0026 Cc-pivot).
   Single-register pinning — other invariants reload from
   `[R15 + offset]` at point of use (so cross-module bridge

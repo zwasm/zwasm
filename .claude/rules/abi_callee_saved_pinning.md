@@ -21,8 +21,8 @@ paths:
 
 ## Invariant (PRESERVE — cost 6-cycle root-causes D-142 / D-206 / D-210)
 
-- The **pinned runtime cohort** — arm64 **X19** + **X24–X28**; x86_64 **R15** —
-  is installed by the prologue (ADR-0017 sub-2d-ii: MOV-install from the rt, not
+- The **pinned runtime cohort** is `abi.zig::reserved_invariant_gprs` — read it,
+  do not restate it. It is installed by the prologue (ADR-0017 sub-2d-ii: MOV-install from the rt, not
   stack-save). Any path that **clobbers** a cohort reg across a call to a
   DIFFERENT runtime (cross-module bridge thunk, frame-consuming tail-jump
   `BR X16` / `JMP R11`) MUST restore the cohort first, else a same-module
@@ -32,14 +32,20 @@ paths:
   `return_call` stays **call-and-return** via the bridge thunk, NOT proper-
   tail-call (D-210).
 - Bridge thunk (`shared/thunk.zig:emitThunk`) is call-and-return: swap
-  runtime_ptr → callee_rt, `BLR`/`CALL` callee_entry, `RET`. Cohort-safe by
-  construction.
+  runtime_ptr → callee_rt, `BLR`/`CALL` callee_entry, `RET`. Its arm64 save
+  block iterates the array (ADR-0228 D4); a copy of the cohort written beside
+  a boundary is what #413 was.
 
 ## Enforcement
 
-Reviewer discipline (no mechanical gate) + the 3-host gate (cohort corruption
-surfaces as a cross-module SEGV / wrong value, esp. x86_64 SysV). Cross-module +
-tail-call fixtures are the regression net.
+`arm64/thunk.zig`'s "the save set is abi.reserved_invariant_gprs, not a copy of
+it" test decodes the emitted thunk and fails when a reserved register is not
+stored before the BLR and loaded after it. It runs on any host, and what it
+catches is an emit that goes back to writing the cohort out — a reservation
+added to the array is carried by the iteration itself. Everything else is reviewer discipline + the 3-host gate
+(cohort corruption surfaces as a cross-module SEGV / wrong value, esp. x86_64
+SysV). Cross-module + tail-call fixtures are the regression net; a cohort
+register only observable through globals needs both modules to use them (#413).
 
 ## Key cases
 

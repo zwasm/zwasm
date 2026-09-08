@@ -150,6 +150,13 @@ comptime {
         @compileError("bridge thunk relays trap_flag|trap_kind as one 8-byte pair; they are no longer adjacent");
     if (jit_abi.trap_flag_off % 8 != 0)
         @compileError("bridge thunk relays trap_flag|trap_kind as one 8-byte pair; trap_flag_off is no longer 8-aligned");
+    // The PUSH/POP pair below names R15 rather than iterating the cohort, which
+    // holds only while the cohort is R15. The arm64 encoder can iterate; this
+    // one cannot, because each register has its own encoding under two
+    // conventions. So pin the set instead — an addition that reached the array
+    // and not this file is what #413 was, and it was silent for 3.5 months.
+    if (abi.reserved_invariant_gprs.len != 1 or abi.reserved_invariant_gprs[0] != abi.runtime_ptr_save_gpr)
+        @compileError("bridge thunk saves runtime_ptr_save_gpr alone; the x86_64 reserved-invariant set has grown");
 }
 
 /// Total thunk size in bytes (PUSH RBP [1] + MOV RBP,RSP [3] + PUSH

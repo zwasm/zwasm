@@ -1019,6 +1019,39 @@ test "cross-module JIT CALL: A.test calls imported B.get → 42 (D-206 harness b
     try testing.expectEqual(@as(u32, 42), try h.callTest());
 }
 
+// #413 — the same harness, with globals on both sides. The importer reads its
+// own global AFTER the call, which is the only shape that observes the
+// bridge's save set: `globals_base` is loaded once in the prologue and a
+// same-module callee can never change it, so nothing but a cross-module return
+// can leave the register holding another instance's base.
+test "cross-module JIT CALL: the importer's globals_base survives the callee (#413)" {
+    const gpa = testing.allocator;
+    // (module (global $g (mut i32) (i32.const 7))
+    //         (func (export "get") (result i32) global.get $g))
+    const b_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+        0x00, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x06, 0x06, 0x01, 0x7f, 0x01,
+        0x41, 0x07, 0x0b, 0x07, 0x07, 0x01, 0x03, 0x67, 0x65, 0x74, 0x00, 0x00,
+        0x0a, 0x06, 0x01, 0x04, 0x00, 0x23, 0x00, 0x0b,
+    };
+    // (module (import "b" "get" (func $get (result i32)))
+    //         (global $g (mut i32) (i32.const 5))
+    //         (func (export "test") (result i32) call $get drop global.get $g))
+    const a_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+        0x00, 0x01, 0x7f, 0x02, 0x09, 0x01, 0x01, 0x62, 0x03, 0x67, 0x65, 0x74,
+        0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x06, 0x06, 0x01, 0x7f, 0x01, 0x41,
+        0x05, 0x0b, 0x07, 0x08, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x00, 0x01,
+        0x0a, 0x09, 0x01, 0x07, 0x00, 0x10, 0x00, 0x1a, 0x23, 0x00, 0x0b,
+    };
+
+    var h = try CrossModuleHarness.link(gpa, &a_bytes, &b_bytes, "get");
+    defer h.deinit(gpa);
+    // 5 is the importer's global. 7 is the exporter's, read through a base the
+    // bridge failed to restore.
+    try testing.expectEqual(@as(u32, 5), try h.callTest());
+}
+
 // D-225 — the same cross-module CALL, but wired through the PUBLIC
 // `initLinked` + `exportedFuncTarget` path (the spec runner uses this):
 // the importer's setup resolves the func-import target + emits the bridge
