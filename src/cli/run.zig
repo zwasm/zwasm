@@ -15,6 +15,11 @@
 //!   - guest returns normally     → 0
 //!   - guest calls `proc_exit(N)` → N
 //!   - guest traps (other)        → 1
+//!
+//! CLI behaviour rule (issue #256): where the CLI has a wasmtime
+//! equivalent and we have not written down a reason to differ, we
+//! match wasmtime. `argv[0]` = the wasm file's base name is one
+//! instance; `main.zig` builds it.
 
 const std = @import("std");
 

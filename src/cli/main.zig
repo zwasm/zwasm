@@ -315,7 +315,7 @@ pub fn main(init: std.process.Init) !void {
             // bytes. Both the `.cwasm` and `.wasm` paths consume it.
             var argv_list: std.ArrayList([]const u8) = .empty;
             defer argv_list.deinit(gpa);
-            try argv_list.append(gpa, path);
+            try argv_list.append(gpa, std.Io.Dir.path.basename(path));
             while (arg_it.next()) |a| try argv_list.append(gpa, a);
 
             // The guest's fd 0 (#257): a core module reads the process stdin

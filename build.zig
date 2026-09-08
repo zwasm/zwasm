@@ -1270,6 +1270,26 @@ pub fn build(b: *std.Build) void {
     const test_cli_stdin_step = b.step("test-cli-stdin", "Pipe bytes through `zwasm run` and check the guest reads them on fd 0 (issue #257)");
     test_cli_stdin_step.dependOn(&run_cli_stdin.step);
 
+    // `zig build test-cli-argv0` — issue #256: the REAL CLI must hand the
+    // guest the wasm file's base name as argv[0], whatever path it was given
+    // (wasmtime's default). Subprocess for the same reason as above: only
+    // `main.zig` builds argv from the path.
+    const cli_argv0_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/wasi/argv0_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const cli_argv0_exe = b.addExecutable(.{
+        .name = "zwasm-cli-argv0",
+        .root_module = cli_argv0_mod,
+    });
+    const run_cli_argv0 = b.addRunArtifact(cli_argv0_exe);
+    run_cli_argv0.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
+    run_cli_argv0.addArg(b.pathFromRoot("test/wasi/argv0_echo.wasm"));
+    run_cli_argv0.has_side_effects = true;
+    const test_cli_argv0_step = b.step("test-cli-argv0", "Run `zwasm run` on a path with a directory component and check the guest's argv[0] is the base name (issue #256)");
+    test_cli_argv0_step.dependOn(&run_cli_argv0.step);
+
     // `zig build test-wasi-p1-official` — the OFFICIAL wasi-testsuite
     // wasm32-wasip1 corpus (D-582). Deliberately NOT in `test-all` yet: the
     // corpus is not green on every OS (D-583 carries the live count — no copy
@@ -1620,6 +1640,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_fuzz_exec.step); // D-469 interp-vs-JIT exec differential (exec_seed; toolchain-free, 3-host)
     test_all_step.dependOn(&run_aot_diff.step); // AOT campaign Phase II cross-process .wasm-vs-.cwasm differential (toolchain-free, 3-host)
     test_all_step.dependOn(&run_cli_stdin.step); // issue #257 CLI stdin → guest fd 0
+    test_all_step.dependOn(&run_cli_argv0.step); // issue #256 CLI argv[0] = base name
     test_all_step.dependOn(&run_wasi_p1.step);
     // §9.7 / 7.8 row close (D-045 chunks 1-14 fully discharged):
     // wire test-spec-assert into test-all on ALL hosts. Three-host
