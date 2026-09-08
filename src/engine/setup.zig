@@ -15,6 +15,7 @@ const entry = @import("codegen/shared/entry.zig");
 const linker = @import("codegen/shared/linker.zig");
 const canonical_type = @import("codegen/shared/canonical_type.zig");
 const rv = @import("runner_validate.zig");
+const zir = @import("../ir/zir.zig");
 
 const runner_mod = @import("runner.zig");
 const instantiate = @import("../runtime/instance/instantiate.zig");
@@ -35,9 +36,17 @@ const CompiledWasm = runner_mod.CompiledWasm;
 /// emits a cohort-safe bridge thunk (ADR-0066 `emitThunk`) into its own
 /// thunk arena and plants the slot in `dispatch[func_import_idx]`. A
 /// zero `callee_entry` = unresolved (slot stays `hostDispatchTrap`).
+///
+/// ADR-0228 — `sig` is the CALLEE's signature, filled by the exporter from
+/// its own `func_sigs` (the module that defines the function, whichever
+/// module re-exported it on the way). The bridge thunk needs it to lay out
+/// what the ABI does not pass in registers (#390); it borrows the exporter's
+/// compile arena, which lives as long as the exporter (see
+/// `JitInstance.exportedFuncTarget`). Empty when unresolved.
 pub const FuncImportTarget = struct {
     callee_rt: usize = 0,
     callee_entry: usize = 0,
+    sig: zir.FuncType = .{ .params = &.{}, .results = &.{} },
 };
 
 /// D-478 — a resolved EMBEDDER host-func import (`wasm_func_new`), in

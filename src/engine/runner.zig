@@ -998,6 +998,14 @@ pub const JitInstance = struct {
     /// `Runtime.interrupt_flag_storage`. Stack-allocated callers that drive
     /// interruption via an external atomic (`setInterruptFlag`) leave it unused.
     interrupt_flag: std.atomic.Value(u32) = .init(0),
+    /// ADR-0228 — the resolved func-import targets `initLinked` was handed,
+    /// in func-import order (an owned copy; `fromCompiled` links nothing, so
+    /// it is empty there). Kept so `exportedFuncTarget` can answer for a
+    /// RE-EXPORTED import (#388): the entry it returns is the one this
+    /// instance resolved to, i.e. the defining module's, so a chain A→B→C
+    /// gives C a thunk into A directly — link-time folding, nothing walked at
+    /// call time.
+    import_targets: []setup_mod.FuncImportTarget = &.{},
 
     pub fn init(allocator: Allocator, wasm_bytes: []const u8) Error!JitInstance {
         return initLinked(allocator, wasm_bytes, &.{}, &.{}, &.{}, &.{});
@@ -1021,8 +1029,10 @@ pub const JitInstance = struct {
     ) Error!JitInstance {
         var compiled = try compileWasm(allocator, wasm_bytes);
         errdefer compiled.deinit(allocator);
-        const owned = try setup_mod.setupRuntimeLinked(allocator, &compiled, wasm_bytes, imported_global_vals, func_import_targets, tag_import_targets, host_func_targets);
-        return .{ .compiled = compiled, .owned = owned, .wasm_bytes = wasm_bytes };
+        var owned = try setup_mod.setupRuntimeLinked(allocator, &compiled, wasm_bytes, imported_global_vals, func_import_targets, tag_import_targets, host_func_targets);
+        errdefer owned.deinit(allocator);
+        const import_targets = try allocator.dupe(setup_mod.FuncImportTarget, func_import_targets);
+        return .{ .compiled = compiled, .owned = owned, .wasm_bytes = wasm_bytes, .import_targets = import_targets };
     }
 
     /// ADR-0203 stage 2 — build a JitInstance from an ALREADY-BUILT
@@ -1040,6 +1050,7 @@ pub const JitInstance = struct {
     }
 
     pub fn deinit(self: *JitInstance, allocator: Allocator) void {
+        if (self.import_targets.len > 0) allocator.free(self.import_targets);
         self.owned.deinit(allocator);
         self.compiled.deinit(allocator);
     }
@@ -1058,16 +1069,32 @@ pub const JitInstance = struct {
     }
 
     /// D-225 — resolve THIS instance as a cross-module export target: the
-    /// (callee_rt, callee_entry) an importer plants into a bridge thunk for
-    /// `(import "<this>" "<name>" (func …))`. Null if `name` isn't an
+    /// (callee_rt, callee_entry, sig) an importer plants into a bridge thunk
+    /// for `(import "<this>" "<name>" (func …))`. Null if `name` isn't an
     /// exported func. `callee_rt` is the address of this instance's pinned
     /// JitRuntime (stable — JitInstance must not move while referenced).
+    ///
+    /// ADR-0228 — a re-exported IMPORT answers with the target this instance
+    /// itself resolved (`import_targets`), so the importer's thunk enters the
+    /// defining module directly. Null while that import is unresolved — a
+    /// WASI or embedder host func is planted in `dispatch`, not here, and
+    /// re-exporting one stays unsupported. The returned target names the
+    /// defining instance's runtime, arena and module bytes, not this one's:
+    /// the defining instance must outlive every importer that took it, and
+    /// nothing counts the takers. Today the C API keeps that by never freeing
+    /// a JIT instance before its store (`api/instance.zig` `parkJitAsZombie`
+    /// / `Module.jit_borrowers`); other callers keep it by hand.
     pub fn exportedFuncTarget(self: *JitInstance, allocator: Allocator, name: []const u8) ?setup_mod.FuncImportTarget {
         const idx = findExportFunc(allocator, self.wasm_bytes, name) catch return null;
-        if (idx < self.compiled.num_imports) return null;
+        if (idx < self.compiled.num_imports) {
+            if (idx >= self.import_targets.len) return null;
+            const t = self.import_targets[idx];
+            return if (t.callee_entry != 0) t else null;
+        }
         return .{
             .callee_rt = @intFromPtr(&self.owned.rt),
             .callee_entry = self.compiled.module.entryAddr(idx),
+            .sig = self.compiled.func_sigs[idx],
         };
     }
 
