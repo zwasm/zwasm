@@ -76,6 +76,32 @@ fn checkTrapParity(gpa: std.mem.Allocator, io: std.Io, cli: []const u8, wasm_pat
     return failed;
 }
 
+/// Item (d) — the fixture's only export takes a parameter and there is no
+/// `--invoke`. The report must not name the flag, and a marshalling failure is
+/// not a trap, so it must not print as one; with `--invoke f` the flag is fair
+/// to name, but the second half still holds. Returns the number of lanes that
+/// failed.
+fn checkParamsEntryWording(gpa: std.mem.Allocator, io: std.Io, cli: []const u8, wasm_path: []const u8) !u32 {
+    const label = std.Io.Dir.path.basename(wasm_path);
+    var failed: u32 = 0;
+
+    var plain = try runCli(gpa, io, &.{ cli, "run", wasm_path });
+    defer plain.deinit(gpa);
+    const plain_ok = plain.exit != 0 and
+        std.mem.find(u8, plain.stderr, "--invoke") == null and
+        !std.mem.startsWith(u8, plain.stderr, "zwasm: trapped in");
+    report(label, ".wasm", plain, plain_ok);
+    if (!plain_ok) failed += 1;
+
+    var named = try runCli(gpa, io, &.{ cli, "run", "--invoke", "f", wasm_path });
+    defer named.deinit(gpa);
+    const named_ok = named.exit != 0 and !std.mem.startsWith(u8, named.stderr, "zwasm: trapped in");
+    report(label, "--invoke f", named, named_ok);
+    if (!named_ok) failed += 1;
+
+    return failed;
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const gpa = init.gpa;
@@ -112,6 +138,10 @@ pub fn main(init: std.process.Init) !u8 {
         return 1;
     }
     failed += try checkTrapParity(gpa, io, cli, start_multi_trap, start_multi_trap_cwasm);
+
+    const param_only = try std.fmt.allocPrint(gpa, "{s}/param_only.wasm", .{fixture_dir});
+    defer gpa.free(param_only);
+    failed += try checkParamsEntryWording(gpa, io, cli, param_only);
 
     return if (failed != 0) 1 else 0;
 }

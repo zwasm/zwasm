@@ -658,13 +658,28 @@ pub fn runWasmCapturedFull(
     var result_text: std.ArrayList(u8) = .empty;
     defer result_text.deinit(alloc);
     const trap = invoke_args_mod.invokeFormatted(alloc, entry_fn, invoke_args, &result_text) catch |err| {
-        const msg = switch (err) {
-            error.ArgCountMismatch => "--invoke: argument count does not match the export's parameters",
-            error.UnsupportedArgType => "--invoke: unsupported argument type (CLI args are i32/i64/f32/f64 only)",
-            error.InvalidArgValue => "--invoke: could not parse an argument for the export's parameter type",
-            else => "--invoke: argument marshalling failed",
-        };
-        diagnostic.setDiag(.execute, .binding_error, .unknown, "{s}", .{msg});
+        // Marshalling fails before the call, so it is not a trap: the phase is
+        // `.unknown`, which `diag_print` renders as `error in`, not `trapped
+        // in`. Without `--invoke` the lenient chain resolved an export whose
+        // params nothing supplies — name the export, not the absent flag
+        // (#220 (d)). Only the count mismatch means that; `invokeFormatted`
+        // can still fail after that check (result buffer, output writes).
+        if (invoke_name == null and err == error.ArgCountMismatch) {
+            const n = paramCount(entry_fn);
+            diagnostic.setDiag(.unknown, .binding_error, .unknown, "the default entry '{s}' takes {d} parameter{s} and none were supplied", .{
+                instance.exports_storage[entry_idx].name,
+                n,
+                if (n == 1) "" else "s",
+            });
+            return err;
+        }
+        switch (err) {
+            error.ArgCountMismatch => diagnostic.setDiag(.unknown, .binding_error, .unknown, "--invoke: argument count does not match the export's parameters", .{}),
+            error.UnsupportedArgType => diagnostic.setDiag(.unknown, .binding_error, .unknown, "--invoke: unsupported argument type (CLI args are i32/i64/f32/f64 only)", .{}),
+            error.InvalidArgValue => diagnostic.setDiag(.unknown, .binding_error, .unknown, "--invoke: could not parse an argument for the export's parameter type", .{}),
+            // Reachable with or without `--invoke`, so no flag in the text.
+            else => diagnostic.setDiag(.unknown, .binding_error, .unknown, "argument marshalling failed before the call: {s}", .{@errorName(err)}),
+        }
         return err;
     };
     if (trap == null) {
@@ -737,6 +752,15 @@ fn writeResultText(io: std.Io, capture: ?*std.ArrayList(u8), alloc: std.mem.Allo
 /// writer fails (closed pipe, OOM during print), there is nothing
 /// meaningful to do beyond the caller's exit-code path — the print
 /// errors are intentionally swallowed.
+/// Param arity of an exported func, for the no-`--invoke` marshalling report.
+/// 0 when the type cannot be read — the message then still names the entry.
+fn paramCount(f: *const wasm_c_api.Func) usize {
+    const ft = wasm_c_api.wasm_func_type(f) orelse return 0;
+    defer wasm_c_api.wasm_functype_delete(ft);
+    const params = wasm_c_api.wasm_functype_params(ft) orelse return 0;
+    return params.size;
+}
+
 fn surfaceTrap(io: std.Io, trap: anytype) void {
     // Production CLI diagnostic. Under `zig build test` this writes to the shared
     // harness stderr (no test asserts the text; they check exit codes / trap
@@ -892,6 +916,19 @@ test "runWasmCapturedOpts: --invoke add with a bad arg count is a loud binding_e
     try testing.expectError(error.ArgCountMismatch, result);
     const diag = diagnostic.lastDiagnostic().?;
     try testing.expectEqual(diagnostic.Kind.binding_error, diag.kind);
+    // A marshalling failure is not a trap: no phase that renders `trapped in`.
+    try testing.expectEqual(diagnostic.Phase.unknown, diag.phase);
+}
+
+test "runWasmCapturedOpts: a default entry with params names the export, not --invoke (#220 (d))" {
+    // No `_start`/`main`, so the lenient chain resolves `add` and has nothing
+    // to hand its two params.
+    const result = runWasmCapturedOpts(testing.allocator, testing.io, &add_wasm, &.{}, null, null, &.{}, &.{}, &.{}, null, .{});
+    try testing.expectError(error.ArgCountMismatch, result);
+    const diag = diagnostic.lastDiagnostic().?;
+    try testing.expectEqual(diagnostic.Kind.binding_error, diag.kind);
+    try testing.expectEqual(diagnostic.Phase.unknown, diag.phase);
+    try testing.expectEqualStrings("the default entry 'add' takes 2 parameters and none were supplied", diag.message());
 }
 
 // (module (func (export "a") (result i32) i32.const 42)) — zero params,
