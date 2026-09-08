@@ -1,9 +1,10 @@
 # 0226 — The liveness parity check gates the JIT spec lane, with a named list
 
-- **Status**: Proposed (gate definition per ADR-0212 D1 — lands in one PR
-  with the lane it defines, and flips to Accepted on the maintainer's word
-  on that PR, the way ADR-0225 did on #380; D1's placement is the part that
-  needs it, D3 is apparatus-internal)
+- **Status**: Accepted (2026-09-06 — maintainer sign-off on PR #402, review
+  `5125447983`: "A — block from day one". That letter is the PR body's option
+  A, which is D1 as written; the ADR's own Alternative A below, report first,
+  is the one not taken. D1–D4 as written; D3 is apparatus-internal and needed
+  none. Landed 2026-09-08 through the merge queue, `a49bbd594`..`b56b645ee`.)
 - **Date**: 2026-09-05
 - **Author**: Junji Takakura
 - **Tags**: ci, jit, liveness, gate, ratchet
@@ -36,10 +37,30 @@ That pair is the check's own overhead inside one lane, not what this decision
 costs; D1 carries that figure. The ten commonest ops the divergence is first
 seen at: `end` 21, `return` 16,
 `i32.const` 8, `i32.add` 4, `drop` 4, `call_ref` 4, `unreachable` 3,
-`struct.get_s` 2, `br_on_cast` 2, `block` 2 (66 of the 69). #269 measured 178 on the spec
-corpus; #398 (open) takes the `end` / `return` class next. Every residual so
-far has been found by hand and filed as its own issue — eight numbers for
-one root, which #400 now holds as a table.
+`struct.get_s` 2, `br_on_cast` 2, `block` 2 (66 of the 69). #269 measured
+178 on the spec corpus; #398 (landed 2026-09-07) takes the `end` / `return`
+class next. Every residual so far has been found by hand and filed as its own
+issue — eight numbers for one root, which #400 now holds as a table.
+
+**Re-take, 2026-09-08** (#402, after #398 landed 2026-09-07): **45 lines
+over 8 modules**. The x86_64 SysV table was re-taken 2026-09-07 at `main`
+`5e989fe22` (`fee98fca4`): `try_table.1` and `br_on_non_null.1` fell to 0 and
+left, `br_table.0` fell 25 → 1, and the four `gc` rows rose (13 → 15, 1 → 2,
+11 → 18, 2 → 4). The twelve lines the rises add are not new funcs: ten are
+`end` lines, because #398's last commit compares at the `.end` that closes a
+dead body, so a func already diverged after its `return` / `unreachable`
+prints that `.end` too; the other two (`i32.const` / `array.get_u`) are named
+on their row. The Win64 and aarch64 tables were then re-taken from CI's own
+legs on that commit, run `34200535507`, which read the seed rows as
+`10 enumerated, 4 unexpected, 3 stale` on both — the same seven moves to the
+same counts (D2; `b56b645ee`). The proof run on the branch's final head,
+`34202971145`, printed on all three legs:
+
+```
+[wasm-3.0-assert] liveverify (aarch64-macos): 8 enumerated, 0 unexpected, 0 stale
+[wasm-3.0-assert] liveverify (x86_64-linux): 8 enumerated, 0 unexpected, 0 stale
+[wasm-3.0-assert] liveverify (x86_64-windows): 8 enumerated, 0 unexpected, 0 stale
+```
 
 Two facts shape where the check can live. The env must not be set on
 `test-all`: the AOT unit tests fail under it by design
@@ -90,7 +111,8 @@ count is per row so that "one func fixed, one regressed" in the same module
 is visible; the list carries no total.
 
 The seeds are taken the way #376 took its Windows row: the x86_64 SysV table
-is seeded from this host (the 69 above, re-taken on the PR's base), and the
+is seeded from this host (the 69 above, re-taken on the PR's base; the table
+on `main` is the 2026-09-07 re-take, 45 lines over 8 modules), and the
 x86_64 Win64 and aarch64 tables start **empty**, so the PR's first CI run
 reports every residual on those legs as `unexpected` and names them. Those
 names are copied into the tables and pushed; the second run is the proof
@@ -118,7 +140,8 @@ records.
 A PR that fixes a drift removes its row in the same change, which `stale`
 enforces. A new drift lands as a row here **and** a row on #400, not as a
 new issue. #398, if it lands after this, retires the `end` / `return` rows
-it fixes in its own diff. Retiring the root — deriving liveness's
+it fixes in its own diff (#398 landed first; #402's own re-take, `fee98fca4` /
+`b56b645ee`, retired them — Context). Retiring the root — deriving liveness's
 control-flow mirror from the emit's source (ADR-0088 extended to edges) —
 is #400's move 2 and is not decided here.
 
@@ -132,7 +155,8 @@ is #400's move 2 and is not decided here.
   `success`, which is what `ci-required` reads — #307 item 6 and ADR-0225's
   Context are the record of a check that reported and was not read. The
   list mechanism already makes day-one blocking safe: 10 rows carrying 69
-  lines are debt made visible, not red PRs. **This is the maintainer's call, not a rejection**:
+  lines (8 rows / 45 lines after the 2026-09-08 re-take) are debt made
+  visible, not red PRs. **This is the maintainer's call, not a rejection**:
   if A is preferred, D1 gains the `continue-on-error` and a promotion
   threshold, and the Status line records it.
 
@@ -154,8 +178,9 @@ is #400's move 2 and is not decided here.
 
 - **Positive**: a liveness/emit divergence becomes a red PR on the commit
   that introduces it, on every target CI runs, instead of an issue filed
-  after someone runs the check by hand. The 10 rows become load-bearing:
-  each is one someone must retire, and #398's rows must go in #398.
+  after someone runs the check by hand. The 10 rows (8 rows / 45 lines after
+  the 2026-09-08 re-take) become load-bearing: each is one someone must
+  retire, and #398's rows must go in #398.
 - **Negative**: a divergence with no demonstrated wrong answer still reds a
   PR until it is listed. That is the point of an invariant gate, but it is
   a new kind of red for this lane and the failure message must say which
@@ -174,9 +199,16 @@ is #400's move 2 and is not decided here.
 
 - #269 (the check, and its deferral of gating), #376 (`jitKnownFails`, core
   placement), #380 / ADR-0225 (names not counts, `stale`), #400 (the ledger
-  of rows), #398 (open, the `.end` class)
+  of rows), #398 (landed 2026-09-07, the `.end` class)
 - ADR-0212 D1 (gate definitions need sign-off; apparatus does not),
   ADR-0076 D9 (CI is authoritative), ADR-0088 (stack-effect extraction — the
   half of the mirror that is table-driven)
 - `.dev/lessons/2026-06-02-jit-liveness-must-mirror-emit-pushed-vregs.md`
   (D-596), `.dev/lessons/2026-08-24-measurement-scaffolding-hid-the-product-gate.md`
+
+## Revision history
+
+| Date       | SHA          | Note |
+|------------|--------------|------|
+| 2026-09-05 | `a49bbd594` | Initial, as written 2026-09-05; landed with the lane it defines (#402). |
+| 2026-09-08 | `b56b645ee` | Tables re-taken after #398 (45 lines / 8 modules); Status flipped on the 2026-09-06 word in the follow-up doc PR. |
