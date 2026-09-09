@@ -186,6 +186,11 @@ jobs:
             runs-on: ubuntu-22.04
             zig-dir: zig-x86_64-linux-0.16.0
             extended: true
+            # #347 — the unit tests built ReleaseSafe, on every PR. A row gets
+            # this when its leg finishes far enough ahead of aarch64-macos
+            # (the critical path) to absorb a second optimised build; the
+            # numbers are on the block in ci_gate.sh.
+            releasesafe_unit: true
           - name: x86_64-windows
             runs-on: windows-2022
             zig-dir: zig-x86_64-windows-0.16.0
@@ -194,6 +199,9 @@ jobs:
             # the Win64 entry thunks optimised, and Windows is where the JIT is
             # the default engine.
             jit_releasesafe: true
+            # #303 — the other half: the JIT ships by default here, so the
+            # optimised unit lane runs on this leg too, not on Linux alone.
+            releasesafe_unit: true
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -320,13 +328,15 @@ jobs:
       # JIT smoke + AOT cross-compile) are up to ~20 cold-cache ReleaseSafe builds
       # and dominate wall-clock (~2.5-4.5 min/build on hosted runners), so they
       # run ONLY on the merge to `main` (push) — not on every PR / dispatch, which
-      # get the core gate (fmt + test-all + the Linux-only ReleaseSafe unit tests
-      # and rust-host; see ci_gate.sh's header). windows is always core.
+      # get the core gate (fmt + test-all + the Linux-only rust-host + the
+      # ReleaseSafe unit tests on the `releasesafe_unit` rows; see ci_gate.sh's
+      # header). windows is always core.
       - name: ci_gate.sh
         shell: bash
         env:
           ZWASM_CI_EXTENDED: ${{ (github.event_name == 'push' && matrix.extended) && '1' || '0' }}
           ZWASM_CI_JIT_RELEASESAFE: ${{ (github.event_name == 'push' && matrix.jit_releasesafe) && '1' || '0' }}
+          ZWASM_CI_RELEASESAFE_UNIT: ${{ matrix.releasesafe_unit && '1' || '0' }}
         run: bash scripts/ci_gate.sh
 
       # Official wasi-testsuite wasm32-wasip1 corpus (D-582). BLOCKING, with

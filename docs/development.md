@@ -98,7 +98,8 @@ required **`ci-required`** status check. CI runs
 macOS aarch64, Linux x86_64, Windows x86_64. Your PR gets the *core* gate: fmt
 + `test-all` + the rust-host consumer + the test-discovery guard + the
 ReleaseSafe-runner floor guard (ADR-0177) + the unit tests built
-ReleaseSafe (Linux leg only; the mode every release binary is built in) — plus
+ReleaseSafe (Linux and Windows legs; the mode every release binary is built
+in) — plus
 `test-wasi-p1-official`, which blocks from a step of its own rather than from
 inside the script (ADR-0225). The extended
 static/build checks (lint, the build-option DCE matrix, AOT cross-compile,
@@ -120,6 +121,7 @@ leg's content except for the one blocking step beside it:
 
 ```sh
 bash scripts/ci_gate.sh                    # core (fmt + test-all)
+ZWASM_CI_RELEASESAFE_UNIT=1 bash scripts/ci_gate.sh  # + the ReleaseSafe unit tests (the Linux + Windows rows)
 ZWASM_CI_EXTENDED=1 bash scripts/ci_gate.sh  # + lint/DCE/AOT/zone checks (Unix)
 zig build test-wasi-p1-official            # the blocking step outside the script
 ```
