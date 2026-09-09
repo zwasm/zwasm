@@ -43,10 +43,38 @@ const enabled = builtin.os.tag != .windows and builtin.os.tag != .wasi;
 /// necessary (production signal-handler site; same rationale as `_exit`).
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 
-// Page-aligned alternate signal stack so a stack-overflow SIGSEGV (host-side deep
-// native recursion, cf. D-288) can still run the handler on a fresh stack.
-const ALT_STACK_SIZE: usize = 1 << 16; // 64 KiB
-var alt_stack: [ALT_STACK_SIZE]u8 align(std.heap.page_size_max) = undefined;
+// Alternate signal stack, ONE PER THREAD (issue #321). `sigaction` is
+// process-wide but `sigaltstack` is per-thread state, so the `SA.ONSTACK`
+// on the dispositions below is a promise every thread has to keep for
+// itself: a stack-overflow SIGSEGV (host-side deep native recursion, cf.
+// D-288) needs a stack the handler can run on, on a thread that has just
+// run out of its own. `armAltStackForThisThread` keeps that promise on a
+// thread's first entry into guarded code.
+//
+// 32 KiB: the handler allocates nothing and formats nothing (disposition 2
+// is a fixed write(2) + `_exit`), so the floor is the platform minimum —
+// MINSIGSTKSZ is 32 KiB on Darwin and 2–8 KiB on Linux — not the 256 KiB
+// wasmtime sizes for a handler that mallocs a backtrace.
+//
+// Static TLS, no teardown: the array dies with the thread's TLS block. In
+// the window between TLS destruction and the thread's exit no zwasm code
+// runs on that thread, so a signal there is not ours to diagnose; a
+// pthread_key destructor that SS_DISABLEs first (wasmtime's shape) buys
+// nothing for its complexity. Cost: this many bytes of static TLS in
+// every thread of the process, armed or not.
+const ALT_STACK_SIZE = 1 << 15; // 32 KiB
+const min_sigstksz = switch (builtin.os.tag) {
+    // `std.c.MINSIGSTKSZ` is unset for Linux; the kernel's value lives here.
+    .linux => std.os.linux.MINSIGSTKSZ,
+    else => std.posix.system.MINSIGSTKSZ,
+};
+comptime {
+    if (enabled) std.debug.assert(ALT_STACK_SIZE >= min_sigstksz);
+}
+threadlocal var alt_stack: [ALT_STACK_SIZE]u8 align(16) = undefined;
+threadlocal var alt_stack_armed: bool = false;
+/// The arm-failure warning fires once per process, not once per thread.
+var alt_stack_warned = std.atomic.Value(bool).init(false);
 
 const INTERNAL_ERROR_MSG =
     "zwasm: internal error — caught a fatal signal. This is a bug in zwasm " ++
@@ -180,7 +208,13 @@ var install_state = std.atomic.Value(InstallState).init(.uninstalled);
 /// (production CLI init, embedding init, or the spec runner); briefly
 /// spin-waits while another thread's install is in flight, so a
 /// handler is ALWAYS armed by the time this returns.
+///
+/// Two axes, one call: the process-wide dispositions (the state machine
+/// below, once per process) and THIS thread's alternate stack (once per
+/// thread, before the state machine — a terminal state says nothing
+/// about the calling thread, issue #321).
 pub fn ensureInstalled() void {
+    armAltStackForThisThread();
     switch (install_state.load(.acquire)) {
         .installed, .external => return,
         .uninstalled => {
@@ -213,6 +247,7 @@ pub fn markInstalled() void {
 /// in-flight install and publishes `installed` only after its OWN
 /// complete install.
 pub fn installInternalFaultHandler() void {
+    armAltStackForThisThread();
     while (true) {
         const s = install_state.load(.acquire);
         if (s == .installing) {
@@ -225,25 +260,58 @@ pub fn installInternalFaultHandler() void {
     install_state.store(.installed, .release);
 }
 
-/// The platform install body — sigaltstack + sigaction (POSIX) or the
-/// VEH registration (Windows). Writes NO install state: the two pub
-/// installers above own the state machine and publish only after this
-/// returns.
+/// Arm THIS thread's alternate stack, once per thread. Independent of the
+/// process-wide install state, and armed under `external` too: the spec
+/// runner's handler carries `SA.ONSTACK` as well, and nothing but an
+/// `SA.ONSTACK` handler ever uses an alternate stack, so arming one is
+/// never a clobber.
+///
+/// A thread that already has an alternate stack at least this large keeps
+/// it: Zig's start code and `std.Thread.spawn` arm std's 256 KiB one on
+/// every thread they start, and the spec runner arms its own. Replacing a
+/// larger stack with a smaller one is a downgrade — the process-wide
+/// install used to do exactly that to the main thread.
+///
+/// Failure is not fatal (warned once per process) and not remembered:
+/// the guard-fault → trap disposition never touches the alternate stack,
+/// so JIT execution on the thread stays sound, and what is lost is the
+/// exit-70 diagnosis of a host stack overflow on that one thread until
+/// the next entry. The one reachable failure is EPERM — this thread is
+/// executing ON an alternate stack right now (the size is checked at
+/// comptime, the pointer is ours) — and the next entry from ordinary
+/// context succeeds.
+fn armAltStackForThisThread() void {
+    if (comptime !enabled) return;
+    if (alt_stack_armed) return;
+    var old: std.posix.stack_t = undefined;
+    const has_one = if (std.posix.sigaltstack(null, &old))
+        old.flags & std.posix.system.SS.DISABLE == 0 and old.size >= ALT_STACK_SIZE
+    else |_|
+        false; // the query failed; arm our own below and let that call report
+    if (!has_one) {
+        std.posix.sigaltstack(&.{
+            .sp = &alt_stack,
+            .flags = 0,
+            .size = ALT_STACK_SIZE,
+        }, null) catch |err| {
+            if (!alt_stack_warned.swap(true, .monotonic))
+                std.debug.print("zwasm: warning: sigaltstack failed ({s}); a host stack overflow on this thread will not be diagnosed\n", .{@errorName(err)});
+            return;
+        };
+    }
+    alt_stack_armed = true;
+}
+
+/// The platform install body — sigaction (POSIX) or the VEH registration
+/// (Windows); the per-thread alternate stack is `armAltStackForThisThread`'s.
+/// Writes NO install state: the two pub installers above own the state
+/// machine and publish only after this returns.
 fn installNow() void {
     if (comptime builtin.os.tag == .windows) {
         win_impl.install();
         return;
     }
     if (comptime !enabled) return;
-    std.posix.sigaltstack(&.{
-        .sp = &alt_stack,
-        .flags = 0,
-        .size = alt_stack.len,
-    }, null) catch |err| {
-        // Non-fatal: the handler still works without an altstack for the common
-        // (non-stack-overflow) fault. Surface it; do NOT abort startup.
-        std.debug.print("zwasm: warning: sigaltstack failed ({s}); fault handler degraded\n", .{@errorName(err)});
-    };
     var act: std.posix.Sigaction = .{
         .handler = .{ .sigaction = faultHandler },
         .mask = std.posix.sigemptyset(),
@@ -270,6 +338,89 @@ test "installInternalFaultHandler: a fault in a forked child exits 70 (handler r
         installInternalFaultHandler();
         const p: *allowzero volatile u8 = @ptrFromInt(0); // null page → SIGSEGV
         p.* = 0;
+        std.c._exit(1); // unreachable if the handler fired
+    }
+    var status: c_int = 0;
+    _ = std.c.waitpid(pid, &status, 0);
+    const ustatus: u32 = @bitCast(status);
+    try std.testing.expect(std.posix.W.IFEXITED(ustatus));
+    try std.testing.expectEqual(@as(u32, INTERNAL_ERROR_EXIT_CODE), std.posix.W.EXITSTATUS(ustatus));
+}
+
+// A thread that zwasm did not create (an embedder's pthread, a host thread
+// pool) arrives with NO alternate stack. `std.Thread.spawn` arms std's own
+// 256 KiB one on every thread it starts, so the two #321 tests below strip it
+// first — the kernel state that matters is "SS_DISABLE on this thread", and
+// that is what a foreign thread has.
+//
+// The size and pointer travel with SS_DISABLE even though the kernel ignores
+// both: Darwin's libc wrapper (`Libc/compat-43/sigaltstk.c`) returns ENOMEM
+// for any new stack smaller than MINSIGSTKSZ before the flag is looked at.
+fn disableThisThreadsAltStack() void {
+    std.posix.sigaltstack(&.{
+        .sp = &alt_stack,
+        .flags = std.posix.system.SS.DISABLE,
+        .size = ALT_STACK_SIZE,
+    }, null) catch unreachable;
+}
+
+test "ensureInstalled: a thread that arrives with no alternate stack leaves with one of its own (#321)" {
+    if (comptime !enabled) return skip.phaseEnd(.win64);
+    // Drive the process-wide state to terminal on THIS thread first, so the
+    // probe thread below exercises the per-thread arm alone, not the one-time
+    // install (which arms whichever thread happens to win the election).
+    ensureInstalled();
+    var main_ss: std.posix.stack_t = undefined;
+    try std.posix.sigaltstack(null, &main_ss);
+    const Probe = struct {
+        fn run(out: *std.posix.stack_t) void {
+            disableThisThreadsAltStack();
+            ensureInstalled();
+            std.posix.sigaltstack(null, out) catch unreachable;
+        }
+    };
+    var got: std.posix.stack_t = undefined;
+    const t = try std.Thread.spawn(.{}, Probe.run, .{&got});
+    t.join();
+    try std.testing.expect(got.flags & std.posix.system.SS.DISABLE == 0);
+    try std.testing.expect(got.size >= ALT_STACK_SIZE);
+    try std.testing.expect(got.sp != main_ss.sp);
+}
+
+// Host-side native recursion, never inlined, never tail-called: the volatile
+// write keeps the frame, the call keeps the depth. The frame is kept SMALLER
+// than a guard page on purpose: a frame that steps over the guard in one go
+// lands its first touch in whatever is mapped below, and the kernel can then
+// push a signal frame there — the death this test is after never happens.
+// A small frame faults with the stack pointer INSIDE the guard page, where
+// no signal frame fits without an alternate stack.
+fn overflowHostStack(depth: usize) usize {
+    var frame: [256]u8 = undefined;
+    const slot: *volatile u8 = &frame[depth % frame.len];
+    slot.* = @truncate(depth);
+    return @call(.never_inline, overflowHostStack, .{depth + 1}) +% slot.*;
+}
+
+fn overflowOnBareThread() void {
+    disableThisThreadsAltStack();
+    ensureInstalled();
+    _ = overflowHostStack(0);
+}
+
+test "installInternalFaultHandler: a host stack overflow on a second thread exits 70, not a signal death (#321)" {
+    if (comptime !enabled) return skip.phaseEnd(.win64);
+    // Same fork shape as the test above. The child arms the handler on its
+    // main thread the way the CLI does, then a second thread — armed only by
+    // the JIT entry path's `ensureInstalled` — overflows its host stack. The
+    // handler needs stack on a thread that has just run out of it; without a
+    // per-thread alternate stack the kernel cannot deliver and the child dies
+    // by the signal (WIFSIGNALED), the exit-70 contract of ADR-0166 lost.
+    const pid = std.c.fork();
+    try std.testing.expect(pid != -1);
+    if (pid == 0) {
+        installInternalFaultHandler();
+        const t = std.Thread.spawn(.{}, overflowOnBareThread, .{}) catch std.c._exit(2);
+        t.join();
         std.c._exit(1); // unreachable if the handler fired
     }
     var status: c_int = 0;

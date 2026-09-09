@@ -40,8 +40,11 @@ own their recovery handlers). On an unintended fatal fault it writes a distinct
 "internal error" line and exits with a distinct code, instead of dying silently.
 
 - **POSIX** — mirror the test runner's proven setup but diagnostic-only (NO
-  siglongjmp recovery): `sigaltstack` + `std.posix.sigaction` (sa_sigaction form,
-  `SA.SIGINFO | SA.ONSTACK`) for `SEGV` + `BUS` (+ `ILL`, `FPE`). The handler is
+  siglongjmp recovery): a **per-thread** `sigaltstack` (32 KiB of static TLS,
+  armed on each thread's first entry into JIT code or the force-install; #321)
+  + `std.posix.sigaction` (sa_sigaction form, `SA.SIGINFO | SA.ONSTACK`) for
+  `SEGV` + `BUS` (+ `ILL`, `FPE`). `sigaction` is process-wide, `sigaltstack`
+  is not — `SA.ONSTACK` is a promise every thread keeps for itself. The handler is
   **async-signal-safe**: it only `std.posix.write`s a FIXED message + the
   `siginfo.addr` fault address (rendered with a stack buffer, no allocator/stdio),
   then `std.c._exit(70)`. `std.posix.sigaction`/`write` are pure-Zig syscalls (no
@@ -81,3 +84,10 @@ own their recovery handlers). On an unintended fatal fault it writes a distinct
 
 I `signal.zig` POSIX handler + main.zig install + `--__selftest-crash` + subprocess
 test → II Windows filter → III 3-host verify (signal behaviour per-OS) → close.
+
+## Revision history
+
+| Date       | SHA          | Note |
+|------------|--------------|------|
+| 2026-06-06 | `e7eacf37d` | Initial accepted version. |
+| 2026-09-08 | `<backfill>` | The alternate stack is per thread (32 KiB, armed on a thread's first JIT entry), not one 64 KiB stack for the process (#321). |
