@@ -25,7 +25,7 @@
 //! and force-install scenarios are single-threaded and deterministic.
 //!
 //! Deliberately NOT asserted here: sigaltstack arming, which is
-//! per-thread and tracked separately (issue #321).
+//! per-thread and covered by `signal.zig`'s own #321 tests.
 //!
 //! Windows: fork is unavailable; the runner self-skips (exit 0). The
 //! publish-after-install path is shared with the win_impl branch but is
