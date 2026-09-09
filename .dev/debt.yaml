@@ -333,7 +333,7 @@ entries:
       ADR-0228 a cross-module import reached by a tail call inherits it —
       the bridge copies overflow words from ITS caller's frame, which the
       tail form has torn down; the #391 fence had declined those signatures
-      cross-module only as a side effect. The reproducers are an issue, not
+      cross-module only as a side effect. The reproducers are #424, not
       this row (ADR-0216); one fix covers the three routes. (g) FIXED by
       ADR-0228 (#390): an imported
       callee with a MEMORY-class return (`results.len > 2`) was called with the

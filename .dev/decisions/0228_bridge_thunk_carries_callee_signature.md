@@ -1,6 +1,8 @@
 # 0228 — The cross-module bridge knows the callee's signature and enters the defining module
 
-- **Status**: Proposed
+- **Status**: Accepted (2026-09-09 — sign-off on PR #419, the maintainer of
+  record's own per #407; D1–D5 as written, the #391 fence narrowed to a v128
+  parameter)
 - **Date**: 2026-09-08
 - **Author**: Junji Takakura
 - **Tags**: jit, cross-module, abi
