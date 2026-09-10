@@ -993,6 +993,7 @@ fn trapKindName(k: wasm_c_api.TrapKind) []const u8 {
         // (the testsuite imports no WASI), so this name only ever appears in a
         // mismatch message, where naming the kind beats naming nothing.
         .wasi_exit => "WasiExit",
+        .invalid_module => "InvalidModule", // #233 — an instantiation verdict, not a call-time trap
     };
 }
 

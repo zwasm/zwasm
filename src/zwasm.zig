@@ -102,6 +102,7 @@ comptime {
     _ = @import("api/wasm.zig");
     _ = @import("api/wasi.zig");
     _ = @import("api/trap_surface.zig");
+    _ = @import("api/engine_verdict_test.zig");
     _ = @import("api/vec.zig");
     _ = @import("api/types.zig");
     _ = @import("api/instance.zig");

@@ -1061,9 +1061,21 @@ fn collectFromExterns(
 /// borrowed `wasm_bytes` live in the owning `Module`, which outlives the
 /// instance, and the `JitInstance` is heap-pinned so `exportedFuncTarget`'s
 /// `&owned.rt` stays stable.
-fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, trap_out: ?*?*Trap, limits: InstantiateLimits) ?*Instance {
-    const alloc = storeAllocator(store) orelse return null;
-    const bytes_ptr = module.bytes_ptr orelse return null;
+/// #233 / ADR-0229 — why `instantiateJit` produced no instance. The tag, not
+/// the trap slot, is what `.auto` reads: a `Final` outcome stays final when
+/// the trap that would name it cannot be allocated (PR #429 review).
+const JitReject = error{
+    /// A capability decline: nothing about the module's validity follows, and
+    /// `.auto` retries on the interpreter.
+    Declined,
+    /// A validity verdict or a `(start)` trap. `trap_out` carries the reason
+    /// when it could be allocated.
+    Final,
+};
+
+fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, trap_out: ?*?*Trap, limits: InstantiateLimits) JitReject!*Instance {
+    const alloc = storeAllocator(store) orelse return error.Declined;
+    const bytes_ptr = module.bytes_ptr orelse return error.Declined;
     const bytes = bytes_ptr[0..module.bytes_len];
 
     // ADR-0200 / D-451 / D-478 / #360 — every import must be JIT-satisfiable AT
@@ -1074,18 +1086,28 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     // Anything else — non-func import, an interp-backed cross-module source,
     // uncovered host-func signature, unsatisfied import — rejects here so the
     // caller's `.interp` path handles it (no silent wrong answer; uncovered
-    // shapes never reach the JIT body). The resolved targets are arena-scoped:
+    // shapes never reach the JIT body). A validity VERDICT from `initLinked` is
+    // different: it goes out through `trap_out` and is not retried (#233; see
+    // `isValidityVerdict`). The resolved targets are arena-scoped:
     // setup copies the host ones' (idx, dispatch_ptr, payload) into the
     // heap-owned `host_payloads` and emits the cross-module ones into its own
     // thunk arena, so this arena can be reclaimed once `initLinked` returns.
     var ht_arena = std.heap.ArenaAllocator.init(alloc);
     defer ht_arena.deinit();
-    const func_imports = collectFuncImportTargets(ht_arena.allocator(), bytes, builder_state, store) catch return null;
+    const func_imports = collectFuncImportTargets(ht_arena.allocator(), bytes, builder_state, store) catch return error.Declined;
 
-    const jit = alloc.create(runner.JitInstance) catch return null;
-    jit.* = runner.JitInstance.initLinked(alloc, bytes, &.{}, func_imports.cross, &.{}, func_imports.host) catch {
+    const jit = alloc.create(runner.JitInstance) catch return error.Declined;
+    jit.* = runner.JitInstance.initLinked(alloc, bytes, &.{}, func_imports.cross, &.{}, func_imports.host) catch |err| {
         alloc.destroy(jit);
-        return null;
+        // #233 — a validity VERDICT (the module breaks a spec rule the JIT
+        // checks and the front-end validator does not yet, #285) is final:
+        // the reason goes out through `trap_out`, and the outcome is `Final`
+        // whether or not that trap could be allocated. A capability DECLINE
+        // (a shape this backend cannot compile or set up) leaves `trap_out`
+        // untouched.
+        if (!isValidityVerdict(err)) return error.Declined;
+        if (trap_out) |to| to.* = verdictTrap(alloc, store, err);
+        return error.Final;
     };
     // ADR-0179 budgets: the JIT meters poll-site crossings (not interp insns);
     // null axes stay unmetered. Memory/table caps clamp grow at runtime.
@@ -1104,7 +1126,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
         host.materializePendingPreopens() catch {
             jit.deinit(alloc);
             alloc.destroy(jit);
-            return null;
+            return error.Declined;
         };
     }
     jit.owned.rt.wasi_host = store.wasi_host;
@@ -1115,7 +1137,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
         store.retired_wasi_hosts.ensureUnusedCapacity(std.heap.c_allocator, 1) catch {
             jit.deinit(alloc);
             alloc.destroy(jit);
-            return null;
+            return error.Declined;
         };
         store.wasi_host_captured = true;
     }
@@ -1146,17 +1168,25 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
         store.wasi_call_depth +|= 1;
         defer store.wasi_call_depth -|= 1;
         jit.runStart() catch |err| {
-            if (trap_out) |to| to.* = jitErrToTrap(err, jit, alloc, store);
+            // An imported start is `UnsupportedEntrySignature`: a decline the
+            // interpreter can run, so no trap is left for it to return beside
+            // its instance (PR #429 review). Anything else trapped: final —
+            // the trap reads the runtime's kind, so it is built before the
+            // JIT is torn down.
+            const reject: JitReject = if (err == error.UnsupportedEntrySignature) error.Declined else error.Final;
+            if (reject == error.Final) {
+                if (trap_out) |to| to.* = jitErrToTrap(err, jit, alloc, store);
+            }
             jit.deinit(alloc);
             alloc.destroy(jit);
-            return null;
+            return reject;
         };
     }
 
     const inst = alloc.create(Instance) catch {
         jit.deinit(alloc);
         alloc.destroy(jit);
-        return null;
+        return error.Declined;
     };
     inst.* = .{
         .store = store,
@@ -1184,7 +1214,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
             jit.deinit(alloc);
             alloc.destroy(jit);
             alloc.destroy(inst);
-            return null;
+            return error.Declined;
         };
         arena.* = std.heap.ArenaAllocator.init(alloc);
         const a = arena.allocator();
@@ -1209,7 +1239,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
             jit.deinit(alloc);
             alloc.destroy(jit);
             alloc.destroy(inst);
-            return null;
+            return error.Declined;
         }
         // Retain the arena only if it backs live export storage; else release it.
         if (inst.exports_storage.len > 0) inst.arena = arena else {
@@ -1319,23 +1349,25 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
     // ADR-0200 — per-instance engine fork, shared by EVERY entry point
     // (`instantiateFacade`, `wasm_instance_new`, `src/zwasm/linker.zig`). `.jit`
     // builds a native JIT-backed instance; `.interp` forces the interp setup below.
-    if (engine == .jit) return instantiateJit(store, module, builder_state, trap_out, limits);
+    if (engine == .jit) return instantiateJit(store, module, builder_state, trap_out, limits) catch null;
 
-    // ADR-0200 / D-496 — `.auto`→JIT flip (D-489/D-494 regalloc miscompiles fixed;
-    // JIT instances now expose the full C-API surface: exports + memory/table/global
-    // accessors + introspection + get_func, chunks 1-5). TRY the JIT first; it
-    // rejects (returns null, NO trap) any module with an import/signature it can't
-    // satisfy — that rejection is at the import check BEFORE any setup side-effect
-    // (preopens, start), so the interp retry below is clean. A real `(start)` trap
-    // sets `jit_trap` and propagates (interp would trap too) rather than re-running.
+    // ADR-0200 / D-496 / ADR-0229 — `.auto` tries the JIT first and reads the
+    // tag of its rejection. `Declined` = a capability decline (an import it
+    // cannot satisfy, a body it cannot compile): the rejection is before any
+    // setup side-effect (preopens, start), so the interp retry below is
+    // clean. `Final` = a `(start)` trap (the interp would trap too) or the
+    // JIT's validity VERDICT on the module (#233), which the interpreter would
+    // not re-judge, so re-running it would run an invalid module; the reason
+    // is already in `trap_out` when it could be allocated.
+    // `.claude/rules/single_slot_dual_meaning.md`: a bare `null` cannot carry
+    // both meanings, the tag is the second axis.
     if (engine == .auto) {
-        var jit_trap: ?*Trap = null;
-        if (instantiateJit(store, module, builder_state, &jit_trap, limits)) |inst| return inst;
-        if (jit_trap) |t| {
-            if (trap_out) |to| to.* = t;
-            return null;
+        if (instantiateJit(store, module, builder_state, trap_out, limits)) |inst| {
+            return inst;
+        } else |reject| switch (reject) {
+            error.Final => return null,
+            error.Declined => {}, // fall through to the interp setup below
         }
-        // JIT could not compile this module → fall through to the interp setup below.
     }
 
     // ADR-0184: open any preopen requests queued by the io-free
@@ -2626,6 +2658,124 @@ fn typedResultToCVal(tr: runner.TypedResult, inst: *Instance, alloc: std.mem.All
 
 /// Map a JIT engine error to a C `*Trap`. Runtime traps carry a numeric
 /// `trap_kind` on the JIT runtime (generic bucket → unreachable, D-292).
+/// #233 / ADR-0229 — the `runner.Error` names that are a validity VERDICT on the
+/// module: a spec rule the JIT checks at compile or setup time. Every name in
+/// `runner.Error` is in exactly this table or `jit_decline_names` (a test walks
+/// the error set), so a new JIT-side check has to say which it is. The tables
+/// classify NAMES, not raise sites: a check that states a spec rule must raise
+/// a name from this table, never borrow a decline name for it (the start
+/// section's trailing-bytes raise did, and was renamed). Names shared by the
+/// lowerer and the validator (`UnexpectedEnd`, `TrailingBytes`, …) are listed
+/// once, as the validator's: `compileWasm` runs the shared validator over
+/// every body before lowering it.
+pub const jit_verdict_names = [_][]const u8{
+    // Module-level rules `compile.zig` checks (Wasm 3.0 §3.4).
+    "ExportIdxOutOfRange", // §3.4.10 export target exists
+    "DuplicateExport", // §3.4.10 export names pairwise distinct
+    "InvalidMemoryLimit", // §3.4.4 memory limits
+    "DataSegmentRequiresMemory", // §3.4.7 active data names a memory
+    "InvalidTableLimit", // §3.4.5 table limits
+    "ElemSegmentRequiresTable", // §3.4.6 active elem names a table
+    "ElemSegmentTypeMismatch", // §3.4.6 elem type ≤ table type
+    "ImportTypeIdxOutOfRange", // §3.4.9 import's typeidx exists
+    "InvalidStartFunction", // §3.4.8 start is a defined `[] → []` func
+    "DataCountMismatch", // §5.5.13 data count section = data section length
+    "InvalidGlobalInitExpr", // §3.3.13.1 constant expression (the shared validator's verdict, #397)
+    "MissingTypeSection", // §3.4.1 / §3.4.9 a func, import or tag names a typeidx past the type section
+    "MissingFunctionSection", // §5.5.13 code entries without function entries
+    "MissingCodeSection", // §5.5.13 function entries without matching code entries
+    "InvalidFuncIndex", // §3.4.9 / §3.3.9 a tag's typeidx, or a body's funcidx, out of range
+    // Malformed binary (§5): parser, section decoders, LEB128.
+    "TruncatedHeader",
+    "InvalidMagic",
+    "UnknownSectionId",
+    "SectionTooLarge",
+    "SectionOutOfOrder",
+    "DuplicateSection",
+    "Truncated",
+    "Overlong",
+    "Overflow",
+    "UnexpectedEnd",
+    "InvalidFunctype",
+    "BadValType",
+    "TrailingBytes",
+    "LocalsOverflow",
+    "InvalidTagAttribute",
+    // Per-function rules (§3.3) from the shared validator, which `compileWasm`
+    // runs over every body: the interpreter would reject the same body.
+    "StackUnderflow",
+    "StackTypeMismatch",
+    "UnexpectedOpcode",
+    "InvalidOpcode",
+    "BadBlockType",
+    "InvalidLocalIndex",
+    "UninitializedLocal",
+    "InvalidGlobalIndex",
+    "ImmutableGlobal",
+    "UnknownMemory",
+    "UndeclaredFuncRef",
+    "InvalidBranchDepth",
+    "UnclosedFrames",
+    "ArityMismatch",
+    "InvalidLaneIndex",
+    "InvalidAlignment",
+    "InvalidTagIndex",
+    "PackedFieldAccess",
+};
+
+/// #233 / ADR-0229 — the `runner.Error` names that are a capability DECLINE:
+/// the JIT cannot take this module, and nothing about the module's validity
+/// follows. `.auto` falls through to the interpreter on these.
+pub const jit_decline_names = [_][]const u8{
+    // Shapes the JIT does not represent or link.
+    "MultipleMemories", // the JIT models one memory; at the 3.0 level a second one is valid (§3.4.4 multi-memory)
+    "UnsupportedImport",
+    "ImportUnsatisfied", // the interpreter's linker judges the import set
+    "UnsupportedVersion",
+    "Memory64Unsupported",
+    "UnsupportedEntrySignature",
+    "UnsupportedConstExpr",
+    "NotImplemented",
+    // Resource bounds — the interpreter applies its own.
+    "OutOfMemory",
+    "TableLimitExceeded",
+    "AllocationFailed",
+    "ProtectionFailed",
+    // Per-function codegen: lowerer, liveness, regalloc, emit, linker limits.
+    "BadMemarg", // the lowerer's immediate width, not §3.3's alignment rule
+    "ControlStackOverflow",
+    "OperandStackOverflow",
+    "UnsupportedControlFlow",
+    "UnsupportedOp",
+    "OperandStackUnderflow",
+    "LivenessMissing",
+    "SlotOverflow",
+    "AllocationMissing",
+    "UnknownCallTarget",
+    "DisplacementOverflow",
+    // Never raised by `initLinked`: invoke-time and start-time names.
+    "ExportNotFound",
+    "ExportIsNotFunction",
+    "Trap",
+};
+
+/// #233 — is `err` a validity verdict (`jit_verdict_names`)? Anything else is a
+/// decline.
+pub fn isValidityVerdict(err: runner.Error) bool {
+    const name = @errorName(err);
+    for (jit_verdict_names) |v| if (std.mem.eql(u8, v, name)) return true;
+    return false;
+}
+
+/// #233 — the verdict as the embedder sees it: `ZWASM_TRAP_INVALID_MODULE`
+/// with the error name in the message, so `NULL` comes with its reason
+/// (Refs #353).
+fn verdictTrap(alloc: std.mem.Allocator, store: *Store, err: runner.Error) ?*Trap {
+    var buf: [96]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "invalid module: {s}", .{@errorName(err)}) catch "invalid module";
+    return trap_surface.allocTrapWithMessage(alloc, store, .invalid_module, msg);
+}
+
 fn jitErrToTrap(err: runner.Error, jit: *runner.JitInstance, alloc: std.mem.Allocator, store: *Store) ?*Trap {
     return switch (err) {
         error.Trap => allocTrap(alloc, store, trap_surface.jitTrapCode(jit.owned.rt.trap_kind) orelse .unreachable_),

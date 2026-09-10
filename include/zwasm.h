@@ -99,6 +99,10 @@ WASM_API_EXTERN void zwasm_instance_clear_interrupt(wasm_instance_t*);
 /* Host-originated, not a guest fault: the guest called WASI proc_exit. Read the
  * status itself with zwasm_store_wasi_exit_code(). */
 #define ZWASM_TRAP_WASI_EXIT 18
+/* The JIT judged the module invalid (a check the front-end validator does not
+ * make yet): zwasm_instance_new_ex returns NULL with this trap on AUTO and JIT,
+ * and AUTO does not retry on the interpreter. The message names the verdict. */
+#define ZWASM_TRAP_INVALID_MODULE 19
 WASM_API_EXTERN int32_t zwasm_trap_kind(const wasm_trap_t*);
 
 /* ── Instance helpers ────────────────────────────────────────────────── */
@@ -113,20 +117,23 @@ WASM_API_EXTERN wasm_func_t* zwasm_instance_get_func(wasm_instance_t*, uint32_t 
 
 /* Per-instance engine kind for zwasm_instance_new_ex. AUTO — what stock
  * wasm_instance_new passes — compiles the module with the JIT and instantiates
- * the interpreter only for a module the JIT declines (an import it cannot
- * satisfy, or a body it cannot compile). JIT forces the native
- * JIT: a declined module fails instantiation, returning NULL — no silent
- * downgrade. INTERP forces the interpreter, which unlike the other two rejects
- * a module importing wasi_snapshot_preview1 when no WASI host is configured on
- * the store. */
+ * the interpreter only for a module the JIT DECLINES (an import it cannot
+ * satisfy, or a body it cannot compile). A module the JIT judges INVALID is
+ * not retried: NULL, with a ZWASM_TRAP_INVALID_MODULE trap through trap_out.
+ * JIT forces the native JIT: a declined module fails instantiation, returning
+ * NULL with no trap — no silent downgrade; an invalid one returns NULL with
+ * the same trap AUTO gives. INTERP forces the interpreter, which unlike the
+ * other two rejects a module importing wasi_snapshot_preview1 when no WASI
+ * host is configured on the store. */
 #define ZWASM_ENGINE_AUTO 0
 #define ZWASM_ENGINE_JIT 1
 #define ZWASM_ENGINE_INTERP 2
 
 /* wasm_instance_new with a trailing per-instance engine selector (the stock
  * wasm_instance_new is AUTO). Same ownership/trap contract as wasm_instance_new:
- * NULL on null input / instantiation failure / OOM; a start-function trap is
- * written through trap_out (when non-NULL) with a NULL return. */
+ * NULL on null input / instantiation failure / OOM; a start-function trap or a
+ * ZWASM_TRAP_INVALID_MODULE verdict is written through trap_out (when non-NULL)
+ * with a NULL return. */
 WASM_API_EXTERN wasm_instance_t* zwasm_instance_new_ex(
     wasm_store_t*, const wasm_module_t*, const wasm_extern_vec_t*,
     wasm_trap_t**, uint8_t engine_kind);

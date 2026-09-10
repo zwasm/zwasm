@@ -25,6 +25,9 @@ pub const Error = error{
     UsageError,
     ReadInputFailed,
     WriteOutputFailed,
+    /// #233 — the front-end validator rejected the input; the diagnostic is
+    /// already on stderr, the way `zwasm run` reports it.
+    InvalidModule,
 } || runner.Error || aot_produce.Error;
 
 /// Drive the compile subcommand. `arg_it` is positioned past
@@ -58,6 +61,30 @@ pub fn run(
         return Error.ReadInputFailed;
     };
     defer gpa.free(wasm_bytes);
+
+    // #233 — validate before compiling, as `zwasm run` and `wasm_module_new`
+    // do, so `compile` starts from the same verdict; the JIT's own
+    // module-level checks (#285's remainder) still follow in `compileWasm`.
+    // Cleared first so a failure without a fresh diagnostic cannot print an
+    // earlier one (PR #429 review).
+    zwasm.diagnostic.clearDiag();
+    if (!@import("../runtime/instance/instantiate.zig").frontendValidate(gpa, wasm_bytes)) {
+        // Most of `frontendValidate`'s rejections set no diagnostic; say so
+        // generically rather than exit in silence, as `zwasm run` does.
+        if (zwasm.diagnostic.lastDiagnostic() == null) {
+            zwasm.diagnostic.setDiag(.instantiate, .module_alloc_failed, .unknown, "module decode/validate failed", .{});
+        }
+        var stderr_buf: [1024]u8 = undefined;
+        var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
+        const stderr = &stderr_writer.interface;
+        if (zwasm.diagnostic.lastDiagnostic()) |diag| {
+            // EXEMPT-FALLBACK: ADR-0016 phase 1 — diagnostic render is last-resort stderr; re-entry on failure is meaningless.
+            zwasm.cli.diag_print.formatDiagnostic(diag, .{ .filename = in, .bytes = wasm_bytes }, stderr) catch {};
+            // EXEMPT-FALLBACK: ADR-0016 phase 1 — flushing the stderr that just rendered the diagnostic; failure here is unrecoverable.
+            stderr.flush() catch {};
+        }
+        return Error.InvalidModule;
+    }
 
     // ADR-0203 stage 4 — the compile honours the ambient bounds mode
     // (default `.auto` → elided on qualifying memories); the artifact

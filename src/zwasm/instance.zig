@@ -533,6 +533,9 @@ fn jitTrapToError(code: u32) Instance.InvokeError {
         .out_of_fuel => error.OutOfFuel,
         .wasi_exit => error.ProcExit, // #331 — a clean WASI termination, not a fault
         .binding_error => error.HostTrap, // #331 — the embedder's own failure
+        // #233 — an instantiation verdict, never a call-time code: `jitTrapCode`
+        // does not mint it, so a call cannot reach this arm.
+        .invalid_module => unreachable,
     };
 }
 

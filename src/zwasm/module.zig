@@ -170,8 +170,11 @@ pub const Module = struct {
         var trap: ?*_trap_surface.Trap = null;
         const inst = _api_instance.instantiateFacade(self.c_store, self.c_handle, &trap, limits, opts.engine) orelse {
             if (trap) |t| {
+                // #233 — the JIT's validity verdict travels the same slot as a
+                // start trap; it is a failed instantiation, not a start that ran.
+                const verdict = t.kind == .invalid_module;
                 _trap_surface.wasm_trap_delete(t); // facade owns the trap; free it
-                return error.StartTrapped;
+                return if (verdict) error.InstantiateFailed else error.StartTrapped;
             }
             return error.InstantiateFailed;
         };
@@ -422,6 +425,25 @@ test "Module.instantiate: declared initial table above max_table_elements → Ta
 
     var inst = try mod.instantiate(.{ .max_table_elements = .{ .limited = 2 } });
     defer inst.deinit();
+}
+
+test "Module.instantiate: the JIT's validity verdict is InstantiateFailed, not StartTrapped (#233)" {
+    // (module (func) (export "a" (func 0)) (export "a" (func 0))) — accepted by
+    // `Engine.compile` (the front-end validator lacks the rule, #285), refused
+    // by the JIT's module-level check on `.auto` and `.jit`.
+    const dup_export = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
+        0x01, 0x00, 0x07, 0x09, 0x02, 0x01, 0x61, 0x00,
+        0x00, 0x01, 0x61, 0x00, 0x00, 0x0a, 0x04, 0x01,
+        0x02, 0x00, 0x0b,
+    };
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&dup_export);
+    defer mod.deinit();
+    try testing.expectError(error.InstantiateFailed, mod.instantiate(.{ .engine = .auto }));
+    try testing.expectError(error.InstantiateFailed, mod.instantiate(.{ .engine = .jit }));
 }
 
 test "Module.exports: memory export → kind=.memory (kind-mapping boundary)" {

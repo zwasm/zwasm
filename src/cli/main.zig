@@ -419,6 +419,8 @@ pub fn main(init: std.process.Init) !void {
                     printlnErr(io, "usage: zwasm compile <file.wasm> -o <out.cwasm>") catch {};
                     std.process.exit(2);
                 }
+                // #233 — the validate diagnostic is already on stderr.
+                if (err == error.InvalidModule) std.process.exit(1);
                 var buf: [256]u8 = undefined;
                 const msg = std.fmt.bufPrint(&buf, "zwasm compile: {s}", .{@errorName(err)}) catch "zwasm compile: failed";
                 // EXEMPT-FALLBACK: ADR-0016 phase 1 — compile-error stderr report is last-resort; the process exits 1 regardless.
