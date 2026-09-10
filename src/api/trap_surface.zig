@@ -71,6 +71,11 @@ pub const TrapKind = enum(u32) {
     // an embedder failure. The status itself is read out-of-band with
     // `zwasm_store_wasi_exit_code`; this kind only says which path ended the run.
     wasi_exit = 18,
+    // #233 — the JIT's validity verdict on a module the front-end validator
+    // let through (#285's remainder): `zwasm_instance_new_ex` returns NULL
+    // with this trap on AUTO and JIT alike, and AUTO does not retry on the
+    // interpreter. The message names the verdict.
+    invalid_module = 19,
 };
 
 /// `wasm_trap_t` — runtime trap surface. Carries the trap kind +
@@ -117,6 +122,7 @@ pub fn trapMessageFor(kind: TrapKind) []const u8 {
         .interrupted => "interrupted",
         .out_of_fuel => "all fuel consumed",
         .wasi_exit => "wasi proc_exit",
+        .invalid_module => "invalid module",
     };
 }
 
@@ -196,7 +202,12 @@ pub fn mapInterpTrap(err: anyerror) TrapKind {
 }
 
 pub fn allocTrap(alloc: std.mem.Allocator, store: ?*wasm_c_api.Store, kind: TrapKind) ?*Trap {
-    const msg = trapMessageFor(kind);
+    return allocTrapWithMessage(alloc, store, kind, trapMessageFor(kind));
+}
+
+/// `allocTrap` with a caller-supplied message (copied), for the kinds whose
+/// message carries a reason beyond the kind's fixed string.
+pub fn allocTrapWithMessage(alloc: std.mem.Allocator, store: ?*wasm_c_api.Store, kind: TrapKind, msg: []const u8) ?*Trap {
     const buf = alloc.dupe(u8, msg) catch return null;
     const t = alloc.create(Trap) catch {
         alloc.free(buf);

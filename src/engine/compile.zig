@@ -739,7 +739,7 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
     if (module.find(.start)) |ss| {
         var pos: usize = 0;
         const start_funcidx = try leb128.readUleb128(u32, ss.body, &pos);
-        if (pos != ss.body.len) return Error.UnsupportedEntrySignature; // trailing bytes in start section
+        if (pos != ss.body.len) return Error.TrailingBytes; // trailing bytes in start section (§5.5.11)
         if (start_funcidx >= total_funcs) return Error.InvalidStartFunction;
         const start_sig = func_sigs[start_funcidx];
         if (start_sig.params.len != 0 or start_sig.results.len != 0) {

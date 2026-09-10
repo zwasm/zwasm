@@ -136,10 +136,28 @@ pub fn runWasmJitCaptured(
     // on the CWAS magic). Export-TYPE lookups (arg packing / multi-result
     // sizing) read module metadata through the artifact's embedded original
     // bytes so `--invoke` behaves byte-identically to the source `.wasm`.
-    const wasm_view: []const u8 = if (bytes.len >= 4 and std.mem.eql(u8, bytes[0..4], "CWAS"))
+    const is_cwasm = bytes.len >= 4 and std.mem.eql(u8, bytes[0..4], "CWAS");
+    const wasm_view: []const u8 = if (is_cwasm)
         try @import("../engine/codegen/aot/load_compiled.zig").embeddedWasmBytes(bytes)
     else
         bytes;
+    // #233 — the same front-end validation `wasm_module_new` runs for the
+    // `.wasm` default, so `--engine jit` starts from the same verdict and
+    // prints the same diagnostic (set by `frontendValidate`). A `.cwasm` was
+    // validated when `zwasm compile` produced it.
+    if (!is_cwasm) {
+        // Cleared first, as `runWasmCapturedFull` does on entry: the slot is
+        // process state, and a rejection that sets nothing must not inherit
+        // an earlier call's reason (PR #429 review).
+        diagnostic.clearDiag();
+        if (!@import("../runtime/instance/instantiate.zig").frontendValidate(alloc, bytes)) {
+            // The same generic reason `runWasm` gives when the validator set none.
+            if (diagnostic.lastDiagnostic() == null) {
+                diagnostic.setDiag(.instantiate, .module_alloc_failed, .unknown, "module decode/validate failed", .{});
+            }
+            return error.ModuleAllocFailed;
+        }
+    }
     if (dbg.on("jit.callcount")) call_profile.reset();
     defer if (dbg.on("jit.callcount")) call_profile.dump();
     if (dbg.on("global.trace")) call_profile.greset();
@@ -572,8 +590,18 @@ pub fn runWasmCapturedFull(
 
     // D-496 — honour the caller's engine selection (default `.auto` = JIT-preferring
     // with interp fallback per the flip; `.interp` forces interp for `--engine interp`).
-    const instance = @import("../api/instance.zig").instanceNewWithEngine(store, module, null, null, limits.engine) orelse {
-        diagnostic.setDiag(.instantiate, .instance_alloc_failed, .unknown, "instantiation failed (no further detail in phase 1)", .{});
+    // #233 — take the trap: a `(start)` trap or the JIT's validity verdict
+    // (`ZWASM_TRAP_INVALID_MODULE`) is the reason the instantiation failed.
+    var inst_trap: ?*trap_surface.Trap = null;
+    const instance = @import("../api/instance.zig").instanceNewWithEngine(store, module, null, &inst_trap, limits.engine) orelse {
+        if (inst_trap) |t| {
+            defer wasm_c_api.wasm_trap_delete(t);
+            const msg: []const u8 = if (t.message_ptr) |p| p[0..t.message_len] else trap_surface.trapMessageFor(t.kind);
+            // `diag_print` already says "instantiation failed for <file>:".
+            diagnostic.setDiag(.instantiate, .instance_alloc_failed, .unknown, "{s}", .{msg});
+        } else {
+            diagnostic.setDiag(.instantiate, .instance_alloc_failed, .unknown, "instantiation failed (no further detail in phase 1)", .{});
+        }
         return error.InstanceAllocFailed;
     };
     defer wasm_c_api.wasm_instance_delete(instance);

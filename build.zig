@@ -1310,6 +1310,27 @@ pub fn build(b: *std.Build) void {
     const test_cli_default_entry_step = b.step("test-cli-default-entry", "Run each default-entry fixture as .wasm, --engine=jit and .cwasm and require the same exit code, stdout and stderr (issue #220)");
     test_cli_default_entry_step.dependOn(&run_cli_default_entry.step);
 
+    // `zig build test-cli-invalid-module` — issue #233: `zwasm run` (both
+    // drivers) and `zwasm compile` refuse the same invalid module with the
+    // same reason on stderr, whether the front-end validator or the JIT's own
+    // module-level check is the one that judges it. Subprocess for the same
+    // reason as above: only `main.zig` picks the driver.
+    const cli_invalid_module_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/runners/invalid_module_cli_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const cli_invalid_module_exe = b.addExecutable(.{
+        .name = "zwasm-cli-invalid-module",
+        .root_module = cli_invalid_module_mod,
+    });
+    const run_cli_invalid_module = b.addRunArtifact(cli_invalid_module_exe);
+    run_cli_invalid_module.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
+    run_cli_invalid_module.addArg(b.pathFromRoot("test/runners/fixtures/invalid_module"));
+    run_cli_invalid_module.has_side_effects = true;
+    const test_cli_invalid_module_step = b.step("test-cli-invalid-module", "Run each invalid-module fixture through `zwasm run`, `zwasm run --engine=jit` and `zwasm compile` and require exit 1 with the reason on stderr from all three (issue #233)");
+    test_cli_invalid_module_step.dependOn(&run_cli_invalid_module.step);
+
     // `zig build test-wasi-p1-official` — the OFFICIAL wasi-testsuite
     // wasm32-wasip1 corpus (D-582). Deliberately NOT in `test-all` yet: the
     // corpus is not green on every OS (D-583 carries the live count — no copy
@@ -1429,6 +1450,7 @@ pub fn build(b: *std.Build) void {
         .{ .src = "test/c_api_conformance/cross_module_reexport.c", .name = "cross_module_reexport" }, // #388 a re-exported import links, and the chain outlives A
         .{ .src = "test/c_api_conformance/cross_module_abi.c", .name = "cross_module_abi" }, // #390 / #413 overflow args, MEMORY-class results and the arm64 cohort cross the bridge
         .{ .src = "test/c_api_conformance/instance_new_short_imports.c", .name = "instance_new_short_imports" }, // #392 a short import vector is NULL, not a read past it
+        .{ .src = "test/c_api_conformance/auto_rejects_invalid.c", .name = "auto_rejects_invalid" }, // #233 AUTO and JIT return NULL with an INVALID_MODULE trap, AUTO does not retry
         .{
             .src = "test/c_api_conformance/wasi_preopen.c",
             .name = "wasi_preopen",
@@ -1664,6 +1686,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_cli_stdin.step); // issue #257 CLI stdin → guest fd 0
     test_all_step.dependOn(&run_cli_argv0.step); // issue #256 CLI argv[0] = base name
     test_all_step.dependOn(&run_cli_default_entry.step); // issue #220 default-entry parity across the two run drivers
+    test_all_step.dependOn(&run_cli_invalid_module.step); // issue #233 the same verdict from run, run --engine=jit and compile
     test_all_step.dependOn(&run_wasi_p1.step);
     // §9.7 / 7.8 row close (D-045 chunks 1-14 fully discharged):
     // wire test-spec-assert into test-all on ALL hosts. Three-host

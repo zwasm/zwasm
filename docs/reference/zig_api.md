@@ -45,7 +45,7 @@ lifetime.
 `Module.instantiate` and `Linker.instantiate` both take an `InstantiateOpts`
 (`.{}` = defaults). Fields (`src/zwasm/module.zig`):
 
-- `engine`: `.auto` (default — prefers JIT, interp fallback) · `.jit` · `.interp`.
+- `engine`: `.auto` (default — prefers JIT, interp fallback when the JIT declines the module; an invalid module is `InstantiateFailed` on every engine, #233) · `.jit` · `.interp`.
 - `fuel`: a `Budget` — `.{ .limited = N }` (default finite) or `.unmetered`.
 - `max_memory_pages`, `max_table_elements`: `Budget` host caps (finite by default).
 
