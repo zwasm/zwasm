@@ -245,6 +245,9 @@ fn nonSimdOnModuleLoaded(
         .valtypes = compiled.globals_valtypes,
         .buf = scratch_globals[0..],
         .num_imports = compiled.num_global_imports,
+        // The import slots only: the data offsets below are evaluated
+        // before the defined globals are written.
+        .readable = compiled.num_global_imports,
     };
 
     runner_mod.applyActiveDataSegmentsCtx(
@@ -1899,6 +1902,9 @@ fn nonSimdHandleAssertUninstantiable(
         .valtypes = compiled.globals_valtypes,
         .buf = scratch_globals[0..],
         .num_imports = compiled.num_global_imports,
+        // The import slots only: the data offsets below are evaluated
+        // before the defined globals are written.
+        .readable = compiled.num_global_imports,
     };
     runner_mod.applyTableInitCtx(
         gpa,

@@ -63,12 +63,22 @@ test "validateConstExpr: is_const opcode set + arity + global.get mutability (§
     // Trailing bytes after `end`.
     try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0x41, 0x00, 0x0B, 0x41, 0x00 }, .i32, scope));
 
-    // The GC family is admissible per `is_const` but not typed here. Every one
-    // of its forms yields a reference, so the verdict splits on what the
-    // position expects: a reference is undeterminable (an incomplete walker
-    // must not reject a valid module), a numeric type is an outright mismatch.
-    try testing.expectEqual(validator.ConstExprVerdict.undeterminable, validator.validateConstExpr(&[_]u8{ 0xFB, 0x00, 0x03, 0x0B }, ValType.anyref, scope));
-    try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0xFB, 0x00, 0x03, 0x0B }, .i32, scope));
+    // The GC family is admissible per `is_const` and walked for arity, but
+    // not typed here. Every one of its forms yields a reference, so the
+    // verdict splits on what the position expects: a reference is
+    // undeterminable (an incomplete walker must not reject a valid module), a
+    // numeric type is an outright mismatch. `ref.i31` wraps one i32.
+    try testing.expectEqual(validator.ConstExprVerdict.undeterminable, validator.validateConstExpr(&[_]u8{ 0x41, 0x01, 0xFB, 0x1C, 0x0B }, ValType.i31ref, scope));
+    try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0x41, 0x01, 0xFB, 0x1C, 0x0B }, .i32, scope));
+    // struct.new names a type this (empty) type section does not define.
+    try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0xFB, 0x00, 0x03, 0x0B }, ValType.anyref, scope));
+    // The walk continues past the GC form (PR #428 review): a numeric value
+    // left beside the reference, a missing operand, and a non-const GC op
+    // (`array.len`) are each invalid, as they are for the reference
+    // interpreter.
+    try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0x41, 0x01, 0xFB, 0x1C, 0x41, 0x02, 0x0B }, ValType.i31ref, scope));
+    try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0xFB, 0x1C, 0x0B }, ValType.i31ref, scope));
+    try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0x41, 0x01, 0xFB, 0x1C, 0xFB, 0x0F, 0x0B }, ValType.i31ref, scope));
 
     // An expression deeper than a single instruction's arity is typed, not
     // waved through: extended-const can push many operands before folding.

@@ -212,6 +212,9 @@ pub fn validateConstExpr(
     var stack: [256]ValType = undefined;
     var sp: usize = 0;
     var pos: usize = 0;
+    // A GC form produced a reference whose exact type this walker does not
+    // compute; structure and arity are still judged all the way to `end`.
+    var gc_result = false;
 
     while (pos < expr.len) {
         const op = expr[pos];
@@ -220,6 +223,7 @@ pub fn validateConstExpr(
             0x0B => { // end — must be the last byte, leaving exactly [expected]
                 if (pos != expr.len) return .invalid;
                 if (sp != 1) return .invalid;
+                if (gc_result) return if (expected == .ref) .undeterminable else .invalid;
                 return if (gc_subtype.gcValTypeSubtype(stack[0], expected, scope.types)) .ok else .invalid;
             },
             0x41 => { // i32.const
@@ -282,11 +286,47 @@ pub fn validateConstExpr(
                 sp += 1;
             },
             // GC + extern-convert const forms (struct.new / array.new* /
-            // ref.i31 / any.convert_extern …). Every one of them yields a
-            // reference, so a numeric `expected` can never be satisfied and is
-            // an outright mismatch. Typing them against a reference needs the
-            // full GC type algebra, which this walker declines to judge.
-            0xFB => return if (expected == .ref) .undeterminable else .invalid,
+            // ref.i31 / any.convert_extern …). Each pops a fixed number of
+            // operands, or one per field of the named type, and pushes one
+            // reference — so arity, the terminating `end` and what follows are
+            // judged here; the reference's exact type needs the full GC type
+            // algebra, which this walker declines (`gc_result` → the `end`
+            // arm answers `undeterminable` for a reference `expected` and
+            // `invalid` for a numeric one). Returning at the first `0xFB`
+            // let a numeric suffix through (PR #428 review).
+            0xFB => {
+                const sub = leb128.readUleb128(u32, expr, &pos) catch return .invalid;
+                const pops: usize = switch (sub) {
+                    0x00, 0x01 => blk: { // struct.new $t (one per field) / struct.new_default $t
+                        const t = leb128.readUleb128(u32, expr, &pos) catch return .invalid;
+                        if (t >= scope.types.struct_defs.len) return .invalid;
+                        const sd = scope.types.struct_defs[t] orelse return .invalid;
+                        break :blk if (sub == 0x00) sd.fields.len else 0;
+                    },
+                    0x06, 0x07 => blk: { // array.new $t (elem, len) / array.new_default $t (len)
+                        const t = leb128.readUleb128(u32, expr, &pos) catch return .invalid;
+                        if (t >= scope.types.array_defs.len or scope.types.array_defs[t] == null) return .invalid;
+                        break :blk if (sub == 0x06) 2 else 1;
+                    },
+                    0x08 => blk: { // array.new_fixed $t N
+                        const t = leb128.readUleb128(u32, expr, &pos) catch return .invalid;
+                        if (t >= scope.types.array_defs.len or scope.types.array_defs[t] == null) return .invalid;
+                        const n = leb128.readUleb128(u32, expr, &pos) catch return .invalid;
+                        break :blk n;
+                    },
+                    0x1A, 0x1B => 1, // any.convert_extern / extern.convert_any (a reference in)
+                    0x1C => 1, // ref.i31 (an i32 in)
+                    else => return .invalid, // not in `is_const`
+                };
+                if (sp < pops) return .invalid;
+                if (sub == 0x1C and std.meta.activeTag(stack[sp - 1]) != .i32) return .invalid;
+                if ((sub == 0x1A or sub == 0x1B) and std.meta.activeTag(stack[sp - 1]) != .ref) return .invalid;
+                sp -= pops;
+                if (sp >= stack.len) return .undeterminable;
+                stack[sp] = ValType.anyref; // placeholder: a reference of unjudged type
+                sp += 1;
+                gc_result = true;
+            },
             else => return .invalid, // not in `is_const`
         }
     }

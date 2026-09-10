@@ -50,15 +50,18 @@ pub fn applyDefinedGlobalsInit(
     // Callers that haven't populated the import prefix get the
     // ctx but its buf reads zeros — matching pre-cohort-1 behaviour
     // for fixtures that don't use global.get in init exprs.
-    const gctx: rv.GlobalsCtx = .{
-        .offsets = globals_offsets,
-        .valtypes = globals_valtypes,
-        .buf = globals_buf,
-        .num_imports = num_global_imports,
-    };
     for (globals_decoded.items, 0..) |gd, gi| {
         const off = globals_offsets[num_global_imports + gi];
         const vt = globals_valtypes[num_global_imports + gi];
+        // §3.3.13.1 — this global's init may read the imports and the
+        // globals before it, all written by the time it is evaluated.
+        const gctx: rv.GlobalsCtx = .{
+            .offsets = globals_offsets,
+            .valtypes = globals_valtypes,
+            .buf = globals_buf,
+            .num_imports = num_global_imports,
+            .readable = num_global_imports + @as(u32, @intCast(gi)),
+        };
         // Post-ADR-0110 widen: every slot is uniform 16 bytes.
         if (off + 16 > globals_buf.len) return Error.UnsupportedEntrySignature;
         switch (vt) {
