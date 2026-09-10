@@ -22,7 +22,7 @@
  * C's import at B's runtime and B's func index 0, which is B's import
  * placeholder (body: `unreachable`, the backstop `instantiate.zig` describes),
  * so the chained call traps there today — the same missing fold, in the other
- * engine, tracked separately. Exits 0 on success.
+ * engine (#427). Exits 0 on success.
  */
 
 #include <stdio.h>

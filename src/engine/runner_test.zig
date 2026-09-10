@@ -1316,7 +1316,7 @@ test "JitInstance.initLinked: the importer's globals base survives a cross-modul
 // Measured without that registration (2026-09-08, x86_64): the same chain —
 // and a chain with no tag import at all, the callee throwing its own tag
 // into a `catch_all` — dies with SIGSEGV (`signal.zig` exit 70). `initLinked`
-// registers nothing, and it is the entry the C API uses; tracked separately.
+// registers nothing, and it is the entry the C API uses (#426).
 const eh_tag_wasm = [_]u8{
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
     0x01, 0x7f, 0x00, 0x0d, 0x03, 0x01, 0x00, 0x00, 0x07, 0x05, 0x01, 0x01,
