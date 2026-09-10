@@ -52,6 +52,38 @@ pub fn boundsChecksMode() BoundsChecks {
 /// binds the guarded reservation, ADR-0202 D5 clauses D-515(1)), so the
 /// historical forced-`.explicit` is gone. Kept as a named entry point so
 /// AOT-destined call sites stay greppable.
+/// #397 — a const expression's validity is judged once, by the shared
+/// validator (Wasm 3.0 §3.3.13.1); `runner_validate.zig` only evaluates.
+/// `.undeterminable` is the GC shapes that walker does not type: they are
+/// not rejected here, setup evaluates or declines them.
+fn checkConstExpr(expr: []const u8, want: zir.ValType, scope: validator_mod.ConstExprScope) Error!void {
+    switch (validator_mod.validateConstExpr(expr, want, scope)) {
+        .ok, .undeterminable => {},
+        .invalid => return Error.InvalidGlobalInitExpr,
+    }
+}
+
+/// The global index space as the validator sees it: the imported globals
+/// first, then the global section, each as (valtype, mutable).
+fn collectGlobalEntries(a: Allocator, imports_buf: ?sections.Imports, globals: ?sections.Globals) Error![]validator_mod.GlobalEntry {
+    var n: usize = if (globals) |g| g.items.len else 0;
+    if (imports_buf) |ib| for (ib.items) |imp| {
+        if (imp.kind == .global) n += 1;
+    };
+    const out = try a.alloc(validator_mod.GlobalEntry, n);
+    var gi: usize = 0;
+    if (imports_buf) |ib| for (ib.items) |imp| {
+        if (imp.kind != .global) continue;
+        out[gi] = .{ .valtype = imp.payload.global.valtype, .mutable = imp.payload.global.mutable };
+        gi += 1;
+    };
+    if (globals) |g| for (g.items) |gd| {
+        out[gi] = .{ .valtype = gd.valtype, .mutable = gd.mutable };
+        gi += 1;
+    };
+    return out;
+}
+
 pub fn compileWasmForAot(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledWasm {
     return compileWasm(allocator, wasm_bytes);
 }
@@ -455,42 +487,69 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
                 num_global_imports_empty += 1;
             };
         }
-        // §9.9 / 9.9-l-1b-d093-d82 — total_funcs for empty-fn
-        // path = number of function imports only (no defined
-        // functions). Used by validateGlobalInitExpr's ref.func
-        // arm for range-checking funcidxs in global / offset
-        // const-exprs.
-        const total_funcs_empty_for_init: u32 = sig_count;
-        if (module.find(.global)) |gs| {
-            var gs_buf = try sections.decodeGlobals(a, gs.body);
-            defer gs_buf.deinit();
-            for (gs_buf.items) |gd| {
-                try rv.validateGlobalInitExpr(gd.init_expr, gd.valtype, num_global_imports_empty, imports_buf, total_funcs_empty_for_init);
+        // The type section as the validator's scope wants it — decoded
+        // as an empty vector when absent, the way the validate path does.
+        const empty_type_body = [_]u8{0x00};
+        var types_empty = try sections.decodeTypes(a, if (module.find(.type)) |ts| ts.body else &empty_type_body);
+        defer types_empty.deinit();
+        var globals_empty: ?sections.Globals = null;
+        defer if (globals_empty) |*g| g.deinit();
+        if (module.find(.global)) |gs| globals_empty = try sections.decodeGlobals(a, gs.body);
+        const global_entries_empty = try collectGlobalEntries(a, imports_buf, globals_empty);
+        if (globals_empty) |gs_buf| {
+            for (gs_buf.items, 0..) |gd, i| {
+                // §3.3.13.1 — a global's init sees the imports and the
+                // globals defined before it. `typeidxs` = the import
+                // funcs, the whole function index space on this path.
+                try checkConstExpr(gd.init_expr, gd.valtype, .{
+                    .globals = global_entries_empty[0 .. num_global_imports_empty + i],
+                    .func_type_indices = typeidxs,
+                    .types = &types_empty,
+                });
             }
         }
         // §9.9 / 9.9-l-1b-d093-d78 mirror — empty-fn path
-        // elem + data active-offset_expr validation.
+        // elem + data active-offset_expr validation. An offset sees
+        // every global (§3.3.13.1).
+        const offset_scope_empty: validator_mod.ConstExprScope = .{
+            .globals = global_entries_empty,
+            .func_type_indices = typeidxs,
+            .types = &types_empty,
+        };
         if (module.find(.data)) |ds| {
             var ds_buf = try sections.decodeData(a, ds.body);
             defer ds_buf.deinit();
             for (ds_buf.items) |seg| {
                 if (seg.kind == .active) {
-                    try rv.validateGlobalInitExpr(seg.offset_expr, data_off_vt, num_global_imports_empty, imports_buf, total_funcs_empty_for_init);
+                    try checkConstExpr(seg.offset_expr, data_off_vt, offset_scope_empty);
                 }
+            }
+        }
+        // D-475: a table64 elem offset is i64-typed (§3.3.6) — decode
+        // the table section for the per-table expected offset type.
+        var empty_tables_buf: ?sections.Tables = null;
+        defer if (empty_tables_buf) |*t| t.deinit();
+        if (module.find(.table)) |ts| empty_tables_buf = try sections.decodeTables(a, ts.body);
+        // §3.3.13.1 — a table's own init expr sees the imported globals
+        // only: the reference interpreter checks tables before any defined
+        // global enters the context (PR #428 review).
+        if (empty_tables_buf) |t| {
+            const table_scope_empty: validator_mod.ConstExprScope = .{
+                .globals = global_entries_empty[0..num_global_imports_empty],
+                .func_type_indices = typeidxs,
+                .types = &types_empty,
+            };
+            for (t.items) |tbl| {
+                if (tbl.init_expr.len != 0) try checkConstExpr(tbl.init_expr, tbl.elem_type, table_scope_empty);
             }
         }
         if (module.find(.element)) |es| {
             var es_buf = try sections.decodeElement(a, es.body);
             defer es_buf.deinit();
-            // D-475: a table64 elem offset is i64-typed (§3.3.6) — decode
-            // the table section for the per-table expected offset type.
-            var empty_tables_buf: ?sections.Tables = null;
-            defer if (empty_tables_buf) |*t| t.deinit();
-            if (module.find(.table)) |ts| empty_tables_buf = try sections.decodeTables(a, ts.body);
             for (es_buf.items) |seg| {
                 if (seg.kind == .active) {
                     const off_vt = elemOffsetValType(imports_buf, empty_tables_buf, seg.tableidx);
-                    try rv.validateGlobalInitExpr(seg.offset_expr, off_vt, num_global_imports_empty, imports_buf, total_funcs_empty_for_init);
+                    try checkConstExpr(seg.offset_expr, off_vt, offset_scope_empty);
                 }
             }
         }
@@ -706,26 +765,23 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
     if (module.find(.data)) |s| datas_buf = try sections.decodeData(allocator, s.body);
     if (module.find(.element)) |s| elems_buf = try sections.decodeElement(allocator, s.body);
 
-    // §9.9 / 9.9-l-1b-d093-d77 (skip-impl drainage):
-    // Wasm spec §3.4.3 / §3.3.2 global init-expression
-    // validation. Per spec, a defined global's init_expr
-    // must be a "constant expression": single const opcode
-    // (i32/i64/f32/f64.const, ref.null, ref.func, or
-    // global.get of an *imported* *immutable* global)
-    // followed by `end (0x0B)`, AND the result type must
-    // match the declared valtype.
-    // Count global imports once for d-77 + d-78 const-expr
-    // checks (init-expr `global.get` must reference an
-    // imported immutable global).
-    var num_global_imports_main: u32 = 0;
-    if (imports_buf) |ib| {
-        for (ib.items) |imp| if (imp.kind == .global) {
-            num_global_imports_main += 1;
-        };
-    }
+    // §9.12-E / B158: validator_globals indexed by FULL wasm global
+    // index space (imports prefix + defined; mirrors B153/B154's
+    // globals_offsets shape). Without this, opGlobalGet/Set rejects
+    // imported-global references as out-of-bounds (B156 Errors 1+2).
+    const validator_globals = try collectGlobalEntries(a, imports_buf, globals_buf);
+
+    // §9.9 / 9.9-l-1b-d093-d77 (skip-impl drainage): Wasm spec §3.4.3
+    // global init-expression validation — the shared validator's verdict
+    // (#397). §3.3.13.1: a defined global's init sees the imports and the
+    // globals defined before it, never itself or a later one.
     if (globals_buf) |g| {
-        for (g.items) |gd| {
-            try rv.validateGlobalInitExpr(gd.init_expr, gd.valtype, num_global_imports_main, imports_buf, total_funcs);
+        for (g.items, 0..) |gd, i| {
+            try checkConstExpr(gd.init_expr, gd.valtype, .{
+                .globals = validator_globals[0 .. nm_global_imports + i],
+                .func_type_indices = func_typeidxs,
+                .types = &types,
+            });
         }
     }
 
@@ -735,11 +791,16 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
     // expressions per §3.3.2. Drains `elem` + `data`
     // SKIP-VALIDATOR-GAP entries with "type mismatch",
     // "constant expression required", "unknown global" in
-    // offset positions.
+    // offset positions. An offset sees every global (§3.3.13.1).
+    const offset_scope: validator_mod.ConstExprScope = .{
+        .globals = validator_globals,
+        .func_type_indices = func_typeidxs,
+        .types = &types,
+    };
     if (datas_buf) |d| {
         for (d.items) |seg| {
             if (seg.kind == .active) {
-                try rv.validateGlobalInitExpr(seg.offset_expr, data_off_vt, num_global_imports_main, imports_buf, total_funcs);
+                try checkConstExpr(seg.offset_expr, data_off_vt, offset_scope);
             }
         }
     }
@@ -748,28 +809,21 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
             if (seg.kind == .active) {
                 // D-475: a table64 elem offset is i64-typed (§3.3.6).
                 const off_vt = elemOffsetValType(imports_buf, tables_buf, seg.tableidx);
-                try rv.validateGlobalInitExpr(seg.offset_expr, off_vt, num_global_imports_main, imports_buf, total_funcs);
+                try checkConstExpr(seg.offset_expr, off_vt, offset_scope);
             }
         }
     }
-
-    // §9.12-E / B158: validator_globals indexed by FULL wasm global
-    // index space (imports prefix + defined; mirrors B153/B154's
-    // globals_offsets shape). Without this, opGlobalGet/Set rejects
-    // imported-global references as out-of-bounds (B156 Errors 1+2).
-    const defined_globals_n: usize = if (globals_buf) |g| g.items.len else 0;
-    const validator_globals = try a.alloc(validator_mod.GlobalEntry, @as(usize, nm_global_imports) + defined_globals_n);
-    if (imports_buf) |ib| {
-        var gi: usize = 0;
-        for (ib.items) |imp| {
-            if (imp.kind != .global) continue;
-            validator_globals[gi] = .{ .valtype = imp.payload.global.valtype, .mutable = imp.payload.global.mutable };
-            gi += 1;
-        }
-    }
-    if (globals_buf) |g| {
-        for (g.items, 0..) |gd, gi| {
-            validator_globals[@as(usize, nm_global_imports) + gi] = .{ .valtype = gd.valtype, .mutable = gd.mutable };
+    // §3.3.13.1 — a table's own init expr sees the imported globals only:
+    // the reference interpreter checks tables before any defined global
+    // enters the context (PR #428 review).
+    if (tables_buf) |t| {
+        const table_scope: validator_mod.ConstExprScope = .{
+            .globals = validator_globals[0..nm_global_imports],
+            .func_type_indices = func_typeidxs,
+            .types = &types,
+        };
+        for (t.items) |tbl| {
+            if (tbl.init_expr.len != 0) try checkConstExpr(tbl.init_expr, tbl.elem_type, table_scope);
         }
     }
 

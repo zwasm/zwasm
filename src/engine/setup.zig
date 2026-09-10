@@ -372,20 +372,7 @@ pub fn setupRuntimeLinked(
     const ta = temp_arena.allocator();
     var module = try parser.parse(ta, wasm_bytes);
 
-    // D-225 — `[]*Value` view of the resolved imported-global values, in
-    // import order, for the setup-time const-expr evals' `global.get N`
-    // (N < num_global_imports). ta-allocated: read only during setup.
     const Value = @import("../runtime/value.zig").Value;
-    const imp_global_ptrs: []const *Value = blk: {
-        if (imported_global_vals.len == 0) break :blk &.{};
-        const cells = try ta.alloc(Value, imported_global_vals.len);
-        const ptrs = try ta.alloc(*Value, imported_global_vals.len);
-        for (imported_global_vals, 0..) |v, i| {
-            cells[i] = .{ .bits64 = v };
-            ptrs[i] = &cells[i];
-        }
-        break :blk ptrs;
-    };
 
     var num_func_imports: u32 = 0;
     // ADR-0134 D3 — imported-tag count + a within-module aliasing map
@@ -642,6 +629,15 @@ pub fn setupRuntimeLinked(
     for (0..num_global_imports) |i| {
         globals_buf[i] = .{ .bits64 = if (i < imported_global_vals.len) imported_global_vals[i] else 0 };
     }
+    // D-225 / #397 — `[]*Value` view of every global slot, in index order,
+    // for the setup-time const-expr evals' `global.get N`: a prefix of it is
+    // the window §3.3.13.1 gives each expression. ta-allocated: read only
+    // during setup.
+    const global_ptrs: []const *Value = blk: {
+        const ptrs = try ta.alloc(*Value, globals_total);
+        for (ptrs, 0..) |*p, i| p.* = &globals_buf[i];
+        break :blk ptrs;
+    };
 
     // 10.G GC-on-JIT (ADR-0128 §2): materialise the GC heap + type table
     // for modules with a GC type section BEFORE the global-init loop, so
@@ -739,9 +735,12 @@ pub fn setupRuntimeLinked(
         for (g.items, 0..) |gd, i| {
             // Defined globals follow the import slots (D-225) to match the
             // import-inclusive emitted-code layout.
+            // §3.3.13.1 — the init may read the imports and the globals
+            // defined before it, all evaluated by now.
+            const readable = global_ptrs[0 .. num_global_imports + i];
             globals_buf[num_global_imports + i] = instantiate.evalConstExprValue(gd.init_expr) catch |e| blk: {
                 if (e == error.UnsupportedConstExpr) {
-                    break :blk instantiate.evalGlobalInitGc(gd.init_expr, gc_heap_typed, gti_val, func_entities, imp_global_ptrs) catch |e2| {
+                    break :blk instantiate.evalGlobalInitGc(gd.init_expr, gc_heap_typed, gti_val, func_entities, readable) catch |e2| {
                         // A real GC-heap resource trap (the 4 GiB cap — e.g. a
                         // too-large `array.new` const-expr, D-472) must FAIL
                         // instantiation, matching the interp path
@@ -846,14 +845,15 @@ pub fn setupRuntimeLinked(
     // i31ref/ref table trapped on i31.get/use). evalConstExprValue handles
     // ref.null/numeric; evalGlobalInitGc handles ref.i31 / ref.func /
     // struct.new / array.new (with the heap + func_entities built above).
-    // `global.get` of an IMPORTED global in the init-expr is not yet
-    // resolved here (imported_globals = &.{}) — the cross-module piece.
+    // `global.get` in the init-expr reads an imported global only — the
+    // scope §3.3.13.1 gives a table init, and the one `compileWasm` judged
+    // it against; evaluation gets the same prefix (PR #428 review).
     {
         const gti_val: ?gc_type_info.GcTypeInfos = if (gc_type_infos_typed) |t| t.* else null;
         for (table_metas, 0..) |tm, i| {
             if (tm.init_expr.len == 0) continue;
             const v = instantiate.evalConstExprValue(tm.init_expr) catch
-                instantiate.evalGlobalInitGc(tm.init_expr, gc_heap_typed, gti_val, func_entities, imp_global_ptrs) catch continue;
+                instantiate.evalGlobalInitGc(tm.init_expr, gc_heap_typed, gti_val, func_entities, global_ptrs[0..num_global_imports]) catch continue;
             // A table init-expr always yields a reftype; `.ref` (== `.bits64`
             // offset in the extern union) holds the ref-encoded u64.
             const raw: u64 = v.ref;
@@ -1118,7 +1118,7 @@ pub fn setupRuntimeLinked(
                     for (seg.item_exprs, 0..) |ie, k| {
                         const v = instantiate.evalConstExprValue(ie) catch |e| blk: {
                             if (e == error.UnsupportedConstExpr) {
-                                break :blk instantiate.evalGlobalInitGc(ie, gc_heap_typed, elem_gti_val, func_entities, imp_global_ptrs) catch Value{ .ref = Value.null_ref };
+                                break :blk instantiate.evalGlobalInitGc(ie, gc_heap_typed, elem_gti_val, func_entities, global_ptrs) catch Value{ .ref = Value.null_ref };
                             }
                             break :blk Value{ .ref = Value.null_ref };
                         };

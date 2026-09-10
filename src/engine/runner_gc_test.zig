@@ -1135,7 +1135,7 @@ test "JitInstance: ref.i31 global init compiles + get returns the i31 value" {
     if (builtin.os.tag == .windows) return skip.phaseEnd(.win64);
     // (module (global $g i31ref (i32.const 1234) (ref.i31))
     //   (func (export "g") (result i32) global.get 0 i31.get_s))
-    // The JIT compile gate's validateGlobalInitExpr was single-opcode and
+    // The JIT compile gate's own const-expr check was single-opcode and
     // rejected the `i32.const; ref.i31; end` sequence (InvalidGlobalInitExpr).
     const bytes = [_]u8{
         0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
@@ -1163,7 +1163,7 @@ test "runI32Export: array.new_default const-expr global + array.len → 3 (D-223
     //   (type $arr (array (mut i32)))                       ;; type 0
     //   (global $g (ref 0) (i32.const 3) (array.new_default 0)) ;; gc const-expr
     //   (func (export "len") (result i32) global.get 0 array.len))
-    // The JIT compile gate (validateGlobalInitExpr) rejected the multi-op
+    // The JIT compile gate's own const-expr check rejected the multi-op
     // const-expr (i32.const; array.new_default; end → InvalidGlobalInitExpr),
     // so the whole module was compile-skipped. Now the validator walks the
     // const-expr + setup allocates the array on the gc heap at global init.

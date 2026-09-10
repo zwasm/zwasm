@@ -168,10 +168,15 @@ pub const Error = error{
     /// called. An unsatisfied import MUST fail instantiation regardless
     /// of whether it is reached at runtime (D-451).
     ImportUnsatisfied,
+    /// Wasm 3.0 §3.3.13.1: a global's init expression or an active
+    /// segment's offset expression is not a valid constant expression
+    /// for its position — the shared validator's `.invalid` verdict
+    /// (`validateConstExpr`), raised by `compile.zig` (#397).
+    InvalidGlobalInitExpr,
 } || compile_func.Error || parser.Error || sections.Error || linker.Error || entry.Error || validator_mod.Error || rv.Error;
-// `InvalidGlobalInitExpr` / `UnsupportedEntrySignature` /
-// `UnsupportedConstExpr` originate in `runner_validate.zig`
-// (per ADR-0064) and are merged in via `|| rv.Error` above.
+// `UnsupportedEntrySignature` / `UnsupportedConstExpr` originate in
+// `runner_validate.zig` (per ADR-0064) and are merged in via
+// `|| rv.Error` above.
 
 /// Compile every defined function in `wasm_bytes` and link into
 /// a single JitModule. Caller owns the module — pair with
