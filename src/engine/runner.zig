@@ -1096,11 +1096,20 @@ pub const JitInstance = struct {
     /// / `Module.jit_borrowers`); other callers keep it by hand.
     pub fn exportedFuncTarget(self: *JitInstance, allocator: Allocator, name: []const u8) ?setup_mod.FuncImportTarget {
         const idx = findExportFunc(allocator, self.wasm_bytes, name) catch return null;
+        return self.funcTarget(idx);
+    }
+
+    /// The same target for a func named by its index in this module's func
+    /// space (imports ++ defined). #386 — the C API binds a cross-module
+    /// import to the func the embedder's extern names, not to whichever
+    /// export shares the import's field name, so it resolves by index.
+    pub fn funcTarget(self: *JitInstance, idx: u32) ?setup_mod.FuncImportTarget {
         if (idx < self.compiled.num_imports) {
             if (idx >= self.import_targets.len) return null;
             const t = self.import_targets[idx];
             return if (t.callee_entry != 0) t else null;
         }
+        if (idx >= self.compiled.func_sigs.len) return null;
         return .{
             .callee_rt = @intFromPtr(&self.owned.rt),
             .callee_entry = self.compiled.module.entryAddr(idx),

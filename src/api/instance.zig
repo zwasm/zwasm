@@ -587,17 +587,23 @@ pub export fn wasm_module_delete(m: ?*Module) callconv(.c) void {
 // Instance constructors / destructors (§9.3 / 3.5 + 3.6)
 // ============================================================
 
-/// Look up the source instance's exported entity descriptor by
-/// `(kind, name)` against `inst.{exports_storage, export_types}`.
+/// Look up the source instance's exported entity descriptor by `(kind,
+/// index)` against `inst.{exports_storage, export_types}`. #386 — the index
+/// is the one the embedder's extern carries (`Func.func_idx`,
+/// `Extern.{table,memory,global}_idx`), so a binding lands on the entity that
+/// was passed, whatever the import's field name says. An entity exported
+/// under several names has one descriptor; the first match serves. A handle
+/// to an unexported entity (a funcref recovered from a table) has no
+/// descriptor here and does not bind — as before, when it had no name.
 fn lookupSourceExportType(
     inst: *const Instance,
     kind: sections.ExportDesc,
-    name: []const u8,
+    idx: u32,
 ) !runtime.ExportType {
     if (inst.exports_storage.len != inst.export_types.len)
         return error.ImportTypeMismatch;
     for (inst.exports_storage, inst.export_types) |exp, et| {
-        if (exp.kind == kind and std.mem.eql(u8, exp.name, name)) return et;
+        if (exp.kind == kind and exp.idx == idx) return et;
     }
     return error.ImportTypeMismatch;
 }
@@ -712,20 +718,17 @@ fn buildBindings(
         const source_inst = ext.instance orelse return error.UnknownImportModule;
         const source_rt = source_inst.runtime orelse return error.UnknownImportModule;
 
+        // #386 — wasm-c-api's import vector is positional: `imports.data[i]`
+        // IS the entity for import `i`, and the import's field name plays no
+        // part in resolving it. Each arm binds the entity the extern names by
+        // index; the name is not consulted.
         switch (it.kind) {
             .func => {
                 const fh = ext.func orelse return error.UnknownImportModule;
-                _ = fh;
-                const source_funcidx = blk: {
-                    for (source_inst.exports_storage) |exp| {
-                        if (exp.kind == .func and std.mem.eql(u8, exp.name, it.name))
-                            break :blk exp.idx;
-                    }
-                    return error.UnknownImportModule;
-                };
-                const src_et = try lookupSourceExportType(source_inst, .func, it.name);
-                const source_sig = switch (src_et) {
-                    .func => |sft| sft.sig,
+                const source_funcidx = fh.func_idx;
+                const src_et = try lookupSourceExportType(source_inst, .func, source_funcidx);
+                const sft = switch (src_et) {
+                    .func => |sft| sft,
                     else => return error.ImportTypeMismatch,
                 };
                 const ctx_ptr = try arena_alloc.create(cross_module.CallCtx);
@@ -734,6 +737,14 @@ fn buildBindings(
                     .source_funcidx = source_funcidx,
                     .dispatch_table = dispatchTable(),
                 };
+                // #387 — hand the exporter's own type section to the type
+                // check, so the two signatures are compared across both type
+                // spaces. What the binding keeps past instantiation is
+                // `source_signature`, whose slices live on the exporter's
+                // arena; `wasm_instance_delete` parks that arena with the
+                // runtime the binding also names, so both outlive the importer
+                // together (the #382 park). `source_types` points into the
+                // exporter's handle and is read at instantiation only.
                 bindings[idx] = .{ .func = .{
                     .host_call = .{
                         .fn_ptr = cross_module.thunk,
@@ -742,13 +753,16 @@ fn buildBindings(
                     .source = .{ .cross_module = .{
                         .source_runtime = source_rt,
                         .source_funcidx = source_funcidx,
-                        .source_signature = source_sig,
+                        .source_signature = sft.sig,
+                        .source_types = if (source_inst.export_src_types) |*t| t else null,
+                        .source_typeidx = sft.typeidx,
+                        .source_final = sft.final,
                     } },
                 } };
             },
             .table => {
                 if (ext.table_idx >= source_rt.tables.len) return error.UnknownImportModule;
-                const src_et = try lookupSourceExportType(source_inst, .table, it.name);
+                const src_et = try lookupSourceExportType(source_inst, .table, ext.table_idx);
                 const desc = switch (src_et) {
                     .table => |t| t,
                     else => return error.ImportTypeMismatch,
@@ -761,18 +775,18 @@ fn buildBindings(
                 } };
             },
             .memory => {
-                const src_et = try lookupSourceExportType(source_inst, .memory, it.name);
+                if (ext.memory_idx >= source_rt.memories.len) return error.UnknownImportModule;
+                const src_et = try lookupSourceExportType(source_inst, .memory, ext.memory_idx);
                 switch (src_et) {
                     .memory => {},
                     else => return error.ImportTypeMismatch,
                 }
-                // D-199 — share the exporter's live memory0 *MemoryInstance.
-                if (source_rt.memories.len == 0) return error.UnknownImportModule;
-                bindings[idx] = .{ .memory = .{ .inst = source_rt.memories[0] } };
+                // D-199 — share the exporter's live *MemoryInstance.
+                bindings[idx] = .{ .memory = .{ .inst = source_rt.memories[ext.memory_idx] } };
             },
             .global => {
                 if (ext.global_idx >= source_rt.globals.len) return error.UnknownImportModule;
-                const src_et = try lookupSourceExportType(source_inst, .global, it.name);
+                const src_et = try lookupSourceExportType(source_inst, .global, ext.global_idx);
                 const desc = switch (src_et) {
                     .global => |g| g,
                     else => return error.ImportTypeMismatch,
@@ -870,42 +884,58 @@ const JitFuncImports = struct {
 /// #360 — resolve one cross-module FUNC import against a JIT-backed source
 /// instance into the D-225 `FuncImportTarget` `initLinked` already consumes.
 /// `error.Unsupported` when the source is interp-backed (JIT-compiled code
-/// cannot enter an interpreter runtime), when it exports no such func, or
-/// when its type is not a subtype of the declared import type — the same
-/// §4.5.10 rule `instantiate.checkImportTypeMatches` applies on the interp
-/// path. Matching is BY NAME, as the interp binder's cross-module arm is.
+/// cannot enter an interpreter runtime), when `func_idx` is not one of its
+/// exported funcs, or when its type-def does not match the declared import
+/// type — the same rule `instantiate.checkImportTypeMatches` applies on the
+/// interp path. #386 — `func_idx` is the one the embedder's extern carries,
+/// so the import binds to that func, whatever export shares its field name.
 fn crossModuleJitTarget(
-    ta: std.mem.Allocator,
     source_inst: *Instance,
+    func_idx: u32,
     it: sections.Import,
     importer_types: *const sections.Types,
 ) error{Unsupported}!setup_mod.FuncImportTarget {
     const jit_ptr = source_inst.jit orelse return error.Unsupported;
     const source_jit: *runner.JitInstance = @ptrCast(@alignCast(jit_ptr));
-    const src_et = lookupSourceExportType(source_inst, .func, it.name) catch return error.Unsupported;
-    const src_sig = switch (src_et) {
-        .func => |sft| sft.sig,
+    const src_et = lookupSourceExportType(source_inst, .func, func_idx) catch return error.Unsupported;
+    const sft = switch (src_et) {
+        .func => |sft| sft,
         else => return error.Unsupported,
     };
+    const src_sig = sft.sig;
     const want_tidx = it.payload.func_typeidx;
     if (want_tidx >= importer_types.items.len) return error.Unsupported;
     const want_sig = importer_types.items[want_tidx];
-    // #387 — `funcTypeImportCompatible` resolves both signatures in ONE type
-    // space, and the only one in hand here is the importer's. That is sound
-    // while every type is structural, and unsound the moment a signature names
-    // a type INDEX: `(ref $t)` means what `$t` means in the module it came
-    // from. The interp path has the same gap, but it carries
-    // `source_signature` to the call; a resolved JIT target becomes a bridge
-    // thunk jumping straight into the callee's body, so a wrongly accepted
-    // link there is an ABI mismatch rather than a semantic one. Decline the
-    // shape until the exporter's own `Types` are retained (the facade linker's
-    // `export_src_types` + `canonicalEqualCross` is the model). Declining is
-    // NOT a graceful degradation: the `.auto` retry lands in `buildBindings`,
-    // which needs the source's interpreter `Runtime` and a JIT-backed source
-    // has none, so this shape stays unsupported — NULL with no trap, #353's
-    // surface. It is unsupported at `main` too, by the same route, so the
-    // guard withholds an acceptance rather than removing one.
-    if (hasConcreteHeapType(want_sig) or hasConcreteHeapType(src_sig)) return error.Unsupported;
+    // #387 — `instantiateJit` retains the exporter's own type section, so the
+    // two type-defs are compared each in its own space (ADR-0127 PHASE C, the
+    // facade linker's rule): the exporter's def IS the declared one, or
+    // declares it as a supertype. The fallback below is the same-space
+    // structural compare, sound only while both signatures are structural.
+    if (source_inst.export_src_types) |*src_types| {
+        const def_ok = sections.canonicalEqualCross(importer_types, want_tidx, src_types, sft.typeidx) or
+            sections.superReachesCross(src_types, sft.typeidx, importer_types, want_tidx);
+        if (!def_ok) return error.Unsupported;
+    } else {
+        if (!validator_helpers.funcTypeImportCompatible(want_sig, src_sig, importer_types))
+            return error.Unsupported;
+        if (importer_types.finals[want_tidx] and !sft.final) return error.Unsupported;
+    }
+    // The link-time compare above is now cross-space, but what a concrete
+    // heap type means at RUN time is still per instance: `ref.test` /
+    // `ref.cast` / `call_indirect` judge a reference by the type index its
+    // defining instance stamped on it (`FuncEntity.raw_typeidx`, the GC
+    // object's info), and no canonical id crosses the boundary with the
+    // value. Whether a GC value handed from one instance to another is
+    // judged correctly there is not verified — no test passes a struct or
+    // array across instances and casts it, on either engine — so a signature
+    // naming a struct / array type keeps declining. Declining is NOT a
+    // graceful degradation: the `.auto` retry lands in `buildBindings`, which
+    // needs the source's interpreter `Runtime` and a JIT-backed source has
+    // none, so the shape stays unsupported — NULL with no trap, #353's
+    // surface. A typed function reference (`(ref $t)` with `$t` a func type)
+    // is not held back: `call_ref` checks nothing at run time, and
+    // `cross_module_type_space.c` measures the link and the call.
+    if (hasNonFuncConcreteHeapType(want_sig, importer_types) or hasNonFuncConcreteHeapType(src_sig, if (source_inst.export_src_types) |*t| t else null)) return error.Unsupported;
     // #390 / ADR-0228 — the bridge thunk is laid out for the callee's
     // signature, so overflow arguments and MEMORY-class results cross it. What
     // it still does not carry is a v128 parameter: the SysV call site's own
@@ -915,9 +945,7 @@ fn crossModuleJitTarget(
     // Mirrors the host-func sibling above, whose `dispatchPtrFor` declines the
     // signatures ITS bridge does not cover.
     if (hasV128Param(want_sig)) return error.Unsupported;
-    if (!validator_helpers.funcTypeImportCompatible(want_sig, src_sig, importer_types))
-        return error.Unsupported;
-    return source_jit.exportedFuncTarget(ta, it.name) orelse error.Unsupported;
+    return source_jit.funcTarget(func_idx) orelse error.Unsupported;
 }
 
 /// #390 / ADR-0228 — the one shape the signature-aware bridge still declines
@@ -935,14 +963,18 @@ test "hasV128Param: only a v128 parameter is declined; results and every scalar 
     try testing.expect(hasV128Param(.{ .params = &.{ .i32, .v128 }, .results = &.{} }));
 }
 
-/// #387 — does this signature name a type-section INDEX anywhere? Such a type
-/// is only meaningful in its own module, so a single-type-space comparison
-/// cannot judge it across a module boundary.
-fn hasConcreteHeapType(sig: zir.FuncType) bool {
+/// #387 — does this signature name a type-section INDEX that is not a func
+/// type (a struct or array def)? `types` is the space the signature's indices
+/// live in; with none retained, any concrete index counts (nothing can say it
+/// is a func).
+fn hasNonFuncConcreteHeapType(sig: zir.FuncType, types: ?*const sections.Types) bool {
     for ([_][]const zir.ValType{ sig.params, sig.results }) |half| {
         for (half) |vt| switch (vt) {
             .ref => |r| switch (r.heap_type) {
-                .concrete => return true,
+                .concrete => |tidx| {
+                    const t = types orelse return true;
+                    if (tidx >= t.kinds.len or t.kinds[tidx] != .func) return true;
+                },
                 .abstract => {},
             },
             else => {},
@@ -1038,12 +1070,12 @@ fn collectFromExterns(
         if (i >= arr.len) return error.Unsupported; // #392 — short vector
         const ext = arr[i] orelse return error.Unsupported;
         if (ext.kind != .func) return error.Unsupported;
+        const fh = ext.func orelse return error.Unsupported;
         if (ext.instance) |source_inst| {
-            cross[i] = try crossModuleJitTarget(ta, source_inst, it, &types);
+            cross[i] = try crossModuleJitTarget(source_inst, fh.func_idx, it, &types);
             any_cross = true;
             continue;
         }
-        const fh = ext.func orelse return error.Unsupported;
         const payload = fh.host orelse return error.Unsupported;
         const dp = jit_host_bridge.dispatchPtrFor(payload.params, payload.results, func_idx) orelse return error.Unsupported;
         try host.append(ta, .{ .idx = func_idx, .dispatch_ptr = dp, .payload = @intFromPtr(payload) });
@@ -1230,7 +1262,16 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
                 null;
             const exports = sections.decodeExports(a, export_section.body) catch break :blk false;
             inst.exports_storage = exports.items;
-            inst.export_types = instantiate.buildExportTypes(a, rt_module, exports.items, imports_decoded) catch break :blk false;
+            // #387 — retain the type section too, as the interp path does
+            // (`instantiate.zig`), so an importer can compare type-defs across
+            // both spaces (`crossModuleJitTarget`); `export_types` aliases
+            // its entries. Read at the importer's link only, while this
+            // handle is alive; the arena goes with the handle at
+            // `wasm_instance_delete`, and nothing an importer keeps points
+            // into it (its bridge thunk names the parked `JitInstance`, whose
+            // `func_sigs` outlive the handle).
+            inst.export_src_types = if (rt_module.find(.type)) |ts| (sections.decodeTypes(a, ts.body) catch break :blk false) else null;
+            inst.export_types = instantiate.buildExportTypes(a, rt_module, exports.items, imports_decoded, if (inst.export_src_types) |*t| t else null) catch break :blk false;
             break :blk true;
         };
         if (!built) {
@@ -1241,8 +1282,11 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
             alloc.destroy(inst);
             return error.Declined;
         }
-        // Retain the arena only if it backs live export storage; else release it.
+        // Retain the arena only if it backs live export storage; else release
+        // it — and with it the type section decoded above, which nothing can
+        // ask for through an instance that exports nothing (PR #434 review).
         if (inst.exports_storage.len > 0) inst.arena = arena else {
+            inst.export_src_types = null;
             arena.deinit();
             alloc.destroy(arena);
         }
@@ -3818,6 +3862,65 @@ test "D-497 JIT C-path: wasm_table_grow on a funcref table (host fail-safe fill)
     try testing.expectEqual(@as(u32, 3), wasm_table_size(tab));
 }
 
+test "#386 lookupSourceExportType resolves by func index, not by export name" {
+    // (module (func (export "a") (result i32) (i32.const 1))
+    //         (func (export "b") (param i32) (result i32) (local.get 0)))
+    const e = wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer wasm_engine_delete(e);
+    const s = wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_store_delete(s);
+    var bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x0a, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60,
+        0x01, 0x7f, 0x01, 0x7f, 0x03, 0x03, 0x02, 0x00,
+        0x01, 0x07, 0x09, 0x02, 0x01, 0x61, 0x00, 0x00,
+        0x01, 0x62, 0x00, 0x01, 0x0a, 0x0b, 0x02, 0x04,
+        0x00, 0x41, 0x01, 0x0b, 0x04, 0x00, 0x20, 0x00,
+        0x0b,
+    };
+    const bv: ByteVec = .{ .size = bytes.len, .data = &bytes };
+    const m = wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
+    defer wasm_module_delete(m);
+    for ([_]EngineKind{ .interp, .jit }) |engine| {
+        const inst = instanceNewWithEngine(s, m, null, null, engine) orelse return error.InstanceAllocFailed;
+        defer wasm_instance_delete(inst);
+        // Func 1 is the one-parameter export "b"; the index, not the name, selects it.
+        const b = try lookupSourceExportType(inst, .func, 1);
+        try testing.expectEqual(@as(usize, 1), b.func.sig.params.len);
+        try testing.expectEqual(@as(u32, 1), b.func.typeidx);
+        const a = try lookupSourceExportType(inst, .func, 0);
+        try testing.expectEqual(@as(usize, 0), a.func.sig.params.len);
+        try testing.expectError(error.ImportTypeMismatch, lookupSourceExportType(inst, .func, 2));
+        try testing.expectError(error.ImportTypeMismatch, lookupSourceExportType(inst, .table, 0));
+        // #387 — both engines retain the exporter's type section for the
+        // cross-space compare, and the export sigs alias it.
+        const types = inst.export_src_types orelse return error.TypesNotRetained;
+        try testing.expectEqual(@as(usize, 2), types.items.len);
+        try testing.expectEqual(types.items[1].params.ptr, b.func.sig.params.ptr);
+    }
+}
+
+test "#387 a JIT instance that exports nothing retains neither its arena nor a type section pointing into it (PR #434 review)" {
+    // (module (type (func))) with an empty export section: a type section
+    // to decode, no extern to hand out.
+    const e = wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer wasm_engine_delete(e);
+    const s = wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_store_delete(s);
+    var bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type ()->()
+        0x07, 0x01, 0x00, // export section, count 0
+    };
+    const bv: ByteVec = .{ .size = bytes.len, .data = &bytes };
+    const m = wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
+    defer wasm_module_delete(m);
+    const inst = instanceNewWithEngine(s, m, null, null, .jit) orelse return error.InstanceAllocFailed;
+    defer wasm_instance_delete(inst);
+    try testing.expect(inst.arena == null);
+    try testing.expect(inst.export_src_types == null);
+}
+
 test "ADR-0200 JIT C-path: export_types parallel to exports_storage so by-name discovery resolves (wast_runtime_runner regression)" {
     // (module (func (export "add") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add))
     // The .auto-flip reverted because a JIT instance populated exports_storage but
@@ -3846,7 +3949,7 @@ test "ADR-0200 JIT C-path: export_types parallel to exports_storage so by-name d
     // The invariant the C discovery path requires: parallel arrays.
     try testing.expectEqual(@as(usize, 1), inst.exports_storage.len);
     try testing.expectEqual(inst.exports_storage.len, inst.export_types.len);
-    const et = try lookupSourceExportType(inst, .func, "add");
+    const et = try lookupSourceExportType(inst, .func, 0);
     try testing.expectEqual(@as(usize, 2), et.func.sig.params.len);
     try testing.expectEqual(@as(usize, 1), et.func.sig.results.len);
 

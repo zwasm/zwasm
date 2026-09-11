@@ -836,22 +836,21 @@ fn preDecodeSectionBodies(alloc: std.mem.Allocator, module: *Module) bool {
 /// - Global: walk imports + decoded globals for type info.
 /// - Table: walk imports + decoded tables for elem_type + limits.
 /// - Memory: walk imports + decoded memories for limits.
+/// `types` is the module's RETAINED type section (`Instance.export_src_types`):
+/// a func entry's `sig` aliases `types.items[typeidx]`, so the `Types` must
+/// outlive the returned slice. Decoding a throwaway copy here instead left
+/// `sig` pointing into a freed child arena — which an arena parent reclaims
+/// and the next allocation overwrites (#387 surfaced it on the JIT path).
 pub fn buildExportTypes(
     a: std.mem.Allocator,
     module: Module,
     exports_items: []sections.Export,
     imports_decoded: ?sections.Imports,
+    types: ?*const sections.Types,
 ) ![]ExportType {
     if (exports_items.len == 0) return &.{};
     const out = try a.alloc(ExportType, exports_items.len);
     errdefer a.free(out);
-
-    // Decode the type section once (used for func sig resolution).
-    var types_owned: ?sections.Types = null;
-    defer if (types_owned) |*t| t.deinit();
-    if (module.find(.type)) |s| {
-        types_owned = try sections.decodeTypes(a, s.body);
-    }
     var func_section_funcs: ?[]u32 = null;
     if (module.find(.function)) |s| {
         func_section_funcs = try sections.decodeFunctions(a, s.body);
@@ -885,7 +884,7 @@ pub fn buildExportTypes(
                         if (it.kind != .func) continue;
                         if (idx == exp.idx) {
                             const tidx = it.payload.func_typeidx;
-                            const t = types_owned orelse return error.UnsupportedImport;
+                            const t = types orelse return error.UnsupportedImport;
                             break :blk .{ .func = .{ .sig = t.items[tidx], .final = t.finals[tidx], .typeidx = tidx } };
                         }
                         idx += 1;
@@ -897,7 +896,7 @@ pub fn buildExportTypes(
                 const fs = func_section_funcs orelse return error.UnsupportedImport;
                 if (def_idx >= fs.len) return error.UnsupportedImport;
                 const tidx = fs[def_idx];
-                const t = types_owned orelse return error.UnsupportedImport;
+                const t = types orelse return error.UnsupportedImport;
                 break :blk .{ .func = .{ .sig = t.items[tidx], .final = t.finals[tidx], .typeidx = tidx } };
             },
             .table => blk: {
@@ -1620,11 +1619,12 @@ pub fn instantiateRuntime(
     if (module.find(.@"export")) |export_section| {
         const exports = try sections.decodeExports(a, export_section.body);
         inst.exports_storage = exports.items;
-        inst.export_types = try buildExportTypes(a, module, exports.items, imports_decoded);
         // ADR-0127 PHASE C — retain the exporter's full type section (arena-
         // backed, freed by arena.deinit) so a cross-module func import can run
-        // the cross-`Types` type-def identity check at link resolve.
+        // the cross-`Types` type-def identity check at link resolve. Decoded
+        // first: `export_types` aliases its entries.
         inst.export_src_types = if (module.find(.type)) |ts_sec| try sections.decodeTypes(a, ts_sec.body) else null;
+        inst.export_types = try buildExportTypes(a, module, exports.items, imports_decoded, if (inst.export_src_types) |*t| t else null);
         // EH cross-module tag exports (10.E-xmodule-tags): tag exports
         // (kind 0x04) are dropped from exports_storage (c_api ExternKind
         // lacks a tag variant), so scan the export section directly for
@@ -1670,17 +1670,32 @@ fn checkImportTypeMatches(
             const want_ft = types.items[want_tidx];
             switch (binding.func.source) {
                 .cross_module => |cm| {
-                    // Wasm 3.0 §4.5.10 — the PROVIDED func type must be a
-                    // SUBTYPE of the declared import type (func subtyping,
-                    // §3.3.5.1), not exact-equal. cyc192 (D-198 .30/.48/.50):
-                    // a cross-module module imports the same name under
-                    // multiple subtype-related sigs. Monotonic-safe vs the
-                    // prior exact `eql` — only widens acceptance, so the
-                    // green multi-mem + EH cross-module imports (all eql) are
-                    // unaffected.
+                    // #387 — with the exporter's `Types` in hand, the rule is
+                    // the facade linker's (ADR-0127 PHASE C): the exporter's
+                    // type-def IS the declared one (`canonicalEqualCross`) or
+                    // declares it as a supertype (`superReachesCross`), each
+                    // index read in its own module's space. `source_signature`
+                    // is not consulted here — a `(ref $t)` in it means what
+                    // `$t` means in the EXPORTER, which `types` cannot say.
+                    if (cm.source_types) |src_types| {
+                        const def_ok = sections.canonicalEqualCross(&types, want_tidx, src_types, cm.source_typeidx) or
+                            sections.superReachesCross(src_types, cm.source_typeidx, &types, want_tidx);
+                        if (!def_ok) return error.ImportTypeMismatch;
+                        return;
+                    }
+                    // No retained exporter types: Wasm 3.0 §4.5.10 — the
+                    // PROVIDED func type must be a SUBTYPE of the declared
+                    // import type (func subtyping, §3.3.5.1), not exact-equal.
+                    // cyc192 (D-198 .30/.48/.50): a cross-module module imports
+                    // the same name under multiple subtype-related sigs. Read
+                    // in ONE type space (the importer's) — sound only while
+                    // both signatures are structural. The facade linker runs
+                    // this same compare plus its own cross-space check before
+                    // handing the binding here.
                     if (!validator.funcTypeImportCompatible(want_ft, cm.source_signature, &types)) {
                         return error.ImportTypeMismatch;
                     }
+                    if (types.finals[want_tidx] and !cm.source_final) return error.ImportTypeMismatch;
                 },
                 .wasi => {
                     // WASI binding-side guarantees the lookup
