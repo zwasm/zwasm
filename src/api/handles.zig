@@ -264,9 +264,10 @@ pub const Extern = struct {
     /// For kind = table: index into the source instance's
     /// runtime table list. Only meaningful when `kind == .table`.
     table_idx: u32 = 0,
-    /// For kind = memory: always references the source instance's
-    /// single linear memory (multi-memory unsupported pre-v0.2).
-    /// Only meaningful when `kind == .memory`.
+    /// For kind = memory: index into the source instance's runtime
+    /// memory list (the interpreter carries several under multi-memory;
+    /// the JIT declines such a module). Only meaningful when
+    /// `kind == .memory`.
     memory_idx: u32 = 0,
     /// For kind = global: index into the source instance's
     /// runtime globals list. Only meaningful when `kind == .global`.

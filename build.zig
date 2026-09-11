@@ -1449,6 +1449,8 @@ pub fn build(b: *std.Build) void {
         .{ .src = "test/c_api_conformance/cross_module_func.c", .name = "cross_module_func" }, // #360 cross-module func import on every engine
         .{ .src = "test/c_api_conformance/cross_module_reexport.c", .name = "cross_module_reexport" }, // #388 a re-exported import links, and the chain outlives A
         .{ .src = "test/c_api_conformance/cross_module_abi.c", .name = "cross_module_abi" }, // #390 / #413 overflow args, MEMORY-class results and the arm64 cohort cross the bridge
+        .{ .src = "test/c_api_conformance/cross_module_by_extern.c", .name = "cross_module_by_extern" }, // #386 an import binds to the extern passed, not to the export sharing its field name
+        .{ .src = "test/c_api_conformance/cross_module_type_space.c", .name = "cross_module_type_space" }, // #387 a func import's type-def is compared across both type spaces
         .{ .src = "test/c_api_conformance/instance_new_short_imports.c", .name = "instance_new_short_imports" }, // #392 a short import vector is NULL, not a read past it
         .{ .src = "test/c_api_conformance/auto_rejects_invalid.c", .name = "auto_rejects_invalid" }, // #233 AUTO and JIT return NULL with an INVALID_MODULE trap, AUTO does not retry
         .{

@@ -23,6 +23,7 @@
 
 const runtime_mod = @import("../runtime.zig");
 const zir = @import("../../ir/zir.zig");
+const sections = @import("../../parse/sections.zig");
 
 const Runtime = runtime_mod.Runtime;
 const Value = runtime_mod.Value;
@@ -60,6 +61,20 @@ pub const FuncImport = struct {
             source_runtime: *Runtime,
             source_funcidx: u32,
             source_signature: zir.FuncType,
+            /// #387 — the exporter's own decoded type section and the func's
+            /// index into it, so `checkImportTypeMatches` compares the two
+            /// type DEFINITIONS across both type spaces
+            /// (`sections.canonicalEqualCross` / `superReachesCross`) instead
+            /// of reading `source_signature`'s concrete indices in the
+            /// importer's space. Null when the exporter retained none; the
+            /// check then falls back to the same-space structural compare
+            /// plus the finality rule. Read at instantiation only, while the
+            /// exporter's handle is alive (the binder took it from the extern
+            /// the embedder passed); nothing dereferences it afterwards.
+            source_types: ?*const sections.Types = null,
+            source_typeidx: u32 = 0,
+            /// The exporter type-def's finality, for the fallback arm.
+            source_final: bool = true,
         },
         wasi: void,
     },

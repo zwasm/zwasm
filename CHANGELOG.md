@@ -10,6 +10,18 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A cross-module import through the C API binds to the extern the embedder
+  passed, and its type is compared across both modules' type spaces** (#386,
+  #387). The binder re-resolved the source by the import's field name — an
+  import under a different name failed to instantiate, and an export that
+  happened to share the name was bound in the passed entity's stead — and
+  read the exporter's signature in the importer's type space, so a typed
+  function reference (`(ref $t)`) at a different index failed to link on
+  both engines. Signatures naming a struct or array type still decline on
+  the JIT.
+
 ## [2.6.0] - 2026-08-31
 
 ### Added
