@@ -95,12 +95,12 @@ test "D-477 FP: runWasiLenientArgs addf(2.5,1.5) → f64 4.0 via the FP-bank thu
     try testing.expectEqual(@as(f64, 4.0), result.?.f64);
 }
 
-test "D-477: runWasiLenient (no args) of a 2-arg export → UnsupportedEntrySignature" {
+test "D-477: runWasiLenient (no args) of a 2-arg export → EntryNotCallable" {
     // Zero args supplied for a 2-param entry → can't invoke. The back-compat
     // delegate threads an empty arg slice, so the arity guard rejects (this is
     // distinct from the WITH-args path below).
     try testing.expectError(
-        runner.Error.UnsupportedEntrySignature,
+        runner.Error.EntryNotCallable,
         runner.runWasiLenient(testing.allocator, &add_i32i32, "add", null, null, .{}, null),
     );
 }

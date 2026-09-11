@@ -104,6 +104,13 @@ pub const Error = error{
     MissingCodeSection,
     ExportNotFound,
     ExportIsNotFunction,
+    /// The named entry's shape has no call helper on the lenient WASI path
+    /// (#220 C4): an imported function, a lone reference result, a
+    /// multi-value shape with no thunk or a v128 member, params `args` does
+    /// not cover. Its own name so the CLI can say "cannot call '<entry>'"
+    /// only when that is the reason — `UnsupportedEntrySignature` is also
+    /// what setup and const-expr evaluation decline with (PR #433 review).
+    EntryNotCallable,
     /// Wasm spec §3.4.10: an export's idx must reference a
     /// defined entity (funcidx < total_funcs, tableidx <
     /// total_tables, memidx < total_memories, globalidx <
@@ -538,9 +545,9 @@ pub fn resolveLenientEntry(allocator: Allocator, wasm_bytes: []const u8) Error!?
 /// so the process exit code comes from `proc_exit` (or 0), never from the
 /// entry's result (#220 (c)). What is left — a lone ref result, params `args`
 /// does not cover, a multi-result shape without a thunk — is
-/// `UnsupportedEntrySignature`, for a named entry of either origin: a
-/// capability gap is reported, not covered by an instantiate-only exit 0
-/// (#220 C4, the same posture as ADR-0229).
+/// `EntryNotCallable`, for a named entry of either origin: a capability gap
+/// is reported, not covered by an instantiate-only exit 0 (#220 C4, the same
+/// posture as ADR-0229).
 /// ADR-0179 #3a-4 / D-314 — sandboxing limits the CLI threads into the JIT
 /// run path (the facade stays interp-only by design, so the JIT runner arms
 /// its JitRuntime directly). All optional; defaults = unmetered/uncapped.
@@ -741,8 +748,7 @@ fn runWasiLenientArgsCore(
     // the facade ran start, `--engine jit`/`.cwasm` via this path didn't).
     if (startFuncIdx(wasm_bytes)) |sfx| {
         // An imported `(start)` is an import shape this run path cannot
-        // dispatch — its own error, so `UnsupportedEntrySignature` always
-        // means the named entry (PR #433 review).
+        // dispatch — its own error, not the entry's (PR #433 review).
         if (sfx < compiled.num_imports) return Error.UnsupportedImport;
         entry.callVoidNoArgs(compiled.module, sfx, &owned.rt) catch |err| {
             if (err == Error.Trap) {
@@ -754,7 +760,7 @@ fn runWasiLenientArgsCore(
 
     const idx = entry_idx orelse return owned.rt.jit_executed_flag; // no entry named → instantiate-only
     if (idx >= compiled.func_sigs.len) return Error.ExportNotFound;
-    if (idx < compiled.num_imports) return Error.UnsupportedEntrySignature;
+    if (idx < compiled.num_imports) return Error.EntryNotCallable;
     const sig = compiled.func_sigs[idx];
 
     if (sig.params.len == 0 and sig.results.len == 0) {
@@ -793,7 +799,7 @@ fn runWasiLenientArgsCore(
             return owned.rt.jit_executed_flag;
         }
         // remaining non-scalar single result (ref) — no call helper.
-        return Error.UnsupportedEntrySignature;
+        return Error.EntryNotCallable;
     }
     // D-477: multi-arg (params > 0) host invoke via the generalized buffer-write
     // thunk. Single scalar/void result fills `result_out`; a MULTI result (≥2,
@@ -821,7 +827,7 @@ fn runWasiLenientArgsCore(
             if (result_out) |ro| ro.* = decodeScalarResult(sig.results[0], rbuf[0]);
         } else if (can_multi) {
             for (multi_out.?[0..sig.results.len], 0..) |*res, i| {
-                res.* = switch (resultKind(sig.results[i]) orelse return Error.UnsupportedEntrySignature) {
+                res.* = switch (resultKind(sig.results[i]) orelse return Error.EntryNotCallable) {
                     .i32 => .{ .i32 = @truncate(rbuf[i]) },
                     .i64 => .{ .i64 = rbuf[i] },
                     .f32 => .{ .f32 = @truncate(rbuf[i]) },
@@ -833,7 +839,7 @@ fn runWasiLenientArgsCore(
         }
         return owned.rt.jit_executed_flag;
     }
-    return Error.UnsupportedEntrySignature; // no thunk for this shape
+    return Error.EntryNotCallable; // no thunk for this shape
 }
 
 /// Map a scalar `ValType` to a 0..3 dispatch key (i32/i64/f32/f64);

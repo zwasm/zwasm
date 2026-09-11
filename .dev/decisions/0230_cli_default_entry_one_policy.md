@@ -43,9 +43,10 @@ shapes on all four paths (`.wasm`, `--engine interp`, `--engine jit`,
    supplied`, exit 1). wasmtime refuses the same shape with exit 1.
 4. **A shape the engine cannot call is refused with the reason**, never run
    as instantiate-only exit 0: the JIT's `runWasiLenientArgs` returns
-   `UnsupportedEntrySignature` for any named entry it has no helper for, and
-   the CLI prints `the JIT engine cannot call '<name>': unsupported entry
-   signature`. The engine keeps one judgment — whether it can call the
+   `EntryNotCallable` for any named entry it has no helper for — its own
+   name, since `UnsupportedEntrySignature` is also what setup declines with
+   — and the CLI prints `the JIT engine cannot call '<name>': unsupported
+   entry signature` for that error alone. The engine keeps one judgment — whether it can call the
    shape — and none about which export is the entry: with no name it
    instantiates and runs `(start)` only.
 5. **One policy, called by both drivers, after instantiation.**
