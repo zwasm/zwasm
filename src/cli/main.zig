@@ -341,12 +341,8 @@ pub fn main(init: std.process.Init) !void {
                     try printlnErr(io, "zwasm run: --engine interp cannot run a .cwasm artifact (precompiled JIT code); run the original .wasm instead");
                     std.process.exit(2);
                 }
-                const code = cli_run.runWasmJitCaptured(gpa, io, run_bytes, invoke_name, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, limits, null, invoke_args, .inherit) catch |err| {
-                    var buf: [256]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&buf, "zwasm run: cannot run '{s}': {s}", .{ path, @errorName(err) }) catch "zwasm run: .cwasm run failed";
-                    try printlnErr(io, msg);
-                    std.process.exit(1);
-                };
+                const code = cli_run.runWasmJitCaptured(gpa, io, run_bytes, invoke_name, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, limits, null, invoke_args, .inherit) catch |err|
+                    exitWithRunFailure(io, err, path, bytes);
                 std.process.exit(code);
             }
 
@@ -390,25 +386,8 @@ pub fn main(init: std.process.Init) !void {
             const code = (if (engine_jit)
                 cli_run.runWasmJitCaptured(gpa, io, run_bytes, invoke_name, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, limits, null, invoke_args, .inherit)
             else
-                cli_run.runWasmCapturedFull(gpa, io, run_bytes, argv_list.items, null, null, .inherit, invoke_name, preopen_list.items, env_keys.items, env_vals.items, invoke_args, limits)) catch |err| {
-                // Per ADR-0016 phase 1: prefer the structured
-                // diagnostic when one was set; fall back to the
-                // legacy `@errorName` form for unwired sites.
-                var stderr_buf: [1024]u8 = undefined;
-                var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-                const stderr = &stderr_writer.interface;
-                const source: diag_print.Source = .{ .filename = path, .bytes = bytes };
-                if (diagnostic.lastDiagnostic()) |diag| {
-                    // EXEMPT-FALLBACK: ADR-0016 phase 1 — diagnostic render is last-resort stderr; re-entry on failure is meaningless.
-                    diag_print.formatDiagnostic(diag, source, stderr) catch {};
-                } else {
-                    // EXEMPT-FALLBACK: ADR-0016 phase 1 — fallback render is last-resort stderr; re-entry on failure is meaningless.
-                    diag_print.renderFallback(err, source, stderr) catch {};
-                }
-                // EXEMPT-FALLBACK: ADR-0016 phase 1 — flushing the same stderr that just rendered the diagnostic; failure here is unrecoverable.
-                stderr.flush() catch {};
-                std.process.exit(1);
-            };
+                cli_run.runWasmCapturedFull(gpa, io, run_bytes, argv_list.items, null, null, .inherit, invoke_name, preopen_list.items, env_keys.items, env_vals.items, invoke_args, limits)) catch |err|
+                exitWithRunFailure(io, err, path, bytes);
             std.process.exit(code);
         }
         if (std.mem.eql(u8, subcmd, "compile")) {
@@ -470,6 +449,28 @@ fn defaultCacheRoot(gpa: std.mem.Allocator, init: std.process.Init) ?[]const u8 
             return std.fmt.allocPrint(gpa, "{s}/.cache/zwasm", .{home}) catch null;
         },
     }
+}
+
+/// A `zwasm run` driver failed before or outside the guest's own exit: print
+/// the reason and exit 1. Per ADR-0016 phase 1 the structured diagnostic is
+/// preferred when one was set; the legacy `@errorName` form covers unwired
+/// sites. One report for the `.wasm`, `--engine jit` and `.cwasm` drivers
+/// (#220 C5), so a refusal reads the same whichever driver made it.
+fn exitWithRunFailure(io: std.Io, err: anyerror, path: []const u8, bytes: []const u8) noreturn {
+    var stderr_buf: [1024]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
+    const stderr = &stderr_writer.interface;
+    const source: diag_print.Source = .{ .filename = path, .bytes = bytes };
+    if (diagnostic.lastDiagnostic()) |diag| {
+        // EXEMPT-FALLBACK: ADR-0016 phase 1 — diagnostic render is last-resort stderr; re-entry on failure is meaningless.
+        diag_print.formatDiagnostic(diag, source, stderr) catch {};
+    } else {
+        // EXEMPT-FALLBACK: ADR-0016 phase 1 — fallback render is last-resort stderr; re-entry on failure is meaningless.
+        diag_print.renderFallback(err, source, stderr) catch {};
+    }
+    // EXEMPT-FALLBACK: ADR-0016 phase 1 — flushing the same stderr that just rendered the diagnostic; failure here is unrecoverable.
+    stderr.flush() catch {};
+    std.process.exit(1);
 }
 
 fn printlnErr(io: std.Io, msg: []const u8) !void {

@@ -22,13 +22,19 @@ explicit; there is no bare-file shortcut.
 
 ### `run`
 
-Drives a WASI module's `_start` / `main` and exits with the guest's
-`proc_exit` code. A `.cwasm` (CWAS magic) loads + runs directly (no
-parse/compile).
+Runs the module's default entry: the `_start` export, else `main`. It must
+take no parameters — otherwise `run` refuses it, naming the export, with exit
+1 — and its results, if any, print bare on stdout, one per line, like an
+`--invoke` result. The exit code is the guest's `proc_exit` status (0 when it
+never calls it), never the entry's result; a trap exits 1 with its kind on
+stderr. A module with neither export is refused the same way (use `--invoke`).
+The same contract holds on every engine and on a `.cwasm` (CWAS magic, which
+loads + runs directly with no parse/compile); a shape the JIT cannot call is
+refused with the reason rather than silently skipped (ADR-0230).
 
 | Flag                       | Effect                                                                                                                                                                                                                                       |
 |----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `--invoke <name>[=a,b,…]` | run the named export instead of `_start`/`main`. Zero-arg form → result surfaces as the exit code. `=args` (comma-separated, parsed by param type i32/i64/f32/f64) → typed results print bare, one per line, on stdout. Works on both the interpreter and the JIT (D-477) |
+| `--invoke <name>[=a,b,…]` | run the named export instead of `_start`/`main`. `=args` (comma-separated, parsed by param type i32/i64/f32/f64) supplies its parameters; typed results print bare, one per line, on stdout. Works on both the interpreter and the JIT (D-477) |
 | `--engine <auto\|interp\|jit>` | default `auto` — prefers the JIT, falls back to the interpreter when the JIT declines the module (`--engine auto` is the explicit spelling of the same). `--engine interp` / `jit` force one. BOTH do full WASI; `jit` additionally executes SIMD-128                    |
 | `--dir <host>[:<guest>]`   | preopen a host directory for WASI (colon separator; guest path mirrors host when omitted)                                                                                                                                                    |
 | `--env KEY=VAL`            | set a WASI environment variable for the guest (repeatable; bare `KEY` sets empty)                                                                                                                                                            |

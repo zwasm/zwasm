@@ -255,8 +255,11 @@ BENCHES=(
     "tinygo/sieve:bench/runners/wasm/tinygo/sieve.wasm"
     "tinygo/string_ops:bench/runners/wasm/tinygo/string_ops.wasm"
     "tinygo/tak:bench/runners/wasm/tinygo/tak.wasm"
-    # Hand-written
-    "handwritten/nbody:bench/runners/wasm/handwritten/nbody.wasm"
+    # Hand-written: none. `handwritten/nbody` exports `init` / `run` /
+    # `advance` and no `_start` / `main`; the row that ran it without
+    # `--invoke` measured `init` (setup) through the first-func-export
+    # fallback #220 removed. It needs `--invoke run=N` on every runtime
+    # (bench/runners/wasm/PROVENANCE.txt).
     # ClojureWasm v1 (vendored at §9.6 / 6.G into test/realworld/wasm/)
     "cljw/fib:test/realworld/wasm/cljw_fib.wasm"
     "cljw/gcd:test/realworld/wasm/cljw_gcd.wasm"

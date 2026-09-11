@@ -494,44 +494,53 @@ pub fn runVoidExportWasi(
     return owned.rt.jit_executed_flag;
 }
 
-/// D-284 — lenient default-entry resolution for the JIT CLI, mirroring the
-/// interp/AOT chain: `_start` → `main` → first func export → null (no func
-/// export → instantiate-only). Returns the entry func index, or null.
-fn resolveLenientEntryIdx(allocator: Allocator, wasm_bytes: []const u8) Error!?u32 {
+/// The CLI's default entry, resolved on the module bytes: `_start`, else
+/// `main`, else null (#220, ADR-0230). Both `zwasm run` drivers call this and
+/// apply one policy to the answer (`cli/run.zig` `resolveDefaultEntry`); the
+/// engine itself never picks an entry — `runWasiLenientArgs` calls the export
+/// it is named, or nothing.
+pub const LenientEntry = struct {
+    func_idx: u32,
+    /// `"_start"` or `"main"` — the literal, so it outlives the decode.
+    name: []const u8,
+};
+
+pub fn resolveLenientEntry(allocator: Allocator, wasm_bytes: []const u8) Error!?LenientEntry {
     var module = try parser.parse(allocator, wasm_bytes);
     defer module.deinit(allocator);
     const export_section = module.find(.@"export") orelse return null;
     var exports = try sections.decodeExports(allocator, export_section.body);
     defer exports.deinit();
-    var first_func: ?u32 = null;
     var start_idx: ?u32 = null;
     var main_idx: ?u32 = null;
     for (exports.items) |e| {
         if (e.kind != .func) continue;
-        if (first_func == null) first_func = e.idx;
         if (std.mem.eql(u8, e.name, "_start")) start_idx = e.idx;
         if (std.mem.eql(u8, e.name, "main")) main_idx = e.idx;
     }
-    return start_idx orelse main_idx orelse first_func;
+    if (start_idx) |i| return .{ .func_idx = i, .name = "_start" };
+    if (main_idx) |i| return .{ .func_idx = i, .name = "main" };
+    return null;
 }
 
-/// D-284 — run a WASI module via the LENIENT entry chain so the JIT CLI matches
-/// the interp (`runWasmCaptured`) + the AOT CWAS lane: `--invoke NAME` → `_start`
-/// → `main` → first func export, else INSTANTIATE-ONLY (exit 0, wasmtime-aligned)
-/// — instead of strict `_start`-only → ExportNotFound on no-`_start` modules
-/// (D-284 nbody). The resolved entry is gated by ARITY, then by whether a call
-/// helper exists for its shape: `() -> ()` runs via `callVoidNoArgs` (proc_exit
-/// code flows through the host); `() -> T` runs for T = i32 / i64 / f32 / f64
-/// (`dispatchNoArg`) and v128 (`callV128NoArgs`), the value landing in
-/// `result_out` — it is NOT an exit status; every other shape (params, ≥2
-/// results) runs through the buffer-write thunk when `args` covers the params,
-/// `multi_out` can hold the results and `hasThunk` says one was emitted. The
-/// returned u32 is `JitRuntime.jit_executed_flag` on every path, so the process
-/// exit code comes from `proc_exit` (or 0), never from the entry's result
-/// (#220 (c)). What is left — a lone ref result, params `args` does not cover
-/// (a default entry supplies none), a multi-result shape without a thunk — is
-/// instantiate-only for a default entry and UnsupportedEntrySignature for
-/// `--invoke`.
+/// D-284 / #220 — run a WASI module on the JIT with full WASI, calling the
+/// export named by `invoke_name`, or none. `null` instantiates, runs the
+/// `(start)` function and returns — the embedder/test convenience; the CLI
+/// always names its entry (`cli/run.zig` resolves the default one and applies
+/// the policy before calling here). A named entry is gated by ARITY, then by
+/// whether a call helper exists for its shape: `() -> ()` runs via
+/// `callVoidNoArgs` (proc_exit code flows through the host); `() -> T` runs for
+/// T = i32 / i64 / f32 / f64 (`dispatchNoArg`) and v128 (`callV128NoArgs`), the
+/// value landing in `result_out` — it is NOT an exit status; every other shape
+/// (params, ≥2 results) runs through the buffer-write thunk when `args` covers
+/// the params, `multi_out` can hold the results and `hasThunk` says one was
+/// emitted. The returned u32 is `JitRuntime.jit_executed_flag` on every path,
+/// so the process exit code comes from `proc_exit` (or 0), never from the
+/// entry's result (#220 (c)). What is left — a lone ref result, params `args`
+/// does not cover, a multi-result shape without a thunk — is
+/// `UnsupportedEntrySignature`, for a named entry of either origin: a
+/// capability gap is reported, not covered by an instantiate-only exit 0
+/// (#220 C4, the same posture as ADR-0229).
 /// ADR-0179 #3a-4 / D-314 — sandboxing limits the CLI threads into the JIT
 /// run path (the facade stays interp-only by design, so the JIT runner arms
 /// its JitRuntime directly). All optional; defaults = unmetered/uncapped.
@@ -693,7 +702,7 @@ fn runWasiLenientArgsCore(
     const entry_idx: ?u32 = if (invoke_name) |name|
         try findExportFunc(allocator, wasm_bytes, name)
     else
-        try resolveLenientEntryIdx(allocator, wasm_bytes);
+        null;
 
     // D-451 — Wasm spec §4.5.4: an unsatisfied import MUST fail instantiation,
     // regardless of whether it is ever called. Reject here (interp-parity)
@@ -731,7 +740,10 @@ fn runWasiLenientArgsCore(
     // cross-process differential caught (start_func fixture: `.wasm` via
     // the facade ran start, `--engine jit`/`.cwasm` via this path didn't).
     if (startFuncIdx(wasm_bytes)) |sfx| {
-        if (sfx < compiled.num_imports) return Error.UnsupportedEntrySignature;
+        // An imported `(start)` is an import shape this run path cannot
+        // dispatch — its own error, so `UnsupportedEntrySignature` always
+        // means the named entry (PR #433 review).
+        if (sfx < compiled.num_imports) return Error.UnsupportedImport;
         entry.callVoidNoArgs(compiled.module, sfx, &owned.rt) catch |err| {
             if (err == Error.Trap) {
                 if (trap_code_out) |p| p.* = owned.rt.trap_kind;
@@ -740,7 +752,7 @@ fn runWasiLenientArgsCore(
         };
     }
 
-    const idx = entry_idx orelse return owned.rt.jit_executed_flag; // no entry → instantiate-only
+    const idx = entry_idx orelse return owned.rt.jit_executed_flag; // no entry named → instantiate-only
     if (idx >= compiled.func_sigs.len) return Error.ExportNotFound;
     if (idx < compiled.num_imports) return Error.UnsupportedEntrySignature;
     const sig = compiled.func_sigs[idx];
@@ -780,10 +792,8 @@ fn runWasiLenientArgsCore(
             if (result_out) |ro| ro.* = .{ .v128 = v };
             return owned.rt.jit_executed_flag;
         }
-        // remaining non-scalar single result (ref) — the named-invoke path
-        // rejects it; a default entry just instantiate-runs.
-        if (invoke_name != null) return Error.UnsupportedEntrySignature;
-        return owned.rt.jit_executed_flag;
+        // remaining non-scalar single result (ref) — no call helper.
+        return Error.UnsupportedEntrySignature;
     }
     // D-477: multi-arg (params > 0) host invoke via the generalized buffer-write
     // thunk. Single scalar/void result fills `result_out`; a MULTI result (≥2,
@@ -823,8 +833,7 @@ fn runWasiLenientArgsCore(
         }
         return owned.rt.jit_executed_flag;
     }
-    if (invoke_name != null) return Error.UnsupportedEntrySignature;
-    return owned.rt.jit_executed_flag; // unsupported default-entry shape → instantiate-only
+    return Error.UnsupportedEntrySignature; // no thunk for this shape
 }
 
 /// Map a scalar `ValType` to a 0..3 dispatch key (i32/i64/f32/f64);

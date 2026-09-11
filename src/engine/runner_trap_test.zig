@@ -890,11 +890,11 @@ test "runWasiLenient: RunLimits fuel + interrupt_flag bound an infinite-loop gue
         0x40, 0x0c, 0x00, 0x0b, 0x0b,
     };
     var trap_code: u32 = 0;
-    try testing.expectError(entry.Error.Trap, runner.runWasiLenient(testing.allocator, &inf_start, null, null, &trap_code, .{ .fuel = 100 }, null));
+    try testing.expectError(entry.Error.Trap, runner.runWasiLenient(testing.allocator, &inf_start, "_start", null, &trap_code, .{ .fuel = 100 }, null));
     try testing.expectEqual(@as(u32, 17), trap_code); // out_of_fuel
     var flag = std.atomic.Value(u32).init(1);
     trap_code = 0;
-    try testing.expectError(entry.Error.Trap, runner.runWasiLenient(testing.allocator, &inf_start, null, null, &trap_code, .{ .interrupt_flag = &flag }, null));
+    try testing.expectError(entry.Error.Trap, runner.runWasiLenient(testing.allocator, &inf_start, "_start", null, &trap_code, .{ .interrupt_flag = &flag }, null));
     try testing.expectEqual(@as(u32, 16), trap_code); // interrupted (prologue poll)
 }
 

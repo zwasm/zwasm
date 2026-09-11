@@ -10,6 +10,20 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+### Changed
+
+- **`zwasm run` has one default-entry contract on every path** (#220,
+  ADR-0230). The entry is `_start`, else `main`; the third fallback — the
+  first function export, whatever its name — is gone: a module with neither
+  is refused with exit 1 and the reason (`--invoke` names the export instead).
+  A zero-parameter entry runs whatever its results, and the results print on
+  stdout on `--engine jit` and on a `.cwasm` as they already did on the
+  default engine. An entry that takes parameters is refused by name with exit
+  1 on every path, where `--engine jit` and a `.cwasm` used to instantiate and
+  exit 0 without running it; a shape the JIT cannot call (a lone reference
+  result, a mixed multi-value result) is refused the same way instead of
+  silently skipped.
+
 ### Fixed
 
 - **A cross-module import through the C API binds to the extern the embedder

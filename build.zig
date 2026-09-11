@@ -1290,10 +1290,11 @@ pub fn build(b: *std.Build) void {
     const test_cli_argv0_step = b.step("test-cli-argv0", "Run `zwasm run` on a path with a directory component and check the guest's argv[0] is the base name (issue #256)");
     test_cli_argv0_step.dependOn(&run_cli_argv0.step);
 
-    // `zig build test-cli-default-entry` — issue #220: the `.wasm` default and
-    // the `.cwasm` / `--engine jit` driver must give the same module the same
-    // exit code and stderr. Subprocess by necessity: only `main.zig` picks the
-    // driver, and the artifact only exists through `zwasm compile`.
+    // `zig build test-cli-default-entry` — issue #220 / ADR-0230: the
+    // default-entry contract, re-derived as a table of module shapes × run
+    // paths (`.wasm` default, `--engine interp`, `--engine jit`, `.cwasm`).
+    // Subprocess by necessity: only `main.zig` picks the driver, and the
+    // artifact only exists through `zwasm compile`.
     const cli_default_entry_mod = createSanitizedModule(b, sanitize_opts, .{
         .root_source_file = b.path("test/runners/default_entry_runner.zig"),
         .target = target,
@@ -1587,10 +1588,13 @@ pub fn build(b: *std.Build) void {
     // FaultHandler + guarded memory + elided codegen + Win64 VEH redirect);
     // the spec corpus runs `.explicit` (non-guarded harness memory).
     const run_oob_trap = b.addRunArtifact(exe);
+    // `--invoke` goes before the path: everything after the path is the
+    // guest's argv. It used to trail the path and be dropped, and the module
+    // still ran `test` through the first-func-export fallback #220 removed.
     run_oob_trap.addArgs(&.{
         "run",      "--engine",
-        "jit",      "test/edge_cases/p7/memory_bounds/past_limit_load_i32.wasm",
-        "--invoke", "test",
+        "jit",      "--invoke",
+        "test",     "test/edge_cases/p7/memory_bounds/past_limit_load_i32.wasm",
     });
     run_oob_trap.expectExitCode(1); // a genuine trap → exit 1 (interp-parity)
     // has_side_effects: `expectExitCode` routes through `addCheck`, which flips

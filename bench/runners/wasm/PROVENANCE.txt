@@ -13,7 +13,9 @@ tinygo/    (11 TinyGo-compiled WASI guests with internal benchmark
             loops invoked from `_start`)
   arith fib fib_loop gcd list_build mfr nqueens real_work sieve string_ops tak
 
-handwritten/  (1 hand-written numeric benchmark)
+handwritten/  (1 hand-written numeric benchmark; exports init / run /
+               advance, no `_start` / `main` — `--invoke run=N` only, so
+               not in run_bench.sh's inventory since #220)
   nbody
 
 cljw_*.wasm fixtures (5 ClojureWasm v1 guests) live in
