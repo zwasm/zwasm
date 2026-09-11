@@ -2778,6 +2778,7 @@ pub const jit_decline_names = [_][]const u8{
     "UnsupportedVersion",
     "Memory64Unsupported",
     "UnsupportedEntrySignature",
+    "EntryNotCallable", // the lenient WASI path has no call helper for the named entry's shape (#220 C4)
     "UnsupportedConstExpr",
     "NotImplemented",
     // Resource bounds — the interpreter applies its own.

@@ -256,11 +256,12 @@ pub fn runWasmJitCaptured(
         // #220 C4 — the engine has no call helper for this entry's shape (a
         // lone ref result, a multi-value shape without a thunk). Said, not
         // covered by an instantiate-only exit 0: the `.wasm` default runs the
-        // same module on the interpreter and prints its result. The error
-        // always means the named entry (an imported `(start)` the JIT cannot
-        // dispatch is `UnsupportedImport`), so it never arrives on a deferred
-        // refusal, where no entry was named (PR #433 review).
-        if (err == error.UnsupportedEntrySignature) {
+        // same module on the interpreter and prints its result. Only the
+        // entry gate's own error becomes this line: `UnsupportedEntrySignature`
+        // is also what setup declines with (a 17th table, a const expression),
+        // and that is the module's, not the entry's (PR #433 review). It never
+        // arrives on a deferred refusal, where no entry was named.
+        if (err == error.EntryNotCallable) {
             if (entry_name) |name| {
                 diagnostic.setDiag(.unknown, .binding_error, .unknown, "the JIT engine cannot call '{s}': unsupported entry signature", .{name});
             }
@@ -303,7 +304,7 @@ pub fn runWasmJitCaptured(
 /// parameters nothing supplies. Returns the export name to call; a refusal
 /// sets the diagnostic and returns the error the driver propagates (exit 1).
 /// Whether the engine can CALL that shape is the engine's own answer
-/// (`UnsupportedEntrySignature`), reported where it is caught. The refusal is
+/// (`EntryNotCallable`), reported where it is caught. The refusal is
 /// reported after instantiation on both drivers: a validity verdict
 /// (ADR-0229) or a `(start)` trap comes first.
 fn resolveDefaultEntry(alloc: std.mem.Allocator, wasm_view: []const u8) ![]const u8 {
@@ -1015,6 +1016,24 @@ test "a deferred refusal survives the engine refusing the (start) import: its er
     try testing.expectEqual(@as(?*const diagnostic.Info, null), diagnostic.lastDiagnostic());
     // Named entry, same module: still the start import's error, not "cannot call 'f'".
     try testing.expectError(error.UnsupportedImport, runWasmJit(testing.allocator, testing.io, &imported_start_no_entry_wasm, "f", &.{}, &.{}, &.{}, &.{}, .{}));
+    try testing.expectEqual(@as(?*const diagnostic.Info, null), diagnostic.lastDiagnostic());
+}
+
+// `(module (table 0 funcref) ×17 (func (export "main")))` — a callable entry in
+// a module the JIT's setup declines (a 17th table).
+const tables17_main_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60,
+    0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x04, 0x34, 0x11, 0x70, 0x00, 0x00,
+    0x70, 0x00, 0x00, 0x70, 0x00, 0x00, 0x70, 0x00, 0x00, 0x70, 0x00, 0x00,
+    0x70, 0x00, 0x00, 0x70, 0x00, 0x00, 0x70, 0x00, 0x00, 0x70, 0x00, 0x00,
+    0x70, 0x00, 0x00, 0x70, 0x00, 0x00, 0x70, 0x00, 0x00, 0x70, 0x00, 0x00,
+    0x70, 0x00, 0x00, 0x70, 0x00, 0x00, 0x70, 0x00, 0x00, 0x70, 0x00, 0x00,
+    0x07, 0x08, 0x01, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x00, 0x00, 0x0a, 0x04,
+    0x01, 0x02, 0x00, 0x0b,
+};
+
+test "a setup decline is not reported as the entry's shape (PR #433 review)" {
+    try testing.expectError(error.UnsupportedEntrySignature, runWasmJit(testing.allocator, testing.io, &tables17_main_wasm, null, &.{}, &.{}, &.{}, &.{}, .{}));
     try testing.expectEqual(@as(?*const diagnostic.Info, null), diagnostic.lastDiagnostic());
 }
 
