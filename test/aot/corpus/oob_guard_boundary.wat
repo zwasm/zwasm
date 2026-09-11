@@ -2,11 +2,11 @@
 ;; accesses in an ELIDED artifact. `zwasm compile` defaults to elided codegen
 ;; on qualifying memories, so the .cwasm lane must guard-fault through the
 ;; RE-REGISTERED trap entries in a fresh process and exit-code-match the
-;; .wasm lane (default entry = first export = the straddling load → trap).
+;; .wasm lane (default entry = `main` = the straddling load → trap).
 (module
   (memory 1)
   ;; 4-byte load at 65533: bytes 65533..65537 cross the 65536 end → trap.
-  (func (export "oob_load_straddle") (result i32)
+  (func $oob_load_straddle (export "main") (result i32)
     (i32.load (i32.const 65533)))
   ;; 4-byte store at 65534 → trap; must write NO byte.
   (func (export "oob_store_straddle") (result i32)

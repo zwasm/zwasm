@@ -2633,9 +2633,9 @@ test "runWasiLenient: declared table elements over max_table_elements → TableL
         0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b, // code: 1 body, 0 locals, end
     };
     // Cap of 2 < declared 5 → early-reject before setup's eager alloc.
-    try testing.expectError(runner.Error.TableLimitExceeded, runner.runWasiLenient(testing.allocator, &wasm, null, null, null, .{ .max_table_elements = 2 }, null));
+    try testing.expectError(runner.Error.TableLimitExceeded, runner.runWasiLenient(testing.allocator, &wasm, "_start", null, null, .{ .max_table_elements = 2 }, null));
     // Uncapped (null) → runs to completion (5-element table allocated, _start empty).
-    _ = try runner.runWasiLenient(testing.allocator, &wasm, null, null, null, .{}, null);
+    _ = try runner.runWasiLenient(testing.allocator, &wasm, "_start", null, null, .{}, null);
 }
 
 test "setupRuntimeLinked: non-funcref table with min > grow_cap allocates min slots, no OOB (fuzz-found SEGV)" {
