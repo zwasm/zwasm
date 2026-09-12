@@ -68,7 +68,8 @@ pub const WasmFuncCallbackEnv = *const fn (env: ?*anyopaque, args: ?*const ValVe
 
 /// Backing for a host-created func (`wasm_func_new[_with_env]`).
 /// `callback` XOR `callback_env` is set. `params`/`results` are owned
-/// `zir.ValType` slices (the marshalled arity); freed in `wasm_func_delete`.
+/// `zir.ValType` slices (the marshalled arity). #439 — the STORE owns this,
+/// not the `Func` handle: see `Store.host_func_payloads`.
 pub const HostFuncPayload = struct {
     callback: ?WasmFuncCallback = null,
     callback_env: ?WasmFuncCallbackEnv = null,

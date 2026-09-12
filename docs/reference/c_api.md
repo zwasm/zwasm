@@ -23,7 +23,14 @@ Full coverage of the wasm-c-api families:
   `_delete` for each.
 - **Externals**: `wasm_func_*` (incl. host callbacks + `wasm_func_call`),
   `wasm_global_get`/`_set`, `wasm_table_get`/`_set`/`_grow`/`_size`,
-  `wasm_memory_data`/`_size`/`_grow`.
+  `wasm_memory_data`/`_size`/`_grow`. A host callback's function instance
+  belongs to the store, as `WASM_DECLARE_REF` says it does:
+  `wasm_func_delete` releases the handle, and the callback's
+  `finalizer(env)` runs at `wasm_store_delete` — instances that imported it
+  keep calling it until then (#439). That teardown is already in progress
+  when the finalizer runs, with the store's instances reaped, so a finalizer
+  must release its own resources and return: it must not call back into the
+  store it belongs to.
 - **Types**: `wasm_*type_*` (functype / globaltype / tabletype / memorytype
   / valtype / externtype / importtype / exporttype) + the tagtype family
   (EH).

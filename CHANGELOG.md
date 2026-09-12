@@ -29,6 +29,15 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   exit 0 without running it; a shape the JIT cannot call (a lone reference
   result, a mixed multi-value result) is refused the same way instead of
   silently skipped.
+- **A host callback's function instance belongs to the store, not to the
+  handle** (#439). `wasm_func_new[_with_env]`'s payload — the callback, its
+  `env` and finalizer, the marshalled arity — is now released by
+  `wasm_store_delete` instead of by `wasm_func_delete`, so **`finalizer(env)`
+  fires at store teardown rather than at handle deletion**, mid-teardown, so a
+  finalizer must release its own resources and not call back into that store.
+  Embedders that relied on the old timing must move that work.
+  `wasm_func_delete` still releases the handle; what changes is that deleting
+  it no longer destroys the function for the instances that imported it.
 
 ### Fixed
 
@@ -66,6 +75,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   interpreter, whose binder would build the same dangling reference. A
   standalone global, memory or table is handle-owned rather than store-owned
   and is not refused. Composition inside one store is unchanged.
+- **`wasm_func_delete` no longer frees a host callback an instance is still
+  importing** (#439). Every binding made from the handle kept the payload's
+  raw address and nothing counted them, so deleting the handle ran the
+  finalizer and freed the arity out from under the live importers; the next
+  call into the import read released memory on both engines. See the
+  finalizer-timing note under Changed.
 - **On the interpreter, a re-exported import binds to what the re-exporter
   bound, so a chain reaches its definition** (#427). The binder pointed the
   importer at the re-exporter's own import slot — a placeholder whose body is

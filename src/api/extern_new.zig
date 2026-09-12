@@ -307,6 +307,17 @@ fn funcNewImpl(
         return null;
     };
     fh.* = .{ .instance = null, .func_idx = 0, .host = payload, .store = s };
+    // #439 — the store owns the payload from here (`Store.host_func_payloads`
+    // says why at creation and not at `wasm_func_delete`). Keep this the LAST
+    // fallible step: nothing after it may fail and leave the store holding a
+    // payload for a func the embedder never received.
+    s.host_func_payloads.append(alloc, @ptrCast(payload)) catch {
+        alloc.free(params);
+        alloc.free(results);
+        alloc.destroy(payload);
+        alloc.destroy(fh);
+        return null;
+    };
     return fh;
 }
 
@@ -320,8 +331,9 @@ pub export fn wasm_func_new(store: ?*instance.Store, ft: ?*const types.FuncType,
 }
 
 /// `wasm_func_new_with_env(store, functype, callback, env, finalizer)` —
-/// as `wasm_func_new` but the callback receives `env`; `finalizer(env)`
-/// runs at `wasm_func_delete`.
+/// as `wasm_func_new` but the callback receives `env`; `finalizer(env)` runs
+/// at `wasm_store_delete`, not at `wasm_func_delete`, and must not re-enter
+/// that store — it fires mid-teardown (#439).
 pub export fn wasm_func_new_with_env(
     store: ?*instance.Store,
     ft: ?*const types.FuncType,
