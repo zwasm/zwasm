@@ -8,21 +8,20 @@
  *
  * C's import is satisfied with B's export extern, which is A's function
  * re-exported. Before #388 a JIT-backed B answered "not a defined function"
- * and C failed to instantiate; the interpreter has always bound this.
+ * and C failed to instantiate; before #427 an interp-backed B bound C's
+ * import to B's own func index 0 — B's import placeholder (body:
+ * `unreachable`, the backstop `instantiate.zig` describes) — so C linked and
+ * the chained call trapped there.
  *
  * Between instantiating C and calling it, A's instance and module are
- * deleted, then B's. C's bridge thunk names A's runtime and entry point
- * (ADR-0228: B hands out what it resolved, so the thunk enters A directly),
- * and nothing counts that reference — A must stay alive until the store
- * goes. `wasm_instance_delete` parks every JIT instance on the store and
+ * deleted, then B's. On both engines C's thunk names A's runtime and entry
+ * point (ADR-0228 / #427: B hands out what it resolved, so the thunk enters A
+ * directly), and nothing counts that reference — A must stay alive until the
+ * store goes. `wasm_instance_delete` parks every instance on the store and
  * `wasm_module_delete` defers a borrowed module's bytes, so it does. If a
  * refcount ever replaced the park, this is the test that would notice.
  *
- * Run on `auto` and `jit`. The interpreter is left out: its binder points
- * C's import at B's runtime and B's func index 0, which is B's import
- * placeholder (body: `unreachable`, the backstop `instantiate.zig` describes),
- * so the chained call traps there today — the same missing fold, in the other
- * engine (#427). Exits 0 on success.
+ * Run on every engine. Exits 0 on success.
  */
 
 #include <stdio.h>
@@ -61,7 +60,7 @@ static const uint8_t kCWasm[] = {
     0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,             /* body: call 0 */
 };
 
-static const uint8_t kEngines[] = { ZWASM_ENGINE_AUTO, ZWASM_ENGINE_JIT };
+static const uint8_t kEngines[] = { ZWASM_ENGINE_AUTO, ZWASM_ENGINE_JIT, ZWASM_ENGINE_INTERP };
 
 static const char* engine_name(uint8_t kind) {
     switch (kind) {

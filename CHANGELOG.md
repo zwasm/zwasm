@@ -26,6 +26,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **On the interpreter, a re-exported import binds to what the re-exporter
+  bound, so a chain reaches its definition** (#427). The binder pointed the
+  importer at the re-exporter's own import slot — a placeholder whose body is
+  `unreachable` — so in a chain A→B→C, C linked and its call trapped. It now
+  folds at link time as the JIT has since #388: C's binding names A's runtime
+  directly, or copies a re-exported host callback's binding, and A stays
+  parked on the store until `wasm_store_delete` however B and C are deleted.
 - **A cross-module import through the C API binds to the extern the embedder
   passed, and its type is compared across both modules' type spaces** (#386,
   #387). The binder re-resolved the source by the import's field name — an
