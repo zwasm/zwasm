@@ -628,6 +628,65 @@ fn crossModuleHostCall(arena_alloc: std.mem.Allocator, rt: *runtime.Runtime, fun
     return .{ .fn_ptr = cross_module.thunk, .ctx = @ptrCast(ctx_ptr) };
 }
 
+/// #436 — a binding aliases what a STORE owns, and only that store's park
+/// keeps the target alive for as long as an importer can reach it (ADR-0014
+/// §2.1). Across stores nothing does, so `wasm_store_delete` on the other one
+/// would leave the binding in freed memory, and wasm-c-api cannot express the
+/// dependency.
+const CrossStore = error{CrossStoreImport};
+
+/// The INTERPRETER's WASI rule: `buildBindings` serves any
+/// `wasi_snapshot_preview1` import from `store.wasi_host` — or refuses it when
+/// the field is one it has no thunk for — and never reads the embedder's
+/// vector slot for it.
+fn isWasiImport(it: sections.Import) bool {
+    return std.mem.eql(u8, it.module, "wasi_snapshot_preview1");
+}
+
+/// The JIT's WASI rule, and NOT the same set: `setup` plants only the fields
+/// `jit_dispatch` implements, so `collectFromExterns` DOES read the slot of a
+/// preview1 name whose field it does not know, and binds whatever sits there.
+///
+/// The cross-store precheck must skip by THIS predicate. It guards that binder,
+/// and skipping the interpreter's wider set let a cross-store extern through
+/// under an unrecognised preview1 field — the #436 use-after-free, by another
+/// door. A skip is only safe where the slot is genuinely never read.
+fn jitPlantsWasi(it: sections.Import) bool {
+    return it.kind == .func and jit_dispatch.lookup(it.module, it.name) != null;
+}
+
+/// The `ExternKind` an import declaration requires. Null for a tag import: EH
+/// tags (10.E-xmodule-tags) have no `ExternKind` and bind through the Linker,
+/// not this path, so reaching one here is an unbound tag import.
+fn wantedExternKind(it: sections.Import) ?ExternKind {
+    return switch (it.kind) {
+        .func => .func,
+        .table => .table,
+        .memory => .memory,
+        .global => .global,
+        .tag => null,
+    };
+}
+
+/// Would a binding built from `ext` reach across a store boundary? An
+/// instance's arm ties to that instance's runtime and arena; the standalone
+/// FUNC arm ties to the payload #439 gives the store. A standalone global /
+/// memory / table is deliberately absent: its backing belongs to the handle,
+/// not to any store, so a boundary is not what endangers it — its own
+/// `_delete` is, in or across stores alike. When that ownership moves, it
+/// belongs here.
+///
+/// Asked BEFORE any engine-specific capability filter, so a lifetime error is
+/// never masked by a decline: a forced `.jit` would otherwise answer a
+/// cross-store non-func import with a bare NULL where the others name it.
+fn crossesStore(ext: *const Extern, importer: *Store) bool {
+    if (ext.instance) |inst| return inst.store != importer;
+    if (ext.kind == .func) {
+        if (ext.func) |fh| return fh.store != importer;
+    }
+    return false;
+}
+
 /// Pre-resolve all imports declared in `bytes` into Zone-1
 /// native `ImportBinding`s. Returns null when the module has no
 /// imports. Allocates the binding slice + cross-module CallCtx
@@ -647,7 +706,7 @@ fn buildBindings(
 
     const bindings = try arena_alloc.alloc(runtime_instance_import.ImportBinding, imports_decoded.items.len);
     for (imports_decoded.items, 0..) |it, idx| {
-        if (std.mem.eql(u8, it.module, "wasi_snapshot_preview1")) {
+        if (isWasiImport(it)) {
             if (it.kind != .func) return error.UnsupportedWasiImport;
             const thunk = wasi.lookupWasiThunk(it.name) orelse return error.UnsupportedWasiImport;
             const wasi_host_ptr = store.wasi_host orelse return error.WasiNotConfigured;
@@ -676,18 +735,13 @@ fn buildBindings(
         // a read past the vector.
         const ext_ptr = if (imports_array) |arr| (if (idx < arr.len) arr[idx] else null) else null;
         const ext = ext_ptr orelse return error.UnknownImportModule;
-        const want_kind: ExternKind = switch (it.kind) {
-            .func => .func,
-            .table => .table,
-            .memory => .memory,
-            .global => .global,
-            // EH tag imports (10.E-xmodule-tags) don't bind through the
-            // legacy ext_ptr/ExternKind c_api path (ExternKind has no
-            // tag); cross-module tag binding goes via the Linker (step
-            // 2). Reaching here = unbound tag import.
-            .tag => return error.ImportKindMismatch,
-        };
+        const want_kind = wantedExternKind(it) orelse return error.ImportKindMismatch;
+        // The kind is judged FIRST: an extern of the wrong kind never binds, so
+        // it fails the same way whatever store it came from, and the boundary
+        // is not the reason worth reporting. The precheck in
+        // `collectFuncImportTargets` defers to this for the same reason.
         if (ext.kind != want_kind) return error.ImportKindMismatch;
+        if (crossesStore(ext, store)) return error.CrossStoreImport;
         // Host-created standalone entity (e.g. `wasm_global_new`): no source
         // instance — bind directly from the entity's own backing cell. The
         // GlobalImport binding only needs a `*Value` + type descriptors, so a
@@ -1051,26 +1105,42 @@ fn collectFuncImportTargets(
     bytes: []const u8,
     builder_state: anytype,
     store: *Store,
-) error{ Unsupported, OutOfMemory }!JitFuncImports {
+) (error{ Unsupported, OutOfMemory } || CrossStore)!JitFuncImports {
     var mod = parser.parse(ta, bytes) catch return error.Unsupported;
     const imp_section = mod.find(.import) orelse return .{};
     var imports = sections.decodeImports(ta, imp_section.body) catch return error.Unsupported;
     defer imports.deinit();
-
-    // First pass: only func imports are JIT-satisfiable; detect whether any
-    // needs a binding resolved here (a non-WASI func import).
-    var needs_binding = false;
-    for (imports.items) |it| {
-        if (it.kind != .func) return error.Unsupported;
-        if (jit_dispatch.lookup(it.module, it.name) == null) needs_binding = true;
-    }
-    if (!needs_binding) return .{};
 
     var local_state = builder_state;
     const builder: BindingsBuilder = if (@TypeOf(builder_state) == BindingsBuilder)
         builder_state
     else
         local_state.asBuilder();
+
+    // #436 — the store rule runs before the CAPABILITY filter below, over an
+    // import of any kind: that filter declines a non-func import as a shape the
+    // JIT lacks, and a decline would hide why a forced `.jit` refused. It does
+    // NOT run before the kind judgement, which `buildBindings` owns for both
+    // engines — an extern of the wrong kind never binds, so reporting the
+    // boundary instead would make the engines disagree on one input.
+    if (builder.imports) |arr| {
+        for (imports.items, 0..) |it, i| {
+            if (jitPlantsWasi(it)) continue; // planted by setup; the slot is never read
+            if (i >= arr.len) break; // #392 — a short vector is the caller's error
+            const ext = arr[i] orelse continue;
+            if (ext.kind != (wantedExternKind(it) orelse continue)) continue;
+            if (crossesStore(ext, store)) return error.CrossStoreImport;
+        }
+    }
+
+    // First pass: only func imports are JIT-satisfiable; detect whether any
+    // needs a binding resolved here (a non-WASI func import).
+    var needs_binding = false;
+    for (imports.items) |it| {
+        if (it.kind != .func) return error.Unsupported;
+        if (!jitPlantsWasi(it)) needs_binding = true;
+    }
+    if (!needs_binding) return .{};
 
     if (builder.imports) |arr| {
         const type_sec = mod.find(.type) orelse return error.Unsupported;
@@ -1086,7 +1156,7 @@ fn collectFuncImportTargets(
     var func_idx: u32 = 0;
     for (imports.items, 0..) |it, i| {
         defer func_idx += 1; // every import is a func (checked above)
-        if (jit_dispatch.lookup(it.module, it.name) != null) continue; // WASI → setup plants it
+        if (jitPlantsWasi(it)) continue; // WASI → setup plants it
         if (i >= bindings.len or bindings[i] != .func) return error.Unsupported;
         const hc = bindings[i].func.host_call;
         if (hc.fn_ptr != hostFuncThunk) return error.Unsupported; // cross-module / non-embedder
@@ -1116,7 +1186,7 @@ fn collectFromExterns(
     var any_cross = false;
     for (items, 0..) |it, i| {
         const func_idx: u32 = @intCast(i);
-        if (jit_dispatch.lookup(it.module, it.name) != null) continue; // WASI → setup plants it
+        if (jitPlantsWasi(it)) continue; // WASI → setup plants it
         if (i >= arr.len) return error.Unsupported; // #392 — short vector
         const ext = arr[i] orelse return error.Unsupported;
         if (ext.kind != .func) return error.Unsupported;
@@ -1150,8 +1220,9 @@ const JitReject = error{
     /// A capability decline: nothing about the module's validity follows, and
     /// `.auto` retries on the interpreter.
     Declined,
-    /// A validity verdict or a `(start)` trap. `trap_out` carries the reason
-    /// when it could be allocated.
+    /// A validity verdict, a `(start)` trap, or an import the embedder got
+    /// wrong (#436) — in none of them would the interpreter reach a different
+    /// answer. `trap_out` carries the reason when it could be allocated.
     Final,
 };
 
@@ -1176,7 +1247,13 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     // thunk arena, so this arena can be reclaimed once `initLinked` returns.
     var ht_arena = std.heap.ArenaAllocator.init(alloc);
     defer ht_arena.deinit();
-    const func_imports = collectFuncImportTargets(ht_arena.allocator(), bytes, builder_state, store) catch return error.Declined;
+    const func_imports = collectFuncImportTargets(ht_arena.allocator(), bytes, builder_state, store) catch |err| switch (err) {
+        error.CrossStoreImport => {
+            if (trap_out) |to| to.* = crossStoreTrap(alloc, store);
+            return error.Final;
+        },
+        else => return error.Declined,
+    };
 
     const jit = alloc.create(runner.JitInstance) catch return error.Declined;
     jit.* = runner.JitInstance.initLinked(alloc, bytes, &.{}, func_imports.cross, &.{}, func_imports.host) catch |err| {
@@ -1526,7 +1603,10 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
     inst_rt.alloc = arena.allocator();
     inst_rt.instance = inst;
 
-    const bindings = builder.build(builder.ctx, arena.allocator(), bytes, store) catch {
+    const bindings = builder.build(builder.ctx, arena.allocator(), bytes, store) catch |err| {
+        if (err == error.CrossStoreImport) {
+            if (trap_out) |to| to.* = crossStoreTrap(alloc, store);
+        }
         if (inst.arena) |a2| {
             // EXEMPT-FALLBACK: ADR-0014 — parkAsZombie OOM accepts arena leak over UAF of cross-module references.
             parkAsZombie(alloc, store, inst_rt, a2) catch {};
@@ -2925,6 +3005,12 @@ fn verdictTrap(alloc: std.mem.Allocator, store: *Store, err: runner.Error) ?*Tra
     var buf: [96]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "invalid module: {s}", .{@errorName(err)}) catch "invalid module";
     return trap_surface.allocTrapWithMessage(alloc, store, .invalid_module, msg);
+}
+
+/// #436 — the one binder failure that carries a reason out to the embedder.
+/// Every other one still returns a bare NULL (#353).
+fn crossStoreTrap(alloc: std.mem.Allocator, store: *Store) ?*Trap {
+    return trap_surface.allocTrapWithMessage(alloc, store, .binding_error, "import extern belongs to a different store");
 }
 
 /// #431 — the kind for an error out of a post-instantiate JIT invoke. The

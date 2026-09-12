@@ -81,7 +81,15 @@ WASM_API_EXTERN void zwasm_instance_clear_interrupt(wasm_instance_t*);
 
 /* The embedder's binding is wrong: an argument or result count that is not the
  * signature's, or a host callback's own trap. A shape the engine cannot call
- * is ZWASM_TRAP_UNSUPPORTED. */
+ * is ZWASM_TRAP_UNSUPPORTED.
+ *
+ * A binding the runtime REFUSES to make earns it too (#436):
+ * zwasm_instance_new[_ex] returns NULL with this trap, on every engine, when
+ * an import's extern names an instance in a DIFFERENT store, or a host
+ * callback created on one — nothing ties the two stores' lifetimes. A
+ * standalone global, memory or table is NOT refused: its storage belongs to
+ * its own handle rather than to a store, so no boundary is crossed. Other
+ * instantiation failures still return NULL with no trap. */
 #define ZWASM_TRAP_BINDING_ERROR 0
 #define ZWASM_TRAP_UNREACHABLE 1
 #define ZWASM_TRAP_DIV_BY_ZERO 2
@@ -144,9 +152,11 @@ WASM_API_EXTERN wasm_func_t* zwasm_instance_get_func(wasm_instance_t*, uint32_t 
 
 /* wasm_instance_new with a trailing per-instance engine selector (the stock
  * wasm_instance_new is AUTO). Same ownership/trap contract as wasm_instance_new:
- * NULL on null input / instantiation failure / OOM; a start-function trap or a
- * ZWASM_TRAP_INVALID_MODULE verdict is written through trap_out (when non-NULL)
- * with a NULL return. */
+ * NULL on null input / instantiation failure / OOM; a start-function trap, a
+ * ZWASM_TRAP_INVALID_MODULE verdict or a ZWASM_TRAP_BINDING_ERROR cross-store
+ * import is written through trap_out (when non-NULL) with a NULL return. The
+ * cross-store refusal is decided before any engine-specific capability check,
+ * so all three engine kinds give the same reason for it. */
 WASM_API_EXTERN wasm_instance_t* zwasm_instance_new_ex(
     wasm_store_t*, const wasm_module_t*, const wasm_extern_vec_t*,
     wasm_trap_t**, uint8_t engine_kind);
