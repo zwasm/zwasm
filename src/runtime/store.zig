@@ -34,6 +34,14 @@ const Runtime = runtime_mod.Runtime;
 /// Plain (non-`extern`) struct: C only sees `wasm_store_t` as
 /// opaque per upstream wasm.h, so the layout is private.
 /// Matches the `Instance` shape choice for the same reason.
+/// #446 — a standalone entity's backing, erased for the same Zone-1 reason as
+/// `jit_zombies`: this file cannot name `api/` types. The tag is what lets one
+/// list free three shapes — Zone 3 casts back and frees per kind.
+pub const HostBacking = struct {
+    kind: enum(u8) { global, memory, table },
+    ptr: *anyopaque,
+};
+
 pub const Store = struct {
     engine: ?*Engine,
     /// Optional WASI host (`zwasm_wasi_config_t` from C's
@@ -118,6 +126,13 @@ pub const Store = struct {
     /// free for a second lifetime rule. `*anyopaque` as `jit_zombies`, same
     /// Zone-1 reason.
     host_func_payloads: std.ArrayList(*anyopaque) = .empty,
+    /// #446 — the same rule for the other three standalone entities, whose
+    /// backing an import binding aliases just as directly: `wasm_global_new`'s
+    /// cell, `wasm_memory_new`'s instance and pages, `wasm_table_new`'s
+    /// instance and refs. `host_func_payloads` above says why creation is when
+    /// the store takes it and what the deferred free costs; one list with a
+    /// kind tag, because the three free differently but live identically.
+    host_backings: std.ArrayList(HostBacking) = .empty,
     /// Wasm 1.0 §4.5 cross-module instance registry per ADR-0065
     /// (Phase 9 Cat III §9.9-III scope). Spec testsuite uses
     /// `(register "M" $inst)` to bind a previously-instantiated

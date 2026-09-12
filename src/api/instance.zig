@@ -340,6 +340,23 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
         alloc.destroy(p);
     }
     handle.host_func_payloads.deinit(alloc);
+    // #446 — and the standalone entities' backing, by the same rule and at the
+    // same point: the bindings that aliased it died with the instances above.
+    for (handle.host_backings.items) |b| switch (b.kind) {
+        .global => alloc.destroy(@as(*runtime.Value, @ptrCast(@alignCast(b.ptr)))),
+        .memory => {
+            const mi: *runtime.MemoryInstance = @ptrCast(@alignCast(b.ptr));
+            // ADR-0202 D1 — guarded backing is reservation-owned.
+            memory_backing.freeBacking(alloc, .{ .bytes = mi.bytes, .reservation = mi.reservation });
+            alloc.destroy(mi);
+        },
+        .table => {
+            const ti: *runtime.TableInstance = @ptrCast(@alignCast(b.ptr));
+            alloc.free(ti.refs);
+            alloc.destroy(ti);
+        },
+    };
+    handle.host_backings.deinit(alloc);
     // Free the cross-module instance registry (ADR-0065 §"Cat III").
     // Values are erased `*Instance` pointers (lifetimes managed by
     // the zombie list); keys are caller-owned. Only the hashmap's
@@ -713,22 +730,24 @@ fn wantedExternKind(it: sections.Import) ?ExternKind {
 }
 
 /// Would a binding built from `ext` reach across a store boundary? An
-/// instance's arm ties to that instance's runtime and arena; the standalone
-/// FUNC arm ties to the payload #439 gives the store. A standalone global /
-/// memory / table is deliberately absent: its backing belongs to the handle,
-/// not to any store, so a boundary is not what endangers it — its own
-/// `_delete` is, in or across stores alike. When that ownership moves, it
-/// belongs here.
+/// instance's arm ties to that instance's runtime and arena; every standalone
+/// arm ties to backing the STORE owns — the payload for a func (#439), the
+/// cell, memory instance or table instance for the rest (#446). #445 left the
+/// latter three out because their backing then belonged to the handle; moving
+/// that ownership to the store is what brings them here, and leaving them out
+/// after the move is a use-after-free the measurements show directly.
 ///
 /// Asked BEFORE any engine-specific capability filter, so a lifetime error is
 /// never masked by a decline: a forced `.jit` would otherwise answer a
 /// cross-store non-func import with a bare NULL where the others name it.
 fn crossesStore(ext: *const Extern, importer: *Store) bool {
     if (ext.instance) |inst| return inst.store != importer;
-    if (ext.kind == .func) {
-        if (ext.func) |fh| return fh.store != importer;
-    }
-    return false;
+    return switch (ext.kind) {
+        .func => if (ext.func) |h| h.store != importer else false,
+        .global => if (ext.global) |h| h.store != importer else false,
+        .table => if (ext.table) |h| h.store != importer else false,
+        .memory => if (ext.memory) |h| h.store != importer else false,
+    };
 }
 
 /// Pre-resolve all imports declared in `bytes` into Zone-1
@@ -2151,7 +2170,7 @@ pub export fn wasm_global_delete(g: ?*Global) callconv(.c) void {
     const alloc = storeAllocator(store) orelse return;
     if (handle.extern_view) |v| alloc.destroy(v);
     if (handle.ref_view) |rv| alloc.destroy(rv); // object-identity as_ref view (ADR-0158)
-    if (handle.cell) |c| alloc.destroy(c); // standalone own-cell (instance-backed: null)
+    // #446 — `handle.cell` belongs to the store; this releases the handle alone.
     alloc.destroy(handle);
 }
 
@@ -2233,11 +2252,7 @@ pub export fn wasm_memory_delete(m: ?*Memory) callconv(.c) void {
     const alloc = storeAllocator(store) orelse return;
     if (handle.extern_view) |v| alloc.destroy(v);
     if (handle.ref_view) |rv| alloc.destroy(rv); // object-identity as_ref view (ADR-0158)
-    if (handle.minst) |mi| { // standalone host memory: free its own backing
-        // ADR-0202 D1 — guarded backing is reservation-owned.
-        memory_backing.freeBacking(alloc, .{ .bytes = mi.bytes, .reservation = mi.reservation });
-        alloc.destroy(mi);
-    }
+    // #446 — `handle.minst` belongs to the store; this releases the handle alone.
     alloc.destroy(handle);
 }
 
@@ -2381,10 +2396,7 @@ pub export fn wasm_table_delete(t: ?*Table) callconv(.c) void {
     const alloc = storeAllocator(store) orelse return;
     if (handle.extern_view) |v| alloc.destroy(v);
     if (handle.ref_view) |rv| alloc.destroy(rv); // object-identity as_ref view (ADR-0158)
-    if (handle.tinst) |ti| { // standalone host table: free its own backing
-        alloc.free(ti.refs);
-        alloc.destroy(ti);
-    }
+    // #446 — `handle.tinst` belongs to the store; this releases the handle alone.
     alloc.destroy(handle);
 }
 
@@ -3066,6 +3078,7 @@ fn verdictTrap(alloc: std.mem.Allocator, store: *Store, err: runner.Error) ?*Tra
 fn crossStoreTrap(alloc: std.mem.Allocator, store: *Store) ?*Trap {
     return trap_surface.allocTrapWithMessage(alloc, store, .binding_error, "import extern belongs to a different store");
 }
+
 
 /// #431 — the kind for an error out of a post-instantiate JIT invoke. The
 /// `else` is safe because the three invoke paths raise nothing else once the
