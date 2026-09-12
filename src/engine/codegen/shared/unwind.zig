@@ -151,8 +151,13 @@ pub fn walk(
     loader: FrameChainLoader,
     max_depth: u32,
     resolver: ?InstanceResolver,
+    /// The thrown tag's globally comparable identity, when the caller holds it
+    /// rather than an index into `table` — a `throw_ref` of an exnref whose tag
+    /// the RETHROWING module does not declare has no local index to name it
+    /// (#426 review). `null` = derive it from `throw_tag_idx` as usual.
+    throw_id_override: ?u64,
 ) UnwindResult {
-    const throw_id = table.identityOf(throw_tag_idx);
+    const throw_id = throw_id_override orelse table.identityOf(throw_tag_idx);
     var pc = initial_pc;
     var abs_pc = initial_abs_pc;
     var fp = initial_fp;
@@ -231,7 +236,7 @@ test "unwind: matching handler in current frame → returns handler immediately"
 
     // No frame chain needed — handler hits at the initial frame.
     const frames: SyntheticFrames = .{ .links = &.{} };
-    const result = walk(t, 5, 50, 0, 1, frames.loader(), 16, null);
+    const result = walk(t, 5, 50, 0, 1, frames.loader(), 16, null, null);
 
     switch (result) {
         .handler => |h| {
@@ -262,7 +267,7 @@ test "unwind: no handler in any frame → uncaught (caller_fp == 0 terminates)" 
         .{ .caller_fp = 0, .caller_pc = 0, .caller_abs_pc = 0 },
         .{ .caller_fp = 1, .caller_pc = 50, .caller_abs_pc = 50 },
     } };
-    const result = walk(t, 99, 50, 0, 2, frames.loader(), 16, null);
+    const result = walk(t, 99, 50, 0, 2, frames.loader(), 16, null, null);
     try testing.expectEqual(UnwindResult.uncaught, result);
 }
 
@@ -294,7 +299,7 @@ test "unwind: walks to caller frame and finds handler there" {
         .{ .caller_fp = 0, .caller_pc = 0, .caller_abs_pc = 0 },
         .{ .caller_fp = 1, .caller_pc = 550, .caller_abs_pc = 0x10550 },
     } };
-    const result = walk(t, 5, 50, 0x10050, 2, frames.loader(), 16, null);
+    const result = walk(t, 5, 50, 0x10050, 2, frames.loader(), 16, null, null);
 
     switch (result) {
         .handler => |h| {
@@ -318,7 +323,7 @@ test "unwind: catch_all in inner frame catches everything (no walk needed)" {
     const t = b.finalize();
 
     const frames: SyntheticFrames = .{ .links = &.{} };
-    const result = walk(t, 12345, 50, 0, 0, frames.loader(), 16, null);
+    const result = walk(t, 12345, 50, 0, 0, frames.loader(), 16, null, null);
     switch (result) {
         .handler => |h| {
             try testing.expectEqual(@as(u32, 77), h.landing_pad_pc);
@@ -341,7 +346,7 @@ test "unwind: max_depth bound prevents runaway on corrupted chain" {
             .{ .caller_fp = 0, .caller_pc = 0, .caller_abs_pc = 0 }, // fp=0 → fp=0 (self-cycle)
         },
     };
-    const result = walk(t, 1, 0, 0, 0, frames.loader(), 4, null);
+    const result = walk(t, 1, 0, 0, 0, frames.loader(), 4, null, null);
     try testing.expectEqual(UnwindResult.uncaught, result);
 }
 
@@ -352,7 +357,7 @@ test "unwind: loader returning null (invalid fp) → uncaught" {
 
     // Empty frame chain — loader returns null at any fp.
     const frames: SyntheticFrames = .{ .links = &.{} };
-    const result = walk(t, 5, 50, 0, 99, frames.loader(), 16, null);
+    const result = walk(t, 5, 50, 0, 99, frames.loader(), 16, null, null);
     try testing.expectEqual(UnwindResult.uncaught, result);
 }
 
@@ -377,7 +382,7 @@ test "unwind: handler_fp reports the catching frame (NOT the throwing frame)" {
         .{ .caller_fp = 1, .caller_pc = 1500, .caller_abs_pc = 0x21500 },
         .{ .caller_fp = 2, .caller_pc = 50, .caller_abs_pc = 0x20050 },
     } };
-    const result = walk(t, 7, 10, 0x30010, 3, frames.loader(), 16, null);
+    const result = walk(t, 7, 10, 0x30010, 3, frames.loader(), 16, null, null);
     switch (result) {
         .handler => |h| try testing.expectEqual(@as(usize, 1), h.handler_fp),
         .uncaught => try testing.expect(false),
@@ -437,7 +442,7 @@ test "unwind: per-frame resolver switches to the catching instance's table (ADR-
         },
     };
     // throw_tag_idx 0 resolved via A's table → 0xAA. initial abs 0x1050 (A).
-    const result = walk(a_table, 0, 0, 0x1050, 2, frames.loader(), 16, two.resolver());
+    const result = walk(a_table, 0, 0, 0x1050, 2, frames.loader(), 16, two.resolver(), null);
     switch (result) {
         .handler => |h| {
             try testing.expectEqual(@as(u32, 200), h.landing_pad_pc);
@@ -450,6 +455,6 @@ test "unwind: per-frame resolver switches to the catching instance's table (ADR-
     const a_ids2 = [_]u64{0xCC}; // A maps tag 0 → 0xCC (≠ B's 0xAA)
     const a_table2: ExceptionTable = .{ .entries = ab.finalize().entries, .tag_ids = &a_ids2 };
     const two2: TwoInstanceResolver = .{ .a = a_table2, .b = b_table };
-    const r2 = walk(a_table2, 0, 0, 0x1050, 2, frames.loader(), 16, two2.resolver());
+    const r2 = walk(a_table2, 0, 0, 0x1050, 2, frames.loader(), 16, two2.resolver(), null);
     try testing.expectEqual(UnwindResult.uncaught, r2);
 }

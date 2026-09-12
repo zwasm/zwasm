@@ -314,6 +314,7 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
     // each of these, and every importer is gone with the cascade above.
     for (handle.jit_zombies.items) |jp| {
         const jit: *runner.JitInstance = @ptrCast(@alignCast(jp));
+        unregisterJitEh(jit);
         jit.deinit(alloc);
         alloc.destroy(jit);
     }
@@ -399,6 +400,33 @@ fn parkJitAsZombie(
     jit: *anyopaque,
 ) std.mem.Allocator.Error!void {
     try store.jit_zombies.append(store_alloc, jit);
+}
+
+/// #426 — enter a heap-pinned `JitInstance` in the process-global EH registry
+/// (ADR-0134 D2 / ADR-0185 (b)): its runtime, so a throw inside it resolves to
+/// ITS exception table and tag identities, and its bridge-thunk arena, so the
+/// x86_64 frame sniff reads a thunk-return frame as code. Every JIT
+/// instantiation registers; `unregisterJitEh` is the counterpart at every site
+/// that frees one.
+///
+/// Called once `jit`'s address is final, because that address is what the
+/// registry stores. `setupRuntimeLinked` is NOT a registration site: it moves
+/// `RuntimeOwned` by value (D-215), so the rt it sees is not the one the
+/// instance keeps.
+fn registerJitEh(jit: *runner.JitInstance) error{OutOfMemory}!void {
+    try runner.eh_registry.register(&jit.owned.rt);
+    errdefer runner.eh_registry.unregister(&jit.owned.rt);
+    if (jit.owned.thunk_arena) |a| if (a.bytes.len > 0)
+        try runner.eh_registry.registerThunkArena(@intFromPtr(a.bytes.ptr), a.bytes.len);
+}
+
+/// Leave the EH registry. Paired with `registerJitEh` at every site that calls
+/// `jit.deinit`. A PARKED instance stays registered: its code is still mapped
+/// and an importer's thunk still enters it.
+fn unregisterJitEh(jit: *runner.JitInstance) void {
+    runner.eh_registry.unregister(&jit.owned.rt);
+    if (jit.owned.thunk_arena) |a| if (a.bytes.len > 0)
+        runner.eh_registry.unregisterThunkArena(@intFromPtr(a.bytes.ptr));
 }
 
 // ============================================================
@@ -1284,6 +1312,15 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
         if (trap_out) |to| to.* = verdictTrap(alloc, store, err);
         return error.Final;
     };
+    // #426 — the instance's address is final, so enter it in the EH registry
+    // before anything can run its code. A registration it cannot fund is a
+    // decline, not a silent omission: an unregistered instance whose throw
+    // crosses the bridge cannot be unwound through.
+    registerJitEh(jit) catch {
+        jit.deinit(alloc);
+        alloc.destroy(jit);
+        return error.Declined;
+    };
     // ADR-0179 budgets: the JIT meters poll-site crossings (not interp insns);
     // null axes stay unmetered. Memory/table caps clamp grow at runtime.
     jit.setFuel(limits.fuel);
@@ -1299,6 +1336,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     if (store.wasi_host) |host_opaque| {
         const host: *wasi_host.Host = @ptrCast(@alignCast(host_opaque));
         host.materializePendingPreopens() catch {
+            unregisterJitEh(jit);
             jit.deinit(alloc);
             alloc.destroy(jit);
             return error.Declined;
@@ -1310,6 +1348,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     // including why the retirement slot is reserved at capture.
     if (store.wasi_host != null) {
         store.retired_wasi_hosts.ensureUnusedCapacity(std.heap.c_allocator, 1) catch {
+            unregisterJitEh(jit);
             jit.deinit(alloc);
             alloc.destroy(jit);
             return error.Declined;
@@ -1354,6 +1393,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
                 // decline it can raise is already `Declined` above (#431).
                 if (trap_out) |to| to.* = allocTrap(alloc, store, jitErrKind(err, jit.owned.rt.trap_kind));
             }
+            unregisterJitEh(jit);
             jit.deinit(alloc);
             alloc.destroy(jit);
             return reject;
@@ -1361,6 +1401,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     }
 
     const inst = alloc.create(Instance) catch {
+        unregisterJitEh(jit);
         jit.deinit(alloc);
         alloc.destroy(jit);
         return error.Declined;
@@ -1388,6 +1429,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     // (which outlive the instance). Freed in the JIT instance teardown via `inst.arena`.
     {
         const arena = alloc.create(std.heap.ArenaAllocator) catch {
+            unregisterJitEh(jit);
             jit.deinit(alloc);
             alloc.destroy(jit);
             alloc.destroy(inst);
@@ -1422,6 +1464,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
         if (!built) {
             arena.deinit();
             alloc.destroy(arena);
+            unregisterJitEh(jit);
             jit.deinit(alloc);
             alloc.destroy(jit);
             alloc.destroy(inst);

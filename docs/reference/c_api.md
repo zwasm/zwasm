@@ -97,6 +97,14 @@ Instance-level budget setters (ADR-0179 #3a-4) mirroring the Zig facade —
 post-instantiate and re-armable mid-workload (v1's config-level
 `zwasm_config_set_*` shape was deliberately rejected). All null-tolerant.
 
+**Threads.** The engine is single-threaded — one thread per process, not one
+per Store (ROADMAP §7: "Phases 0–10: single-threaded"). Separate Stores are not
+separate islands: they share process-global state, among it the table the
+exception unwinder consults to find which instance owns a frame, so deleting a
+Store from a second thread can free memory a call on the first is still
+reading. `zwasm_instance_interrupt` / `..._clear_interrupt` are the one
+documented exception. Multi-store use across threads is Phase 11's design.
+
 **Engine selection.** Stock `wasm_instance_new` builds an `.auto`-engine
 instance: the JIT where it takes the module, the interpreter where the JIT
 *declines* it (an import it cannot satisfy, a body it cannot compile). A module

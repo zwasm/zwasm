@@ -51,6 +51,10 @@ pub const ThrowSite = struct {
     initial_fp: usize,
     throw_site_addr: usize,
     tag_idx: u32,
+    /// The thrown tag's identity, when `tag_idx` cannot name it: a `throw_ref`
+    /// of an exnref whose tag the rethrowing module does not declare has no
+    /// local index (#426 review). `null` = derive it from `tag_idx`.
+    tag_id: ?u64 = null,
 };
 
 /// Default max unwind depth — Phase 10 cap on the Wasm call
@@ -111,6 +115,7 @@ pub fn dispatchThrow(
         loader,
         max_unwind_depth,
         resolver,
+        site.tag_id,
     );
 }
 

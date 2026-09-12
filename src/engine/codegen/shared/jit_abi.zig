@@ -625,6 +625,24 @@ pub const JitRuntime = extern struct {
     /// The `throw`/`throw_ref` unwind entry (`callconv(.naked)`; reads its
     /// arguments from the registers the op emit stages) — same D1 motive.
     throw_trampoline_fn: *const fn () callconv(.naked) noreturn = @import("throw_trampoline.zig").zwasmThrowTrampoline,
+    /// The runtime that OWNS the landing pad `eh_handler_pc` points into —
+    /// the CATCHING instance's, which on a cross-instance catch is not the
+    /// throwing one. The dispatcher installs it in the pinned invariant
+    /// registers before jumping, because the bridge thunk's own restore is
+    /// skipped: a throw leaves through the thunk's frame rather than
+    /// returning through it, so nothing else puts the catching instance's
+    /// globals / memory / table bases back. Without it a `catch_all` that
+    /// read `global.get 0` got the THROWING instance's global (#426 review).
+    /// Written by `trampolineCore` on the `.handler` path; equal to the
+    /// throwing runtime for a same-instance catch. TRAILING.
+    eh_handler_rt: usize = 0,
+    /// The identity of the tag currently being dispatched — the `tag_ids`
+    /// entry of the THROWING instance, which is what `unwind.walk` compares.
+    /// `trampolineCore` writes it beside `eh_thrown_tag_idx`, `reifyExnref`
+    /// stores it in the `Exception`, and `rethrowFromExnref` puts it back so a
+    /// `throw_ref` names the original tag even where no local index does
+    /// (#426 review). TRAILING.
+    eh_thrown_tag_id: u64 = 0,
 };
 
 /// Host-side context for `reifyExnref` (ADR-0120 D6 / D-327). Owns the
@@ -671,6 +689,7 @@ pub fn reifyExnref(rt: *JitRuntime) callconv(.c) usize {
     exc.* = .{
         .tag_idx = rt.eh_thrown_tag_idx,
         .tag = null,
+        .jit_tag_id = rt.eh_thrown_tag_id,
         .payload_len = rt.eh_payload_len,
         .payload = undefined,
     };
@@ -702,8 +721,26 @@ pub fn rethrowFromExnref(rt: *JitRuntime, exc_ptr: usize) callconv(.c) u32 {
     var i: u32 = 0;
     while (i < n) : (i += 1) rt.eh_payload_buf[i] = exc.payload[i].bits64;
     rt.eh_payload_len = exc.payload_len;
+    // The identity is what names the tag across modules; the index is only a
+    // name for it inside one. Hand the identity back to the dispatcher, and an
+    // index only when THIS runtime has one for it (#426 review).
+    rt.eh_thrown_tag_id = exc.jit_tag_id;
+    if (exc.jit_tag_id != 0) {
+        if (rt.tag_ids_ptr) |ids| {
+            var k: u32 = 0;
+            while (k < rt.tag_ids_count) : (k += 1) {
+                if (ids[k] == exc.jit_tag_id) return k;
+            }
+        }
+        return no_local_tag_idx;
+    }
     return exc.tag_idx;
 }
+
+/// `eh_thrown_tag_idx` / a `rethrowFromExnref` result meaning "this runtime has
+/// no index for the tag; read `eh_thrown_tag_id` instead". Also what a null
+/// exnref yields, where it makes the dispatch uncaught.
+pub const no_local_tag_idx: u32 = 0xFFFF_FFFF;
 
 /// Default `memory_grow_fn` — unconditionally refuses growth by
 /// returning the spec sentinel `-1`. Spec-conformant for any host
@@ -1526,6 +1563,8 @@ pub const eh_code_map_count_off: u12 = @offsetOf(JitRuntime, "eh_code_map_count"
 /// Handler-dispatch fields read by
 /// the naked-stub trampoline's branch after `trampolineCore` returns.
 pub const eh_handler_active_off: u12 = @offsetOf(JitRuntime, "eh_handler_active");
+pub const eh_handler_rt_off: u12 = @offsetOf(JitRuntime, "eh_handler_rt");
+pub const eh_thrown_tag_id_off: u12 = @offsetOf(JitRuntime, "eh_thrown_tag_id");
 pub const eh_handler_sp_off: u12 = @offsetOf(JitRuntime, "eh_handler_sp");
 pub const eh_handler_pc_off: u12 = @offsetOf(JitRuntime, "eh_handler_pc");
 pub const eh_handler_fp_off: u12 = @offsetOf(JitRuntime, "eh_handler_fp");
@@ -1727,7 +1766,7 @@ test "JitRuntime: layout offsets match documented prologue load sequence" {
     try testing.expectEqual(@as(u12, 80), jit_executed_flag_off);
 }
 
-test "JitRuntime: total size = 720 bytes" {
+test "JitRuntime: total size = 736 bytes" {
     // EH dispatcher fields appended
     // (+32 bytes = 2 ptrs × 8 B + 2 u32 × 4 B + 2 u32 pads × 4 B).
     // The handler-dispatch result fields
@@ -1751,7 +1790,50 @@ test "JitRuntime: total size = 720 bytes" {
     // D-314(b) appends `store_table_elements_max` (u64 +8, trailing) → 592 + 8 = 600.
     // D-478 appends `host_payloads_base` (?[*]const usize +8 B, trailing) → 600 + 8 = 608.
     // ADR-0203 D1 appends 14 de-baked helper fn slots (trailing) → 608 + 112 = 720.
-    try testing.expectEqual(@as(u32, 720), head_size);
+    // #426 review appends `eh_handler_rt` (usize +8, trailing) → 720 + 8 = 728,
+    // then `eh_thrown_tag_id` (u64 +8, trailing) → 728 + 8 = 736.
+    try testing.expectEqual(@as(u32, 736), head_size);
+}
+
+test "rethrowFromExnref: a reified exnref names its tag by identity, not by index (#426 review)" {
+    // Tag indices are per module, so a `throw_ref` in a module other than the
+    // thrower must resolve the exception's IDENTITY against its own tag space.
+    const exception_mod2 = @import("../../../feature/exception_handling/exception.zig");
+    var ids = [_]u64{ 0xAAA, 0xBBB };
+    var rt: JitRuntime = std.mem.zeroes(JitRuntime);
+    rt.tag_ids_ptr = &ids;
+    rt.tag_ids_count = 2;
+
+    // An identity this runtime DOES have: the rethrow gets its local index —
+    // which is 1 here even though the thrower may have called it anything.
+    var known: exception_mod2.Exception = .{
+        .tag_idx = 0,
+        .jit_tag_id = 0xBBB,
+        .payload_len = 0,
+        .payload = undefined,
+    };
+    try testing.expectEqual(@as(u32, 1), rethrowFromExnref(&rt, @intFromPtr(&known)));
+    try testing.expectEqual(@as(u64, 0xBBB), rt.eh_thrown_tag_id);
+
+    // An identity it does NOT have: no local index can name it, so the
+    // dispatcher is told to read the identity instead. The old behaviour —
+    // handing back the raw index — had this land on whatever tag sat there.
+    var foreign: exception_mod2.Exception = .{
+        .tag_idx = 1,
+        .jit_tag_id = 0xCCC,
+        .payload_len = 0,
+        .payload = undefined,
+    };
+    try testing.expectEqual(no_local_tag_idx, rethrowFromExnref(&rt, @intFromPtr(&foreign)));
+    try testing.expectEqual(@as(u64, 0xCCC), rt.eh_thrown_tag_id);
+
+    // No identity recorded (the pre-identity path): the index stands.
+    var legacy: exception_mod2.Exception = .{
+        .tag_idx = 7,
+        .payload_len = 0,
+        .payload = undefined,
+    };
+    try testing.expectEqual(@as(u32, 7), rethrowFromExnref(&rt, @intFromPtr(&legacy)));
 }
 
 test "jitGcAlloc: allocates struct{i32} via the *JitRuntime bridge" {

@@ -65,6 +65,17 @@ WASM_API_EXTERN bool zwasm_instance_fuel_remaining(const wasm_instance_t*, uint6
 WASM_API_EXTERN void zwasm_instance_set_memory_pages_limit(wasm_instance_t*, uint64_t max_pages);
 WASM_API_EXTERN void zwasm_instance_clear_memory_pages_limit(wasm_instance_t*);
 
+/* ── Threads ─────────────────────────────────────────────────────────── */
+
+/* THE ENGINE IS SINGLE-THREADED. Not merely one thread per Store: one thread
+ * per process. Stores share process-global state — among it the table the
+ * exception unwinder consults to find which instance owns a frame — so a
+ * second thread that deletes a Store can free memory a call on the first is
+ * still reading, even though the two share no handle. Making separate Stores
+ * usable on separate threads is a later design, not an undocumented
+ * allowance. `zwasm_instance_interrupt` below is the one call safe from any
+ * thread, and says so. */
+
 /* ── Cooperative interruption (cancel / host-driven timeout) ─────────── */
 
 /* Callable from any thread; the running guest traps with kind

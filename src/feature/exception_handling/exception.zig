@@ -40,6 +40,13 @@ pub const Exception = struct {
     /// `rt.tags[tag_idx]`; catch matches by pointer. `null` only on
     /// the legacy/no-tags path (catch then falls back to `tag_idx`).
     tag: ?*TagInstance = null,
+    /// The JIT's counterpart to `tag`: the globally comparable identity from
+    /// the throwing instance's `tag_ids` (ADR-0134 D3). A reified `exnref`
+    /// keeps it so a later `throw_ref` names the ORIGINAL tag, whatever local
+    /// index — or none — the rethrowing module has for it (#426 review).
+    /// `tag_idx` alone cannot: indices are per module. 0 = not set (the interp
+    /// path, which matches on `tag`).
+    jit_tag_id: u64 = 0,
     payload_len: u32,
     payload: [max_payload]Value,
 

@@ -1451,6 +1451,7 @@ pub fn build(b: *std.Build) void {
         .{ .src = "test/c_api_conformance/cross_module_reexport.c", .name = "cross_module_reexport" }, // #388 a re-exported import links, and the chain outlives A
         .{ .src = "test/c_api_conformance/cross_module_reexport_host.c", .name = "cross_module_reexport_host" }, // #427 a re-exported host callback is reached through the chain
         .{ .src = "test/c_api_conformance/cross_module_abi.c", .name = "cross_module_abi" }, // #390 / #413 overflow args, MEMORY-class results and the arm64 cohort cross the bridge
+        .{ .src = "test/c_api_conformance/cross_module_throw.c", .name = "cross_module_throw" }, // #426 a throw in an imported func reaches the importer's catch_all across the bridge
         .{ .src = "test/c_api_conformance/cross_module_by_extern.c", .name = "cross_module_by_extern" }, // #386 an import binds to the extern passed, not to the export sharing its field name
         .{ .src = "test/c_api_conformance/cross_module_type_space.c", .name = "cross_module_type_space" }, // #387 a func import's type-def is compared across both type spaces
         .{ .src = "test/c_api_conformance/instance_new_short_imports.c", .name = "instance_new_short_imports" }, // #392 a short import vector is NULL, not a read past it

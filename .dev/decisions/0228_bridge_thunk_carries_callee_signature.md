@@ -109,9 +109,10 @@ optimisation layered on a correct thunk, not a replacement for one.
   requires to be alive.
 - **Neutral / follow-ups**: the interpreter's binder has the same missing fold
   for a re-exported import (its thunk runs the re-exporter's `unreachable`
-  placeholder) — #427. A cross-module throw through the bridge
-  faults unless the caller registered its instances with `eh_registry`, which
-  `initLinked` never does — #426. `fromCompiled` (`.cwasm`)
+  placeholder) — #427. A cross-module throw through the bridge faulted
+  unless the caller registered its instances with `eh_registry`, which no
+  production path did; closed by #426, which registers in the C API's
+  `instantiateJit` and makes the registry growable. `fromCompiled` (`.cwasm`)
   still links no cross-module imports. A v128 parameter is still declined
   (SysV's overflow rule excludes it).
 

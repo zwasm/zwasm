@@ -194,7 +194,7 @@ test "frame_chain_adapter: end-to-end walk — synthetic frame chain → handler
 
     const ctx: Context = .{ .normalize = identityTruncate };
     const loader = loaderFor(&ctx);
-    const result = unwind.walk(t, 5, 9999, 0xDEAD0000 | 9999, inner_fp, loader, 16, null);
+    const result = unwind.walk(t, 5, 9999, 0xDEAD0000 | 9999, inner_fp, loader, 16, null, null);
 
     switch (result) {
         .handler => |h| {
@@ -218,7 +218,7 @@ test "frame_chain_adapter: end-to-end walk — uncaught after exhausting frame c
 
     const ctx: Context = .{ .normalize = identityTruncate };
     const loader = loaderFor(&ctx);
-    const result = unwind.walk(t, 7, 50, 0x50, inner_fp, loader, 16, null);
+    const result = unwind.walk(t, 7, 50, 0x50, inner_fp, loader, 16, null, null);
     try testing.expectEqual(unwind.UnwindResult.uncaught, result);
 }
 
