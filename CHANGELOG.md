@@ -41,6 +41,22 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A cross-module throw reaches the importer's handler through the C API**
+  (#426). The process-global EH registry the unwinder consults to find which
+  instance owns a frame had no production writer: only the test runners
+  registered, so an embedder that linked two JIT-backed instances and threw
+  across the bridge unwound against an empty registry and died on a fatal
+  signal instead of landing in the importer's `catch_all`. `instantiateJit`
+  now registers every instance it heap-pins, and the registry grows instead
+  of dropping registrations past a fixed 64. The handler also runs as the
+  instance that owns it: a throw leaves through the bridge thunk's frame
+  rather than returning through it, so the thunk's restore of the caller's
+  pinned runtime never ran and a handler reading `global.get` got the
+  THROWING instance's global — 1000 where its own was 7. A reified `exnref`
+  keeps its tag identity across the boundary too: a tag index is per module, so
+  a later `throw_ref` was resolving the thrower's number among the catcher's
+  tags and its own handler caught what should have escaped.
+
 - **A trap message ends with the NUL `wasm.h` declares, and its size says so**
   (#441). `wasm_trap_message` copied the message bytes alone into a
   `wasm_message_t` the header types as NUL-terminated, so a C host reading it

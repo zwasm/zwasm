@@ -1355,16 +1355,16 @@ test "JitInstance.initLinked: a cross-module throw reaches the importer's try_ta
     const boom = e.exportedFuncTarget(gpa, "boom") orelse return error.TestUnexpectedResult;
     var i = try JitInstance.initLinked(gpa, &eh_importer_wasm, &.{}, &.{boom}, &.{tag}, &.{});
     defer i.deinit(gpa);
-    reg.register(&t.owned.rt);
-    reg.register(&e.owned.rt);
-    reg.register(&i.owned.rt);
+    try reg.register(&t.owned.rt);
+    try reg.register(&e.owned.rt);
+    try reg.register(&i.owned.rt);
     defer {
         reg.unregister(&t.owned.rt);
         reg.unregister(&e.owned.rt);
         reg.unregister(&i.owned.rt);
     }
     if (i.owned.thunk_arena) |a| {
-        reg.registerThunkArena(@intFromPtr(a.bytes.ptr), a.bytes.len);
+        try reg.registerThunkArena(@intFromPtr(a.bytes.ptr), a.bytes.len);
     }
     defer if (i.owned.thunk_arena) |a| reg.unregisterThunkArena(@intFromPtr(a.bytes.ptr));
     try testing.expectEqual(@as(?u64, 42), try i.invoke(gpa, "test", &.{}));

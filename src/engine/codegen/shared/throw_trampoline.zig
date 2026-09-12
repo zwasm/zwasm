@@ -118,10 +118,27 @@ pub fn trampolineCore(
         else
             &.{},
     };
+    // The identity is what the walk matches on. Normally it comes from this
+    // instance's `tag_ids[tag_idx]`; a `throw_ref` whose tag this module does
+    // not declare arrives with the no-index marker and the identity in
+    // `eh_thrown_tag_id` instead (#426 review).
+    // `null` = no identity to carry, so the walk derives one from the index as
+    // it always did. That is the case for a runtime with no `tag_ids` map:
+    // `identityOf` then returns the INDEX, and recording that as an identity
+    // would have `rethrowFromExnref` — which trusts a non-zero identity over
+    // the index — search a map that is not there and report no local tag, so a
+    // same-instance rethrow went uncaught (#426 review).
+    const thrown_tag_id: ?u64 = if (tag_idx == jit_abi.no_local_tag_idx)
+        rt.eh_thrown_tag_id // a rethrow with no local index: the identity IS the name
+    else if (rt.tag_ids_ptr == null)
+        null
+    else
+        table.identityOf(tag_idx);
     const site: zwasm_throw.ThrowSite = .{
         .initial_fp = initial_fp,
         .throw_site_addr = throw_site_addr,
         .tag_idx = tag_idx,
+        .tag_id = thrown_tag_id,
     };
 
     // ADR-0134 D2 — cross-instance per-frame dispatch. With zero
@@ -170,12 +187,64 @@ pub fn trampolineCore(
                     // The catching function's body addresses locals
                     // via X29/RBP; restore it from the matched frame.
                     rt.eh_handler_fp = h.handler_fp;
+                    // The landing pad runs the CATCHING instance's code, so it
+                    // needs that instance's runtime in the pinned invariant
+                    // registers. A throw leaves through the bridge thunk's
+                    // frame instead of returning through it, so the thunk's own
+                    // restore never runs (#426 review). Falls back to this
+                    // runtime when the registry has no owner — the
+                    // single-instance case, where they are the same.
+                    const catching_rt = eh_registry.runtimeForPc(h.handler_abs_pc) orelse rt;
+                    // The landing pad reads the thrown payload through the SAME
+                    // pinned register it reads globals through, so switching the
+                    // register moves the payload out from under a `catch`
+                    // clause's parameters — measured as 0 where 42 was thrown
+                    // (runner_test's registered chain). Carry the dispatch state
+                    // across to the instance that is about to read it. No-op
+                    // when they are the same instance.
+                    if (catching_rt != rt) {
+                        catching_rt.eh_payload_len = rt.eh_payload_len;
+                        const n = @min(rt.eh_payload_len, rt.eh_payload_buf.len);
+                        var k: usize = 0;
+                        while (k < n) : (k += 1) catching_rt.eh_payload_buf[k] = rt.eh_payload_buf[k];
+                        catching_rt.eh_reify_ctx = rt.eh_reify_ctx;
+                        // The tag INDEX is module-local and `Exception` records
+                        // no owner, so copying it across would have a later
+                        // `throw_ref` resolve the throwing module's number in
+                        // the catching module's tag space — a different tag, or
+                        // none (#426 review). Translate through the globally
+                        // comparable identity the unwinder already matches on;
+                        // when the catching module declares no tag with that
+                        // identity, the exnref has no representable index here,
+                        // and the no-match sentinel `rethrowFromExnref` already
+                        // uses for a null exnref sends a `throw_ref` of it to an
+                        // uncaught dispatch rather than to the wrong handler.
+                        // The identity travels; the index is only its name in
+                        // one module, so it is translated where the catching
+                        // module has one and marked absent where it does not.
+                        // `reifyExnref` keeps the identity either way, so an
+                        // exnref rethrown in a third module that DOES declare
+                        // the tag still names it.
+                        catching_rt.eh_thrown_tag_idx =
+                            translateTagIdx(rt, catching_rt, site.tag_idx) orelse
+                            jit_abi.no_local_tag_idx;
+                    }
+                    rt.eh_handler_rt = @intFromPtr(catching_rt);
                     rt.eh_handler_active = 1;
                     // D-327 (ADR-0120 D6) — stash the thrown tag_idx so a
                     // catch_ref / catch_all_ref landing pad can reify the
                     // exnref with the ACTUAL caught tag (catch_all_ref has no
                     // compile-time tag). Uniform for both _ref kinds.
                     rt.eh_thrown_tag_idx = site.tag_idx;
+                    // And the identity beside it, on the runtime the landing pad
+                    // will reify through — UNCONDITIONALLY. Written only for a
+                    // cross-instance catch, it went stale: this runtime kept the
+                    // FOREIGN identity from an earlier cross-instance catch, and
+                    // a later same-instance `_ref` catch reified its own tag
+                    // with it, so `rethrowFromExnref` — which trusts a non-zero
+                    // identity over the index — sent the rethrow to the wrong
+                    // tag or to none (#426 review).
+                    catching_rt.eh_thrown_tag_id = thrown_tag_id orelse 0;
                     // trap_flag stays 0 — handler dispatch will run.
                 },
                 .outside => {
@@ -189,6 +258,22 @@ pub fn trampolineCore(
             }
         },
     }
+}
+
+/// `from`'s local tag index expressed in `to`'s tag space, or null when `to`
+/// declares no tag with the same identity. Tag indices are per module; the
+/// `tag_ids` arrays hold the identity the unwinder compares (ADR-0134 D3), so
+/// that is what crosses the boundary.
+fn translateTagIdx(from: *const jit_abi.JitRuntime, to: *const jit_abi.JitRuntime, idx: u32) ?u32 {
+    const from_ids = from.tag_ids_ptr orelse return null;
+    if (idx >= from.tag_ids_count) return null;
+    const identity = from_ids[idx];
+    const to_ids = to.tag_ids_ptr orelse return null;
+    var i: u32 = 0;
+    while (i < to.tag_ids_count) : (i += 1) {
+        if (to_ids[i] == identity) return i;
+    }
+    return null;
 }
 
 /// EH dispatcher trampoline. Invoked via BL/CALL from JIT-emitted
@@ -227,8 +312,10 @@ pub fn zwasmThrowTrampoline() callconv(.naked) noreturn {
         //   ldr x16, [x19, #sp]          ; handler path: load new SP
         //   mov sp, x16
         //   ldr x29, [x19, #fp]          ; restore catching frame FP
-        //   ldr x16, [x19, #pc]          ; load absolute landing PC
-        //   br x16                       ; jump (never returns here)
+        //   ldr x17, [x19, #pc]          ; landing PC, before x19 moves
+        //   ldr x19, [x19, #handler_rt]  ; the CATCHING instance's runtime
+        //   ldr x23..x28, [x19, #...]    ; and its invariant cohort
+        //   br x17                       ; jump (never returns here)
         // .Luncaught:
         //   ldp x29, x30, [sp], #16
         //   ret
@@ -244,8 +331,15 @@ pub fn zwasmThrowTrampoline() callconv(.naked) noreturn {
                 \\ldr x16, [x19, #{d}]
                 \\mov sp, x16
                 \\ldr x29, [x19, #{d}]
-                \\ldr x16, [x19, #{d}]
-                \\br x16
+                \\ldr x17, [x19, #{d}]
+                \\ldr x19, [x19, #{d}]
+                \\ldr x23, [x19, #{d}]
+                \\ldr x24, [x19, #{d}]
+                \\ldr x25, [x19, #{d}]
+                \\ldr x26, [x19, #{d}]
+                \\ldr x27, [x19, #{d}]
+                \\ldr x28, [x19, #{d}]
+                \\br x17
                 \\1:
                 \\ldp x29, x30, [sp], #16
                 \\ret
@@ -254,6 +348,13 @@ pub fn zwasmThrowTrampoline() callconv(.naked) noreturn {
                 jit_abi.eh_handler_sp_off,
                 jit_abi.eh_handler_fp_off,
                 jit_abi.eh_handler_pc_off,
+                jit_abi.eh_handler_rt_off,
+                jit_abi.globals_base_off,
+                jit_abi.typeidx_base_off,
+                jit_abi.table_size_off,
+                jit_abi.funcptr_base_off,
+                jit_abi.mem_limit_off,
+                jit_abi.vm_base_off,
             })
             :
             : [core] "r" (&trampolineCore),
@@ -293,7 +394,9 @@ pub fn zwasmThrowTrampoline() callconv(.naked) noreturn {
                     \\jz 1f
                     \\movq {d}(%%r15), %%rsp
                     \\movq {d}(%%r15), %%rbp
-                    \\jmpq *{d}(%%r15)
+                    \\movq {d}(%%r15), %%rax
+                    \\movq {d}(%%r15), %%r15
+                    \\jmpq *%%rax
                     \\1:
                     \\popq %%rbp
                     \\retq
@@ -302,6 +405,7 @@ pub fn zwasmThrowTrampoline() callconv(.naked) noreturn {
                     jit_abi.eh_handler_sp_off,
                     jit_abi.eh_handler_fp_off,
                     jit_abi.eh_handler_pc_off,
+                    jit_abi.eh_handler_rt_off,
                 })
                 :
                 : [core] "r" (&trampolineCore),
@@ -376,7 +480,9 @@ pub fn zwasmThrowTrampoline() callconv(.naked) noreturn {
                     \\jz 1f
                     \\movq {d}(%%r15), %%rsp
                     \\movq {d}(%%r15), %%rbp
-                    \\jmpq *{d}(%%r15)
+                    \\movq {d}(%%r15), %%rax
+                    \\movq {d}(%%r15), %%r15
+                    \\jmpq *%%rax
                     \\1:
                     \\addq $0x20, %%rsp
                     \\popq %%rbp
@@ -386,6 +492,7 @@ pub fn zwasmThrowTrampoline() callconv(.naked) noreturn {
                     jit_abi.eh_handler_sp_off,
                     jit_abi.eh_handler_fp_off,
                     jit_abi.eh_handler_pc_off,
+                    jit_abi.eh_handler_rt_off,
                 })
                 :
                 : [core] "r" (&trampolineCore),

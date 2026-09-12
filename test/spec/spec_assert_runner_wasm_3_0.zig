@@ -1276,13 +1276,22 @@ pub fn main(init: std.process.Init) !void {
                                 // instance's rt for cross-instance unwind
                                 // dispatch (stable address; unregistered
                                 // at every free site below).
-                                zwasm.engine.runner.eh_registry.register(&pp.owned.rt);
-                                // D-238 / ADR-0185 (b) — register this instance's
+                                // D-238 / ADR-0185 (b) — and this instance's
                                 // bridge-thunk arena range so the x86_64 EH sniff
                                 // resolves a thunk-return frame across instances.
-                                if (pp.owned.thunk_arena) |a| if (a.bytes.len > 0)
-                                    zwasm.engine.runner.eh_registry.registerThunkArena(@intFromPtr(a.bytes.ptr), a.bytes.len);
-                                break :blk pp;
+                                // An unregistered instance cannot be unwound
+                                // through, so a registration OOM drops the
+                                // instance rather than running it half-linked.
+                                blk_reg: {
+                                    zwasm.engine.runner.eh_registry.register(&pp.owned.rt) catch break :blk_reg;
+                                    if (pp.owned.thunk_arena) |a| if (a.bytes.len > 0)
+                                        zwasm.engine.runner.eh_registry.registerThunkArena(@intFromPtr(a.bytes.ptr), a.bytes.len) catch break :blk_reg;
+                                    break :blk pp;
+                                }
+                                zwasm.engine.runner.eh_registry.unregister(&pp.owned.rt);
+                                pp.deinit(gpa);
+                                gpa.destroy(pp);
+                                break :blk null;
                             };
                             // ADR-0226 D3 — attribute this module's residuals.
                             // Read here per module, and once more after the
