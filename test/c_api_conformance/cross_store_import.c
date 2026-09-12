@@ -20,6 +20,8 @@
  *   mem-exporter:  (module (memory (export "m") 1))
  *   mem-importer:  (module (import "e" "m" (memory 1))
  *                          (func (export "test") (result i32) (i32.const 0) (i32.load)))
+ *   glob-importer: (module (import "e" "g" (global i32))
+ *                          (func (export "test") (result i32) (global.get 0)))
  *   wasi-importer: (module (import "wasi_snapshot_preview1" "fd_write"
  *                            (func (param i32 i32 i32 i32) (result i32)))
  *                          (memory (export "memory") 1)
@@ -38,6 +40,21 @@
  * name the boundary. The first two cases are each paired with the same
  * composition inside ONE store, which must still bind and still answer — what
  * the guard refuses is the boundary, not the composition.
+ *
+ * The standalone arm reaches all four kinds (#446). `wasm_global_new`'s cell,
+ * like the `_with_env` payload above, belongs to the STORE that made it and
+ * dies with it — so a global created on store B and imported in store A is
+ * refused on the same ground. It was NOT refused while that cell belonged to
+ * the handle instead: nothing about the boundary had changed, only who owned
+ * what the binding would alias.
+ *
+ * The MODULE is under the rule too (#447). A JIT-backed instance BORROWS the
+ * module's bytes and `wasm_module_delete` defers them to the MODULE's store, so
+ * instantiating store B's module in store A reads out of a buffer B frees. Same
+ * refusal, and the message names the route that does work: `wasm_module_share`
+ * + `wasm_module_obtain` COPY the bytes into the obtaining store. That route is
+ * measured right after the refusal, because a refusal is only defensible if the
+ * sanctioned path still instantiates and still answers the exporter's 7.
  *
  * One more rule can answer at the same slot, and it OUTRANKS this one: the
  * KIND. An extern of the wrong kind for the import declaration — B's memory
@@ -162,6 +179,17 @@ static const unsigned char kWasiUnknownImporterWasm[] = {
     0x03, 0x02, 0x01, 0x00,                                     /* func[1]: type 0 */
     0x07, 0x08, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x00, 0x01, /* export "test" -> 1 */
     0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b,             /* body: call 0 */
+};
+
+/* (module (import "e" "g" (global i32))
+ *         (func (export "test") (result i32) (global.get 0))) */
+static const unsigned char kGlobalImporterWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,                   /* type ()->(i32) */
+    0x02, 0x08, 0x01, 0x01, 0x65, 0x01, 0x67, 0x03, 0x7f, 0x00, /* import e.g : global i32 const */
+    0x03, 0x02, 0x01, 0x00,                                     /* func[0]: type 0 */
+    0x07, 0x08, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x00, 0x00, /* export "test" -> 0 */
+    0x0a, 0x06, 0x01, 0x04, 0x00, 0x23, 0x00, 0x0b,             /* body: global.get 0 */
 };
 
 static const uint8_t kEngines[] = { ZWASM_ENGINE_AUTO, ZWASM_ENGINE_JIT, ZWASM_ENGINE_INTERP };
@@ -519,6 +547,54 @@ cleanup:
     return rc;
 }
 
+/* The standalone arm at a NON-func kind: a `wasm_global_new` global created on
+ * store B, imported by a module instantiating in store A. Its cell is store B's
+ * (#446), so the binding would alias memory `wasm_store_delete` on B releases —
+ * the same hazard the host-callback case above names, at a different kind. The
+ * rule is asked before the JIT's capability filter, so all three engines name
+ * the boundary rather than one of them declining with a bare NULL. */
+static int host_global_refused_across_stores(uint8_t engine) {
+    int rc = 1;
+    const char* who = engine_name(engine);
+    wasm_globaltype_t* gt = NULL;
+    wasm_global_t* hg = NULL;
+    wasm_module_t* importer_module = NULL;
+    wasm_instance_t* importer = NULL;
+    wasm_trap_t* itrap = NULL;
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store_a = eng ? wasm_store_new(eng) : NULL;
+    wasm_store_t* store_b = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store_a || !store_b) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+
+    gt = wasm_globaltype_new(wasm_valtype_new(WASM_I32), WASM_CONST);
+    wasm_val_t init = { WASM_I32, { 4919 } };
+    hg = wasm_global_new(store_b, gt, &init);
+    wasm_globaltype_delete(gt);
+    gt = NULL;
+    if (!hg) { fprintf(stderr, "[%s] wasm_global_new failed on store B\n", who); goto cleanup; }
+
+    wasm_byte_vec_t importer_binary = { sizeof(kGlobalImporterWasm), (wasm_byte_t*) kGlobalImporterWasm };
+    importer_module = wasm_module_new(store_a, &importer_binary);
+    if (!importer_module) { fprintf(stderr, "[%s] global-importer failed to parse\n", who); goto cleanup; }
+    wasm_extern_t* import_externs[1] = { wasm_global_as_extern(hg) };
+    wasm_extern_vec_t imports = { 1, import_externs };
+    importer = zwasm_instance_new_ex(store_a, importer_module, &imports, &itrap, engine);
+    if (refusal_is_binding_error(importer, itrap, who, "a host global from another store") != 0) goto cleanup;
+    rc = 0;
+
+cleanup:
+    if (itrap) wasm_trap_delete(itrap);
+    if (importer) wasm_instance_delete(importer);
+    if (importer_module) wasm_module_delete(importer_module);
+    if (hg) wasm_global_delete(hg);
+    if (gt) wasm_globaltype_delete(gt);
+    if (store_a) wasm_store_delete(store_a);
+    if (store_b) wasm_store_delete(store_b);
+    if (eng) wasm_engine_delete(eng);
+    return rc;
+}
+
+
 /* What a kind mismatch must look like: a bare NULL. The binder refuses on the
  * declaration's kind before it has anything to say about where the extern came
  * from, so no trap is produced. Ownership stays with the caller, as above. */
@@ -808,6 +884,7 @@ int main(void) {
         if (host_func_refused_across_stores(kEngines[i]) != 0) return 1;
         if (host_func_binds_within_one_store(kEngines[i]) != 0) return 1;
         if (memory_export_refused_across_stores(kEngines[i]) != 0) return 1;
+        if (host_global_refused_across_stores(kEngines[i]) != 0) return 1;
         if (kind_mismatch_outranks_the_store_rule(kEngines[i]) != 0) return 1;
         if (kind_mismatch_refused_within_one_store(kEngines[i]) != 0) return 1;
         if (wasi_slot_is_exempt_from_the_store_rule(kEngines[i]) != 0) return 1;

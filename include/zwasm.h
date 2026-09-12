@@ -83,13 +83,13 @@ WASM_API_EXTERN void zwasm_instance_clear_interrupt(wasm_instance_t*);
  * signature's, or a host callback's own trap. A shape the engine cannot call
  * is ZWASM_TRAP_UNSUPPORTED.
  *
- * A binding the runtime REFUSES to make earns it too (#436):
+ * A binding the runtime REFUSES to make earns it too (#436, #446):
  * zwasm_instance_new[_ex] returns NULL with this trap, on every engine, when
- * an import's extern names an instance in a DIFFERENT store, or a host
- * callback created on one — nothing ties the two stores' lifetimes. A
- * standalone global, memory or table is NOT refused: its storage belongs to
- * its own handle rather than to a store, so no boundary is crossed. Other
- * instantiation failures still return NULL with no trap. */
+ * an import's extern comes from a DIFFERENT store — an instance's export, or
+ * any entity created by wasm_func_new / wasm_global_new / wasm_memory_new /
+ * wasm_table_new on another store. Their backing belongs to the store that
+ * made them and dies with it, and nothing ties two stores' lifetimes.
+ * Other instantiation failures still return NULL with no trap. */
 #define ZWASM_TRAP_BINDING_ERROR 0
 #define ZWASM_TRAP_UNREACHABLE 1
 #define ZWASM_TRAP_DIV_BY_ZERO 2

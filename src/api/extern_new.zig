@@ -156,6 +156,14 @@ pub export fn wasm_global_new(
         .cell = cell,
         .store = s,
     };
+    // #446 — the store owns the cell from here (`Store.host_backings`). Last
+    // fallible step, so nothing after it can fail and leave the store holding
+    // backing for an entity the embedder never received.
+    s.host_backings.append(alloc, .{ .kind = .global, .ptr = @ptrCast(cell) }) catch {
+        alloc.destroy(cell);
+        alloc.destroy(g);
+        return null;
+    };
     return g;
 }
 
@@ -195,6 +203,13 @@ pub export fn wasm_memory_new(store: ?*instance.Store, mt: ?*const types.MemoryT
         return null;
     };
     m.* = .{ .instance = null, .memory_idx = 0, .minst = mi, .store = s };
+    // #446 — as `wasm_global_new` above; last fallible step for the same reason.
+    s.host_backings.append(alloc, .{ .kind = .memory, .ptr = @ptrCast(mi) }) catch {
+        memory_backing.freeBacking(alloc, backing);
+        alloc.destroy(mi);
+        alloc.destroy(m);
+        return null;
+    };
     return m;
 }
 
@@ -237,6 +252,13 @@ pub export fn wasm_table_new(store: ?*instance.Store, tt: ?*const types.TableTyp
         return null;
     };
     tbl.* = .{ .instance = null, .table_idx = 0, .elem_type = et, .min = lim.min, .max = max, .tinst = ti, .store = s };
+    // #446 — as `wasm_global_new` above; last fallible step for the same reason.
+    s.host_backings.append(alloc, .{ .kind = .table, .ptr = @ptrCast(ti) }) catch {
+        alloc.free(refs);
+        alloc.destroy(ti);
+        alloc.destroy(tbl);
+        return null;
+    };
     return tbl;
 }
 

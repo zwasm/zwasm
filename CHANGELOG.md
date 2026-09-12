@@ -10,6 +10,18 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A standalone global, memory or table outlives its handle** (#446).
+  `wasm_global_new`, `wasm_memory_new` and `wasm_table_new` hung their backing
+  off the returned handle, so `wasm_global_delete` / `wasm_memory_delete` /
+  `wasm_table_delete` freed it while an instance that imported the entity was
+  still reading it — a SIGSEGV for a memory, a garbage read for a global, a
+  wrong answer for a table, all within one store. The store owns the backing
+  now and frees it at `wasm_store_delete`, exactly as it already did for a host
+  callback's payload (#439). An import of such an entity from another store is
+  refused for the same reason that one naming another store's instance is.
+
 ### Added
 
 - **`ZWASM_TRAP_UNSUPPORTED` (20)** — the trap kind for a call whose shape the
