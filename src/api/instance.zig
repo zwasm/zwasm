@@ -608,6 +608,26 @@ fn lookupSourceExportType(
     return error.ImportTypeMismatch;
 }
 
+/// #427 — the `HostCall` an interp runtime bound for func `idx` when `idx`
+/// is one of its imports (`host_calls` is null past them); null for a defined
+/// func or a runtime without imports.
+fn importHostCall(rt: *const runtime.Runtime, idx: u32) ?runtime.HostCall {
+    if (idx >= rt.host_calls.len) return null;
+    return rt.host_calls[idx];
+}
+
+/// A `cross_module.thunk` binding whose `CallCtx` (on the importer's arena)
+/// names `rt`'s func `funcidx` as the callee.
+fn crossModuleHostCall(arena_alloc: std.mem.Allocator, rt: *runtime.Runtime, funcidx: u32) !runtime.HostCall {
+    const ctx_ptr = try arena_alloc.create(cross_module.CallCtx);
+    ctx_ptr.* = .{
+        .source_rt = rt,
+        .source_funcidx = funcidx,
+        .dispatch_table = dispatchTable(),
+    };
+    return .{ .fn_ptr = cross_module.thunk, .ctx = @ptrCast(ctx_ptr) };
+}
+
 /// Pre-resolve all imports declared in `bytes` into Zone-1
 /// native `ImportBinding`s. Returns null when the module has no
 /// imports. Allocates the binding slice + cross-module CallCtx
@@ -731,11 +751,38 @@ fn buildBindings(
                     .func => |sft| sft,
                     else => return error.ImportTypeMismatch,
                 };
-                const ctx_ptr = try arena_alloc.create(cross_module.CallCtx);
-                ctx_ptr.* = .{
-                    .source_rt = source_rt,
-                    .source_funcidx = source_funcidx,
-                    .dispatch_table = dispatchTable(),
+                // #427 — the extern may name one of the exporter's own
+                // IMPORTS (a re-export), and that func slot holds only the
+                // `unreachable` placeholder `instantiate.zig` builds: bind to
+                // what the exporter bound. A cross-module thunk folds to its
+                // target, so this binding names the DEFINING runtime. Any
+                // other `HostCall` (an embedder callback, a WASI thunk) is
+                // copied as it stands and runs on this importer's runtime —
+                // what a `call_indirect` through the exporter's slot already
+                // does (`mvp.zig` callIndirectOp).
+                //
+                // Retention: naming the definer is the dependency the
+                // re-exporter's own binding already carries, and
+                // `parkAsZombie` above is what meets it — an interp runtime is
+                // never freed before its store. `cross_module_reexport.c`
+                // deletes A and B before calling C.
+                var target_rt = source_rt;
+                var target_funcidx = source_funcidx;
+                const host_call: runtime.HostCall = blk: {
+                    const hc = importHostCall(source_rt, source_funcidx) orelse
+                        break :blk try crossModuleHostCall(arena_alloc, source_rt, source_funcidx);
+                    // #439 — an embedder callback's ctx is the payload its
+                    // `wasm_func_t` owns and `wasm_func_delete` frees; the copy
+                    // holds what the re-exporter's binding already held.
+                    if (hc.fn_ptr != cross_module.thunk) break :blk hc;
+                    const inner: *const cross_module.CallCtx = @ptrCast(@alignCast(hc.ctx));
+                    target_rt = inner.source_rt;
+                    target_funcidx = inner.source_funcidx;
+                    // Every link folds, so the exporter's target is already a
+                    // definition (or a host call): one hop, never a walk.
+                    const inner_hc = importHostCall(target_rt, target_funcidx);
+                    std.debug.assert(inner_hc == null or inner_hc.?.fn_ptr != cross_module.thunk);
+                    break :blk try crossModuleHostCall(arena_alloc, target_rt, target_funcidx);
                 };
                 // #387 — hand the exporter's own type section to the type
                 // check, so the two signatures are compared across both type
@@ -745,14 +792,17 @@ fn buildBindings(
                 // runtime the binding also names, so both outlive the importer
                 // together (the #382 park). `source_types` points into the
                 // exporter's handle and is read at instantiation only.
+                //
+                // #440 — these type fields stay the re-exporter's declaration
+                // while the target above is now the definition. The compare is
+                // one-directional (the definition is a subtype of what the
+                // re-exporter declared), so it can miss a link, never accept a
+                // bad one.
                 bindings[idx] = .{ .func = .{
-                    .host_call = .{
-                        .fn_ptr = cross_module.thunk,
-                        .ctx = @ptrCast(ctx_ptr),
-                    },
+                    .host_call = host_call,
                     .source = .{ .cross_module = .{
-                        .source_runtime = source_rt,
-                        .source_funcidx = source_funcidx,
+                        .source_runtime = target_rt,
+                        .source_funcidx = target_funcidx,
                         .source_signature = sft.sig,
                         .source_types = if (source_inst.export_src_types) |*t| t else null,
                         .source_typeidx = sft.typeidx,
@@ -4172,6 +4222,105 @@ test "wasm 2.0 cross-module funcref via wasm_instance_new: B's main dispatches i
     try testing.expect(trap == null);
     try testing.expectEqual(ValKind.i32, results_data[0].kind);
     try testing.expectEqual(@as(i32, 42), results_data[0].of.i32);
+}
+
+// (module (import "x" "get" (func (result i32))) (export "get" (func 0)))
+// #427 fixture — imports one () -> (i32) func and re-exports it under the
+// name the chain tests read. The import's module/field names are not
+// consulted by the binder (#386), so one module serves every link.
+const cross_module_reexport_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: () -> (i32)
+    0x02, 0x09, 0x01, 0x01, 0x78, 0x03, 0x67, 0x65, 0x74, 0x00, 0x00, // import "x" "get" func typeidx=0
+    0x07, 0x07, 0x01, 0x03, 0x67, 0x65, 0x74, 0x00, 0x00, // export "get" -> func 0 (the import)
+};
+
+/// #427 test helper — instantiate `m` on `engine`, its single import bound
+/// to `source`'s first export. The source's export vector is released
+/// before returning, so the new instance's binding is the only reference
+/// left into `source`.
+fn instantiateImportingFirstExport(s: *Store, m: *const Module, source: *Instance, engine: EngineKind) ?*Instance {
+    var exports: ExternVec = .{ .size = 0, .data = null };
+    wasm_instance_exports(source, &exports);
+    defer wasm_extern_vec_delete(&exports);
+    const ext = (exports.data orelse return null)[0] orelse return null;
+    var imports_arr: [1]?*Extern = .{ext};
+    var imports_vec: ExternVec = .{ .size = imports_arr.len, .data = &imports_arr };
+    return instanceNewWithEngine(s, m, @ptrCast(&imports_vec), null, engine);
+}
+
+test "#427 a chain of re-exports folds at every link: D's binding names A's runtime, and the call reaches A after A, B and C are gone" {
+    const e = wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer wasm_engine_delete(e);
+    const s = wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_store_delete(s);
+
+    var bytes_a = cross_module_a_wasm;
+    const bv_a: ByteVec = .{ .size = bytes_a.len, .data = &bytes_a };
+    const m_a = wasm_module_new(s, &bv_a) orelse return error.ModuleAAllocFailed;
+    defer wasm_module_delete(m_a);
+    var bytes_r = cross_module_reexport_wasm;
+    const bv_r: ByteVec = .{ .size = bytes_r.len, .data = &bytes_r };
+    const m_r = wasm_module_new(s, &bv_r) orelse return error.ModuleRAllocFailed;
+    defer wasm_module_delete(m_r);
+    var bytes_d = cross_module_b_wasm;
+    const bv_d: ByteVec = .{ .size = bytes_d.len, .data = &bytes_d };
+    const m_d = wasm_module_new(s, &bv_d) orelse return error.ModuleDAllocFailed;
+    defer wasm_module_delete(m_d);
+
+    // A defines; B and C re-export; D imports and calls.
+    const inst_a = instanceNewWithEngine(s, m_a, null, null, .interp) orelse return error.InstanceAAllocFailed;
+    const inst_b = instantiateImportingFirstExport(s, m_r, inst_a, .interp) orelse return error.InstanceBAllocFailed;
+    const inst_c = instantiateImportingFirstExport(s, m_r, inst_b, .interp) orelse return error.InstanceCAllocFailed;
+    const inst_d = instantiateImportingFirstExport(s, m_d, inst_c, .interp) orelse return error.InstanceDAllocFailed;
+    defer wasm_instance_delete(inst_d);
+
+    // The fold, link by link: each importer's entity for its import names A's
+    // runtime and A's func 0 — never the re-exporter's placeholder.
+    const rt_a = inst_a.runtime orelse return error.RuntimeANull;
+    for ([_]*Instance{ inst_b, inst_c, inst_d }) |importer| {
+        const rt = importer.runtime orelse return error.RuntimeNull;
+        try testing.expect(rt.func_entities[0].runtime == rt_a);
+        try testing.expectEqual(@as(u32, 0), rt.func_entities[0].func_idx);
+    }
+
+    var exports_d: ExternVec = .{ .size = 0, .data = null };
+    wasm_instance_exports(inst_d, &exports_d);
+    defer wasm_extern_vec_delete(&exports_d);
+    const main_d = wasm_extern_as_func(exports_d.data.?[0]) orelse return error.MainFuncNull;
+
+    // Every earlier link goes before the call (the park keeps A).
+    wasm_instance_delete(inst_a);
+    wasm_instance_delete(inst_b);
+    wasm_instance_delete(inst_c);
+
+    var rd: [1]Val = undefined;
+    var rv: ValVec = .{ .size = 1, .data = &rd };
+    const av: ValVec = .{ .size = 0, .data = null };
+    const trap = wasm_func_call(main_d, &av, &rv);
+    try testing.expect(trap == null);
+    try testing.expectEqual(@as(i32, 42), rd[0].of.i32);
+}
+
+test "#427 an interp importer of a JIT-backed source is still declined: NULL (D4, unchanged)" {
+    const e = wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer wasm_engine_delete(e);
+    const s = wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_store_delete(s);
+
+    var bytes_a = cross_module_a_wasm;
+    const bv_a: ByteVec = .{ .size = bytes_a.len, .data = &bytes_a };
+    const m_a = wasm_module_new(s, &bv_a) orelse return error.ModuleAAllocFailed;
+    defer wasm_module_delete(m_a);
+    var bytes_b = cross_module_b_wasm;
+    const bv_b: ByteVec = .{ .size = bytes_b.len, .data = &bytes_b };
+    const m_b = wasm_module_new(s, &bv_b) orelse return error.ModuleBAllocFailed;
+    defer wasm_module_delete(m_b);
+
+    const inst_a = instanceNewWithEngine(s, m_a, null, null, .jit) orelse return error.InstanceAAllocFailed;
+    defer wasm_instance_delete(inst_a);
+    try testing.expect(inst_a.runtime == null);
+    try testing.expect(instantiateImportingFirstExport(s, m_b, inst_a, .interp) == null);
 }
 
 test "wasm 2.0 cross-module v128 global via wasm_instance_new: D-170 close" {
