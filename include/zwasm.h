@@ -150,8 +150,11 @@ WASM_API_EXTERN wasm_func_t* zwasm_instance_get_func(wasm_instance_t*, uint32_t 
 /* Per-instance engine kind for zwasm_instance_new_ex. AUTO — what stock
  * wasm_instance_new passes — compiles the module with the JIT and instantiates
  * the interpreter only for a module the JIT DECLINES (an import it cannot
- * satisfy, or a body it cannot compile). A module the JIT judges INVALID is
- * not retried: NULL, with a ZWASM_TRAP_INVALID_MODULE trap through trap_out.
+ * satisfy, or a body it cannot compile). One decline has no fallback: a module
+ * importing a function from another instance THIS Store backs with the JIT
+ * cannot run on the interpreter at all, so AUTO returns NULL with no trap for
+ * it, as JIT does. A module the JIT judges INVALID is not retried: NULL, with
+ * a ZWASM_TRAP_INVALID_MODULE trap through trap_out.
  * JIT forces the native JIT: a declined module fails instantiation, returning
  * NULL with no trap — no silent downgrade; an invalid one returns NULL with
  * the same trap AUTO gives. INTERP forces the interpreter, which unlike the

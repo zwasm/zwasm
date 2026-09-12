@@ -225,6 +225,13 @@ pub fn slotToReg(slot_id: u16) ?Xn {
 /// physical registers (X9 vs V16 for slot 0). The regalloc itself
 /// stays class-blind; class-aware allocation is a follow-up
 /// (D-036 §"option (b)").
+/// AAPCS64 §6.4: V0..V7 carry the FP/SIMD arguments. ONE bank shared by
+/// `f32` / `f64` / `v128` — `marshalCallArgs` advances a single `fp_arg_slot`
+/// across all three, so the ninth of any mix overflows to the stack. Named so
+/// the marshaller and the tail-call fit predicate read the same number
+/// (#424 review).
+pub const fp_arg_regs: u32 = 8;
+
 pub const allocatable_v_regs = [_]Xn{
     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
 };

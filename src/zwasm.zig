@@ -381,6 +381,7 @@ test {
     _ = @import("engine/runner_multiarg_invoke_test.zig");
     _ = @import("engine/runner_trap_test.zig");
     _ = @import("engine/runner_const_expr_test.zig");
+    _ = @import("engine/runner_tail_call_test.zig");
     _ = @import("ir/analysis/loop_info.zig");
     _ = @import("ir/analysis/liveness.zig");
     _ = @import("ir/verifier.zig");

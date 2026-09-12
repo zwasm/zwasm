@@ -713,7 +713,7 @@ pub fn marshalCallArgs(ctx: *EmitCtx, callee_sig: FuncType) Error!void {
             },
             .f32 => {
                 const vs = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, 0);
-                if (fp_arg_slot >= 8) {
+                if (fp_arg_slot >= abi.fp_arg_regs) {
                     const slot_size: u32 = if (apple_natural_packing) 4 else 8;
                     const align_mask: u32 = slot_size - 1;
                     stack_byte_off = (stack_byte_off + align_mask) & ~align_mask;
@@ -729,7 +729,7 @@ pub fn marshalCallArgs(ctx: *EmitCtx, callee_sig: FuncType) Error!void {
             },
             .f64 => {
                 const vs = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, 0);
-                if (fp_arg_slot >= 8) {
+                if (fp_arg_slot >= abi.fp_arg_regs) {
                     stack_byte_off = (stack_byte_off + 7) & ~@as(u32, 7);
                     if (stack_byte_off > 32760) return Error.UnsupportedOp;
                     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrDImm(vs, 31, @intCast(stack_byte_off)));
@@ -749,7 +749,7 @@ pub fn marshalCallArgs(ctx: *EmitCtx, callee_sig: FuncType) Error!void {
             // stage C.4).
             .v128 => {
                 const vs = try gpr.qLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, 0);
-                if (fp_arg_slot >= 8) {
+                if (fp_arg_slot >= abi.fp_arg_regs) {
                     stack_byte_off = (stack_byte_off + 15) & ~@as(u32, 15);
                     if (stack_byte_off > 65520) return Error.UnsupportedOp;
                     try gpr.writeU32(ctx.allocator, ctx.buf, inst_neon.encStrQImm(vs, 31, @intCast(stack_byte_off)));

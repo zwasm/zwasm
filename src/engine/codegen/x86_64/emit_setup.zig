@@ -49,6 +49,7 @@ pub fn computeOutgoingMaxBytes(
     func: *const ZirFunc,
     func_sigs: []const zir.FuncType,
     module_types: []const zir.FuncType,
+    num_imports: u32,
 ) u32 {
     var max_bytes: u32 = 0;
     for (func.instrs.items) |ins| {
@@ -99,6 +100,14 @@ pub fn computeOutgoingMaxBytes(
             // Win64 the per-call shadow SUB then moved them out from under the
             // callee (ADR-0228, found by the #390 funcref test on the Windows leg).
             .call_ref => if (ins.payload < module_types.len) module_types[ins.payload] else null,
+            // A CROSS-MODULE `return_call` keeps its frame (call-and-return
+            // through the ADR-0066 thunk), so its overflow words must be
+            // reserved here; left out, they landed on this function's spill
+            // slots and the callee read its 8th and later integer args from
+            // the wrong place (#424, `cross_module_abi.c`'s `tail` case). The
+            // three FRAME-CONSUMING forms stay absent: their teardown releases
+            // whatever is reserved, so they decline (`op_tail_call`).
+            .return_call => if (ins.payload < num_imports and ins.payload < func_sigs.len) func_sigs[ins.payload] else null,
             else => null,
         };
         const callee_sig = sig orelse continue;
