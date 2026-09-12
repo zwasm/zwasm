@@ -323,6 +323,22 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
     // nothing frees them earlier).
     for (handle.orphaned_module_bytes.items) |bytes| alloc.free(bytes);
     handle.orphaned_module_bytes.deinit(alloc);
+    // #439 — and the host-callback payloads. Every binding that held one died
+    // with the instances and zombies above, so each finalizer runs exactly
+    // once, here, with nothing left to call it. This hands control back to
+    // EMBEDDER code mid-teardown: `live_instances` is already deinit'd, so a
+    // finalizer that re-enters this store is undefined — the header says so.
+    // No position is re-entrancy-safe without a store-wide guard (running
+    // them first would let one delete an instance the cascade then frees),
+    // so this is the one where nothing can still call through a payload.
+    for (handle.host_func_payloads.items) |p_opaque| {
+        const p: *HostFuncPayload = @ptrCast(@alignCast(p_opaque));
+        if (p.finalizer) |fin| fin(p.env);
+        alloc.free(p.params);
+        alloc.free(p.results);
+        alloc.destroy(p);
+    }
+    handle.host_func_payloads.deinit(alloc);
     // Free the cross-module instance registry (ADR-0065 §"Cat III").
     // Values are erased `*Instance` pointers (lifetimes managed by
     // the zombie list); keys are caller-owned. Only the hashmap's
@@ -825,9 +841,9 @@ fn buildBindings(
                 const host_call: runtime.HostCall = blk: {
                     const hc = importHostCall(source_rt, source_funcidx) orelse
                         break :blk try crossModuleHostCall(arena_alloc, source_rt, source_funcidx);
-                    // #439 — an embedder callback's ctx is the payload its
-                    // `wasm_func_t` owns and `wasm_func_delete` frees; the copy
-                    // holds what the re-exporter's binding already held.
+                    // #439 — an embedder callback's ctx is a payload the STORE
+                    // owns; the copy holds what the re-exporter's binding
+                    // already held, and outlives both by the same rule.
                     if (hc.fn_ptr != cross_module.thunk) break :blk hc;
                     const inner: *const cross_module.CallCtx = @ptrCast(@alignCast(hc.ctx));
                     target_rt = inner.source_rt;
@@ -1863,12 +1879,7 @@ pub export fn wasm_func_delete(f: ?*Func) callconv(.c) void {
     const alloc = storeAllocator(store) orelse return;
     if (handle.extern_view) |v| alloc.destroy(v);
     if (handle.ref_view) |rv| alloc.destroy(rv);
-    if (handle.host) |p| { // standalone host func: run finalizer, free payload + arity
-        if (p.finalizer) |fin| fin(p.env);
-        alloc.free(p.params);
-        alloc.free(p.results);
-        alloc.destroy(p);
-    }
+    // #439 — `handle.host` belongs to the store; this releases the handle alone.
     alloc.destroy(handle);
 }
 

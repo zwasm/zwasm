@@ -103,6 +103,21 @@ pub const Store = struct {
     /// rather than going quiet. Freed by `wasm_store_delete` AFTER the
     /// `jit_zombies` reap, by when no runtime aliases them.
     orphaned_module_bytes: std.ArrayList([]u8) = .empty,
+    /// #439 — every `HostFuncPayload` `wasm_func_new[_with_env]` built on this
+    /// store, registered at CREATION. A binding made from the handle keeps the
+    /// payload's raw address and nothing else — the interp in
+    /// `host_calls[i].ctx`, the JIT in `host_payloads[]` — so no handle can
+    /// know whether one still holds it. Upstream `wasm.h` declares
+    /// `wasm_func_t` through `WASM_DECLARE_REF` — the handle is a reference to
+    /// the store's instance — so the store frees it, once, at teardown.
+    /// Registering at creation is what makes that once unconditional: a store
+    /// torn down while a handle is still live must finalize it too.
+    ///
+    /// Payloads therefore accumulate until teardown, the trade `jit_zombies`
+    /// and `orphaned_module_bytes` already take; a refcount buys an earlier
+    /// free for a second lifetime rule. `*anyopaque` as `jit_zombies`, same
+    /// Zone-1 reason.
+    host_func_payloads: std.ArrayList(*anyopaque) = .empty,
     /// Wasm 1.0 §4.5 cross-module instance registry per ADR-0065
     /// (Phase 9 Cat III §9.9-III scope). Spec testsuite uses
     /// `(register "M" $inst)` to bind a previously-instantiated
