@@ -32,6 +32,14 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A trap message ends with the NUL `wasm.h` declares, and its size says so**
+  (#441). `wasm_trap_message` copied the message bytes alone into a
+  `wasm_message_t` the header types as NUL-terminated, so a C host reading it
+  as a string ran past the allocation — measured at 42 bytes against a `size`
+  of 36. The vector now carries the NUL and counts it, the text being
+  `size - 1` bytes, and `wasm_trap_new` takes a host message either way so a
+  round trip keeps its length.
+
 - **A call shape the engine cannot marshal is `ZWASM_TRAP_UNSUPPORTED`, not
   `ZWASM_TRAP_BINDING_ERROR`** (#431). Calling a valid export with a mixed
   multi-value result — `(result i32 f32)`, a shape the JIT's wrapper thunks do

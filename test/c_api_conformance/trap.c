@@ -2,7 +2,8 @@
  *
  * Validates the trap surface through the real C ABI: a guest `unreachable`
  * surfaces as a non-null `wasm_trap_t*` from `wasm_func_call`, and
- * `wasm_trap_message` yields a (NUL-terminated) message.
+ * `wasm_trap_message` yields a NUL-terminated message whose size counts
+ * that NUL (#441).
  *
  *   (module (func (export "boom") unreachable))
  *
@@ -53,8 +54,8 @@ int main(void) {
 
     wasm_message_t msg;
     wasm_trap_message(trap, &msg);
-    printf("zwasm c_api_conformance/trap: trapped, message=\"%.*s\"\n",
-           (int) msg.size, msg.data ? msg.data : "");
+    printf("zwasm c_api_conformance/trap: trapped, message=\"%s\"\n",
+           msg.data ? msg.data : "");
     /* a non-null trap with a readable (possibly empty) message = pass */
     rc = 0;
     wasm_byte_vec_delete(&msg);

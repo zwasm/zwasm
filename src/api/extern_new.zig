@@ -1209,7 +1209,8 @@ test "#315 wasm_func_call: the callback's own trap reaches the caller unconsumed
     var msg: vec.ByteVec = .{ .size = 0, .data = null };
     trap_surface.wasm_trap_message(trap, &msg);
     defer vec.wasm_byte_vec_delete(&msg);
-    try testing.expectEqualStrings("host said no", msg.data.?[0..msg.size]);
+    // #441 — `size` counts the NUL; the body is `size - 1`.
+    try testing.expectEqualStrings("host said no", msg.data.?[0 .. msg.size - 1]);
 }
 
 test "#315 wasm_func_call: an arity mismatch on a host func traps" {

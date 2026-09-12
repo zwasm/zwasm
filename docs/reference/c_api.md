@@ -57,6 +57,14 @@ alone cannot separate a clean termination from a fault, and
 - trap **and** `false` — a genuine fault (unreachable, out of bounds, …).
   `wasm_trap_message` / `zwasm_trap_kind` describe it.
 
+**Reading a trap message.** `wasm_trap_message` fills a `wasm_message_t`, which
+upstream declares NUL-terminated (`include/wasm.h:393`) in the shape
+`wasm_name_new_from_string_nt` produces: the vector **carries the terminating
+NUL and `size` counts it**, so `data` reads as a C string and the text is
+`size - 1` bytes (#441). `wasm_trap_new` accepts a host message either way —
+with the NUL inside `size` or without — so a message that crosses the boundary
+in both directions keeps its length.
+
 The status is **per call** — each `wasm_func_call` into the Store clears it
 before running, so a `true` describes the call just made and never an earlier
 guest's (#341). Read it before calling into the Store again, or creating

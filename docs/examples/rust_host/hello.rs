@@ -128,8 +128,11 @@ unsafe fn print_trap_and_delete(trap: *mut wasm_trap_t) {
     }
     let mut msg = wasm_byte_vec_t { size: 0, data: ptr::null_mut() };
     wasm_trap_message(trap, &mut msg);
-    if !msg.data.is_null() {
-        let bytes = std::slice::from_raw_parts(msg.data, msg.size);
+    // `wasm_trap_message` leaves the vector `{0, NULL}` when it cannot
+    // allocate, so both halves are checked before the length arithmetic below.
+    if !msg.data.is_null() && msg.size > 0 {
+        // `size` counts the terminating NUL (#441); drop it for the text.
+        let bytes = std::slice::from_raw_parts(msg.data, msg.size - 1);
         eprintln!("trap: {}", String::from_utf8_lossy(bytes));
     }
     wasm_byte_vec_delete(&mut msg);
