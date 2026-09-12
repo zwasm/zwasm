@@ -3305,7 +3305,7 @@ test "#431: a mixed multi-value result the JIT cannot marshal is `unsupported`, 
         var msg: ByteVec = .{ .size = 0, .data = null };
         trap_surface.wasm_trap_message(trap, &msg);
         defer vec.wasm_byte_vec_delete(&msg);
-        const text = msg.data.?[0..msg.size];
+        const text = msg.data.?[0 .. msg.size - 1]; // #441 — `size` counts the NUL
         try testing.expect(std.mem.find(u8, text, "(i32 f32)") != null);
     }
 }

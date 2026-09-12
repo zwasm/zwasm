@@ -40,7 +40,11 @@ static void print_trap_and_delete(wasm_trap_t* trap) {
     if (!trap) return;
     wasm_message_t msg;
     wasm_trap_message(trap, &msg);
-    fprintf(stderr, "trap: %.*s\n", (int)msg.size, msg.data);
+    /* `wasm_message_t` is NUL-terminated and its size counts that NUL (#441),
+     * so the vector reads as a plain C string — but `wasm_trap_message` leaves
+     * it `{0, NULL}` when it cannot allocate the copy, and `%s` has no meaning
+     * for a null pointer. */
+    fprintf(stderr, "trap: %s\n", msg.data ? msg.data : "");
     wasm_byte_vec_delete(&msg);
     wasm_trap_delete(trap);
 }

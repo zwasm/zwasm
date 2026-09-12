@@ -86,11 +86,12 @@ static int call_export(uint8_t engine, size_t idx, wasm_val_vec_t* args, wasm_va
         *kind_out = zwasm_trap_kind(trap);
         wasm_message_t msg;
         wasm_trap_message(trap, &msg);
-        /* Copied by size, not read as a C string: zwasm's `wasm_trap_message`
-         * returns exactly the message bytes, where `wasm.h` declares
-         * `wasm_message_t` NUL-terminated (#441). */
-        if (msg.data) {
-            size_t n = msg.size < msg_cap - 1 ? msg.size : msg_cap - 1;
+        /* Copied by size rather than read as a C string. `wasm_message_t`
+         * carries its NUL and counts it in `size` (#441), so `size - 1` is the
+         * body; bounding the copy keeps this test independent of that. */
+        if (msg.data && msg.size > 0) {
+            size_t body = msg.size - 1;
+            size_t n = body < msg_cap - 1 ? body : msg_cap - 1;
             memcpy(msg_out, msg.data, n);
             msg_out[n] = '\0';
         }

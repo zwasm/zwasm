@@ -55,6 +55,8 @@ static int probe(wasm_store_t* store, const uint8_t* bytes, size_t len, uint8_t 
     {
         wasm_message_t msg;
         wasm_trap_message(trap, &msg);
+        /* Read as a C string: `wasm_message_t` carries its NUL and counts it in
+         * `size` (#441), so `strstr` stops inside the allocation. */
         int named = msg.data && strstr(msg.data, reason) != NULL;
         if (!named) fprintf(stderr, "%s: trap message \"%s\" does not name %s\n", label, msg.data ? msg.data : "", reason);
         wasm_byte_vec_delete(&msg);

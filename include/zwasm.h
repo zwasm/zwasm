@@ -113,6 +113,11 @@ WASM_API_EXTERN void zwasm_instance_clear_interrupt(wasm_instance_t*);
 #define ZWASM_TRAP_UNSUPPORTED 20
 WASM_API_EXTERN int32_t zwasm_trap_kind(const wasm_trap_t*);
 
+/* The message beside the kind: wasm.h's wasm_trap_message fills a
+ * wasm_message_t that carries its terminating NUL, with size counting it, so
+ * the vector reads as a C string and the text is size - 1 bytes. Symmetrically
+ * wasm_trap_new takes a host message with or without the NUL inside size. */
+
 /* ── Instance helpers ────────────────────────────────────────────────── */
 
 /* Resolve an instance + defined-function index into a fresh, owned func

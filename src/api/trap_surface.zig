@@ -237,12 +237,20 @@ pub fn allocTrapWithMessage(alloc: std.mem.Allocator, store: ?*wasm_c_api.Store,
 /// to surface their own host-side errors as traps; the binding
 /// itself prefers `allocTrap` with a `TrapKind` so it can map
 /// runtime conditions to the spec-conformant strings.
+///
+/// #441 — the inbound half of the `wasm_message_t` convention. Upstream
+/// spells the same string two ways: `wasm_name_new_from_string` sizes it
+/// `strlen(s)` and `..._nt` sizes it `strlen(s) + 1` (`include/wasm.h:108-118`).
+/// A trailing NUL is dropped here so the stored `message_len` is the body
+/// either way, which is what makes the round-trip through `wasm_trap_message`
+/// length-preserving.
 pub export fn wasm_trap_new(s: ?*wasm_c_api.Store, message: ?*const wasm_c_api.ByteVec) callconv(.c) ?*Trap {
     const store = s orelse return null;
     const alloc = wasm_c_api.storeAllocator(store) orelse return null;
     const m = message orelse return null;
     const data_ptr = m.data orelse return null;
-    const buf = alloc.dupe(u8, data_ptr[0..m.size]) catch return null;
+    const body_len = if (m.size > 0 and data_ptr[m.size - 1] == 0) m.size - 1 else m.size;
+    const buf = alloc.dupe(u8, data_ptr[0..body_len]) catch return null;
     const t = alloc.create(Trap) catch {
         alloc.free(buf);
         return null;
@@ -286,6 +294,13 @@ pub export fn wasm_trap_delete(t: ?*Trap) callconv(.c) void {
 /// the caller and must be released via `wasm_byte_vec_delete`).
 /// Writes a zero-length vec if the trap has no message or
 /// allocation fails.
+///
+/// INVARIANT (#441): `out.size` COUNTS the terminating NUL, and
+/// `out.data[out.size - 1] == 0`. `wasm_message_t` is upstream's
+/// `_nt` shape (`include/wasm.h:393`), so a C host may read the
+/// vector as a C string; the body is `out.size - 1` bytes. The
+/// stored `Trap.message_len` is the body alone — this function and
+/// `wasm_trap_new` are the only two places the NUL exists.
 pub export fn wasm_trap_message(t: ?*const Trap, out: ?*wasm_c_api.ByteVec) callconv(.c) void {
     const out_ptr = out orelse return;
     out_ptr.* = .{ .size = 0, .data = null };
@@ -293,7 +308,9 @@ pub export fn wasm_trap_message(t: ?*const Trap, out: ?*wasm_c_api.ByteVec) call
     const store = handle.store orelse return;
     const alloc = wasm_c_api.storeAllocator(store) orelse return;
     const ptr = handle.message_ptr orelse return;
-    const copy = alloc.dupe(u8, ptr[0..handle.message_len]) catch return;
+    const copy = alloc.alloc(u8, handle.message_len + 1) catch return;
+    @memcpy(copy[0..handle.message_len], ptr[0..handle.message_len]);
+    copy[handle.message_len] = 0;
     out_ptr.* = .{ .size = copy.len, .data = copy.ptr };
 }
 
@@ -477,8 +494,37 @@ test "wasm_trap_new / message / delete: round-trip from caller-supplied message"
     var out: wasm_c_api.ByteVec = .{ .size = 0, .data = null };
     wasm_trap_message(trap, &out);
     defer wasm_c_api.wasm_byte_vec_delete(&out);
-    try testing.expectEqual(@as(usize, 12), out.size);
-    try testing.expectEqualStrings("host failure", out.data.?[0..out.size]);
+    // #441 — 12 body bytes plus the NUL `wasm_message_t` promises.
+    try testing.expectEqual(@as(usize, 13), out.size);
+    try testing.expectEqualStrings("host failure", out.data.?[0 .. out.size - 1]);
+    try testing.expectEqual(@as(u8, 0), out.data.?[out.size - 1]);
+}
+
+test "#441: the message round-trips at the same length whether the caller NUL-terminates or not" {
+    const e = wasm_c_api.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer wasm_c_api.wasm_engine_delete(e);
+    const s = wasm_c_api.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_c_api.wasm_store_delete(s);
+
+    // `wasm_name_new_from_string` shape (body only) and `..._nt` (body + NUL).
+    // Both name the same message, so both must come back the same length —
+    // otherwise a message that crosses the boundary twice grows a NUL per trip.
+    var bare = "host failure".*;
+    var terminated = "host failure\x00".*;
+    const inputs = [_]wasm_c_api.ByteVec{
+        .{ .size = bare.len, .data = &bare },
+        .{ .size = terminated.len, .data = &terminated },
+    };
+    for (inputs) |in| {
+        const trap = wasm_trap_new(s, &in) orelse return error.TrapAllocFailed;
+        defer wasm_trap_delete(trap);
+        var out: wasm_c_api.ByteVec = .{ .size = 0, .data = null };
+        wasm_trap_message(trap, &out);
+        defer wasm_c_api.wasm_byte_vec_delete(&out);
+        try testing.expectEqual(@as(usize, 13), out.size);
+        try testing.expectEqualStrings("host failure", out.data.?[0 .. out.size - 1]);
+        try testing.expectEqual(@as(u8, 0), out.data.?[out.size - 1]);
+    }
 }
 
 test "jitTrapCode: precise codes map to interp-parity kinds; generic bucket is null (ADR-0164 A)" {

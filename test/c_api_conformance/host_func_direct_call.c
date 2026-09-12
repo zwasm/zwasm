@@ -116,7 +116,9 @@ int main(void) {
     if (!trap) { fputs("refusing host callback reported success\n", stderr); goto cleanup; }
     wasm_byte_vec_t msg = { 0, NULL };
     wasm_trap_message(trap, &msg);
-    int msg_ok = msg.data && msg.size == sizeof(kRefusal) - 1 &&
+    /* `size` counts the terminating NUL (#441), so it matches sizeof on the
+     * string literal, and the compare covers the NUL too. */
+    int msg_ok = msg.data && msg.size == sizeof(kRefusal) &&
                  memcmp(msg.data, kRefusal, msg.size) == 0;
     if (msg.data) wasm_byte_vec_delete(&msg);
     wasm_trap_delete(trap);
