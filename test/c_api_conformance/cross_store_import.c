@@ -594,6 +594,126 @@ cleanup:
     return rc;
 }
 
+/* The MODULE itself crosses nothing by hand: `wasm_module_new` on store B,
+ * `zwasm_instance_new_ex` on store A, an EMPTY import vector. Nothing the
+ * embedder passes is from another store — the module is. A JIT-backed instance
+ * borrows the module's bytes, and those bytes are deferred to the MODULE's
+ * store at `wasm_module_delete`, so the instance would read a buffer store B
+ * frees. Refused with the same BINDING_ERROR, and the message must name the
+ * route that does work — a refusal that leaves the embedder with no way across
+ * is a different thing from one that redirects. */
+static int module_refused_across_stores(uint8_t engine) {
+    int rc = 1;
+    const char* who = engine_name(engine);
+    wasm_module_t* module_b = NULL;
+    wasm_instance_t* importer = NULL;
+    wasm_trap_t* itrap = NULL;
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store_a = eng ? wasm_store_new(eng) : NULL;
+    wasm_store_t* store_b = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store_a || !store_b) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+
+    wasm_byte_vec_t exporter_binary = { sizeof(kExporterWasm), (wasm_byte_t*) kExporterWasm };
+    module_b = wasm_module_new(store_b, &exporter_binary);
+    if (!module_b) { fprintf(stderr, "[%s] exporter failed to parse on store B\n", who); goto cleanup; }
+
+    wasm_extern_vec_t no_imports = { 0, NULL };
+    importer = zwasm_instance_new_ex(store_a, module_b, &no_imports, &itrap, engine);
+    if (refusal_is_binding_error(importer, itrap, who, "a module created on another store") != 0) goto cleanup;
+
+    /* The message is the redirection. `strstr` on the API name, not on prose:
+     * the route has to be nameable by an embedder reading the trap. */
+    wasm_message_t msg;
+    wasm_trap_message(itrap, &msg);
+    int names_the_route = msg.data && msg.size > 1 && strstr(msg.data, "module_share") != NULL;
+    if (!names_the_route) {
+        fprintf(stderr, "[%s] the module refusal \"%.*s\" does not name wasm_module_share\n",
+                who, msg.data ? (int) msg.size : 0, msg.data ? msg.data : "");
+    }
+    wasm_byte_vec_delete(&msg);
+    if (!names_the_route) goto cleanup;
+    rc = 0;
+
+cleanup:
+    if (itrap) wasm_trap_delete(itrap);
+    if (importer) wasm_instance_delete(importer);
+    if (module_b) wasm_module_delete(module_b);
+    if (store_a) wasm_store_delete(store_a);
+    if (store_b) wasm_store_delete(store_b);
+    if (eng) wasm_engine_delete(eng);
+    return rc;
+}
+
+/* The sanctioned route, on the module the case above refused. `wasm_module_share`
+ * takes an owned copy of the bytes and `wasm_module_obtain` runs it back through
+ * `wasm_module_new` on store A, so what A instantiates is A's own — nothing is
+ * borrowed across the boundary. The evidence the refusal blocks a hazard and not
+ * the use case: this must instantiate and the call must return the exporter's 7. */
+static int shared_module_crosses_stores(uint8_t engine) {
+    int rc = 1;
+    const char* who = engine_name(engine);
+    wasm_module_t* module_b = NULL;
+    wasm_shared_module_t* shared = NULL;
+    wasm_module_t* module_a = NULL;
+    wasm_instance_t* instance = NULL;
+    wasm_extern_vec_t exports = { 0, NULL };
+    wasm_engine_t* eng = wasm_engine_new();
+    wasm_store_t* store_a = eng ? wasm_store_new(eng) : NULL;
+    wasm_store_t* store_b = eng ? wasm_store_new(eng) : NULL;
+    if (!eng || !store_a || !store_b) { fputs("engine/store new failed\n", stderr); goto cleanup; }
+
+    wasm_byte_vec_t exporter_binary = { sizeof(kExporterWasm), (wasm_byte_t*) kExporterWasm };
+    module_b = wasm_module_new(store_b, &exporter_binary);
+    if (!module_b) { fprintf(stderr, "[%s] exporter failed to parse on store B\n", who); goto cleanup; }
+
+    shared = wasm_module_share(module_b);
+    if (!shared) { fprintf(stderr, "[%s] wasm_module_share failed\n", who); goto cleanup; }
+    module_a = wasm_module_obtain(store_a, shared);
+    if (!module_a) { fprintf(stderr, "[%s] wasm_module_obtain failed on store A\n", who); goto cleanup; }
+
+    wasm_extern_vec_t no_imports = { 0, NULL };
+    wasm_trap_t* itrap = NULL;
+    instance = zwasm_instance_new_ex(store_a, module_a, &no_imports, &itrap, engine);
+    if (itrap) wasm_trap_delete(itrap);
+    if (!instance) {
+        fprintf(stderr, "[%s] the shared module was refused on the store that obtained it — "
+                        "the refusal reaches the route it names\n", who);
+        goto cleanup;
+    }
+    wasm_instance_exports(instance, &exports);
+    if (exports.size < 1 || !exports.data[0] ||
+        wasm_extern_kind(exports.data[0]) != WASM_EXTERN_FUNC) {
+        fprintf(stderr, "[%s] the obtained module's instance is missing its `get` export\n", who);
+        goto cleanup;
+    }
+
+    wasm_val_t results[1] = { { WASM_I32, { 0 } } };
+    wasm_val_vec_t no_args = { 0, NULL };
+    wasm_val_vec_t res = { 1, results };
+    wasm_trap_t* trap = wasm_func_call(wasm_extern_as_func(exports.data[0]), &no_args, &res);
+    if (trap) {
+        fprintf(stderr, "[%s] the obtained module's call trapped\n", who);
+        wasm_trap_delete(trap);
+        goto cleanup;
+    }
+    if (results[0].kind != WASM_I32 || results[0].of.i32 != 7) {
+        fprintf(stderr, "[%s] expected the exporter's 7 from the obtained module, got kind=%d value=%d\n",
+                who, (int) results[0].kind, (int) results[0].of.i32);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (exports.data) wasm_extern_vec_delete(&exports);
+    if (instance) wasm_instance_delete(instance);
+    if (module_a) wasm_module_delete(module_a);
+    if (shared) wasm_shared_module_delete(shared);
+    if (module_b) wasm_module_delete(module_b);
+    if (store_a) wasm_store_delete(store_a);
+    if (store_b) wasm_store_delete(store_b);
+    if (eng) wasm_engine_delete(eng);
+    return rc;
+}
 
 /* What a kind mismatch must look like: a bare NULL. The binder refuses on the
  * declaration's kind before it has anything to say about where the extern came
@@ -885,6 +1005,8 @@ int main(void) {
         if (host_func_binds_within_one_store(kEngines[i]) != 0) return 1;
         if (memory_export_refused_across_stores(kEngines[i]) != 0) return 1;
         if (host_global_refused_across_stores(kEngines[i]) != 0) return 1;
+        if (module_refused_across_stores(kEngines[i]) != 0) return 1;
+        if (shared_module_crosses_stores(kEngines[i]) != 0) return 1;
         if (kind_mismatch_outranks_the_store_rule(kEngines[i]) != 0) return 1;
         if (kind_mismatch_refused_within_one_store(kEngines[i]) != 0) return 1;
         if (wasi_slot_is_exempt_from_the_store_rule(kEngines[i]) != 0) return 1;

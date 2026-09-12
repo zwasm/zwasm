@@ -100,7 +100,13 @@ WASM_API_EXTERN void zwasm_instance_clear_interrupt(wasm_instance_t*);
  * any entity created by wasm_func_new / wasm_global_new / wasm_memory_new /
  * wasm_table_new on another store. Their backing belongs to the store that
  * made them and dies with it, and nothing ties two stores' lifetimes.
- * Other instantiation failures still return NULL with no trap. */
+ *
+ * The module is refused on the same ground (#447): instantiating a module
+ * created on another store returns NULL with this trap, because a JIT-backed
+ * instance borrows the module's bytes. Move the module with
+ * wasm_module_share + wasm_module_obtain, which copies them into the
+ * obtaining store. Other instantiation failures still return NULL with no
+ * trap. */
 #define ZWASM_TRAP_BINDING_ERROR 0
 #define ZWASM_TRAP_UNREACHABLE 1
 #define ZWASM_TRAP_DIV_BY_ZERO 2

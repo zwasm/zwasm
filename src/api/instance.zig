@@ -1597,6 +1597,18 @@ pub const InstantiateLimits = struct {
 pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: anytype, trap_out: ?*?*Trap, limits: InstantiateLimits, engine: EngineKind) ?*Instance {
     const alloc = storeAllocator(store) orelse return null;
 
+    // #447 — a JIT instance BORROWS the module's bytes (`Module.jit_borrowers`,
+    // #360) and `wasm_module_delete` defers them to the MODULE's store, so a
+    // module instantiated across a boundary is read out of a buffer the other
+    // store frees. The same refusal #436 makes for an import's extern, and for
+    // the same reason: no engine would answer differently, so none is asked.
+    // Every entry lands here — the facade and the linker pass the module's own
+    // store by construction, so this bites only the C ABI's two.
+    if (module.store != store) {
+        if (trap_out) |to| to.* = crossStoreModuleTrap(alloc, store);
+        return null;
+    }
+
     // ADR-0200 — per-instance engine fork, shared by EVERY entry point
     // (`instantiateFacade`, `wasm_instance_new`, `src/zwasm/linker.zig`). `.jit`
     // builds a native JIT-backed instance; `.interp` forces the interp setup below.
@@ -3079,6 +3091,13 @@ fn crossStoreTrap(alloc: std.mem.Allocator, store: *Store) ?*Trap {
     return trap_surface.allocTrapWithMessage(alloc, store, .binding_error, "import extern belongs to a different store");
 }
 
+/// #447 — the module's own refusal, naming the route that does work.
+/// `wasm_module_obtain` goes through `wasm_module_new`, which COPIES the bytes
+/// into the obtaining store, so nothing is borrowed across the boundary — which
+/// is what `wasm_shared_module_t` exists for.
+fn crossStoreModuleTrap(alloc: std.mem.Allocator, store: *Store) ?*Trap {
+    return trap_surface.allocTrapWithMessage(alloc, store, .binding_error, "module belongs to a different store; share it with wasm_module_share and wasm_module_obtain");
+}
 
 /// #431 — the kind for an error out of a post-instantiate JIT invoke. The
 /// `else` is safe because the three invoke paths raise nothing else once the
