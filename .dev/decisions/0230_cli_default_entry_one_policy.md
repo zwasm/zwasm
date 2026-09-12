@@ -1,6 +1,7 @@
 # 0230 — The CLI's default entry is `_start`, else `main`; it runs when it takes no parameters; both drivers apply one policy
 
-- **Status**: Proposed
+- **Status**: Accepted (2026-09-11 — sign-off on PR #433, the maintainer of
+  record's own per #407; D1–D5 as written, D4 and D5 in their PR-review form)
 - **Date**: 2026-09-11
 - **Author**: Junji Takakura
 - **Tags**: cli, engine, jit
