@@ -536,6 +536,9 @@ fn jitTrapToError(code: u32) Instance.InvokeError {
         // #233 — an instantiation verdict, never a call-time code: `jitTrapCode`
         // does not mint it, so a call cannot reach this arm.
         .invalid_module => unreachable,
+        // #431 — the C call arm's classification of `UnsupportedEntrySignature`
+        // (`mapJitErr` above maps the error itself); `jitTrapCode` never mints it.
+        .unsupported => unreachable,
     };
 }
 

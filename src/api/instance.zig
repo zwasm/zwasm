@@ -1257,7 +1257,9 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
             // JIT is torn down.
             const reject: JitReject = if (err == error.UnsupportedEntrySignature) error.Declined else error.Final;
             if (reject == error.Final) {
-                if (trap_out) |to| to.* = jitErrToTrap(err, jit, alloc, store);
+                // No shape to name: the start is `[] -> []`, and the one
+                // decline it can raise is already `Declined` above (#431).
+                if (trap_out) |to| to.* = allocTrap(alloc, store, jitErrKind(err, jit.owned.rt.trap_kind));
             }
             jit.deinit(alloc);
             alloc.destroy(jit);
@@ -2652,10 +2654,13 @@ pub fn jitOf(inst: *Instance) ?*runner.JitInstance {
     return @ptrCast(@alignCast(jp));
 }
 
-/// ADR-0200 — `wasm_func_call` JIT arm. Resolve func_idx→export name, get the
-/// sig, marshal `Val[]` args → u64, run via `JitInstance.invoke`/`invokeMulti`,
-/// marshal results back. Scalar args+results only (i32/i64/f32/f64); ref/v128
-/// or an uncovered shape → `binding_error` trap (mirrors the Zig facade arm).
+/// ADR-0200 — `wasm_func_call` JIT arm. Resolve func_idx → sig, marshal `Val[]`
+/// args → u64, run via `JitInstance.invokeIdx` / `invokeRefIdx` /
+/// `invokeMultiIdx`, marshal results back. The guards below are the embedder's
+/// binding (`binding_error`); the shapes the engine's entry helpers do not
+/// cover — over 16 params or results, a v128 result, a multi-value shape with
+/// no wrapper thunk — are `unsupported` (#431), named in the message. This is
+/// the one place that list is written; the interpreter arm marshals them all.
 fn wasmFuncCallJit(jit: *runner.JitInstance, inst: *Instance, store: *Store, alloc: std.mem.Allocator, func_idx: u32, args: ?*const ValVec, results: ?*ValVec) ?*Trap {
     // D-496/D-498 — dispatch by func_idx, NOT export name: a funcref recovered from
     // a table or `ref.func` (wasm_ref_as_func) need not be exported, so the prior
@@ -2666,7 +2671,8 @@ fn wasmFuncCallJit(jit: *runner.JitInstance, inst: *Instance, store: *Store, all
     const results_size = if (results) |r| r.size else 0;
     if (args_size != sig.params.len) return allocTrap(alloc, store, .binding_error);
     if (results_size != sig.results.len) return allocTrap(alloc, store, .binding_error);
-    if (sig.params.len > 16 or sig.results.len > 16) return allocTrap(alloc, store, .binding_error);
+    // The marshalling buffers below hold 16 slots: the engine's limit.
+    if (sig.params.len > 16 or sig.results.len > 16) return unsupportedShapeTrap(alloc, store, sig);
 
     var abuf: [16]u64 = undefined;
     if (args) |a| if (a.data) |dp| {
@@ -2675,9 +2681,10 @@ fn wasmFuncCallJit(jit: *runner.JitInstance, inst: *Instance, store: *Store, all
 
     if (sig.results.len > 1) {
         var rbuf: [16]runner.TypedResult = undefined;
-        jit.invokeMultiIdx(func_idx, abuf[0..sig.params.len], rbuf[0..sig.results.len]) catch |err| return jitErrToTrap(err, jit, alloc, store);
+        jit.invokeMultiIdx(func_idx, abuf[0..sig.params.len], rbuf[0..sig.results.len]) catch |err| return jitErrToTrap(err, sig, jit, alloc, store);
         if (results) |r| if (r.data) |dp| {
-            for (0..sig.results.len) |idx| dp[idx] = typedResultToCVal(rbuf[idx], inst, alloc) orelse return allocTrap(alloc, store, .binding_error);
+            // Null only when a ref result's C handle could not be allocated.
+            for (0..sig.results.len) |idx| dp[idx] = typedResultToCVal(rbuf[idx], inst, alloc) orelse return allocTrap(alloc, store, .out_of_memory);
         };
         return null;
     }
@@ -2686,21 +2693,49 @@ fn wasmFuncCallJit(jit: *runner.JitInstance, inst: *Instance, store: *Store, all
     // (the scalar `invokeIdx` runs a ref-result func as void); marshal the raw
     // payload into an owned `*Ref` C handle.
     if (sig.results.len == 1 and std.meta.activeTag(sig.results[0]) == .ref) {
-        const payload = jit.invokeRefIdx(func_idx, abuf[0..sig.params.len]) catch |err| return jitErrToTrap(err, jit, alloc, store);
+        const payload = jit.invokeRefIdx(func_idx, abuf[0..sig.params.len]) catch |err| return jitErrToTrap(err, sig, jit, alloc, store);
         if (results) |r| if (r.data) |dp| {
-            dp[0] = refResultToCVal(sig.results[0], payload, inst, alloc) orelse return allocTrap(alloc, store, .binding_error);
+            // Null only when the ref's C handle could not be allocated.
+            dp[0] = refResultToCVal(sig.results[0], payload, inst, alloc) orelse return allocTrap(alloc, store, .out_of_memory);
         };
         return null;
     }
 
-    const got = jit.invokeIdx(func_idx, abuf[0..sig.params.len]) catch |err| return jitErrToTrap(err, jit, alloc, store);
+    const got = jit.invokeIdx(func_idx, abuf[0..sig.params.len]) catch |err| return jitErrToTrap(err, sig, jit, alloc, store);
     if (sig.results.len == 1) {
         if (results) |r| if (r.data) |dp| {
-            const bits = got orelse return allocTrap(alloc, store, .binding_error);
-            dp[0] = jitBitsToCVal(sig.results[0], bits) orelse return allocTrap(alloc, store, .binding_error);
+            // No value back for a one-result shape, or one the single-u64
+            // carrier cannot hold (v128).
+            const bits = got orelse return unsupportedShapeTrap(alloc, store, sig);
+            dp[0] = jitBitsToCVal(sig.results[0], bits) orelse return unsupportedShapeTrap(alloc, store, sig);
         };
     }
     return null;
+}
+
+/// #431 — an `unsupported` trap whose message names the declined shape, e.g.
+/// `no JIT entry helper for () -> (i32 f32)`. Falls back to the kind's fixed
+/// message when the shape does not fit the buffer.
+fn unsupportedShapeTrap(alloc: std.mem.Allocator, store: *Store, sig: zir.FuncType) ?*Trap {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    const msg = writeShape(&w, sig) catch return allocTrap(alloc, store, .unsupported);
+    return trap_surface.allocTrapWithMessage(alloc, store, .unsupported, msg);
+}
+
+fn writeShape(w: *std.Io.Writer, sig: zir.FuncType) ![]const u8 {
+    try w.writeAll("no JIT entry helper for (");
+    for (sig.params, 0..) |p, i| {
+        if (i != 0) try w.writeByte(' ');
+        try w.writeAll(p.name());
+    }
+    try w.writeAll(") -> (");
+    for (sig.results, 0..) |r, i| {
+        if (i != 0) try w.writeByte(' ');
+        try w.writeAll(r.name());
+    }
+    try w.writeByte(')');
+    return w.buffered();
 }
 
 /// D-498 — wrap a raw JIT ref payload (u64; funcref = `*FuncEntity` ptr, externref
@@ -2726,7 +2761,7 @@ fn cValToJitBits(v: Val) u64 {
 }
 
 /// Decode a JIT scalar result u64 into a C `Val` by valtype; null for ref/v128
-/// (not retrievable via the single-u64 arm — surfaces as a binding_error trap).
+/// (not retrievable via the single-u64 arm — surfaces as an `unsupported` trap).
 fn jitBitsToCVal(vt: zir.ValType, bits: u64) ?Val {
     return switch (vt) {
         .i32 => .{ .kind = .i32, .of = .{ .i32 = @bitCast(@as(u32, @truncate(bits))) } },
@@ -2871,11 +2906,23 @@ fn verdictTrap(alloc: std.mem.Allocator, store: *Store, err: runner.Error) ?*Tra
     return trap_surface.allocTrapWithMessage(alloc, store, .invalid_module, msg);
 }
 
-fn jitErrToTrap(err: runner.Error, jit: *runner.JitInstance, alloc: std.mem.Allocator, store: *Store) ?*Trap {
+/// #431 — the kind for an error out of a post-instantiate JIT invoke. The
+/// `else` is safe because the three invoke paths raise nothing else once the
+/// module has compiled: `ExportNotFound` needs a func index past the signature
+/// table, which `funcSigByIdx` already refused, and the rest of `runner.Error`
+/// is compile-time names. The generic trap bucket reports `unreachable_` (D-292).
+fn jitErrKind(err: runner.Error, raw_trap_code: u32) TrapKind {
     return switch (err) {
-        error.Trap => allocTrap(alloc, store, trap_surface.jitTrapCode(jit.owned.rt.trap_kind) orelse .unreachable_),
-        else => allocTrap(alloc, store, .binding_error),
+        error.Trap => trap_surface.jitTrapCode(raw_trap_code) orelse .unreachable_,
+        error.UnsupportedEntrySignature => .unsupported,
+        else => .binding_error,
     };
+}
+
+fn jitErrToTrap(err: runner.Error, sig: zir.FuncType, jit: *runner.JitInstance, alloc: std.mem.Allocator, store: *Store) ?*Trap {
+    const kind = jitErrKind(err, jit.owned.rt.trap_kind);
+    if (kind == .unsupported) return unsupportedShapeTrap(alloc, store, sig);
+    return allocTrap(alloc, store, kind);
 }
 
 // ============================================================
@@ -3184,6 +3231,129 @@ test "wasm_func_call: arg-count mismatch returns Trap with message; both freed" 
     try testing.expect(msg.size > 0);
     vec.wasm_byte_vec_delete(&msg);
     trap_surface.wasm_trap_delete(trap);
+}
+
+// ============================================================
+// #431 — a shape the engine cannot call is its own kind
+// ============================================================
+
+// (module (func (export "pair") (result i32 f32) i32.const 1 f32.const 2)
+//         (func (export "id") (param i32) (result i32) local.get 0))
+// `pair` is the mixed multi-value shape the JIT's wrapper thunks do not cover
+// (2-int register-class and 3-int MEMORY-class only); `id` is the contrast —
+// a shape every engine calls, so a mis-bound call to it stays the embedder's.
+const mixed_multi_value_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x0b, 0x02, 0x60, 0x00, 0x02, 0x7f, 0x7d,
+    0x60, 0x01, 0x7f, 0x01, 0x7f, 0x03, 0x03, 0x02,
+    0x00, 0x01, 0x07, 0x0d, 0x02, 0x04, 0x70, 0x61,
+    0x69, 0x72, 0x00, 0x00, 0x02, 0x69, 0x64, 0x00,
+    0x01, 0x0a, 0x10, 0x02, 0x09, 0x00, 0x41, 0x01,
+    0x43, 0x00, 0x00, 0x00, 0x40, 0x0b, 0x04, 0x00,
+    0x20, 0x00, 0x0b,
+};
+
+/// Call export `idx` of `mixed_multi_value_wasm` on `engine` with `args`, and
+/// return the trap (caller deletes) or null. `results` is the caller's buffer,
+/// so a non-trapping call's values can be read back.
+fn callMixedExport(
+    s: *Store,
+    engine: EngineKind,
+    idx: u32,
+    args: *const ValVec,
+    results: *ValVec,
+) !?*Trap {
+    var bytes = mixed_multi_value_wasm;
+    const bv: ByteVec = .{ .size = bytes.len, .data = &bytes };
+    const m = wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
+    defer wasm_module_delete(m);
+    const i = instanceNewWithEngine(s, m, null, null, engine) orelse return error.InstanceAllocFailed;
+    defer wasm_instance_delete(i);
+    // Without this a JIT that silently fell back to the interpreter would make
+    // the assertions below vacuous.
+    switch (engine) {
+        .jit => try testing.expect(i.jit != null),
+        .interp => try testing.expect(i.runtime != null),
+        // `.auto`'s backend is deliberately unpinned — which engine it picks is
+        // documented to change without an API break.
+        .auto => {},
+    }
+    const func = zwasm_instance_get_func(i, idx) orelse return error.FuncResolveFailed;
+    defer wasm_func_delete(func);
+    return wasm_func_call(func, args, results);
+}
+
+test "#431: a mixed multi-value result the JIT cannot marshal is `unsupported`, and the message names the shape" {
+    const e = wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer wasm_engine_delete(e);
+    const s = wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_store_delete(s);
+
+    // `.auto` is the default engine, and a call-time decline cannot fall back:
+    // the instance is already JIT-backed. So it answers as `.jit` does.
+    for ([_]EngineKind{ .jit, .auto }) |engine| {
+        var results_data: [2]Val = undefined;
+        var results: ValVec = .{ .size = 2, .data = &results_data };
+        const args: ValVec = .{ .size = 0, .data = null };
+        const trap = (try callMixedExport(s, engine, 0, &args, &results)) orelse return error.CallDidNotTrap;
+        defer trap_surface.wasm_trap_delete(trap);
+        // The defect: this was `binding_error`, which says the embedder bound
+        // the call wrong. It did not — the engine has no helper for the shape.
+        try testing.expectEqual(TrapKind.unsupported, trap.kind);
+        try testing.expect(trap.kind != .binding_error);
+
+        var msg: ByteVec = .{ .size = 0, .data = null };
+        trap_surface.wasm_trap_message(trap, &msg);
+        defer vec.wasm_byte_vec_delete(&msg);
+        const text = msg.data.?[0..msg.size];
+        try testing.expect(std.mem.find(u8, text, "(i32 f32)") != null);
+    }
+}
+
+test "#431: the interpreter marshals the same shape, so the decline is the engine's and not the module's" {
+    const e = wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer wasm_engine_delete(e);
+    const s = wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_store_delete(s);
+
+    var results_data: [2]Val = undefined;
+    var results: ValVec = .{ .size = 2, .data = &results_data };
+    const args: ValVec = .{ .size = 0, .data = null };
+    const trap = try callMixedExport(s, .interp, 0, &args, &results);
+    try testing.expect(trap == null);
+    try testing.expectEqual(ValKind.i32, results_data[0].kind);
+    try testing.expectEqual(@as(i32, 1), results_data[0].of.i32);
+    try testing.expectEqual(ValKind.f32, results_data[1].kind);
+    try testing.expectEqual(@as(f32, 2.0), results_data[1].of.f32);
+}
+
+test "#431: an argument count that is not the signature's stays `binding_error` on the JIT" {
+    const e = wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer wasm_engine_delete(e);
+    const s = wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_store_delete(s);
+
+    // `id` takes one i32 and the JIT calls its shape; passing none is the
+    // embedder's own error, and the new kind must not swallow it.
+    var results_data: [1]Val = undefined;
+    var results: ValVec = .{ .size = 1, .data = &results_data };
+    const args: ValVec = .{ .size = 0, .data = null };
+    const trap = (try callMixedExport(s, .jit, 1, &args, &results)) orelse return error.CallDidNotTrap;
+    defer trap_surface.wasm_trap_delete(trap);
+    try testing.expectEqual(TrapKind.binding_error, trap.kind);
+}
+
+test "#431: jitErrKind splits a guest fault, an engine decline and the embedder's binding" {
+    // A guest trap reads the runtime's recorded code (5 = the `unreachable`
+    // stub); an unrecorded one is the D-292 generic bucket.
+    try testing.expectEqual(TrapKind.unreachable_, jitErrKind(error.Trap, 5));
+    try testing.expectEqual(TrapKind.oob_memory, jitErrKind(error.Trap, 6));
+    try testing.expectEqual(TrapKind.unreachable_, jitErrKind(error.Trap, 0));
+    // The shape decline — the whole of #431.
+    try testing.expectEqual(TrapKind.unsupported, jitErrKind(error.UnsupportedEntrySignature, 0));
+    // Everything else is a compile-time name a post-instantiate invoke does not
+    // raise; it stays in the embedder bucket, as before.
+    try testing.expectEqual(TrapKind.binding_error, jitErrKind(error.ExportIsNotFunction, 0));
 }
 
 // Extern-vec null-arg coverage lives here alongside

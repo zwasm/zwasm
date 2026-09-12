@@ -1455,6 +1455,7 @@ pub fn build(b: *std.Build) void {
         .{ .src = "test/c_api_conformance/cross_module_type_space.c", .name = "cross_module_type_space" }, // #387 a func import's type-def is compared across both type spaces
         .{ .src = "test/c_api_conformance/instance_new_short_imports.c", .name = "instance_new_short_imports" }, // #392 a short import vector is NULL, not a read past it
         .{ .src = "test/c_api_conformance/auto_rejects_invalid.c", .name = "auto_rejects_invalid" }, // #233 AUTO and JIT return NULL with an INVALID_MODULE trap, AUTO does not retry
+        .{ .src = "test/c_api_conformance/trap_unsupported_shape.c", .name = "trap_unsupported_shape" }, // #431 a call shape the engine cannot marshal is UNSUPPORTED, not BINDING_ERROR
         .{
             .src = "test/c_api_conformance/wasi_preopen.c",
             .name = "wasi_preopen",

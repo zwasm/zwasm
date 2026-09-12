@@ -10,6 +10,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+### Added
+
+- **`ZWASM_TRAP_UNSUPPORTED` (20)** — the trap kind for a call whose shape the
+  instance's engine has no implementation for. Appended, so the existing
+  `ZWASM_TRAP_*` values are unchanged.
+
 ### Changed
 
 - **`zwasm run` has one default-entry contract on every path** (#220,
@@ -26,6 +32,15 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A call shape the engine cannot marshal is `ZWASM_TRAP_UNSUPPORTED`, not
+  `ZWASM_TRAP_BINDING_ERROR`** (#431). Calling a valid export with a mixed
+  multi-value result — `(result i32 f32)`, a shape the JIT's wrapper thunks do
+  not cover — reported the embedder's binding as wrong, on the default engine
+  and on `--engine jit` alike, while `--engine interp` returned both values.
+  The kind now separates the two, and its message names the shape. The
+  interpreter still marshals every shape, and `zwasm run` prints the reason
+  instead of `binding_error`.
+
 - **On the interpreter, a re-exported import binds to what the re-exporter
   bound, so a chain reaches its definition** (#427). The binder pointed the
   importer at the re-exporter's own import slot — a placeholder whose body is
@@ -33,6 +48,7 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   folds at link time as the JIT has since #388: C's binding names A's runtime
   directly, or copies a re-exported host callback's binding, and A stays
   parked on the store until `wasm_store_delete` however B and C are deleted.
+
 - **A cross-module import through the C API binds to the extern the embedder
   passed, and its type is compared across both modules' type spaces** (#386,
   #387). The binder re-resolved the source by the import's field name — an

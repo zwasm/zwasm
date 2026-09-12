@@ -78,6 +78,10 @@ WASM_API_EXTERN void zwasm_instance_clear_interrupt(wasm_instance_t*);
 /* Machine-readable trap kind beside wasm.h's message-only surface; -1 on
  * NULL. Values mirror the `TrapKind` enum (src/api/trap_surface.zig), which is
  * append-only stable; a C host can switch on these without string-matching. */
+
+/* The embedder's binding is wrong: an argument or result count that is not the
+ * signature's, or a host callback's own trap. A shape the engine cannot call
+ * is ZWASM_TRAP_UNSUPPORTED. */
 #define ZWASM_TRAP_BINDING_ERROR 0
 #define ZWASM_TRAP_UNREACHABLE 1
 #define ZWASM_TRAP_DIV_BY_ZERO 2
@@ -103,6 +107,10 @@ WASM_API_EXTERN void zwasm_instance_clear_interrupt(wasm_instance_t*);
  * make yet): zwasm_instance_new_ex returns NULL with this trap on AUTO and JIT,
  * and AUTO does not retry on the interpreter. The message names the verdict. */
 #define ZWASM_TRAP_INVALID_MODULE 19
+/* The engine that owns this instance has no implementation for this call's
+ * shape. Not a guest trap and not a binding error; AUTO does not retry on the
+ * interpreter at call time. The message names the shape. */
+#define ZWASM_TRAP_UNSUPPORTED 20
 WASM_API_EXTERN int32_t zwasm_trap_kind(const wasm_trap_t*);
 
 /* ── Instance helpers ────────────────────────────────────────────────── */
