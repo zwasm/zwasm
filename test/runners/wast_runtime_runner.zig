@@ -994,6 +994,7 @@ fn trapKindName(k: wasm_c_api.TrapKind) []const u8 {
         // mismatch message, where naming the kind beats naming nothing.
         .wasi_exit => "WasiExit",
         .invalid_module => "InvalidModule", // #233 — an instantiation verdict, not a call-time trap
+        .unsupported => "UnsupportedCallShape", // #431 — the engine declined the call's shape, it did not fault
     };
 }
 

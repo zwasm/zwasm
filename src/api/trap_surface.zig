@@ -76,6 +76,11 @@ pub const TrapKind = enum(u32) {
     // with this trap on AUTO and JIT alike, and AUTO does not retry on the
     // interpreter. The message names the verdict.
     invalid_module = 19,
+    // #431 — the engine that owns the instance has no entry helper for the
+    // call's shape. Not a guest fault and not `binding_error`, which is an
+    // argument or result count that is not the signature's; `.auto` cannot
+    // retry at call time. Which shapes — `wasmFuncCallJit` in `api/instance.zig`.
+    unsupported = 20,
 };
 
 /// `wasm_trap_t` — runtime trap surface. Carries the trap kind +
@@ -123,6 +128,7 @@ pub fn trapMessageFor(kind: TrapKind) []const u8 {
         .out_of_fuel => "all fuel consumed",
         .wasi_exit => "wasi proc_exit",
         .invalid_module => "invalid module",
+        .unsupported => "unsupported call shape",
     };
 }
 

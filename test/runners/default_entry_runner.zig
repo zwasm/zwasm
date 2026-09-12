@@ -86,9 +86,11 @@ const rows = [_]Row{
     Row.same("start_section_trap", .{ .exit = 1, .stderr = .{ .contains = "unreachable" } }),
     Row.same("start_section_main_param", .{ .exit = 1, .stderr = .{ .contains = "unreachable" } }),
     // C4 — a shape the JIT cannot call is refused with the reason, not run as
-    // instantiate-only exit 0. `--engine interp` runs it; on `auto` the
-    // JIT-backed instance declines at call time instead — #431's answer,
-    // pinned as it is today.
+    // instantiate-only exit 0. `--engine interp` runs it. On `auto` the call
+    // reaches a JIT-backed instance and cannot fall back, so the decline traps
+    // `unsupported` naming the shape (#431). Only `main_multi_f32` gets there —
+    // the other two return a lone ref result, which the C API's JIT arm does
+    // call (`invokeRefIdx`).
     .{
         .fixture = "main_ref",
         .auto = .{ .exit = 0, .stdout = "null\n" },
@@ -105,7 +107,7 @@ const rows = [_]Row{
     },
     .{
         .fixture = "main_multi_f32",
-        .auto = .{ .exit = 1, .stderr = .{ .contains = "zwasm: trap kind=binding_error" } },
+        .auto = .{ .exit = 1, .stderr = .{ .contains = "zwasm: trap kind=unsupported msg=no JIT entry helper for () -> (i32 f32)" } },
         .interp = .{ .exit = 0, .stdout = "1\n2\n" },
         .jit = jit_cannot_call,
         .cwasm = jit_cannot_call,
