@@ -10,6 +10,18 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+### Changed
+
+- **A module is instantiated only on the store that created it** (#447).
+  `wasm_instance_new` / `zwasm_instance_new_ex` now return NULL with a
+  `ZWASM_TRAP_BINDING_ERROR` when the module belongs to another store: a
+  JIT-backed instance borrows the module's bytes, and `wasm_module_delete`
+  defers them to the module's own store, so deleting that store left the
+  instance reading freed memory — silently, with a wrong result rather than a
+  trap. Move a module between stores with `wasm_module_share` +
+  `wasm_module_obtain`, which copies the bytes into the obtaining store; that
+  is what `wasm_shared_module_t` is for.
+
 ### Fixed
 
 - **A standalone global, memory or table outlives its handle** (#446).
