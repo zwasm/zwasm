@@ -65,6 +65,14 @@ const sections = zwasm.parse.sections;
 const RunnerContext = struct {
     arena: std.heap.ArenaAllocator,
     io: std.Io,
+    /// #436 — ONE store per corpus. A wast script's `register` / `import`
+    /// composes modules inside a single spec store, and wasm-c-api's
+    /// `wasm_store_t` IS that store: an import bound across two of them has
+    /// nothing tying their lifetimes, and the binder now refuses it. The
+    /// shared store also lives to corpus teardown by construction, which is
+    /// what the ADR-0014 §2.1 / 6.K.3 retention contract wants.
+    engine: *wasm_c_api.Engine,
+    store: *wasm_c_api.Store,
     /// Current module (most-recently instantiated). Borrowed pointers
     /// freed at corpus teardown via `delete*` calls.
     current: ?*ActiveModule = null,
@@ -83,6 +91,9 @@ const RunnerContext = struct {
     fn deinit(self: *RunnerContext) void {
         const a = self.arena.allocator();
         for (self.all.items) |am| am.deinit();
+        // After every module handle, so the store's zombie reap is last.
+        wasm_c_api.wasm_store_delete(self.store);
+        wasm_c_api.wasm_engine_delete(self.engine);
         self.all.deinit(a);
         self.by_name.deinit(a);
         self.arena.deinit();
@@ -90,19 +101,17 @@ const RunnerContext = struct {
 };
 
 /// One instantiated module's runtime handles. The runner owns these
-/// for the lifetime of the corpus, then deletes via the c_api.
+/// for the lifetime of the corpus, then deletes via the c_api. The engine
+/// and store are the corpus's (`RunnerContext`), not this module's.
 const ActiveModule = struct {
-    engine: *wasm_c_api.Engine,
-    store: *wasm_c_api.Store,
     module: *wasm_c_api.Module,
     /// `null` when this entry represents an
     /// `assert_uninstantiable` / `assert_unlinkable` failure that
     /// the runner retained so cross-module funcrefs into the
     /// failed instance's funcs stay valid until corpus end (per
-    /// ADR-0014 §2.1 / 6.K.3 runner-retention contract). The
-    /// engine + store + module are kept alive so the c_api Store
-    /// zombie list (holding the failed instance's runtime +
-    /// arena) survives across subsequent assertions.
+    /// ADR-0014 §2.1 / 6.K.3 runner-retention contract). The failed
+    /// runtime + arena sit on the corpus store's zombie list, which
+    /// outlives every assertion.
     instance: ?*wasm_c_api.Instance,
     /// Cached export vector; populated lazily by `lookupExport`.
     exports: wasm_c_api.ExternVec = .{ .size = 0, .data = null },
@@ -111,8 +120,6 @@ const ActiveModule = struct {
         if (self.exports.size > 0) wasm_c_api.wasm_extern_vec_delete(&self.exports);
         if (self.instance) |inst| wasm_c_api.wasm_instance_delete(inst);
         wasm_c_api.wasm_module_delete(self.module);
-        wasm_c_api.wasm_store_delete(self.store);
-        wasm_c_api.wasm_engine_delete(self.engine);
     }
 
     fn ensureExports(self: *ActiveModule) void {
@@ -245,9 +252,16 @@ fn runCorpus(
     };
     defer gpa.free(manifest_bytes);
 
+    const engine = wasm_c_api.wasm_engine_new() orelse return error.EngineAllocFailed;
+    const store = wasm_c_api.wasm_store_new(engine) orelse {
+        wasm_c_api.wasm_engine_delete(engine);
+        return error.StoreAllocFailed;
+    };
     var ctx: RunnerContext = .{
         .arena = std.heap.ArenaAllocator.init(gpa),
         .io = io,
+        .engine = engine,
+        .store = store,
     };
     defer ctx.deinit();
 
@@ -687,11 +701,7 @@ fn buildImports(ctx: *RunnerContext, wasm_bytes: []const u8) !?[]?*const wasm_c_
 }
 
 fn instantiateWithImports(ctx: *RunnerContext, wasm_bytes: []const u8) !ActiveModule {
-    const engine = wasm_c_api.wasm_engine_new() orelse return error.EngineAllocFailed;
-    errdefer wasm_c_api.wasm_engine_delete(engine);
-
-    const store = wasm_c_api.wasm_store_new(engine) orelse return error.StoreAllocFailed;
-    errdefer wasm_c_api.wasm_store_delete(store);
+    const store = ctx.store;
 
     var bv: wasm_c_api.ByteVec = .{
         .size = wasm_bytes.len,
@@ -713,8 +723,6 @@ fn instantiateWithImports(ctx: *RunnerContext, wasm_bytes: []const u8) !ActiveMo
     const instance = zwasm.api.instance.instanceNewWithEngine(store, module, imports_ptr, null, .interp) orelse
         return error.InstanceAllocFailed;
     return .{
-        .engine = engine,
-        .store = store,
         .module = module,
         .instance = instance,
     };
@@ -768,22 +776,15 @@ fn handleInstantiateExpectFail(
     };
     defer a.free(wasm_bytes);
 
-    // Per ADR-0014 §2.1 / 6.K.3 runner-retention contract: when
-    // instance creation fails, retain the engine + store + module
-    // in `ctx.all` so subsequent `assert_return` directives can
-    // call into foreign-table cells that the failed instance
-    // partially initialised. The c_api Store zombie list (per
-    // 6.K.2 sub-change 4) holds the failed runtime + arena
-    // alive; this runner-side retention keeps the *Store itself*
-    // alive across asserts (errdefers in the success-path
-    // `instantiateWithImports` would destroy it otherwise).
+    // Per ADR-0014 §2.1 / 6.K.3 runner-retention contract: when instance
+    // creation fails, retain the module in `ctx.all` so subsequent
+    // `assert_return` directives can call into foreign-table cells that the
+    // failed instance partially initialised. The failed runtime + arena are on
+    // the corpus store's zombie list (per 6.K.2 sub-change 4), and that store
+    // is the context's — it outlives every assertion by construction.
 
-    const engine = wasm_c_api.wasm_engine_new() orelse return error.EngineAllocFailed;
+    const store = ctx.store;
     var success = false;
-    errdefer if (!success) wasm_c_api.wasm_engine_delete(engine);
-
-    const store = wasm_c_api.wasm_store_new(engine) orelse return error.StoreAllocFailed;
-    errdefer if (!success) wasm_c_api.wasm_store_delete(store);
 
     var bv: wasm_c_api.ByteVec = .{
         .size = wasm_bytes.len,
@@ -802,13 +803,11 @@ fn handleInstantiateExpectFail(
     // D-496(B) — pin `.interp` (conformance runner; cross-module imports = interp domain).
     const instance_opt = zwasm.api.instance.instanceNewWithEngine(store, module, imports_ptr, null, .interp);
 
-    // Whichever way it went, retain the bundle in ctx.all so
-    // the c_api Store (which holds the zombie runtime + arena
-    // for the failed-instance case) lives until corpus end.
+    // Whichever way it went, retain the bundle in ctx.all so the module (and,
+    // for the failed-instance case, the zombie runtime + arena the corpus
+    // store holds) lives until corpus end.
     const am = try a.create(ActiveModule);
     am.* = .{
-        .engine = engine,
-        .store = store,
         .module = module,
         .instance = instance_opt, // null when instantiation failed
     };

@@ -56,6 +56,16 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   interpreter still marshals every shape, and `zwasm run` prints the reason
   instead of `binding_error`.
 
+- **An import whose extern belongs to another store is refused instead of
+  linked** (#436). Nothing tied the two stores' lifetimes, so deleting the
+  exporter's store left the importer's call running freed code on every
+  engine. `wasm_instance_new` / `zwasm_instance_new_ex` now return NULL with a
+  `ZWASM_TRAP_BINDING_ERROR` trap naming the boundary, on every engine — the
+  store rule is decided before any capability check, so a forced `jit` gives
+  the same reason rather than a bare NULL. `.auto` does not retry on the
+  interpreter, whose binder would build the same dangling reference. A
+  standalone global, memory or table is handle-owned rather than store-owned
+  and is not refused. Composition inside one store is unchanged.
 - **On the interpreter, a re-exported import binds to what the re-exporter
   bound, so a chain reaches its definition** (#427). The binder pointed the
   importer at the re-exporter's own import slot — a placeholder whose body is
