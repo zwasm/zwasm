@@ -35,6 +35,7 @@ const frame_teardown = @import("frame_teardown.zig");
 const gpr = @import("gpr.zig");
 const canonical_type = @import("../shared/canonical_type.zig");
 const jit_abi = @import("../shared/jit_abi.zig");
+const decline_note = @import("../shared/decline_note.zig");
 const zir = @import("../../../ir/zir.zig");
 const func_mod = @import("../../../runtime/instance/func.zig");
 
@@ -47,6 +48,75 @@ const func_mod = @import("../../../runtime/instance/func.zig");
 /// `src/engine/codegen/x86_64/op_call.zig`'s indirect-call path
 /// where R11 holds the resolved funcptr through the CALL.
 pub const tail_target_gpr: inst.Gpr = .r11;
+
+/// #424 — may a FRAME-CONSUMING tail call carry this callee's arguments and
+/// results? Only when the convention passes all of them in registers.
+///
+/// The emit marshals the args, tears the caller's frame down, then jumps.
+/// Overflow arguments have nowhere to live across that: they go into the
+/// outgoing-args region the teardown's `ADD RSP` releases — a region
+/// `emit_setup.computeOutgoingMaxBytes` never reserved, since it pre-scans no
+/// tail form — and the callee then reads its stack args off its own frame. A
+/// MEMORY-class callee (`results.len > 2`) is the same problem inverted: the
+/// hidden return buffer is LEA'd out of the frame that is about to go. The
+/// fix this decline stands in for is forwarding the words into the
+/// grand-caller's incoming-args area instead.
+///
+/// The threshold is NOT restated here: `computeCallOverflowBytes` is the rule
+/// the call sites marshal by, so a change there moves this predicate with it.
+///
+/// Cross-module `return_call $import` is NOT gated by this — it keeps its frame
+/// through the thunk's call-and-return, so its overflow words are reserved
+/// rather than refused (`emit_setup.computeOutgoingMaxBytes` says why). Beyond
+/// that it has only its own `results.len > 2` limit.
+fn tailFrameCanCarry(callee_sig: zir.FuncType) bool {
+    return op_call.computeCallOverflowBytes(callee_sig) == 0 and
+        simdArgsFitRegisters(callee_sig) and
+        callee_sig.results.len <= 2;
+}
+
+/// Does every FP/SIMD argument reach the callee in a register? #424 review —
+/// on SysV `computeCallOverflowBytes` counts `f32`/`f64` against the XMM bank
+/// but excludes `v128` by design (its overflow takes two 16-aligned
+/// eightbytes, outside that helper's accounting), while `marshalCallArgs`
+/// advances ONE `fp_arg_slot` across all three. A signature past
+/// `arg_xmms.len` of any mix puts arguments on the stack that the helper
+/// reports as zero overflow — for a frame-consuming tail call, the stack that
+/// is about to go. Win64 needs no help here: it counts v128 in its shared
+/// `n_total`, so the helper already sees the overflow.
+///
+/// Not folded into the helper itself, which also sizes the outgoing region and
+/// the MEMORY-class return-buffer offset.
+fn simdArgsFitRegisters(callee_sig: zir.FuncType) bool {
+    if (abi.current_cc == .win64) return true;
+    return simdArgCount(callee_sig) <= abi.current.arg_xmms.len;
+}
+
+/// Record the refused shape for the reporting layer, then decline. `op` is the
+/// wasm op name the user wrote. The conditions are tested in the order
+/// `tailFrameCanCarry` reads them, so the reason reported is the one that
+/// actually failed.
+fn declineTailFrame(op: []const u8, callee_sig: zir.FuncType) ctx_mod.Error {
+    const overflow = op_call.computeCallOverflowBytes(callee_sig);
+    if (overflow > 0) {
+        decline_note.set(op, .{ .overflow_words = overflow / 8 });
+    } else if (!simdArgsFitRegisters(callee_sig)) {
+        decline_note.set(op, .{ .simd_args = simdArgCount(callee_sig) });
+    } else {
+        decline_note.set(op, .{ .memory_class_results = @intCast(callee_sig.results.len) });
+    }
+    return ctx_mod.Error.UnsupportedOp;
+}
+
+/// FP/SIMD parameters — `f32`, `f64` and `v128` all draw on one bank.
+fn simdArgCount(callee_sig: zir.FuncType) u32 {
+    var n: u32 = 0;
+    for (callee_sig.params) |p| switch (p) {
+        .f32, .f64, .v128 => n += 1,
+        .i32, .i64, .ref => {},
+    };
+    return n;
+}
 
 /// Emit step (2) of the ADR-0112 D4 tail-call sequence for
 /// the SAME-MODULE case: restore RDI = runtime_ptr so the
@@ -145,6 +215,7 @@ pub fn emitDirectReturnCall(
     if (ins.payload >= ctx.func_sigs.len) return ctx_mod.Error.AllocationMissing;
     if (ins.payload < ctx.num_imports) return emitCrossModuleReturnCall(ctx, ins);
     const callee_sig: zir.FuncType = ctx.func_sigs[ins.payload];
+    if (!tailFrameCanCarry(callee_sig)) return declineTailFrame("return_call", callee_sig);
 
     try op_call.marshalCallArgs(
         ctx.allocator,
@@ -261,7 +332,7 @@ pub fn emitIndirectReturnCall(
     if (ins.payload >= ctx.module_types.len) return ctx_mod.Error.AllocationMissing;
     const callee_sig: zir.FuncType = ctx.module_types[ins.payload];
     const table_idx: u32 = ins.extra;
-    if (callee_sig.results.len > 2) return ctx_mod.Error.UnsupportedOp;
+    if (!tailFrameCanCarry(callee_sig)) return declineTailFrame("return_call_indirect", callee_sig);
 
     if (ctx.pushed_vregs.items.len < 1) return ctx_mod.Error.AllocationMissing;
     const idx_vreg = ctx.pushed_vregs.pop().?;
@@ -405,7 +476,7 @@ pub fn emitReturnCallRef(
 ) ctx_mod.Error!void {
     if (ins.payload >= ctx.module_types.len) return ctx_mod.Error.AllocationMissing;
     const callee_sig: zir.FuncType = ctx.module_types[ins.payload];
-    if (callee_sig.results.len > 2) return ctx_mod.Error.UnsupportedOp;
+    if (!tailFrameCanCarry(callee_sig)) return declineTailFrame("return_call_ref", callee_sig);
 
     if (ctx.pushed_vregs.items.len < 1) return ctx_mod.Error.AllocationMissing;
     const funcref_vreg = ctx.pushed_vregs.pop().?;

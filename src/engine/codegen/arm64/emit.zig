@@ -287,7 +287,7 @@ pub fn compile(
     // _idx]` is 16-aligned (`encStrQImm` / `encLdrQImm` reject
     // misaligned imm12). The 0-7 byte rounding waste is bounded
     // and amortised against the v128-bearing path.
-    const outgoing_max_raw: u32 = computeOutgoingMaxBytes(func, func_sigs, module_types);
+    const outgoing_max_raw: u32 = computeOutgoingMaxBytes(func, func_sigs, module_types, num_imports);
     const outgoing_max_bytes: u32 = if (layout.v128_count > 0) (outgoing_max_raw + 15) & ~@as(u32, 15) else outgoing_max_raw;
     const local_base_off: u32 = outgoing_max_bytes;
     const spill_base_off: u32 = local_base_off + locals_bytes;

@@ -18,6 +18,19 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Changed
 
+- **A tail call whose frame cannot carry its arguments is declined by the JIT,
+  not miscompiled** (#424). `return_call`, `return_call_indirect` and
+  `return_call_ref` consume the caller's frame before jumping, so a callee
+  whose arguments overflow the registers — or that returns through a
+  MEMORY-class buffer — read somewhere the arguments were not: the three forms
+  returned a garbage value, trapped `oob_table` and died on a fatal signal.
+  All three now decline, and `zwasm run` names the op and the shape instead of
+  reporting a bare `UnsupportedOp`; the default engine runs the module on the
+  interpreter. A cross-module `return_call` to an import is unaffected (it
+  keeps its frame). A cross-module *importer* that hits the decline cannot
+  fall back to the interpreter, so through the C API it now fails to
+  instantiate rather than answering wrongly.
+
 - **`zwasm run` has one default-entry contract on every path** (#220,
   ADR-0230). The entry is `_start`, else `main`; the third fallback — the
   first function export, whatever its name — is gone: a module with neither
@@ -40,6 +53,14 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   it no longer destroys the function for the instances that imported it.
 
 ### Fixed
+
+- **A cross-module `return_call` to an import delivers every argument** (#424).
+  It is the one tail form that keeps its frame — it lowers as call-and-return
+  through the bridge thunk — but `computeOutgoingMaxBytes` reserved no
+  outgoing-args region for any tail form, so the overflow words landed on the
+  caller's own spill slots and the callee read its 8th and later integer
+  arguments from the wrong place: 8, 9 and 10 `i32` parameters all returned the
+  7th on x86_64 SysV, where the interpreter returned each correctly.
 
 - **A cross-module throw reaches the importer's handler through the C API**
   (#426). The process-global EH registry the unwinder consults to find which

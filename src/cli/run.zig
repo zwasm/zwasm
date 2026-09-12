@@ -26,6 +26,7 @@ const std = @import("std");
 const wasm_c_api = @import("../api/wasm.zig");
 const trap_surface = @import("../api/trap_surface.zig");
 const diagnostic = @import("../diagnostic/diagnostic.zig");
+const decline_note = @import("../engine/codegen/shared/decline_note.zig");
 const wasi_host = @import("../wasi/host.zig");
 const invoke_args_mod = @import("invoke_args.zig");
 const export_lookup = @import("../engine/export_lookup.zig");
@@ -147,8 +148,10 @@ pub fn runWasmJitCaptured(
     // validated when `zwasm compile` produced it.
     // Cleared first, as `runWasmCapturedFull` does on entry: the slot is
     // process state, and a rejection that sets nothing must not inherit an
-    // earlier call's reason (PR #429 review).
+    // earlier call's reason (PR #429 review). The emit's decline note is the
+    // same kind of process state, and is cleared with it (#424).
     diagnostic.clearDiag();
+    decline_note.clear();
     if (!is_cwasm) {
         if (!@import("../runtime/instance/instantiate.zig").frontendValidate(alloc, bytes)) {
             // The same generic reason `runWasm` gives when the validator set none.
@@ -266,6 +269,13 @@ pub fn runWasmJitCaptured(
                 diagnostic.setDiag(.unknown, .binding_error, .unknown, "the JIT engine cannot call '{s}': unsupported entry signature", .{name});
             }
         }
+        // #424 — `UnsupportedOp` is one name for every structural path the
+        // emit cannot take, so a site that recorded the shape it refused gets
+        // named here. `--engine jit` only: this is where a decline IS the
+        // failure, and under `.auto` the interpreter runs the module.
+        if (err == error.UnsupportedOp) {
+            if (decline_note.take()) |note| reportDecline(note);
+        }
         return err;
     };
     if (refusal) |err| return err; // instantiated; the policy's diagnostic stands
@@ -294,6 +304,20 @@ pub fn runWasmJitCaptured(
     }
     if (host.exit_code) |code| return @intCast(@min(code, std.math.maxInt(u8)));
     return 0;
+}
+
+/// Turn an emit decline into the run's reason. `decline_note` records counts;
+/// the wording is this layer's. `binding_error` like every sibling here: the
+/// `.instantiate` phase renders the message alone, and `diagnostic.Kind` has no
+/// `unsupported` mirroring the one #431 added to `trap_surface.TrapKind` — that
+/// is a migration of all of this file's sites, not one.
+fn reportDecline(note: decline_note.Note) void {
+    const tail = "; the default engine runs this module on the interpreter";
+    switch (note.reason) {
+        .overflow_words => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} overflow argument word{s}" ++ tail, .{ note.op, n, if (n == 1) "" else "s" }),
+        .simd_args => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} floating-point or vector arguments — more than the register bank carries" ++ tail, .{ note.op, n }),
+        .memory_class_results => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with a {d}-result callee" ++ tail, .{ note.op, n }),
+    }
 }
 
 /// The default-entry contract (#220, ADR-0230), applied by both `zwasm run`
@@ -1666,6 +1690,43 @@ const spam_stdout = [_]u8{
     0x01, 0x00, 0x08, 0x66, 0x64, 0x5f, 0x77, 0x72, 0x69, 0x74, 0x65, 0x03, 0x0a, 0x01, 0x01, 0x01,
     0x00, 0x05, 0x61, 0x67, 0x61, 0x69, 0x6e,
 };
+
+// #424 — `return_call $tri` where `$tri` returns three values, so the callee
+// writes through a buffer addressed out of the frame the tail call released.
+// Zero overflow arguments, so every convention refuses it alike and the
+// message is the same on every leg. Per-form coverage:
+// `engine/runner_tail_call_test.zig`.
+// (module (func $tri (param i32) (result i32 i32 i32) local.get 0 i32.const 2 i32.const 3)
+//         (func $tail (result i32 i32 i32) i32.const 1 return_call $tri)
+//         (func (export "go") (result i32) call $tail i32.add i32.add))
+const tail_three_results_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x12, 0x03, 0x60,
+    0x01, 0x7f, 0x03, 0x7f, 0x7f, 0x7f, 0x60, 0x00, 0x03, 0x7f, 0x7f, 0x7f,
+    0x60, 0x00, 0x01, 0x7f, 0x03, 0x04, 0x03, 0x00, 0x01, 0x02, 0x07, 0x06,
+    0x01, 0x02, 0x67, 0x6f, 0x00, 0x02, 0x0a, 0x18, 0x03, 0x08, 0x00, 0x20,
+    0x00, 0x41, 0x02, 0x41, 0x03, 0x0b, 0x06, 0x00, 0x41, 0x01, 0x12, 0x00,
+    0x0b, 0x06, 0x00, 0x10, 0x01, 0x6a, 0x6a, 0x0b, 0x00, 0x1a, 0x04, 0x6e,
+    0x61, 0x6d, 0x65, 0x01, 0x0c, 0x02, 0x00, 0x03, 0x74, 0x72, 0x69, 0x01,
+    0x04, 0x74, 0x61, 0x69, 0x6c, 0x04, 0x05, 0x01, 0x00, 0x02, 0x72, 0x33,
+};
+
+test "a declined tail call is reported by op, and the default engine still runs the module (#424)" {
+    // Before: `zwasm: r3.wasm: UnsupportedOp`, which named no construct.
+    try testing.expectError(error.UnsupportedOp, runWasmJit(testing.allocator, testing.io, &tail_three_results_wasm, "go", &.{}, &.{}, &.{}, &.{}, .{}));
+    const msg = diagnostic.lastDiagnostic().?.message();
+    // The op and the reason, not the sentence: the other branch's
+    // overflow-word count is per-convention.
+    try testing.expect(std.mem.find(u8, msg, "`return_call`") != null);
+    try testing.expect(std.mem.find(u8, msg, "3-result callee") != null);
+
+    // And the claim the message makes is true: the default engine runs the
+    // same module and prints 1 + 2 + 3.
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    const code = try runWasmCaptured(testing.allocator, testing.io, &tail_three_results_wasm, &.{}, &capture, "go");
+    try testing.expectEqual(@as(u8, 0), code);
+    try testing.expectEqualStrings("6\n", capture.items);
+}
 
 test "runWasmCapturedFull: max_output_bytes caps the C-API capture path too" {
     // The cap was first wired only onto `runWasmJitCaptured`'s host. The C-API

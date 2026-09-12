@@ -287,7 +287,7 @@ pub fn compile(
     // shadow space when any call exists. When `outgoing_max_bytes`
     // > 0 the per-call `emitShadowAlloc` / `Free` become no-ops
     // (the shadow is already part of the prologue's SUB RSP).
-    const outgoing_max_bytes: u32 = computeOutgoingMaxBytes(func, func_sigs, module_types);
+    const outgoing_max_bytes: u32 = computeOutgoingMaxBytes(func, func_sigs, module_types, num_imports);
     // D-054: include r15_save_bytes so local 0 at
     // [RBP-16] (when uses_runtime_ptr=true) lives INSIDE the frame.
     // The prologue does PUSH R15 before MOV RBP,RSP so R15 actually
