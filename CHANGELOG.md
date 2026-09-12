@@ -40,6 +40,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   `size - 1` bytes, and `wasm_trap_new` takes a host message either way so a
   round trip keeps its length.
 
+- **A multi-value result is handed over whole or not at all** (#443). The C
+  API marshalled the JIT's results straight into the caller's buffer one at a
+  time, so a reference result that could not allocate its handle left the
+  handles minted before it stranded in a buffer the caller does not own once a
+  trap comes back. The elements are staged now, and the caller's buffer is
+  written only when every one is in hand.
+
 - **A call shape the engine cannot marshal is `ZWASM_TRAP_UNSUPPORTED`, not
   `ZWASM_TRAP_BINDING_ERROR`** (#431). Calling a valid export with a mixed
   multi-value result — `(result i32 f32)`, a shape the JIT's wrapper thunks do

@@ -2683,8 +2683,17 @@ fn wasmFuncCallJit(jit: *runner.JitInstance, inst: *Instance, store: *Store, all
         var rbuf: [16]runner.TypedResult = undefined;
         jit.invokeMultiIdx(func_idx, abuf[0..sig.params.len], rbuf[0..sig.results.len]) catch |err| return jitErrToTrap(err, sig, jit, alloc, store);
         if (results) |r| if (r.data) |dp| {
-            // Null only when a ref result's C handle could not be allocated.
-            for (0..sig.results.len) |idx| dp[idx] = typedResultToCVal(rbuf[idx], inst, alloc) orelse return allocTrap(alloc, store, .out_of_memory);
+            // #443 — a reference result mints an owned handle and the caller
+            // owns nothing when a trap comes back, so `dp` is written only
+            // once every element is in hand.
+            var staged: [16]Val = undefined;
+            for (0..sig.results.len) |idx| {
+                staged[idx] = typedResultToCVal(rbuf[idx], inst, alloc) orelse {
+                    releaseRefVals(staged[0..idx], alloc);
+                    return allocTrap(alloc, store, .out_of_memory);
+                };
+            }
+            @memcpy(dp[0..sig.results.len], staged[0..sig.results.len]);
         };
         return null;
     }
@@ -2695,7 +2704,8 @@ fn wasmFuncCallJit(jit: *runner.JitInstance, inst: *Instance, store: *Store, all
     if (sig.results.len == 1 and std.meta.activeTag(sig.results[0]) == .ref) {
         const payload = jit.invokeRefIdx(func_idx, abuf[0..sig.params.len]) catch |err| return jitErrToTrap(err, sig, jit, alloc, store);
         if (results) |r| if (r.data) |dp| {
-            // Null only when the ref's C handle could not be allocated.
+            // Null only when the ref's C handle could not be allocated. No
+            // staging here (#443): one element has nothing minted before it.
             dp[0] = refResultToCVal(sig.results[0], payload, inst, alloc) orelse return allocTrap(alloc, store, .out_of_memory);
         };
         return null;
@@ -2747,6 +2757,17 @@ fn refResultToCVal(vt: zir.ValType, payload: u64, inst: *Instance, alloc: std.me
     const ref_handle = alloc.create(Ref) catch return null;
     ref_handle.* = .{ .instance = inst, .ref = payload };
     return .{ .kind = kind, .of = .{ .ref = ref_handle } };
+}
+
+/// #443 — release the owned `Ref` handles among `vals`, kind-guarded so a
+/// non-ref `of` member is never read as a pointer. Freed with the allocator
+/// that minted them rather than through `wasm_ref_delete`, which recovers the
+/// store's: create and destroy have to pair.
+fn releaseRefVals(vals: []const Val, alloc: std.mem.Allocator) void {
+    for (vals) |v| {
+        if (v.kind != .funcref and v.kind != .anyref) continue;
+        if (v.of.ref) |rp| alloc.destroy(@as(*Ref, @ptrCast(@alignCast(rp))));
+    }
 }
 
 /// Marshal a C `Val` to the JIT host-invoke u64 bit-carrier (i32/f32 in low 32).
@@ -3231,6 +3252,136 @@ test "wasm_func_call: arg-count mismatch returns Trap with message; both freed" 
     try testing.expect(msg.size > 0);
     vec.wasm_byte_vec_delete(&msg);
     trap_surface.wasm_trap_delete(trap);
+}
+
+// ============================================================
+// #443 — a multi-value result is handed over whole or not at all
+// ============================================================
+
+/// Fails exactly the `fail_at`-th allocation and lets every other one through.
+/// `std.testing.FailingAllocator` fails its index and everything after it, which
+/// would also swallow the out-of-memory trap the code under test builds to
+/// report the failure — leaving nothing to assert the kind on.
+const OneShotFailingAllocator = struct {
+    backing: std.mem.Allocator,
+    fail_at: usize,
+    seen: usize = 0,
+
+    fn allocator(self: *OneShotFailingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = OneShotFailingAllocator.alloc,
+            .resize = OneShotFailingAllocator.resize,
+            .remap = OneShotFailingAllocator.remap,
+            .free = OneShotFailingAllocator.free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *OneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+        defer self.seen += 1;
+        if (self.seen == self.fail_at) return null;
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+    fn resize(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *OneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawResize(mem, alignment, new_len, ra);
+    }
+    fn remap(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *OneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawRemap(mem, alignment, new_len, ra);
+    }
+    fn free(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *OneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(mem, alignment, ra);
+    }
+};
+
+// (module (func $a) (elem declare func $a)
+//         (func (export "pair") (result funcref funcref) (ref.func $a) (ref.func $a)))
+// Two non-null reference results: the JIT thunks a two-GPR shape, and `.ref` is
+// GPR class, so this reaches the multi-value arm with two handles to mint.
+const two_funcref_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60,
+    0x00, 0x00, 0x60, 0x00, 0x02, 0x70, 0x70, 0x03, 0x03, 0x02, 0x00, 0x01,
+    0x07, 0x08, 0x01, 0x04, 0x70, 0x61, 0x69, 0x72, 0x00, 0x01, 0x09, 0x05,
+    0x01, 0x03, 0x00, 0x01, 0x00, 0x0a, 0x0b, 0x02, 0x02, 0x00, 0x0b, 0x06,
+    0x00, 0xd2, 0x00, 0xd2, 0x00, 0x0b,
+};
+
+/// A `.jit` instance over `two_funcref_wasm`, with its JIT handle. The caller
+/// deletes the instance; `store` outlives it.
+fn twoFuncrefJitInstance(s: *Store, bytes: *[two_funcref_wasm.len]u8) !struct { inst: *Instance, jit: *runner.JitInstance } {
+    const bv: ByteVec = .{ .size = bytes.len, .data = bytes };
+    const m = wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
+    defer wasm_module_delete(m);
+    const i = instanceNewWithEngine(s, m, null, null, .jit) orelse return error.InstanceAllocFailed;
+    errdefer wasm_instance_delete(i);
+    // Without this a JIT that fell back to the interpreter would make the
+    // assertions below vacuous — the interp arm is a different marshaller.
+    try testing.expect(i.jit != null);
+    return .{ .inst = i, .jit = jitOf(i).? };
+}
+
+test "#443: two reference results both reach the caller, and both are its to delete" {
+    const e = wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer wasm_engine_delete(e);
+    const s = wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_store_delete(s);
+    var bytes = two_funcref_wasm;
+    const h = try twoFuncrefJitInstance(s, &bytes);
+    defer wasm_instance_delete(h.inst);
+    const alloc = storeAllocator(s).?;
+
+    var rdata: [2]Val = undefined;
+    var results: ValVec = .{ .size = 2, .data = &rdata };
+    const args: ValVec = .{ .size = 0, .data = null };
+    try testing.expect(wasmFuncCallJit(h.jit, h.inst, s, alloc, 1, &args, &results) == null);
+    for (rdata) |v| {
+        try testing.expectEqual(ValKind.funcref, v.kind);
+        try testing.expect(v.of.ref != null);
+        wasm_ref_delete(@ptrCast(@alignCast(v.of.ref.?)));
+    }
+}
+
+test "#443: a result the marshaller cannot finish writes nothing and strands no handle" {
+    const e = wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer wasm_engine_delete(e);
+    const s = wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_store_delete(s);
+    var bytes = two_funcref_wasm;
+    const h = try twoFuncrefJitInstance(s, &bytes);
+    defer wasm_instance_delete(h.inst);
+
+    // The call's own allocations, in order: handle 0, handle 1, then the trap's
+    // message and the trap. Failing index 1 breaks the loop with exactly one
+    // handle already minted — the case the defect strands.
+    var one_shot: OneShotFailingAllocator = .{ .backing = testing.allocator, .fail_at = 1 };
+    const alloc = one_shot.allocator();
+
+    // A sentinel the marshaller must not overwrite: a trap means the caller was
+    // handed nothing, so its buffer is still its own.
+    const sentinel: Val = .{ .kind = .i32, .of = .{ .i32 = 0x5A5A5A5A } };
+    var rdata: [2]Val = .{ sentinel, sentinel };
+    var results: ValVec = .{ .size = 2, .data = &rdata };
+    const args: ValVec = .{ .size = 0, .data = null };
+
+    const trap = wasmFuncCallJit(h.jit, h.inst, s, alloc, 1, &args, &results) orelse return error.CallDidNotTrap;
+    // Released through `alloc`, not `wasm_trap_delete`: the trap was built with
+    // the allocator passed in, while `wasm_trap_delete` recovers the store's.
+    // The two are the same object in production — this test is the one caller
+    // that hands `wasmFuncCallJit` an allocator of its own.
+    defer {
+        if (trap.message_ptr) |mp| alloc.free(mp[0..trap.message_len]);
+        alloc.destroy(trap);
+    }
+    try testing.expectEqual(TrapKind.out_of_memory, trap.kind);
+    // Nothing handed over.
+    for (rdata) |v| {
+        try testing.expectEqual(ValKind.i32, v.kind);
+        try testing.expectEqual(@as(i32, 0x5A5A5A5A), v.of.i32);
+    }
+    // And nothing stranded: `testing.allocator` reports the first handle at the
+    // end of this test if the loop returned without releasing it.
 }
 
 // ============================================================
