@@ -28,6 +28,7 @@ const build_options = @import("build_options");
 const capi = @import("instance.zig");
 const trap_surface = @import("trap_surface.zig");
 const vec = @import("vec.zig");
+const hooks = @import("../runtime/hooks.zig");
 
 const Instance = capi.Instance;
 
@@ -45,6 +46,46 @@ pub export fn zwasm_version() callconv(.c) [*:0]const u8 {
     // `comptimePrint` re-materialises the same comptime bytes as a
     // sentinel-terminated array in the binary's constant data.
     return std.fmt.comptimePrint("{s}", .{build_options.version});
+}
+
+// ============================================================
+// Embedder observability hooks (#216, ADR-0231)
+//
+// Pure writers onto `Engine.hooks`; `include/zwasm.h` states what each event
+// means and the three contract rules, and is not repeated here. The raising
+// sites are elsewhere by design — `runtime/hooks.zig` holds the funnel (Zone
+// 1, reachable from all three zones) and the events fire where the engine
+// already decides the outcome.
+// ============================================================
+
+pub export fn zwasm_engine_set_compile_hook(e: ?*capi.Engine, f: ?hooks.CompileFn, user_data: ?*anyopaque) callconv(.c) void {
+    const eng = e orelse return;
+    eng.hooks.compile = f;
+    eng.hooks.compile_user_data = user_data;
+}
+
+pub export fn zwasm_engine_set_instantiate_hook(e: ?*capi.Engine, f: ?hooks.InstantiateFn, user_data: ?*anyopaque) callconv(.c) void {
+    const eng = e orelse return;
+    eng.hooks.instantiate = f;
+    eng.hooks.instantiate_user_data = user_data;
+}
+
+pub export fn zwasm_engine_set_trap_hook(e: ?*capi.Engine, f: ?hooks.TrapFn, user_data: ?*anyopaque) callconv(.c) void {
+    const eng = e orelse return;
+    eng.hooks.trap = f;
+    eng.hooks.trap_user_data = user_data;
+}
+
+pub export fn zwasm_engine_set_fuel_exhausted_hook(e: ?*capi.Engine, f: ?hooks.FuelExhaustedFn, user_data: ?*anyopaque) callconv(.c) void {
+    const eng = e orelse return;
+    eng.hooks.fuel_exhausted = f;
+    eng.hooks.fuel_exhausted_user_data = user_data;
+}
+
+pub export fn zwasm_engine_set_memory_growth_hook(e: ?*capi.Engine, f: ?hooks.MemoryGrowthFn, user_data: ?*anyopaque) callconv(.c) void {
+    const eng = e orelse return;
+    eng.hooks.memory_growth = f;
+    eng.hooks.memory_growth_user_data = user_data;
 }
 
 /// Arm (or re-arm) the deterministic fuel budget; the running guest traps
@@ -608,4 +649,100 @@ test "#237: zwasm_version reports build.zig.zon's .version, NUL-terminated" {
     try testing.expectEqual(@as(u8, 0), p[expected.len]);
     try testing.expectEqualStrings(expected, p[0..expected.len]);
     try testing.expectEqualStrings(expected, std.mem.span(p));
+}
+
+// ============================================================
+// #216 — an instantiation failure's trap is an event, `trap_out` or not
+//
+// `wasm_instance_new`'s `trap_out` is nullable and `src/zwasm/linker.zig`
+// always passes null, so a hook that fired as a side effect of building the
+// handle went silent on those callers. Every such trap now routes through
+// `reportInstantiateTrap[Msg]`; this walks the kinds that reach it.
+// ============================================================
+
+var refusal_traps: u32 = 0;
+var refusal_kind: i32 = -1;
+
+fn countRefusal(_: ?*anyopaque, _: u64, kind: i32, msg: ?[*]const u8, msg_len: usize) callconv(.c) void {
+    refusal_traps += 1;
+    refusal_kind = kind;
+    // The message is borrowed for the call; touching it here is what proves
+    // the (ptr, len) pair is live at callback time on this path too.
+    if (msg) |p| std.mem.doNotOptimizeAway(p[0..msg_len]);
+}
+
+test "#216: a cross-store module refusal reports its trap with a null trap_out" {
+    const e = capi.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer capi.wasm_engine_delete(e);
+    e.hooks.trap = countRefusal;
+    refusal_traps = 0;
+
+    // #447 — the module is created on one store and instantiated on another.
+    const a = capi.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer capi.wasm_store_delete(a);
+    const b = capi.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer capi.wasm_store_delete(b);
+    const bv: ByteVec = .{ .size = spin_loop_wasm.len, .data = @constCast(&spin_loop_wasm) };
+    const m = capi.wasm_module_new(a, &bv) orelse return error.ModuleAllocFailed;
+    defer capi.wasm_module_delete(m);
+
+    // null trap_out: the caller declines the handle. The event is not the
+    // handle's, so it fires anyway.
+    try testing.expect(zwasm_instance_new_ex(b, m, null, null, engine_auto) == null);
+    try testing.expectEqual(@as(u32, 1), refusal_traps);
+    try testing.expectEqual(@as(i32, @intFromEnum(TrapKind.binding_error)), refusal_kind);
+
+    // …and exactly once more when the caller DOES want the handle, not twice.
+    var trap: ?*trap_surface.Trap = null;
+    try testing.expect(zwasm_instance_new_ex(b, m, null, &trap, engine_auto) == null);
+    try testing.expectEqual(@as(u32, 2), refusal_traps);
+    try testing.expect(trap != null);
+    trap_surface.wasm_trap_delete(trap);
+}
+
+var compile_events: u32 = 0;
+var compile_accepted: u32 = 0;
+var compile_last_len: usize = 0xFFFF_FFFF;
+
+fn countCompile(_: ?*anyopaque, wasm_len: usize, accepted: bool) callconv(.c) void {
+    compile_events += 1;
+    if (accepted) compile_accepted += 1;
+    compile_last_len = wasm_len;
+}
+
+test "#216: an EMPTY byte vector is an offer and is reported; a null data pointer with a size is not" {
+    // `{ 0, NULL }` is upstream's own empty vector (`wasm_byte_vec_new_empty`),
+    // so unwrapping `data` first made it the one rejection that raised no
+    // event while a one-byte garbage vector raised one.
+    const e = capi.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer capi.wasm_engine_delete(e);
+    e.hooks.compile = countCompile;
+    const s = capi.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer capi.wasm_store_delete(s);
+
+    compile_events = 0;
+    compile_accepted = 0;
+    const empty: ByteVec = .{ .size = 0, .data = null };
+    try testing.expect(!capi.wasm_module_validate(s, &empty));
+    try testing.expectEqual(@as(u32, 1), compile_events);
+    try testing.expectEqual(@as(u32, 0), compile_accepted);
+    try testing.expectEqual(@as(usize, 0), compile_last_len);
+
+    try testing.expect(capi.wasm_module_new(s, &empty) == null);
+    try testing.expectEqual(@as(u32, 2), compile_events);
+
+    // A nonzero size behind a null pointer is a malformed CALL, not bytes:
+    // refused, and nothing to report a verdict on.
+    const malformed: ByteVec = .{ .size = 8, .data = null };
+    try testing.expect(!capi.wasm_module_validate(s, &malformed));
+    try testing.expect(capi.wasm_module_new(s, &malformed) == null);
+    try testing.expectEqual(@as(u32, 2), compile_events);
+
+    // …and a real module still reports accepted, so the fix did not make the
+    // funnel report everything as rejected.
+    const bv: ByteVec = .{ .size = spin_loop_wasm.len, .data = @constCast(&spin_loop_wasm) };
+    try testing.expect(capi.wasm_module_validate(s, &bv));
+    try testing.expectEqual(@as(u32, 3), compile_events);
+    try testing.expectEqual(@as(u32, 1), compile_accepted);
+    try testing.expectEqual(@as(usize, spin_loop_wasm.len), compile_last_len);
 }

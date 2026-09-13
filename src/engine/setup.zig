@@ -21,6 +21,7 @@ const zir = @import("../ir/zir.zig");
 const runner_mod = @import("runner.zig");
 const instantiate = @import("../runtime/instance/instantiate.zig");
 const memory_backing = @import("../runtime/instance/memory_backing.zig");
+const hooks = @import("../runtime/hooks.zig");
 const guarded_mem = @import("../platform/guarded_mem.zig");
 const heap_mod = @import("../feature/gc/heap.zig");
 const gc_type_info = @import("../feature/gc/type_info.zig");
@@ -208,6 +209,11 @@ pub const MemGrowCtx = struct {
     /// `max_pages` (JIT mirror of the facade `setMemoryPagesLimit`). null =
     /// no host cap. Grow past it returns the spec failure (-1), not a trap.
     host_max_pages: ?u64 = null,
+    /// #216 — where a successful grow is reported. The JIT's grow runs from
+    /// emitted code with only `rt.host_state` in hand, so the site travels on
+    /// this context rather than being chased from an instance handle.
+    /// `JitInstance.setObservability` fills it at instantiate.
+    hook_site: hooks.Site = .{},
 };
 
 /// Real `memory_grow_fn` (replaces `defaultMemoryGrowReject`). Grows the
@@ -244,6 +250,11 @@ pub fn jitMemoryGrow(rt: *entry.JitRuntime, delta_pages: u32) callconv(.c) i32 {
     ctx.memory = grown;
     rt.vm_base = grown.ptr;
     rt.mem_limit = new_bytes;
+    // #216 — the JIT's one growth site (guest `memory.grow` and the host
+    // `wasm_memory_grow` / facade `Memory.grow` both land here). Every refusal
+    // above returned -1 already, so reaching here IS the success. memidx 0:
+    // the JIT compiles single-memory modules only (ADR-0111 D2).
+    hooks.emitMemoryGrowth(ctx.hook_site, 0, old_pages, new_pages);
     return @bitCast(@as(u32, @truncate(old_pages)));
 }
 

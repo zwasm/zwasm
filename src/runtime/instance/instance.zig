@@ -115,6 +115,17 @@ pub const Instance = struct {
     /// be a Zone-1→Zone-3 upward import. The Zone-3 binding casts it; freed
     /// (cast to `*Ref`) in `wasm_instance_delete`.
     ref_view: ?*anyopaque = null,
+    /// #216 — the id the observability hooks report for this instantiation.
+    /// Minted from the Engine's counter at the top of `instantiateInternal`,
+    /// BEFORE the `(start)` function runs, so an event a start raises is
+    /// already attributable. `0` = an Instance built outside that path (the
+    /// struct literals in tests).
+    ///
+    /// LAST on purpose, for the reason `Runtime.hook_site` is: a cold field
+    /// declared after the hot ones leaves `func_ptrs_storage` /
+    /// `exports_storage` — read on every C-path call — at the offsets they had
+    /// before this slot existed.
+    id: u64 = 0,
 };
 
 /// Structural type of an exported entity. Mirrors the four

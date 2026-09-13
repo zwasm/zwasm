@@ -36,6 +36,7 @@ const memory_backing = @import("instance/memory_backing.zig");
 const guarded_mem = @import("../platform/guarded_mem.zig");
 const heap_mod = @import("../feature/gc/heap.zig");
 const stack_limit_mod = @import("../platform/stack_limit.zig");
+const hooks = @import("hooks.zig");
 pub const MemoryInstance = memory_instance_mod.MemoryInstance;
 
 const Allocator = std.mem.Allocator;
@@ -414,6 +415,25 @@ pub const Runtime = struct {
     trace_cb: ?TraceCallback = null,
     trace_ctx: ?*anyopaque = null,
 
+    /// #216 — where a successful `memory.grow` is reported, derived rather
+    /// than stored. `instance` is already the back-pointer this file keeps for
+    /// cross-module dispatch, and an Instance carries both the id and the
+    /// Store that knows the Engine, so a slot of its own would be a second
+    /// copy of reachable facts.
+    ///
+    /// Not storing it is also what keeps this struct's layout untouched: Zig's
+    /// auto layout re-packs on any field added, and a 16-byte slot here moved
+    /// `memory` by 8 and `fuel` by 40 — both read on every executed
+    /// instruction (measured against 6f6cbc02d with `@offsetOf`). A derived
+    /// site costs two optional unwraps on the grow path, which is not a path
+    /// anything measures.
+    fn hookSite(self: *const Runtime) hooks.Site {
+        const ip = self.instance orelse return .{};
+        const inst: *const Instance = @ptrCast(@alignCast(ip));
+        const store = inst.store orelse return .{};
+        return .{ .engine = store.engine, .instance_id = inst.id };
+    }
+
     pub fn init(alloc: Allocator) Runtime {
         return .{ .alloc = alloc };
     }
@@ -494,6 +514,9 @@ pub const Runtime = struct {
         } else {
             self.memories[memidx].bytes = new_mem;
         }
+        // #216 — the interp's one growth site: every refusal above returned
+        // already, so reaching here IS the success the hook reports.
+        hooks.emitMemoryGrowth(self.hookSite(), @intCast(memidx), old_pages, new_pages);
         return old_pages;
     }
 

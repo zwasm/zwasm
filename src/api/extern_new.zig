@@ -1329,3 +1329,49 @@ test "#315 wasm_func_call: a ref-kind val is passed through, not owned" {
     // And the caller got the callback's pointer back, unwrapped.
     try testing.expectEqual(@as(?*anyopaque, @ptrCast(&ref_passthrough_out)), results_data[0].of.ref);
 }
+
+// ============================================================
+// #216 — a standalone memory's growth is an event too
+// ============================================================
+
+var growth_events: u32 = 0;
+var growth_instance_id: u64 = 0xFFFF_FFFF;
+var growth_old_pages: u64 = 0;
+var growth_new_pages: u64 = 0;
+
+fn recordGrowth(_: ?*anyopaque, instance_id: u64, _: u32, old_pages: u64, new_pages: u64) callconv(.c) void {
+    growth_events += 1;
+    growth_instance_id = instance_id;
+    growth_old_pages = old_pages;
+    growth_new_pages = new_pages;
+}
+
+test "#216: wasm_memory_grow on a standalone memory reports growth under id 0; a refusal reports nothing" {
+    // A `wasm_memory_new` memory belongs to no instance, which is what id 0
+    // exists for. Staying silent here would make the growth hook's own
+    // contract false for a whole kind of memory (`include/zwasm.h`).
+    const e = instance.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer instance.wasm_engine_delete(e);
+    e.hooks.memory_growth = recordGrowth;
+    growth_events = 0;
+
+    const s = instance.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer instance.wasm_store_delete(s);
+    var lim: types.Limits = .{ .min = 1, .max = 2 };
+    const mt = types.wasm_memorytype_new(&lim) orelse return error.MemTypeAllocFailed;
+    defer types.wasm_memorytype_delete(mt);
+    const m = wasm_memory_new(s, mt) orelse return error.MemNewFailed;
+    defer instance.wasm_memory_delete(m);
+
+    try testing.expect(instance.wasm_memory_grow(m, 1));
+    try testing.expectEqual(@as(u32, 1), growth_events);
+    try testing.expectEqual(@as(u64, 0), growth_instance_id);
+    try testing.expectEqual(@as(u64, 1), growth_old_pages);
+    try testing.expectEqual(@as(u64, 2), growth_new_pages);
+
+    // A refused grow is the spec's recoverable failure, not an event. This
+    // memory has no reservation, so the refusal it can reach is the realloc's;
+    // an absurd delta overflows the byte count instead of allocating.
+    _ = instance.wasm_memory_grow(m, 0xFFFF_FFF0);
+    try testing.expectEqual(@as(u32, 1), growth_events);
+}

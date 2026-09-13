@@ -20,6 +20,8 @@
 const std = @import("std");
 const wasm_c_api = @import("wasm.zig");
 const handles = @import("handles.zig"); // for `Ref` (wasm_trap_as_ref view); pointer-only cycle
+const hooks = @import("../runtime/hooks.zig");
+const runtime_engine = @import("../runtime/engine.zig");
 
 const testing = std.testing;
 
@@ -207,13 +209,43 @@ pub fn mapInterpTrap(err: anyerror) TrapKind {
     };
 }
 
-pub fn allocTrap(alloc: std.mem.Allocator, store: ?*wasm_c_api.Store, kind: TrapKind) ?*Trap {
-    return allocTrapWithMessage(alloc, store, kind, trapMessageFor(kind));
+/// `inst_id` is the `Instance.id` the trap is attributed to for the #216
+/// `trap` hook, or `0` when no instance is in scope (a binding failure the
+/// engine refuses before one exists). It does not reach the C `wasm_trap_t`.
+pub fn allocTrap(alloc: std.mem.Allocator, store: ?*wasm_c_api.Store, inst_id: u64, kind: TrapKind) ?*Trap {
+    return allocTrapWithMessage(alloc, store, inst_id, kind, trapMessageFor(kind));
 }
 
 /// `allocTrap` with a caller-supplied message (copied), for the kinds whose
 /// message carries a reason beyond the kind's fixed string.
-pub fn allocTrapWithMessage(alloc: std.mem.Allocator, store: ?*wasm_c_api.Store, kind: TrapKind, msg: []const u8) ?*Trap {
+///
+/// #216 — the single funnel for engine-raised traps, so this is where the
+/// `trap` hook fires. It fires BEFORE the handle is allocated: the trap
+/// happened whether or not the embedder's allocator could mint a `wasm_trap_t`
+/// for it, and an observability surface that goes quiet under memory pressure
+/// would be reporting the wrong thing. The same reasoning splits `reportTrap`
+/// out below, for the sites whose handle is optional. A trap the EMBEDDER
+/// mints (`wasm_trap_new`) is not the engine's event and does not come
+/// through here.
+pub fn allocTrapWithMessage(alloc: std.mem.Allocator, store: ?*wasm_c_api.Store, inst_id: u64, kind: TrapKind, msg: []const u8) ?*Trap {
+    reportTrap(store, inst_id, kind, msg);
+    return allocTrapQuiet(alloc, store, kind, msg);
+}
+
+/// Report an engine-raised trap to the #216 hook WITHOUT building a handle,
+/// for a site whose `wasm_trap_t` is optional. The trap happened whether or
+/// not the caller asked for the handle, so the two must not be one decision:
+/// `wasm_instance_new`'s `trap_out` is nullable and `src/zwasm/linker.zig`
+/// always passes null, which silently cost every start-function trap its
+/// event until this split existed.
+pub fn reportTrap(store: ?*wasm_c_api.Store, inst_id: u64, kind: TrapKind, msg: []const u8) void {
+    hooks.emitTrap(engineOf(store), inst_id, @intCast(@intFromEnum(kind)), msg);
+}
+
+/// Build the handle without reporting — for a caller that has already called
+/// `reportTrap` for this same trap. Every other site wants `allocTrap` or
+/// `allocTrapWithMessage`, which do both.
+pub fn allocTrapQuiet(alloc: std.mem.Allocator, store: ?*wasm_c_api.Store, kind: TrapKind, msg: []const u8) ?*Trap {
     const buf = alloc.dupe(u8, msg) catch return null;
     const t = alloc.create(Trap) catch {
         alloc.free(buf);
@@ -583,3 +615,16 @@ test "wasm_trap_*: null-arg discipline" {
 // is mechanized cross-artifact by `scripts/check_trap_abi_sync.sh` (gate_commit):
 // @embedFile can't reach include/ (outside the src package), so the C header ↔
 // Zig enum value match is checked at the build-gate, not in a unit test.
+
+/// The Engine behind a Store, for the #216 hook lookup. Null-tolerant on both
+/// links: a Trap allocated without a Store (or with a Store whose Engine is
+/// gone) raises no event rather than faulting.
+fn engineOf(store: ?*wasm_c_api.Store) ?*runtime_engine.Engine {
+    return (store orelse return null).engine;
+}
+
+test "#216: hooks.fuel_trap_kind is TrapKind.out_of_fuel" {
+    // The hook funnel is Zone 1 and spells the kind as a number; this is the
+    // one place both names are visible, so it is where they are held together.
+    try testing.expectEqual(@as(i32, @intFromEnum(TrapKind.out_of_fuel)), hooks.fuel_trap_kind);
+}

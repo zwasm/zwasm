@@ -32,4 +32,17 @@ pub const Engine = extern struct {
     /// C-stable-layout reason as the allocator pair; the §9.3
     /// binding casts to `*std.Io.Threaded`.
     io_threaded: ?*anyopaque = null,
+    /// #216 / ADR-0231 — the embedder's five observability slots, set through
+    /// `zwasm_engine_set_*_hook` (C) or `Engine.set*Hook` (Zig). Every raising
+    /// site reaches them from here, which is why the counter below lives here
+    /// too rather than on the Store.
+    hooks: hooks_mod.Hooks = .{},
+    /// #216 — source of the `u64` instance ids the hooks report. Monotonic and
+    /// never reused, so an id identifies one instantiation for the engine's
+    /// whole life, unlike a pointer a later instance can be handed again.
+    /// Plain integer: a Store is single-threaded by design, and an Engine is
+    /// used from one thread (`include/zwasm.h`, "Threads").
+    next_instance_id: u64 = 0,
 };
+
+const hooks_mod = @import("hooks.zig");

@@ -19,6 +19,7 @@
 #define ZWASM_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "wasm.h"
@@ -39,6 +40,88 @@ extern "C" {
  * do. Per-axis identity accessors are deferred until a consumer needs one
  * (ADR-0221). */
 WASM_API_EXTERN const char* zwasm_version(void);
+
+/* ── Observability hooks ─────────────────────────────────────────────── */
+
+/* Five engine events an embedder can listen to, registered one at a time on
+ * the engine. Passing NULL for the callback clears that slot; `user_data` is
+ * handed back unchanged and is never interpreted.
+ *
+ * Events, not durations: the core carries no clock and no allocator of its
+ * own, so a hook reports that something happened, not how long it took. Time
+ * it on your side if you need it.
+ *
+ * Instances are named by a uint64_t id, never by pointer: the id is monotonic
+ * for the engine's life and never reused, whereas an address can be handed
+ * out again after a delete. Id 0 means "no instance" — an event the engine
+ * raised before one existed, or one belonging to a wasm_func_new function,
+ * which is not part of any instance. Ids are not dense: an instantiation that
+ * fails still consumes one.
+ *
+ * THREE RULES, and they are the whole contract:
+ *
+ *   1. Calling back into this engine, its stores, or its instances from
+ *      inside a hook is UNDEFINED. The hook fires in the middle of the
+ *      operation it reports. Record what you need and return.
+ *   2. Register before you start using the engine, and do not change a slot
+ *      while another thread could be running guest code. The engine reads a
+ *      slot with a plain load and takes no lock (see "Threads" below: the
+ *      engine is single-threaded anyway).
+ *   3. A (pointer, length) string is borrowed for the duration of the call.
+ *      Copy it if you keep it. It is NOT NUL-terminated.
+ */
+
+/* A module was offered to the engine (wasm_module_new / wasm_module_validate).
+ *
+ * `accepted` says whether the engine TOOK the bytes. False covers two things
+ * the engine does not distinguish here: bytes that parse or validation
+ * rejected, and a resource failure while validating them — retrying the same
+ * bytes with memory available can accept them. Treat a false as "not taken",
+ * not as proof the bytes are malformed.
+ *
+ * True is not a promise that a module exists either: an accepted
+ * wasm_module_new can still return NULL if the allocation for the copy fails,
+ * and wasm_module_validate never creates one.
+ *
+ * An empty byte vector (wasm_byte_vec_new_empty's { 0, NULL }) is an offer of
+ * zero bytes and is reported, rejected. A NULL data pointer with a nonzero
+ * size is a malformed call, not bytes: it is refused and raises nothing. */
+typedef void (*zwasm_compile_hook_t)(void* user_data, size_t wasm_len, bool accepted);
+
+/* An instantiation succeeded and was given `instance_id`. A failed one raises
+ * nothing here; when it fails by trapping, the trap hook reports that. */
+typedef void (*zwasm_instantiate_hook_t)(void* user_data, uint64_t instance_id);
+
+/* The engine raised a trap. `trap_kind` is the same value zwasm_trap_kind
+ * reports (the ZWASM_TRAP_* constants below) and `message` the same text
+ * wasm_trap_message would carry. A trap the EMBEDDER mints with wasm_trap_new
+ * is its own, not the engine's, and is not reported. */
+typedef void (*zwasm_trap_hook_t)(void* user_data, uint64_t instance_id,
+                                  int32_t trap_kind, const char* message,
+                                  size_t message_len);
+
+/* A fuel budget ran out. Raised IN ADDITION to a trap event of kind
+ * ZWASM_TRAP_OUT_OF_FUEL for the same instance, so a host that meters fuel
+ * need not switch on the kind. */
+typedef void (*zwasm_fuel_exhausted_hook_t)(void* user_data, uint64_t instance_id);
+
+/* A linear memory grew, on either engine, from a guest memory.grow or from
+ * wasm_memory_grow. Page counts are in that memory's page-size units (64 KiB
+ * by default). A REFUSED grow is the spec's recoverable -1, not an event. */
+typedef void (*zwasm_memory_growth_hook_t)(void* user_data, uint64_t instance_id,
+                                           uint32_t memory_index,
+                                           uint64_t old_pages, uint64_t new_pages);
+
+WASM_API_EXTERN void zwasm_engine_set_compile_hook(
+    wasm_engine_t*, zwasm_compile_hook_t, void* user_data);
+WASM_API_EXTERN void zwasm_engine_set_instantiate_hook(
+    wasm_engine_t*, zwasm_instantiate_hook_t, void* user_data);
+WASM_API_EXTERN void zwasm_engine_set_trap_hook(
+    wasm_engine_t*, zwasm_trap_hook_t, void* user_data);
+WASM_API_EXTERN void zwasm_engine_set_fuel_exhausted_hook(
+    wasm_engine_t*, zwasm_fuel_exhausted_hook_t, void* user_data);
+WASM_API_EXTERN void zwasm_engine_set_memory_growth_hook(
+    wasm_engine_t*, zwasm_memory_growth_hook_t, void* user_data);
 
 /* ── Fuel (deterministic budget) ─────────────────────────────────────── */
 

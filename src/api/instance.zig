@@ -33,6 +33,7 @@ const memory_backing = @import("../runtime/instance/memory_backing.zig");
 const wasi_host = @import("../wasi/host.zig");
 const wasi = @import("wasi.zig");
 const trap_surface = @import("trap_surface.zig");
+const hooks = @import("../runtime/hooks.zig");
 const vec = @import("vec.zig");
 const dispatch = @import("../interp/dispatch.zig");
 const interp_mvp = @import("../interp/mvp.zig");
@@ -571,6 +572,21 @@ pub inline fn storeAllocator(s: *const Store) ?std.mem.Allocator {
     return engineAllocator(engine);
 }
 
+/// #216 — the bytes a `wasm_byte_vec_t` offers, or null when it offers none.
+///
+/// `{ .size = 0, .data = NULL }` is upstream's own empty vector
+/// (`wasm_byte_vec_new_empty`), so it IS an offer — of zero bytes, which the
+/// validator rejects like any other malformed input, and which the compile
+/// hook therefore reports. Unwrapping `data` first made it the one rejection
+/// that raised no event, while a one-byte garbage vector raised one.
+///
+/// `{ .size > 0, .data = NULL }` is a malformed CALL rather than bytes: there
+/// is nothing to read and nothing to report a verdict on. Null, no event.
+fn offeredBytes(bv: *const ByteVec) ?[]const u8 {
+    if (bv.data) |p| return p[0..bv.size];
+    return if (bv.size == 0) &.{} else null;
+}
+
 /// `wasm_module_new(store, binary)` — parse + validate `binary`,
 /// return an owning Module on success or null on parse / validate
 /// failure. The returned Module copies the binary bytes so the C
@@ -579,10 +595,17 @@ pub export fn wasm_module_new(s: ?*Store, binary: ?*const ByteVec) callconv(.c) 
     const store = s orelse return null;
     const bv = binary orelse return null;
     const alloc = storeAllocator(store) orelse return null;
-    const data_ptr = bv.data orelse return null;
-    const slice = data_ptr[0..bv.size];
+    const slice = offeredBytes(bv) orelse return null;
 
-    if (!instantiate.frontendValidate(alloc, slice)) return null;
+    // #216 — the compile funnel: both outcomes are reported from here, and the
+    // Zig facade's `Engine.compile` routes its own success and its validation
+    // failure through this same call (only its pre-parse failure is raised
+    // separately, because it returns before reaching here).
+    if (!instantiate.frontendValidate(alloc, slice)) {
+        hooks.emitCompile(store.engine, slice.len, false);
+        return null;
+    }
+    hooks.emitCompile(store.engine, slice.len, true);
 
     // Copy the bytes so the Module owns them past the call.
     const owned = alloc.dupe(u8, slice) catch return null;
@@ -607,8 +630,13 @@ pub export fn wasm_module_validate(s: ?*Store, binary: ?*const ByteVec) callconv
     const store = s orelse return false;
     const bv = binary orelse return false;
     const alloc = storeAllocator(store) orelse return false;
-    const data_ptr = bv.data orelse return false;
-    return instantiate.frontendValidate(alloc, data_ptr[0..bv.size]);
+    const slice = offeredBytes(bv) orelse return false;
+    // #216 — validating IS offering the module to the engine, so it reports
+    // the same event `wasm_module_new` does. The two are separate calls, so a
+    // host that validates and then creates sees two.
+    const accepted = instantiate.frontendValidate(alloc, slice);
+    hooks.emitCompile(store.engine, slice.len, accepted);
+    return accepted;
 }
 
 /// `wasm_module_delete(module)` — free a Module returned by
@@ -1294,7 +1322,27 @@ const JitReject = error{
     Final,
 };
 
-fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, trap_out: ?*?*Trap, limits: InstantiateLimits) JitReject!*Instance {
+/// #216 — an instantiation failure's trap is an EVENT whether or not the caller
+/// wanted the `wasm_trap_t`. `trap_out` is nullable on `wasm_instance_new` and
+/// `src/zwasm/linker.zig` always passes null, so emitting as a side effect of
+/// building the handle loses the event on those paths — and, for an
+/// out-of-fuel start, the `fuel_exhausted` derived from it.
+///
+/// EVERY trap this file raises before an instance exists goes through here or
+/// `reportInstantiateTrap`: the start failures, the JIT's validity verdict,
+/// and both cross-store refusals. Adding a new one means calling these, not
+/// writing `if (trap_out) |to| to.* = …` again — that shape is the bug.
+fn reportInstantiateTrapMsg(alloc: std.mem.Allocator, store: *Store, inst_id: u64, kind: TrapKind, msg: []const u8, trap_out: ?*?*Trap) void {
+    trap_surface.reportTrap(store, inst_id, kind, msg);
+    if (trap_out) |to| to.* = trap_surface.allocTrapQuiet(alloc, store, kind, msg);
+}
+
+/// `reportInstantiateTrapMsg` with the kind's own fixed message.
+fn reportInstantiateTrap(alloc: std.mem.Allocator, store: *Store, inst_id: u64, kind: TrapKind, trap_out: ?*?*Trap) void {
+    reportInstantiateTrapMsg(alloc, store, inst_id, kind, trap_surface.trapMessageFor(kind), trap_out);
+}
+
+fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, trap_out: ?*?*Trap, limits: InstantiateLimits, inst_id: u64) JitReject!*Instance {
     const alloc = storeAllocator(store) orelse return error.Declined;
     const bytes_ptr = module.bytes_ptr orelse return error.Declined;
     const bytes = bytes_ptr[0..module.bytes_len];
@@ -1317,7 +1365,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     defer ht_arena.deinit();
     const func_imports = collectFuncImportTargets(ht_arena.allocator(), bytes, builder_state, store) catch |err| switch (err) {
         error.CrossStoreImport => {
-            if (trap_out) |to| to.* = crossStoreTrap(alloc, store);
+            crossStoreTrap(alloc, store, trap_out);
             return error.Final;
         },
         else => return error.Declined,
@@ -1333,7 +1381,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
         // (a shape this backend cannot compile or set up) leaves `trap_out`
         // untouched.
         if (!isValidityVerdict(err)) return error.Declined;
-        if (trap_out) |to| to.* = verdictTrap(alloc, store, err);
+        verdictTrap(alloc, store, inst_id, err, trap_out);
         return error.Final;
     };
     // #426 — the instance's address is final, so enter it in the EH registry
@@ -1353,6 +1401,10 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     // ADR-0200 — point the JIT interrupt poll at the now-heap-pinned own flag so
     // the facade `interrupt()` can cooperatively cancel a running guest.
     jit.armSelfInterrupt();
+    // #216 — name this instance to the `memory_growth` hook BEFORE `runStart`
+    // below, so a grow inside a start function reports the id the
+    // `instantiate` event will carry rather than 0.
+    jit.setObservability(.{ .engine = store.engine, .instance_id = inst_id });
     // ADR-0200 / D-478 — attach the store's WASI host so the JIT's planted WASI
     // dispatch thunks do real syscalls (null → compute-only stub: clock/random/
     // fd_write silently no-op). Both fields are `?*anyopaque`. Materialize any
@@ -1415,7 +1467,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
             if (reject == error.Final) {
                 // No shape to name: the start is `[] -> []`, and the one
                 // decline it can raise is already `Declined` above (#431).
-                if (trap_out) |to| to.* = allocTrap(alloc, store, jitErrKind(err, jit.owned.rt.trap_kind));
+                reportInstantiateTrap(alloc, store, inst_id, jitErrKind(err, jit.owned.rt.trap_kind), trap_out);
             }
             unregisterJitEh(jit);
             jit.deinit(alloc);
@@ -1432,6 +1484,7 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     };
     inst.* = .{
         .store = store,
+        .id = inst_id,
         .module = module,
         .runtime = null,
         .jit = jit,
@@ -1600,6 +1653,19 @@ pub const InstantiateLimits = struct {
 /// path, host-fn + cross-instance bindings). Both wrap their
 /// resolver in a `BindingsBuilder` and call here.
 pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: anytype, trap_out: ?*?*Trap, limits: InstantiateLimits, engine: EngineKind) ?*Instance {
+    // #216 — the id is minted HERE, before either engine arm runs, because a
+    // `(start)` function can already raise a trap or grow memory and those
+    // events must name the instance being built. A failed instantiation burns
+    // its id; ids are monotonic, not dense.
+    const inst_id = hooks.nextInstanceId(store.engine);
+    const inst = instantiateWithId(store, module, builder_state, trap_out, limits, engine, inst_id) orelse return null;
+    // The single success point for every entry (`wasm_instance_new`,
+    // `instantiateFacade`, `src/zwasm/linker.zig`) and every engine arm.
+    hooks.emitInstantiate(store.engine, inst_id);
+    return inst;
+}
+
+fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytype, trap_out: ?*?*Trap, limits: InstantiateLimits, engine: EngineKind, inst_id: u64) ?*Instance {
     const alloc = storeAllocator(store) orelse return null;
 
     // #447 — a JIT instance BORROWS the module's bytes (`Module.jit_borrowers`,
@@ -1610,14 +1676,14 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
     // Every entry lands here — the facade and the linker pass the module's own
     // store by construction, so this bites only the C ABI's two.
     if (module.store != store) {
-        if (trap_out) |to| to.* = crossStoreModuleTrap(alloc, store);
+        crossStoreModuleTrap(alloc, store, trap_out);
         return null;
     }
 
     // ADR-0200 — per-instance engine fork, shared by EVERY entry point
     // (`instantiateFacade`, `wasm_instance_new`, `src/zwasm/linker.zig`). `.jit`
     // builds a native JIT-backed instance; `.interp` forces the interp setup below.
-    if (engine == .jit) return instantiateJit(store, module, builder_state, trap_out, limits) catch null;
+    if (engine == .jit) return instantiateJit(store, module, builder_state, trap_out, limits, inst_id) catch null;
 
     // ADR-0200 / D-496 / ADR-0229 — `.auto` tries the JIT first and reads the
     // tag of its rejection. `Declined` = a capability decline (an import it
@@ -1630,7 +1696,7 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
     // `.claude/rules/single_slot_dual_meaning.md`: a bare `null` cannot carry
     // both meanings, the tag is the second axis.
     if (engine == .auto) {
-        if (instantiateJit(store, module, builder_state, trap_out, limits)) |inst| {
+        if (instantiateJit(store, module, builder_state, trap_out, limits, inst_id)) |inst| {
             return inst;
         } else |reject| switch (reject) {
             error.Final => return null,
@@ -1672,6 +1738,7 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
     };
     inst.* = .{
         .store = store,
+        .id = inst_id,
         .module = module,
         .runtime = inst_rt,
     };
@@ -1700,7 +1767,7 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
 
     const bindings = builder.build(builder.ctx, arena.allocator(), bytes, store) catch |err| {
         if (err == error.CrossStoreImport) {
-            if (trap_out) |to| to.* = crossStoreTrap(alloc, store);
+            crossStoreTrap(alloc, store, trap_out);
         }
         if (inst.arena) |a2| {
             // EXEMPT-FALLBACK: ADR-0014 — parkAsZombie OOM accepts arena leak over UAF of cross-module references.
@@ -1764,8 +1831,8 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
             if (sfx < inst_rt.host_calls.len) {
                 if (inst_rt.host_calls[sfx]) |hc| {
                     hc.fn_ptr(inst_rt, hc.ctx) catch |err| {
-                        if (trap_out) |to| {
-                            if (storeAllocator(store)) |sa| to.* = allocTrap(sa, store, mapInterpTrap(err));
+                        if (storeAllocator(store)) |sa| {
+                            reportInstantiateTrap(sa, store, inst_id, mapInterpTrap(err), trap_out);
                         }
                         failBuiltInstance(alloc, store, inst, inst_rt);
                         return null;
@@ -1799,8 +1866,8 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
                 // D-275: surface the trap via `trap_out` (wasm-c-api contract).
                 // Store-level alloc (not the per-instance arena) so the Trap
                 // outlives the parked instance; caller frees via wasm_trap_delete.
-                if (trap_out) |to| {
-                    if (storeAllocator(store)) |sa| to.* = allocTrap(sa, store, mapInterpTrap(err));
+                if (storeAllocator(store)) |sa| {
+                    reportInstantiateTrap(sa, store, inst_id, mapInterpTrap(err), trap_out);
                 }
                 failBuiltInstance(alloc, store, inst, inst_rt);
                 return null;
@@ -2354,6 +2421,17 @@ pub export fn wasm_memory_grow(m: ?*Memory, delta: u32) callconv(.c) bool {
                 break :blk g;
             };
             rt.setMemory0Bytes(grown);
+            // #216 — this arm reimplements the grow rather than calling
+            // `runtime.growMemory` (it deliberately skips the declared-max
+            // check, see the doc comment above), so the hook is raised here
+            // rather than inherited. The JIT arm below does route through
+            // `jitMemoryGrow` and inherits it.
+            hooks.emitMemoryGrowth(
+                .{ .engine = if (inst.store) |st| st.engine else null, .instance_id = inst.id },
+                0,
+                old_pages,
+                old_pages + delta,
+            );
             return true;
         }
         if (jitOf(inst)) |jit| { // D-496 — re-syncs vm_base/mem_limit internally
@@ -2369,14 +2447,24 @@ pub export fn wasm_memory_grow(m: ?*Memory, delta: u32) callconv(.c) bool {
     const ps_log2: u6 = @intCast(mi.page_size_log2);
     const old_len = mi.bytes.len;
     const new_bytes = ((old_len >> ps_log2) + delta) << ps_log2;
+    // #216 — a `wasm_memory_new` memory belongs to no instance, so it reports
+    // under id 0, the value the header already defines for exactly that. The
+    // alternative, staying silent, would make the growth hook's own contract
+    // ("from a guest memory.grow or from wasm_memory_grow") false for a whole
+    // kind of memory, and would skew any host totalling pages grown.
+    const grow_site: hooks.Site = .{ .engine = store.engine, .instance_id = 0 };
+    const new_pages = new_bytes >> ps_log2;
+    const old_pages = old_len >> ps_log2;
     // ADR-0202 D1 — guarded backing commits in place.
     if (mi.reservation) |*res| {
         mi.bytes = memory_backing.growGuarded(res, new_bytes) orelse return false;
+        hooks.emitMemoryGrowth(grow_site, 0, old_pages, new_pages);
         return true;
     }
     const grown = alloc.realloc(mi.bytes, new_bytes) catch return false;
     @memset(grown[old_len..new_bytes], 0);
     mi.bytes = grown;
+    hooks.emitMemoryGrowth(grow_site, 0, old_pages, new_pages);
     return true;
 }
 
@@ -2738,17 +2826,17 @@ pub export fn wasm_func_call(
     // `unreachable`, which short-circuits via host_calls in the
     // dispatch loop. For defined functions the lookup yields
     // the real ZirFunc.
-    if (handle.func_idx >= inst.func_ptrs_storage.len) return allocTrap(alloc, store, .binding_error);
+    if (handle.func_idx >= inst.func_ptrs_storage.len) return allocTrap(alloc, store, inst.id, .binding_error);
 
     const zfunc = inst.func_ptrs_storage[handle.func_idx];
     const sig = zfunc.sig;
     const args_size = if (args) |a| a.size else 0;
     const results_size = if (results) |r| r.size else 0;
-    if (args_size != sig.params.len) return allocTrap(alloc, store, .binding_error);
-    if (results_size != sig.results.len) return allocTrap(alloc, store, .binding_error);
+    if (args_size != sig.params.len) return allocTrap(alloc, store, inst.id, .binding_error);
+    if (results_size != sig.results.len) return allocTrap(alloc, store, inst.id, .binding_error);
 
     const num_locals = sig.params.len + zfunc.locals.len;
-    const locals = alloc.alloc(runtime.Value, num_locals) catch return allocTrap(alloc, store, .out_of_memory);
+    const locals = alloc.alloc(runtime.Value, num_locals) catch return allocTrap(alloc, store, inst.id, .out_of_memory);
     defer alloc.free(locals);
     for (locals) |*l| l.* = .{ .bits128 = 0 };
     if (args) |a| if (a.data) |dp| {
@@ -2762,18 +2850,18 @@ pub export fn wasm_func_call(
         .operand_base = op_base,
         .pc = 0,
         .func = zfunc,
-    }) catch |err| return allocTrap(alloc, store, mapInterpTrap(err));
+    }) catch |err| return allocTrap(alloc, store, inst.id, mapInterpTrap(err));
 
     dispatch.run(rt, dispatchTable(), zfunc.instrs.items) catch |err| {
         _ = rt.popFrame();
         rt.operand_len = op_base;
-        return allocTrap(alloc, store, mapInterpTrap(err));
+        return allocTrap(alloc, store, inst.id, mapInterpTrap(err));
     };
     _ = rt.popFrame();
 
     if (rt.operand_len < op_base + sig.results.len) {
         rt.operand_len = op_base;
-        return allocTrap(alloc, store, .binding_error);
+        return allocTrap(alloc, store, inst.id, .binding_error);
     }
     if (results) |r| if (r.data) |dp| {
         var i: usize = sig.results.len;
@@ -2806,11 +2894,12 @@ fn hostFuncCallDirect(
     const args_size = if (args) |a| a.size else 0;
     const results_size = if (results) |r| r.size else 0;
     if (args_size != hp.params.len or results_size != hp.results.len) {
-        return if (alloc) |al| allocTrap(al, store, .binding_error) else null;
+        // #216 — id 0: a `wasm_func_new` func belongs to no instance.
+        return if (alloc) |al| allocTrap(al, store, 0, .binding_error) else null;
     }
     if (hp.callback_env) |cb| return cb(hp.env, args, results);
     if (hp.callback) |cb| return cb(args, results);
-    return if (alloc) |al| allocTrap(al, store, .binding_error) else null;
+    return if (alloc) |al| allocTrap(al, store, 0, .binding_error) else null;
 }
 
 /// ADR-0200 — cast the Zone-1 `Instance.jit` opaque slot to the engine type at
@@ -2833,13 +2922,13 @@ fn wasmFuncCallJit(jit: *runner.JitInstance, inst: *Instance, store: *Store, all
     // a table or `ref.func` (wasm_ref_as_func) need not be exported, so the prior
     // jitExportName lookup returned null → binding_error. func_idx is always valid
     // (it came from the Func handle / FuncEntity).
-    const sig = jit.funcSigByIdx(func_idx) orelse return allocTrap(alloc, store, .binding_error);
+    const sig = jit.funcSigByIdx(func_idx) orelse return allocTrap(alloc, store, inst.id, .binding_error);
     const args_size = if (args) |a| a.size else 0;
     const results_size = if (results) |r| r.size else 0;
-    if (args_size != sig.params.len) return allocTrap(alloc, store, .binding_error);
-    if (results_size != sig.results.len) return allocTrap(alloc, store, .binding_error);
+    if (args_size != sig.params.len) return allocTrap(alloc, store, inst.id, .binding_error);
+    if (results_size != sig.results.len) return allocTrap(alloc, store, inst.id, .binding_error);
     // The marshalling buffers below hold 16 slots: the engine's limit.
-    if (sig.params.len > 16 or sig.results.len > 16) return unsupportedShapeTrap(alloc, store, sig);
+    if (sig.params.len > 16 or sig.results.len > 16) return unsupportedShapeTrap(alloc, store, inst.id, sig);
 
     var abuf: [16]u64 = undefined;
     if (args) |a| if (a.data) |dp| {
@@ -2848,7 +2937,7 @@ fn wasmFuncCallJit(jit: *runner.JitInstance, inst: *Instance, store: *Store, all
 
     if (sig.results.len > 1) {
         var rbuf: [16]runner.TypedResult = undefined;
-        jit.invokeMultiIdx(func_idx, abuf[0..sig.params.len], rbuf[0..sig.results.len]) catch |err| return jitErrToTrap(err, sig, jit, alloc, store);
+        jit.invokeMultiIdx(func_idx, abuf[0..sig.params.len], rbuf[0..sig.results.len]) catch |err| return jitErrToTrap(err, sig, jit, alloc, store, inst.id);
         if (results) |r| if (r.data) |dp| {
             // #443 — a reference result mints an owned handle and the caller
             // owns nothing when a trap comes back, so `dp` is written only
@@ -2857,7 +2946,7 @@ fn wasmFuncCallJit(jit: *runner.JitInstance, inst: *Instance, store: *Store, all
             for (0..sig.results.len) |idx| {
                 staged[idx] = typedResultToCVal(rbuf[idx], inst, alloc) orelse {
                     releaseRefVals(staged[0..idx], alloc);
-                    return allocTrap(alloc, store, .out_of_memory);
+                    return allocTrap(alloc, store, inst.id, .out_of_memory);
                 };
             }
             @memcpy(dp[0..sig.results.len], staged[0..sig.results.len]);
@@ -2869,22 +2958,22 @@ fn wasmFuncCallJit(jit: *runner.JitInstance, inst: *Instance, store: *Store, all
     // (the scalar `invokeIdx` runs a ref-result func as void); marshal the raw
     // payload into an owned `*Ref` C handle.
     if (sig.results.len == 1 and std.meta.activeTag(sig.results[0]) == .ref) {
-        const payload = jit.invokeRefIdx(func_idx, abuf[0..sig.params.len]) catch |err| return jitErrToTrap(err, sig, jit, alloc, store);
+        const payload = jit.invokeRefIdx(func_idx, abuf[0..sig.params.len]) catch |err| return jitErrToTrap(err, sig, jit, alloc, store, inst.id);
         if (results) |r| if (r.data) |dp| {
             // Null only when the ref's C handle could not be allocated. No
             // staging here (#443): one element has nothing minted before it.
-            dp[0] = refResultToCVal(sig.results[0], payload, inst, alloc) orelse return allocTrap(alloc, store, .out_of_memory);
+            dp[0] = refResultToCVal(sig.results[0], payload, inst, alloc) orelse return allocTrap(alloc, store, inst.id, .out_of_memory);
         };
         return null;
     }
 
-    const got = jit.invokeIdx(func_idx, abuf[0..sig.params.len]) catch |err| return jitErrToTrap(err, sig, jit, alloc, store);
+    const got = jit.invokeIdx(func_idx, abuf[0..sig.params.len]) catch |err| return jitErrToTrap(err, sig, jit, alloc, store, inst.id);
     if (sig.results.len == 1) {
         if (results) |r| if (r.data) |dp| {
             // No value back for a one-result shape, or one the single-u64
             // carrier cannot hold (v128).
-            const bits = got orelse return unsupportedShapeTrap(alloc, store, sig);
-            dp[0] = jitBitsToCVal(sig.results[0], bits) orelse return unsupportedShapeTrap(alloc, store, sig);
+            const bits = got orelse return unsupportedShapeTrap(alloc, store, inst.id, sig);
+            dp[0] = jitBitsToCVal(sig.results[0], bits) orelse return unsupportedShapeTrap(alloc, store, inst.id, sig);
         };
     }
     return null;
@@ -2893,14 +2982,14 @@ fn wasmFuncCallJit(jit: *runner.JitInstance, inst: *Instance, store: *Store, all
 /// #431 — an `unsupported` trap whose message names the declined shape, e.g.
 /// `no JIT entry helper for () -> (i32 f32)`. Falls back to the kind's fixed
 /// message when the shape does not fit the buffer.
-fn unsupportedShapeTrap(alloc: std.mem.Allocator, store: *Store, sig: zir.FuncType) ?*Trap {
+fn unsupportedShapeTrap(alloc: std.mem.Allocator, store: *Store, inst_id: u64, sig: zir.FuncType) ?*Trap {
     var buf: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    const msg = writeShape(&w, sig) catch return allocTrap(alloc, store, .unsupported);
-    return trap_surface.allocTrapWithMessage(alloc, store, .unsupported, msg);
+    const msg = writeShape(&w, sig) catch return allocTrap(alloc, store, inst_id, .unsupported);
+    return trap_surface.allocTrapWithMessage(alloc, store, inst_id, .unsupported, msg);
 }
 
-fn writeShape(w: *std.Io.Writer, sig: zir.FuncType) ![]const u8 {
+pub fn writeShape(w: *std.Io.Writer, sig: zir.FuncType) ![]const u8 {
     try w.writeAll("no JIT entry helper for (");
     for (sig.params, 0..) |p, i| {
         if (i != 0) try w.writeByte(' ');
@@ -3088,24 +3177,26 @@ pub fn isValidityVerdict(err: runner.Error) bool {
 /// #233 — the verdict as the embedder sees it: `ZWASM_TRAP_INVALID_MODULE`
 /// with the error name in the message, so `NULL` comes with its reason
 /// (Refs #353).
-fn verdictTrap(alloc: std.mem.Allocator, store: *Store, err: runner.Error) ?*Trap {
+fn verdictTrap(alloc: std.mem.Allocator, store: *Store, inst_id: u64, err: runner.Error, trap_out: ?*?*Trap) void {
     var buf: [96]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "invalid module: {s}", .{@errorName(err)}) catch "invalid module";
-    return trap_surface.allocTrapWithMessage(alloc, store, .invalid_module, msg);
+    reportInstantiateTrapMsg(alloc, store, inst_id, .invalid_module, msg, trap_out);
 }
 
 /// #436 — the one binder failure that carries a reason out to the embedder.
 /// Every other one still returns a bare NULL (#353).
-fn crossStoreTrap(alloc: std.mem.Allocator, store: *Store) ?*Trap {
-    return trap_surface.allocTrapWithMessage(alloc, store, .binding_error, "import extern belongs to a different store");
+fn crossStoreTrap(alloc: std.mem.Allocator, store: *Store, trap_out: ?*?*Trap) void {
+    // #216 — id 0 on both cross-store refusals: the instance is refused, so
+    // there is none to name.
+    reportInstantiateTrapMsg(alloc, store, 0, .binding_error, "import extern belongs to a different store", trap_out);
 }
 
 /// #447 — the module's own refusal, naming the route that does work.
 /// `wasm_module_obtain` goes through `wasm_module_new`, which COPIES the bytes
 /// into the obtaining store, so nothing is borrowed across the boundary — which
 /// is what `wasm_shared_module_t` exists for.
-fn crossStoreModuleTrap(alloc: std.mem.Allocator, store: *Store) ?*Trap {
-    return trap_surface.allocTrapWithMessage(alloc, store, .binding_error, "module belongs to a different store; share it with wasm_module_share and wasm_module_obtain");
+fn crossStoreModuleTrap(alloc: std.mem.Allocator, store: *Store, trap_out: ?*?*Trap) void {
+    reportInstantiateTrapMsg(alloc, store, 0, .binding_error, "module belongs to a different store; share it with wasm_module_share and wasm_module_obtain", trap_out);
 }
 
 /// #431 — the kind for an error out of a post-instantiate JIT invoke. The
@@ -3121,10 +3212,10 @@ fn jitErrKind(err: runner.Error, raw_trap_code: u32) TrapKind {
     };
 }
 
-fn jitErrToTrap(err: runner.Error, sig: zir.FuncType, jit: *runner.JitInstance, alloc: std.mem.Allocator, store: *Store) ?*Trap {
+fn jitErrToTrap(err: runner.Error, sig: zir.FuncType, jit: *runner.JitInstance, alloc: std.mem.Allocator, store: *Store, inst_id: u64) ?*Trap {
     const kind = jitErrKind(err, jit.owned.rt.trap_kind);
-    if (kind == .unsupported) return unsupportedShapeTrap(alloc, store, sig);
-    return allocTrap(alloc, store, kind);
+    if (kind == .unsupported) return unsupportedShapeTrap(alloc, store, inst_id, sig);
+    return allocTrap(alloc, store, inst_id, kind);
 }
 
 // ============================================================

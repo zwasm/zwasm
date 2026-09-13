@@ -40,6 +40,7 @@ pub const TypedResult = buffer_write.TypedResult;
 // ADR-0079 Step 1 — setup carve-out (RuntimeOwned + setupRuntime +
 // hostDispatchTrap). Re-exports below keep callers unchanged.
 const setup_mod = @import("setup.zig");
+const hooks_mod = @import("../runtime/hooks.zig");
 // D-451 — same WASI import oracle the JIT setup uses to bind dispatch slots
 // (`populateDispatch` → `jit_dispatch.lookup`); a `null` lookup means the
 // import has no host handler, so it must reject at instantiation rather than
@@ -1224,6 +1225,14 @@ pub const JitInstance = struct {
     /// a module with no memory.
     pub fn setMemoryPagesLimit(self: *JitInstance, max_pages: ?u64) void {
         if (self.owned.mem_ctx) |ctx| ctx.host_max_pages = max_pages;
+    }
+
+    /// #216 — name this instance to the `memory_growth` hook. Called from
+    /// `instantiateInternal` before `runStart`, so a `memory.grow` inside a
+    /// start function already reports the instance's own id. A module with no
+    /// memory has no `mem_ctx` and no growth to report.
+    pub fn setObservability(self: *JitInstance, site: hooks_mod.Site) void {
+        if (self.owned.mem_ctx) |ctx| ctx.hook_site = site;
     }
 
     /// ADR-0200 increment 5 — host-facade `Memory.grow`. Grows linear
