@@ -10,6 +10,8 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-09-14
+
 ### Added
 
 - **An embedder can hear what the engine does** (#216). Five observability
@@ -19,31 +21,18 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   facade's `Engine`. They report events, not durations — the core carries no
   clock — and name instances by a monotonic `uint64_t` id rather than a
   pointer, which is reusable after a delete. ADR-0231.
-
-### Changed
-
-- **A host table that has been imported no longer grows** (#449). The binder
-  hands an importer a value copy of a `wasm_table_new` table whose `refs`
-  header aliases the same buffer, so growing from either side reallocated it
-  under the other: `wasm_table_grow` left the guest reading the freed buffer,
-  and the guest's `table.grow` left the handle on it. Both sides now decline —
-  `false` and `-1` respectively, results the C API and the spec each allow —
-  instead of producing a stale pointer. Reads, writes and `wasm_table_size`
-  are unaffected, and a table that is never imported grows as before. Sharing
-  one `TableInstance`, the shape memory imports already have, is the real fix
-  and is tracked in #449.
-
-### Changed
-
-- **A module is instantiated only on the store that created it** (#447).
-  `wasm_instance_new` / `zwasm_instance_new_ex` now return NULL with a
-  `ZWASM_TRAP_BINDING_ERROR` when the module belongs to another store: a
-  JIT-backed instance borrows the module's bytes, and `wasm_module_delete`
-  defers them to the module's own store, so deleting that store left the
-  instance reading freed memory — silently, with a wrong result rather than a
-  trap. Move a module between stores with `wasm_module_share` +
-  `wasm_module_obtain`, which copies the bytes into the obtaining store; that
-  is what `wasm_shared_module_t` is for.
+- **`zwasm_instance_engine`** — an instance reports the engine that runs it,
+  `ZWASM_ENGINE_JIT` or `ZWASM_ENGINE_INTERP`, never `AUTO` (ADR-0200 D3).
+  `Instance.engine()` on the Zig facade. An `AUTO` instantiation runs a module
+  the JIT declines on the interpreter without saying so; this is how an
+  embedder finds out.
+- **`ZWASM_TRAP_INVALID_MODULE` (19)** — the JIT's validity verdict at
+  instantiation: a spec rule it checks that the front-end validator does not
+  (#285). `AUTO` does not retry the interpreter on it. See the entry under
+  Changed.
+- **`ZWASM_TRAP_UNSUPPORTED` (20)** — the trap kind for a call whose shape the
+  instance's engine has no implementation for. Both are appended, so the
+  existing `ZWASM_TRAP_*` values are unchanged.
 
 ### Fixed
 
@@ -56,55 +45,6 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   now and frees it at `wasm_store_delete`, exactly as it already did for a host
   callback's payload (#439). An import of such an entity from another store is
   refused for the same reason that one naming another store's instance is.
-
-### Added
-
-- **`zwasm_instance_engine`** — an instance reports the engine that runs it,
-  `ZWASM_ENGINE_JIT` or `ZWASM_ENGINE_INTERP`, never `AUTO` (ADR-0200 D3).
-  `Instance.engine()` on the Zig facade. An `AUTO` instantiation runs a module
-  the JIT declines on the interpreter without saying so; this is how an
-  embedder finds out.
-- **`ZWASM_TRAP_UNSUPPORTED` (20)** — the trap kind for a call whose shape the
-  instance's engine has no implementation for. Appended, so the existing
-  `ZWASM_TRAP_*` values are unchanged.
-
-### Changed
-
-- **A tail call whose frame cannot carry its arguments is declined by the JIT,
-  not miscompiled** (#424). `return_call`, `return_call_indirect` and
-  `return_call_ref` consume the caller's frame before jumping, so a callee
-  whose arguments overflow the registers — or that returns through a
-  MEMORY-class buffer — read somewhere the arguments were not: the three forms
-  returned a garbage value, trapped `oob_table` and died on a fatal signal.
-  All three now decline, and `zwasm run` names the op and the shape instead of
-  reporting a bare `UnsupportedOp`; the default engine runs the module on the
-  interpreter. A cross-module `return_call` to an import is unaffected (it
-  keeps its frame). A cross-module *importer* that hits the decline cannot
-  fall back to the interpreter, so through the C API it now fails to
-  instantiate rather than answering wrongly.
-
-- **`zwasm run` has one default-entry contract on every path** (#220,
-  ADR-0230). The entry is `_start`, else `main`; the third fallback — the
-  first function export, whatever its name — is gone: a module with neither
-  is refused with exit 1 and the reason (`--invoke` names the export instead).
-  A zero-parameter entry runs whatever its results, and the results print on
-  stdout on `--engine jit` and on a `.cwasm` as they already did on the
-  default engine. An entry that takes parameters is refused by name with exit
-  1 on every path, where `--engine jit` and a `.cwasm` used to instantiate and
-  exit 0 without running it; a shape the JIT cannot call (a lone reference
-  result, a mixed multi-value result) is refused the same way instead of
-  silently skipped.
-- **A host callback's function instance belongs to the store, not to the
-  handle** (#439). `wasm_func_new[_with_env]`'s payload — the callback, its
-  `env` and finalizer, the marshalled arity — is now released by
-  `wasm_store_delete` instead of by `wasm_func_delete`, so **`finalizer(env)`
-  fires at store teardown rather than at handle deletion**, mid-teardown, so a
-  finalizer must release its own resources and not call back into that store.
-  Embedders that relied on the old timing must move that work.
-  `wasm_func_delete` still releases the handle; what changes is that deleting
-  it no longer destroys the function for the instances that imported it.
-
-### Fixed
 
 - **A cross-module `return_call` to an import delivers every argument** (#424).
   It is the one tail form that keeps its frame — it lowers as call-and-return
@@ -129,14 +69,6 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   keeps its tag identity across the boundary too: a tag index is per module, so
   a later `throw_ref` was resolving the thrower's number among the catcher's
   tags and its own handler caught what should have escaped.
-
-- **A trap message ends with the NUL `wasm.h` declares, and its size says so**
-  (#441). `wasm_trap_message` copied the message bytes alone into a
-  `wasm_message_t` the header types as NUL-terminated, so a C host reading it
-  as a string ran past the allocation — measured at 42 bytes against a `size`
-  of 36. The vector now carries the NUL and counts it, the text being
-  `size - 1` bytes, and `wasm_trap_new` takes a host message either way so a
-  round trip keeps its length.
 
 - **A multi-value result is handed over whole or not at all** (#443). The C
   API marshalled the JIT's results straight into the caller's buffer one at a
@@ -164,12 +96,14 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   interpreter, whose binder would build the same dangling reference. A
   standalone global, memory or table is handle-owned rather than store-owned
   and is not refused. Composition inside one store is unchanged.
+
 - **`wasm_func_delete` no longer frees a host callback an instance is still
   importing** (#439). Every binding made from the handle kept the payload's
   raw address and nothing counted them, so deleting the handle ran the
   finalizer and freed the arity out from under the live importers; the next
   call into the import read released memory on both engines. See the
   finalizer-timing note under Changed.
+
 - **On the interpreter, a re-exported import binds to what the re-exporter
   bound, so a chain reaches its definition** (#427). The binder pointed the
   importer at the re-exporter's own import slot — a placeholder whose body is
@@ -187,6 +121,147 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   function reference (`(ref $t)`) at a different index failed to link on
   both engines. Signatures naming a struct or array type still decline on
   the JIT.
+
+### Changed
+
+- **A module the JIT judges invalid is refused, on the default engine too**
+  (#233, ADR-0229). `instantiateJit` produced one NULL for two different
+  things — a shape the JIT cannot take, and a spec rule it checks that the
+  front-end validator does not (#285) — and `.auto` retried the interpreter on
+  both, so a module `--engine jit` and `zwasm compile` refused **ran to exit 0
+  by default**. A verdict is now final on `.auto` and `.jit` alike: NULL with a
+  `ZWASM_TRAP_INVALID_MODULE` trap naming it. A capability decline still falls
+  through to the interpreter. **This is observable**: a module with a duplicate
+  export name, or a start function that takes parameters, instantiated and ran
+  under 2.6.0 and now fails to instantiate — `zwasm run` exits 1 with the
+  reason where it exited 0 with a result. `wasm_module_validate` still answers
+  true for these, which is #285.
+
+- **A trap message ends with the NUL `wasm.h` declares, and its size says so**
+  (#441). `wasm_trap_message` copied the message bytes alone into a
+  `wasm_message_t` the header types as NUL-terminated, so a C host reading it
+  as a string ran past the allocation — measured at 42 bytes against a `size`
+  of 36. The vector now carries the NUL and counts it, the text being
+  `size - 1` bytes, and `wasm_trap_new` takes a host message either way so a
+  round trip keeps its length. **A host that slices the message by `size`
+  rather than reading it as a C string must read `size - 1`**, or it gains a
+  trailing NUL inside the string it builds; `zwasm-rust-sdk` 0.2.0 is such a
+  host.
+
+- **A guest's `argv[0]` is the module file's base name** (#256). `zwasm run
+  sub/guest.wasm` handed the guest the path as written; it now hands it
+  `guest.wasm`, whatever path reached the CLI, as wasmtime does. A guest that
+  echoed or parsed `argv[0]` sees the shorter string.
+
+- **A host callback's function instance belongs to the store, not to the
+  handle** (#439). `wasm_func_new[_with_env]`'s payload — the callback, its
+  `env` and finalizer, the marshalled arity — is now released by
+  `wasm_store_delete` instead of by `wasm_func_delete`, so **`finalizer(env)`
+  fires at store teardown rather than at handle deletion**, mid-teardown, so a
+  finalizer must release its own resources and not call back into that store.
+  Embedders that relied on the old timing must move that work.
+  `wasm_func_delete` still releases the handle; what changes is that deleting
+  it no longer destroys the function for the instances that imported it.
+
+- **A tail call whose frame cannot carry its arguments is declined by the JIT,
+  not miscompiled** (#424). `return_call`, `return_call_indirect` and
+  `return_call_ref` consume the caller's frame before jumping, so a callee
+  whose arguments overflow the registers — or that returns through a
+  MEMORY-class buffer — read somewhere the arguments were not: the three forms
+  returned a garbage value, trapped `oob_table` and died on a fatal signal.
+  All three now decline, and `zwasm run` names the op and the shape instead of
+  reporting a bare `UnsupportedOp`; the default engine runs the module on the
+  interpreter. A cross-module `return_call` to an import is unaffected (it
+  keeps its frame). A cross-module *importer* that hits the decline cannot
+  fall back to the interpreter, so through the C API it now fails to
+  instantiate rather than answering wrongly.
+
+- **`zwasm run` has one default-entry contract on every path** (#220,
+  ADR-0230). The entry is `_start`, else `main`; the third fallback — the
+  first function export, whatever its name — is gone: a module with neither
+  is refused with exit 1 and the reason (`--invoke` names the export instead).
+  A zero-parameter entry runs whatever its results, and the results print on
+  stdout on `--engine jit` and on a `.cwasm` as they already did on the
+  default engine. An entry that takes parameters is refused by name with exit
+  1 on every path, where `--engine jit` and a `.cwasm` used to instantiate and
+  exit 0 without running it; a shape the JIT cannot call (a lone reference
+  result, a mixed multi-value result) is refused the same way instead of
+  silently skipped.
+
+- **A host table that has been imported no longer grows** (#449). The binder
+  hands an importer a value copy of a `wasm_table_new` table whose `refs`
+  header aliases the same buffer, so growing from either side reallocated it
+  under the other: `wasm_table_grow` left the guest reading the freed buffer,
+  and the guest's `table.grow` left the handle on it. Both sides now decline —
+  `false` and `-1` respectively, results the C API and the spec each allow —
+  instead of producing a stale pointer. Reads, writes and `wasm_table_size`
+  are unaffected, and a table that is never imported grows as before.
+
+- **A module is instantiated only on the store that created it** (#447).
+  `wasm_instance_new` / `zwasm_instance_new_ex` now return NULL with a
+  `ZWASM_TRAP_BINDING_ERROR` when the module belongs to another store: a
+  JIT-backed instance borrows the module's bytes, and `wasm_module_delete`
+  defers them to the module's own store, so deleting that store left the
+  instance reading freed memory — silently, with a wrong result rather than a
+  trap. Move a module between stores with `wasm_module_share` +
+  `wasm_module_obtain`, which copies the bytes into the obtaining store; that
+  is what `wasm_shared_module_t` is for.
+
+### Documentation
+
+- The README's WASI rows claim what a lane re-derives rather than what a run
+  once printed: 0.1 names both engines and the upstream `adapters/zwasm.py`,
+  and 0.2 / 0.3 name the lanes that reconcile their counts (#395, #380). The
+  Wasm 3.0 row now names the engine its "green" describes, because the JIT
+  lane carries enumerated known-wrong directives that the interpreter lane does
+  not (#378). `include/zwasm.h` states that the engine is single-threaded —
+  one thread per process, not per Store — and gives the trap-message NUL
+  contract beside the kind. ClojureWasm is no longer named as a consumer
+  (#407).
+
+### Known limitations
+
+- **The JIT returns a constant for a `try_table` f32/f64 result** (#378), on
+  the default engine, with no trap: the value thrown is ignored. Eight
+  `assert_return` directives in the exception-handling corpus — every float
+  directive in it — are enumerated in the JIT spec lane's known list, which
+  fails the run if one of them starts passing or a ninth appears. The
+  interpreter returns each correctly, so `--engine interp` is the workaround.
+- **A host callback re-exported by a JIT-backed module binds on neither the JIT
+  nor the default engine** (#437). In a chain whose root is a `wasm_func_new` callback rather than a
+  guest function, the downstream importer fails to instantiate with NULL and
+  no trap on `AUTO` and `JIT`; `INTERP` links it since #427. A chain whose root
+  is a guest-defined function works on all three.
+- **A re-exported func import is type-checked against the re-exporter's
+  declaration**, not against the defining function's type (#440). Where the
+  declaration is a strict supertype, a downstream import the spec links is
+  refused. One-directional — a missed link, never an unsound one.
+- **An imported host table declines both grows** (#449, above). Sharing one
+  `TableInstance`, the shape memory imports already have, is the real fix and
+  is not in this release.
+- **The JIT declines every tail-call form with overflow arguments** (#424);
+  the default engine runs such a module on the interpreter, and a cross-module
+  importer that hits the decline fails to instantiate. On Apple aarch64 the
+  MEMORY-class return-buffer offset and the frame reservation follow different
+  packing rules (#425); the `deep` case in `cross_module_abi.c` did not
+  reproduce it on the aarch64-macos leg, so nothing is declined for it.
+- **A cross-module func import whose signature takes a `v128` parameter is
+  declined by the JIT** — the SysV call site's own overflow rule excludes
+  v128, so the bridge thunk cannot size a copy for it. A `v128` *result* is
+  carried.
+- **Instantiation failures still return NULL with no trap for three causes**
+  (#353, narrowed): an unknown import module, an import type mismatch, and a
+  JIT capability decline. A store-boundary refusal (#436, #446, #447) and a
+  validity verdict (#233) now carry a trap.
+- **The JIT does not trap on the GC heap cap** (#364): an `array.new_default`
+  past the 4 GiB cap returns a reference and the guest runs on, where the
+  interpreter traps `out_of_memory`.
+- **The C API has no way to feed a guest's stdin** (#365):
+  `zwasm_wasi_config_inherit_stdio` routes stdout and stderr but not fd 0.
+- **The official preview1 corpus is host-dependent on Windows** — 65/72 on
+  CI's `windows-2022`, 64/72 on a Windows 11 host, which also fails
+  `path_symlink_trailing_slashes` (#290). Symlink, hardlink and readdir cases.
+  Linux and macOS are 72/72 on both engines.
 
 ## [2.6.0] - 2026-08-31
 
