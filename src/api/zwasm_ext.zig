@@ -149,6 +149,21 @@ pub export fn zwasm_instance_new_ex(
     return capi.instanceNewWithEngine(s, m, imports, trap_out, eng);
 }
 
+/// ADR-0200 D3 — the engine that RUNS this instance, into `out`:
+/// `ZWASM_ENGINE_JIT` (1) or `ZWASM_ENGINE_INTERP` (2). Never `AUTO` — that is
+/// what the embedder asked for, this is what it got. False (out untouched) for
+/// a null instance, or one that reached neither engine.
+pub export fn zwasm_instance_engine(i: ?*const Instance, out: ?*i32) callconv(.c) bool {
+    const inst = i orelse return false;
+    const jit = capi.jitOf(@constCast(inst));
+    // No kind is recorded beside the fork: `Instance` holds exactly one of
+    // `runtime` / `jit`, so the fork itself is the answer.
+    std.debug.assert(jit == null or inst.runtime == null);
+    const kind: i32 = if (jit != null) 1 else if (inst.runtime != null) 2 else return false;
+    if (out) |p| p.* = kind;
+    return true;
+}
+
 // ============================================================
 // Tests
 // ============================================================

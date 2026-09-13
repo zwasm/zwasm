@@ -21,6 +21,7 @@ const _dispatch = @import("../interp/dispatch.zig");
 const _zir = @import("../ir/zir.zig");
 const _runner = @import("../engine/runner.zig"); // ADR-0200 JIT engine (Zone 2)
 const _trap_surface = @import("../api/trap_surface.zig"); // JIT trap_kind → TrapKind
+const _zwasm_ext = @import("../api/zwasm_ext.zig"); // ADR-0200 D3 engine read-back
 
 const _memory = @import("memory.zig");
 const _global = @import("global.zig");
@@ -114,6 +115,19 @@ pub const Instance = struct {
         if (self.handle.runtime) |rt| return rt.fuel;
         if (self.jitHandle()) |jit| return jit.fuelRemaining();
         return null;
+    }
+
+    /// ADR-0200 D3 — the engine that RUNS this instance: `.jit` or `.interp`,
+    /// never `.auto`. `Module.InstantiateOpts.engine` is the request; this is
+    /// the result, and an `.auto` request lands on `.interp` for a module the
+    /// JIT declined.
+    pub fn engine(self: *Instance) _api_instance.EngineKind {
+        var kind: i32 = 0;
+        const resolved = _zwasm_ext.zwasm_instance_engine(self.handle, &kind);
+        // An instance reachable through this facade came from a successful
+        // instantiate, which leaves exactly one engine behind.
+        std.debug.assert(resolved);
+        return if (kind == 1) .jit else .interp; // ZWASM_ENGINE_JIT / _INTERP
     }
 
     /// Wasm spec §4.5.3 — comptime-typed export-function wrapper.
@@ -738,6 +752,27 @@ test "facade engine=.jit: opt-in JIT instance invokes a no-import compute export
     var results = [_]_zwasm.Value{.{ .i32 = 0 }};
     try inst.invoke("add", &.{ .{ .i32 = 2 }, .{ .i32 = 3 } }, &results);
     try testing.expectEqual(@as(i32, 5), results[0].i32);
+}
+
+test "facade Instance.engine(): the read-back names the engine instantiate picked (ADR-0200 D3)" {
+    // (module (func (export "add") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add))
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01,
+        0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01,
+        0x03, 0x61, 0x64, 0x64, 0x00, 0x00, 0x0a, 0x09,
+        0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a,
+        0x0b,
+    };
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&bytes);
+    defer mod.deinit();
+    for ([_]_api_instance.EngineKind{ .interp, .jit }) |requested| {
+        var inst = try mod.instantiate(.{ .engine = requested });
+        defer inst.deinit();
+        try testing.expectEqual(requested, inst.engine());
+    }
 }
 
 test "facade engine=.jit: exportFuncSig resolves an export signature (cljw from_cljw_02 / D-488)" {

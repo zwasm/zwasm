@@ -120,6 +120,9 @@ instance is already JIT-backed, traps `ZWASM_TRAP_UNSUPPORTED` naming the shape
 (#431). To force the engine from C, use
 `zwasm_instance_new_ex(store, module, imports, trap_out, engine_kind)`
 with `ZWASM_ENGINE_AUTO` / `ZWASM_ENGINE_JIT` / `ZWASM_ENGINE_INTERP`.
+`zwasm_instance_engine(instance, &out)` reads the kind back — `ZWASM_ENGINE_JIT`
+or `ZWASM_ENGINE_INTERP`, never `AUTO`, so an instance that fell back says so
+(ADR-0200 D3).
 `zwasm_instance_get_func(instance, idx)` fetches an export function by index
 (caller owns the result → release with `wasm_func_delete`).
 
@@ -127,6 +130,7 @@ with `ZWASM_ENGINE_AUTO` / `ZWASM_ENGINE_JIT` / `ZWASM_ENGINE_INTERP`.
 |---------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
 | `zwasm_instance_set_fuel(i, n)` / `zwasm_instance_disable_fuel(i)`  | deterministic budget; exhaustion traps `all fuel consumed` (kind 17). Interp units = instructions                                        |
 | `zwasm_instance_fuel_remaining(i, &out)`                            | remaining budget; returns `false` when unmetered                                                                                         |
+| `zwasm_instance_engine(i, &out)`                                    | the engine RUNNING the instance (`ZWASM_ENGINE_JIT` / `_INTERP`, never `AUTO`); `false` on NULL (ADR-0200 D3)                            |
 | `zwasm_instance_set_memory_pages_limit(i, p)` / `…_clear_…(i)`    | host ceiling below the declared max; `memory.grow` past it returns the spec `-1`                                                         |
 | `zwasm_instance_interrupt(i)` / `zwasm_instance_clear_interrupt(i)` | cooperative cancel/timeout from any thread; traps `interrupted` (kind 16) at the next poll                                               |
 | `zwasm_trap_kind(trap)`                                             | machine-readable trap kind beside wasm.h's message-only surface (`ZWASM_TRAP_INTERRUPTED`/`ZWASM_TRAP_OUT_OF_FUEL` macros); `-1` on NULL. Host-originated traps are separable from guest faults on every engine — `ZWASM_TRAP_WASI_EXIT` (18) for a `proc_exit`, `ZWASM_TRAP_BINDING_ERROR` (0) for a host callback's own trap (ADR-0218) and for an import whose extern comes from another store — an instance's export or any host-created entity — and for a module created on another store, all refused by `wasm_instance_new` on every engine (#436, #446, #447; move a module with `wasm_module_share` + `wasm_module_obtain`, which copies its bytes); `ZWASM_TRAP_INVALID_MODULE` (19) is the JIT's validity verdict at instantiation (#233); `ZWASM_TRAP_UNSUPPORTED` (20) is a call shape the instance's engine has no helper for, as against `BINDING_ERROR`'s wrong argument or result count (#431) |

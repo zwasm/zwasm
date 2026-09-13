@@ -36,6 +36,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Added
 
+- **`zwasm_instance_engine`** — an instance reports the engine that runs it,
+  `ZWASM_ENGINE_JIT` or `ZWASM_ENGINE_INTERP`, never `AUTO` (ADR-0200 D3).
+  `Instance.engine()` on the Zig facade. An `AUTO` instantiation runs a module
+  the JIT declines on the interpreter without saying so; this is how an
+  embedder finds out.
 - **`ZWASM_TRAP_UNSUPPORTED` (20)** — the trap kind for a call whose shape the
   instance's engine has no implementation for. Appended, so the existing
   `ZWASM_TRAP_*` values are unchanged.

@@ -1436,6 +1436,7 @@ pub fn build(b: *std.Build) void {
         .{ .src = "test/c_api_conformance/data_active_drop.c", .name = "data_active_drop" },
         .{ .src = "test/c_api_conformance/instance_get_func.c", .name = "instance_get_func" },
         .{ .src = "test/c_api_conformance/jit_engine.c", .name = "jit_engine" }, // ADR-0200 JIT mini-consumer
+        .{ .src = "test/c_api_conformance/engine_readback.c", .name = "engine_readback" }, // ADR-0200 D3 an instance reports the engine that runs it
         .{ .src = "test/c_api_conformance/jit_callback.c", .name = "jit_callback" }, // D-478 host-func under JIT
         .{ .src = "test/c_api_conformance/jit_callback_args.c", .name = "jit_callback_args" }, // D-478 N-scalar-arg
         .{ .src = "test/c_api_conformance/jit_callback_fp.c", .name = "jit_callback_fp" }, // D-478 FP host-func args

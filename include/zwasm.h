@@ -181,6 +181,13 @@ WASM_API_EXTERN wasm_instance_t* zwasm_instance_new_ex(
     wasm_store_t*, const wasm_module_t*, const wasm_extern_vec_t*,
     wasm_trap_t**, uint8_t engine_kind);
 
+/* The RESOLVED engine kind into *out: ZWASM_ENGINE_JIT or ZWASM_ENGINE_INTERP,
+ * never AUTO — AUTO is what you asked for, this is what you got, and an
+ * instance AUTO handed to the interpreter because the JIT declined its module
+ * says INTERP here. Returns false (out untouched) on a null instance.
+ * ADR-0200 D3. */
+WASM_API_EXTERN bool zwasm_instance_engine(const wasm_instance_t*, int32_t* out);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
