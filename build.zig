@@ -1461,6 +1461,7 @@ pub fn build(b: *std.Build) void {
         .{ .src = "test/c_api_conformance/cross_store_import.c", .name = "cross_store_import" }, // #436 an import extern from another store is refused with a BINDING_ERROR trap
         .{ .src = "test/c_api_conformance/host_func_outlives_handle.c", .name = "host_func_outlives_handle" }, // #439 a host callback's payload outlives its handle; the store reaps it exactly once
         .{ .src = "test/c_api_conformance/host_entity_outlives_handle.c", .name = "host_entity_outlives_handle" }, // #446 a standalone global / memory / table's backing outlives its handle; the store frees it
+        .{ .src = "test/c_api_conformance/host_table_grow_declines.c", .name = "host_table_grow_declines" }, // #449 an imported host table declines both grows rather than staling the other side's aliased header
         .{
             .src = "test/c_api_conformance/wasi_preopen.c",
             .name = "wasi_preopen",

@@ -12,6 +12,19 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Changed
 
+- **A host table that has been imported no longer grows** (#449). The binder
+  hands an importer a value copy of a `wasm_table_new` table whose `refs`
+  header aliases the same buffer, so growing from either side reallocated it
+  under the other: `wasm_table_grow` left the guest reading the freed buffer,
+  and the guest's `table.grow` left the handle on it. Both sides now decline —
+  `false` and `-1` respectively, results the C API and the spec each allow —
+  instead of producing a stale pointer. Reads, writes and `wasm_table_size`
+  are unaffected, and a table that is never imported grows as before. Sharing
+  one `TableInstance`, the shape memory imports already have, is the real fix
+  and is tracked in #449.
+
+### Changed
+
 - **A module is instantiated only on the store that created it** (#447).
   `wasm_instance_new` / `zwasm_instance_new_ex` now return NULL with a
   `ZWASM_TRAP_BINDING_ERROR` when the module belongs to another store: a

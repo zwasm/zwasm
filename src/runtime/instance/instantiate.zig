@@ -1447,6 +1447,19 @@ pub fn instantiateRuntime(
                 }
             }
             rt.tables = tbl_storage;
+            // #449 — mark each host source HERE: `rt.tables` is what makes the
+            // binder's aliasing copy reachable, and this is the first line at
+            // which it is. Filling `tbl_storage` above is too early — the
+            // defined-table setup between can still fail, parking a runtime
+            // whose `rt.tables` is empty and whose alias no one can read.
+            // Returning from this function is too late — the element and data
+            // segments below can fail, and that parks a runtime that CAN read
+            // it. `checkImportTypeMatches` ran for every import further up, so
+            // a refused import never reaches here at all.
+            if (imp_table_count > 0) for (imports_decoded.?.items, 0..) |it, idx| {
+                if (it.kind != .table) continue;
+                if (bindings.?[idx].table.host_source) |src| src.host_imported = true;
+            };
         }
     }
 

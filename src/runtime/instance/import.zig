@@ -91,6 +91,10 @@ pub const TableImport = struct {
     source_elem_type: zir.ValType,
     source_min: u32,
     source_max: ?u32,
+    /// #449 — the `wasm_table_new` instance `instance` was copied from, null
+    /// for a cross-module import. Carried so `instantiateRuntime` can mark the
+    /// source at the point it installs the copy; that site says why there.
+    host_source: ?*TableInstance = null,
 };
 
 /// Memory import. `inst` POINTS AT the source instance's live
