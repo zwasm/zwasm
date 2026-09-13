@@ -131,6 +131,12 @@ fn tableGrow(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const
         return;
     };
 
+    // #449 — the realloc below would move a buffer the `wasm_table_t` handle
+    // still points at; the spec lets `table.grow` answer -1. See `TableInstance`.
+    if (tbl.host_imported) {
+        try rt.pushOperand(fail_val);
+        return;
+    }
     const new_refs = rt.alloc.realloc(tbl.refs, std.math.cast(usize, new_len) orelse {
         try rt.pushOperand(fail_val);
         return;
