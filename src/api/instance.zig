@@ -828,9 +828,14 @@ fn buildBindings(
                 .table => {
                     const ht = ext.table orelse return error.UnknownImportModule;
                     const ti = ht.tinst orelse return error.UnknownImportModule;
+                    // #449 — marking the COPY is what stops a start function
+                    // growing through it. The source waits for the commit point.
+                    var shared = ti.*;
+                    shared.host_imported = true;
                     bindings[idx] = .{
                         .table = .{
-                            .instance = ti.*, // value copy; refs slice aliased
+                            .instance = shared, // value copy; refs slice aliased
+                            .host_source = ti,
                             .source_elem_type = ht.elem_type,
                             // table64 handle limits (u64) narrowed to the u32 binding (saturate).
                             .source_min = std.math.cast(u32, ht.min) orelse std.math.maxInt(u32),
@@ -1739,6 +1744,18 @@ pub fn instantiateInternal(store: *Store, module: *const Module, builder_state: 
         return null;
     };
 
+    // #449 — mark the source HERE, not at bind time: every refusal that leaves
+    // no copy behind has run (the binder, and `checkImportTypeMatches` inside
+    // the call above), so marking earlier costs a host table its growth for an
+    // importer that never came to exist. Not later either — from here the
+    // runtime holds the copy even if the start traps, because it parks.
+    if (bindings) |bs| for (bs) |b| switch (b) {
+        .table => |tb| if (tb.host_source) |src| {
+            src.host_imported = true;
+        },
+        else => {},
+    };
+
     // Wasm §4.5.4 — run the start function (if any) AFTER all sections
     // (incl. data segments) are initialised. A trap fails instantiation.
     // The start funcidx was range/sig-validated at compile time.
@@ -2516,6 +2533,10 @@ pub export fn wasm_table_grow(t: ?*Table, delta: u32, init: ?*Ref) callconv(.c) 
         tab_ptr = handle.tinst orelse return false;
         alloc = storeAllocator(handle.store orelse return false) orelse return false;
     }
+    // #449 — after BOTH arms: a re-export names the host table through the
+    // instance one. Putting this inside either arm is the defect the other
+    // then has. `wasm.h` lets a grow answer false; see `TableInstance`.
+    if (tab_ptr.host_imported) return false;
     const old_len = tab_ptr.refs.len;
     const new_len = old_len + delta;
     if (handle.max) |m| {

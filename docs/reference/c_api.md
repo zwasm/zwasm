@@ -44,7 +44,11 @@ Full coverage of the wasm-c-api families:
 Residual *semantic* limits (functions exist + behave honestly, not
 link-stubbed): `wasm_val` `of.ref` = raw payload (D-269); standalone /
 instance / foreign `_copy` → null (D-253-D); `serialize` = source bytes,
-no AOT cache (D-271).
+no AOT cache (D-271); a `wasm_table_new` table that has been imported does not
+grow — `wasm_table_grow` returns `false` and the guest's `table.grow` returns
+`-1`, because the two hold separate views of one buffer and a realloc would
+strand the other on the freed one (#449). Reading, writing and `wasm_table_size`
+are unaffected, and a table that is never imported grows as before.
 
 ## WASI host-setup (`wasi.h`)
 

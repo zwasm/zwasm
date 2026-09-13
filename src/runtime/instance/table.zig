@@ -25,4 +25,11 @@ pub const TableInstance = struct {
     /// i64-indexed table — the table-op handlers pop the index/n at this
     /// width and table.size/grow push their result at this width.
     idx_type: zir.IdxType = .i32,
+    /// #449 — set once a `wasm_table_new` table has been imported. The binder
+    /// hands the importer a VALUE copy whose `refs` header aliases the same
+    /// backing, so a grow on either side strands the other on the freed
+    /// buffer; both decline until they share one `*TableInstance`
+    /// (`linker.zig`'s D-201b note has the follow-up). Never cleared:
+    /// clearing it wrongly costs the use-after-free back.
+    host_imported: bool = false,
 };
