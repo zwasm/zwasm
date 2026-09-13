@@ -10,6 +10,16 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+### Added
+
+- **An embedder can hear what the engine does** (#216). Five observability
+  hooks in `include/zwasm.h`, registered one at a time on the engine:
+  `zwasm_engine_set_compile_hook`, `..._instantiate_hook`, `..._trap_hook`,
+  `..._fuel_exhausted_hook` and `..._memory_growth_hook`, mirrored on the Zig
+  facade's `Engine`. They report events, not durations — the core carries no
+  clock — and name instances by a monotonic `uint64_t` id rather than a
+  pointer, which is reusable after a delete. ADR-0231.
+
 ### Changed
 
 - **A host table that has been imported no longer grows** (#449). The binder

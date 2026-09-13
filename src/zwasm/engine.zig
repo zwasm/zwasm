@@ -18,6 +18,7 @@ const Allocator = std.mem.Allocator;
 const _api_instance = @import("../api/instance.zig");
 const _vec = @import("../api/vec.zig");
 const _parser = @import("../parse/parser.zig");
+const _hooks = @import("../runtime/hooks.zig");
 
 pub const Module = @import("module.zig").Module;
 
@@ -73,7 +74,17 @@ pub const Engine = struct {
     /// Body decoding (types, code, imports) happens lazily; only the
     /// header + section frame is validated here.
     pub fn compile(self: *Engine, bytes: []const u8) CompileError!Module {
-        var native = _parser.parse(self.alloc, bytes) catch return error.ParseFailed;
+        // #216 — this surface parses before handing the bytes to
+        // `wasm_module_new`, so a PARSE failure returns before reaching the
+        // compile funnel there. Raise the same event here rather than dropping
+        // the pre-parse: the alternative, deleting it, would collapse
+        // `ParseFailed` and `ValidateFailed` back into one error (D-197). The
+        // other two outcomes still come from `wasm_module_new`, so each input
+        // produces exactly one event on this surface as on the C one.
+        var native = _parser.parse(self.alloc, bytes) catch {
+            _hooks.emitCompile(self.c_engine, bytes.len, false);
+            return error.ParseFailed;
+        };
         errdefer native.deinit(self.alloc);
 
         // J.2 transition: parallel c_api Module so the existing
@@ -90,6 +101,36 @@ pub const Engine = struct {
             .c_handle = c_mod,
             .native = native,
         };
+    }
+
+    /// #216 / ADR-0231 — the five observability slots. Thin writers onto the
+    /// same `runtime.Engine` fields the C registrations set, so the two
+    /// surfaces observe one engine and cannot drift. Types, contract and the
+    /// event semantics are in `runtime/hooks.zig` and `include/zwasm.h`:
+    /// no re-entry, set before first use, borrowed strings.
+    pub fn setCompileHook(self: *Engine, f: ?_hooks.CompileFn, user_data: ?*anyopaque) void {
+        self.c_engine.hooks.compile = f;
+        self.c_engine.hooks.compile_user_data = user_data;
+    }
+
+    pub fn setInstantiateHook(self: *Engine, f: ?_hooks.InstantiateFn, user_data: ?*anyopaque) void {
+        self.c_engine.hooks.instantiate = f;
+        self.c_engine.hooks.instantiate_user_data = user_data;
+    }
+
+    pub fn setTrapHook(self: *Engine, f: ?_hooks.TrapFn, user_data: ?*anyopaque) void {
+        self.c_engine.hooks.trap = f;
+        self.c_engine.hooks.trap_user_data = user_data;
+    }
+
+    pub fn setFuelExhaustedHook(self: *Engine, f: ?_hooks.FuelExhaustedFn, user_data: ?*anyopaque) void {
+        self.c_engine.hooks.fuel_exhausted = f;
+        self.c_engine.hooks.fuel_exhausted_user_data = user_data;
+    }
+
+    pub fn setMemoryGrowthHook(self: *Engine, f: ?_hooks.MemoryGrowthFn, user_data: ?*anyopaque) void {
+        self.c_engine.hooks.memory_growth = f;
+        self.c_engine.hooks.memory_growth_user_data = user_data;
     }
 
     /// Convenience factory for a `Linker` bound to this engine —

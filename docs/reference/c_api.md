@@ -8,7 +8,7 @@ headers in [`include/`](../../include/):
 |------------------------------------|------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------|
 | [`wasm.h`](../../include/wasm.h)   | Upstream `WebAssembly/wasm-c-api`, vendored read-only (ADR-0004) | **Complete** — every declared `extern` function is implemented (293/293; `scripts/capi_surface_gap.sh` enforces gap=0) |
 | [`wasi.h`](../../include/wasi.h)   | Hand-authored project extension (ADR-0005)                       | WASI 0.1 host-setup (`zwasm_wasi_config_*`, `zwasm_store_set_wasi`) + the guest's exit status (`zwasm_store_wasi_exit_code`) — no canonical upstream `wasi.h` exists |
-| [`zwasm.h`](../../include/zwasm.h) | Hand-authored project extension (ADR-0179 #3a-4)                 | Runtime version (`zwasm_version`) + instance sandboxing setters (fuel / memory cap / interrupt) + `zwasm_trap_kind` + per-instance engine selection (`zwasm_instance_new_ex`) + `zwasm_instance_get_func` — see below |
+| [`zwasm.h`](../../include/zwasm.h) | Hand-authored project extension (ADR-0179 #3a-4)                 | Runtime version (`zwasm_version`) + observability hooks (`zwasm_engine_set_*_hook`) + instance sandboxing setters (fuel / memory cap / interrupt) + `zwasm_trap_kind` + per-instance engine selection (`zwasm_instance_new_ex`) + `zwasm_instance_get_func` — see below |
 
 The header IS the reference — `wasm.h` is the upstream standard
 documented at <https://github.com/WebAssembly/wasm-c-api>. This page
@@ -103,6 +103,19 @@ Instance-level budget setters (ADR-0179 #3a-4) mirroring the Zig facade —
 post-instantiate and re-armable mid-workload (v1's config-level
 `zwasm_config_set_*` shape was deliberately rejected). All null-tolerant.
 
+**Observability hooks** (#216, ADR-0231). Five events an embedder can listen
+to, each registered on the engine with its own
+`zwasm_engine_set_<event>_hook(engine, fn, user_data)`; a NULL callback clears
+the slot. They report that something happened, not how long it took — the core
+carries no clock, so time it on your side. Instances are named by a `uint64_t`
+id that is monotonic for the engine's life and never reused, because an address
+can be handed out again after a delete; `0` means "no instance". Three rules
+are the whole contract, and the header states them: calling back into the
+engine from a hook is undefined, slots are set before first use and not changed
+concurrently, and a `(pointer, length)` string is borrowed for the callback's
+duration and is not NUL-terminated. A trap the embedder mints with
+`wasm_trap_new` is its own and is not reported.
+
 **Threads.** The engine is single-threaded — one thread per process, not one
 per Store (ROADMAP §7: "Phases 0–10: single-threaded"). Separate Stores are not
 separate islands: they share process-global state, among it the table the
@@ -137,6 +150,11 @@ or `ZWASM_ENGINE_INTERP`, never `AUTO`, so an instance that fell back says so
 | `zwasm_instance_engine(i, &out)`                                    | the engine RUNNING the instance (`ZWASM_ENGINE_JIT` / `_INTERP`, never `AUTO`); `false` on NULL (ADR-0200 D3)                            |
 | `zwasm_instance_set_memory_pages_limit(i, p)` / `…_clear_…(i)`    | host ceiling below the declared max; `memory.grow` past it returns the spec `-1`                                                         |
 | `zwasm_instance_interrupt(i)` / `zwasm_instance_clear_interrupt(i)` | cooperative cancel/timeout from any thread; traps `interrupted` (kind 16) at the next poll                                               |
+| `zwasm_engine_set_compile_hook(e, fn, ud)`                          | `fn(ud, wasm_len, accepted)` on every `wasm_module_new` / `wasm_module_validate`, accepted or rejected                                   |
+| `zwasm_engine_set_instantiate_hook(e, fn, ud)`                      | `fn(ud, instance_id)` on each successful instantiation, whatever engine backs it                                                        |
+| `zwasm_engine_set_trap_hook(e, fn, ud)`                             | `fn(ud, instance_id, trap_kind, message, message_len)` on every trap the ENGINE raises; the kind is `zwasm_trap_kind`'s                  |
+| `zwasm_engine_set_fuel_exhausted_hook(e, fn, ud)`                   | `fn(ud, instance_id)` when a budget runs out — in addition to a trap event of kind 17 for the same instance                              |
+| `zwasm_engine_set_memory_growth_hook(e, fn, ud)`                    | `fn(ud, instance_id, memory_index, old_pages, new_pages)` on a SUCCESSFUL grow, guest or host; a refused one raises nothing              |
 | `zwasm_trap_kind(trap)`                                             | machine-readable trap kind beside wasm.h's message-only surface (`ZWASM_TRAP_INTERRUPTED`/`ZWASM_TRAP_OUT_OF_FUEL` macros); `-1` on NULL. Host-originated traps are separable from guest faults on every engine — `ZWASM_TRAP_WASI_EXIT` (18) for a `proc_exit`, `ZWASM_TRAP_BINDING_ERROR` (0) for a host callback's own trap (ADR-0218) and for an import whose extern comes from another store — an instance's export or any host-created entity — and for a module created on another store, all refused by `wasm_instance_new` on every engine (#436, #446, #447; move a module with `wasm_module_share` + `wasm_module_obtain`, which copies its bytes); `ZWASM_TRAP_INVALID_MODULE` (19) is the JIT's validity verdict at instantiation (#233); `ZWASM_TRAP_UNSUPPORTED` (20) is a call shape the instance's engine has no helper for, as against `BINDING_ERROR`'s wrong argument or result count (#431) |
 
 ## Not shipped (`zwasm.h` residuals)

@@ -55,6 +55,25 @@ invoke` is bounded without an extra call. On a live instance, `Instance.setFuel`
 / `fuelRemaining` / `setMemoryPagesLimit` / `interrupt` adjust or cancel the
 budgets.
 
+## Observability hooks
+
+`Engine.setCompileHook` / `setInstantiateHook` / `setTrapHook` /
+`setFuelExhaustedHook` / `setMemoryGrowthHook`, each taking
+`(?fn, ?*anyopaque)` — the same five slots the C
+`zwasm_engine_set_*_hook` family writes, on the same engine, so a host can use
+either surface (#216, ADR-0231). Signatures are in
+[`src/runtime/hooks.zig`](../../src/runtime/hooks.zig); the contract is in
+[`include/zwasm.h`](../../include/zwasm.h) and holds here unchanged: no
+calling back into the engine from a hook, set the slots before first use, and
+a borrowed `(ptr, len)` string lives only for the callback. Instances are named
+by a `u64` id, never a pointer.
+
+A failed `Instance.invoke` raises the trap hook with the kind and message the C
+surface would have put on the `wasm_trap_t`, even though this surface builds
+none. `ExportNotFound` and `NotAFunc` are the exception: they are this
+surface's by-name lookup failing, which the C surface does not do and never
+traps for.
+
 ## Two embedding shapes
 
 **No imports** — `Engine.compile` → `Module.instantiate(.{})` →

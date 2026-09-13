@@ -22,6 +22,7 @@ const _zir = @import("../ir/zir.zig");
 const _runner = @import("../engine/runner.zig"); // ADR-0200 JIT engine (Zone 2)
 const _trap_surface = @import("../api/trap_surface.zig"); // JIT trap_kind → TrapKind
 const _zwasm_ext = @import("../api/zwasm_ext.zig"); // ADR-0200 D3 engine read-back
+const _hooks = @import("../runtime/hooks.zig");
 
 const _memory = @import("memory.zig");
 const _global = @import("global.zig");
@@ -304,6 +305,32 @@ pub const Instance = struct {
         args: []const _zwasm.Value,
         results: []_zwasm.Value,
     ) InvokeError!void {
+        // #216 — this surface never builds a `wasm_trap_t`; it maps the same
+        // conditions straight to `InvokeError`, so the C funnel in
+        // `trap_surface.allocTrapWithMessage` cannot report for it. One catch
+        // covers both engine arms and every `try` inside them, which is what
+        // keeps the two surfaces from drifting apart — per-site emission is
+        // what would have to be kept in sync.
+        //
+        // `invokeInner` MUST stay `inline`. As a plain fn it cost the
+        // interpreter 10.8% at 16 loop trips and 14.6% at 512, reproducibly
+        // (paired A/B against 6f6cbc02d, `zig build bench-latency`, two rounds
+        // agreeing within 0.4%, machine-state control 2.1%). The per-call
+        // constant did not move, so what regressed was `dispatch.run`'s
+        // compilation in the caller, not any added work. `inline` returns both
+        // rows to within the control's own drift.
+        return self.invokeInner(name, args, results) catch |err| {
+            emitInvokeTrap(self, err);
+            return err;
+        };
+    }
+
+    inline fn invokeInner(
+        self: *Instance,
+        name: []const u8,
+        args: []const _zwasm.Value,
+        results: []_zwasm.Value,
+    ) InvokeError!void {
         // ADR-0200 — JIT-backed instance (`runtime == null`, `jit` set): route
         // to the native engine. The interp body below assumes `runtime != null`.
         if (self.handle.runtime == null) {
@@ -408,6 +435,25 @@ pub const Instance = struct {
         rt.operand_len = op_base;
     }
 
+    /// #216 — report an unsupported call shape NAMING the signature, the way
+    /// the C surface's `unsupportedShapeTrap` does, and return the error. Both
+    /// surfaces call `api/instance.writeShape`, so the message cannot drift
+    /// between them; a shape too long for the buffer falls back to the kind's
+    /// fixed text, as the C path does.
+    ///
+    /// Raised here rather than in `invoke`'s catch because this is where the
+    /// resolved `FuncType` exists. `emitInvokeTrap` therefore excludes this
+    /// error — it is the one kind already reported by the time the catch runs.
+    fn unsupportedShape(self: *Instance, sig: _zir.FuncType) Instance.InvokeError {
+        var buf: [256]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        const msg = _api_instance.writeShape(&w, sig) catch
+            _trap_surface.trapMessageFor(.unsupported);
+        const eng = if (self.handle.store) |st| st.engine else null;
+        _hooks.emitTrap(eng, self.handle.id, @intCast(@intFromEnum(_trap_surface.TrapKind.unsupported)), msg);
+        return error.UnsupportedEngineSignature;
+    }
+
     /// ADR-0200 — cast the Zone-1 `Instance.jit` opaque slot to the engine type
     /// at the Zone-3 boundary. Null for an interp-backed (or empty) instance.
     fn jitHandle(self: *Instance) ?*_runner.JitInstance {
@@ -434,23 +480,27 @@ pub const Instance = struct {
         if (args.len != sig.params.len) return error.ArgArityMismatch;
         if (results.len != sig.results.len) return error.ResultArityMismatch;
 
-        if (args.len > 16) return error.UnsupportedEngineSignature;
+        if (args.len > 16) return self.unsupportedShape(sig);
         var abuf: [16]u64 = undefined;
         for (args, 0..) |a, i| abuf[i] = jitArgBits(a);
 
         // Multi-value results route through the ADR-0106 wrapper-thunk buffer
         // (self-describing `TypedResult`); single/void use the scalar `invoke`.
         if (sig.results.len > 1) {
-            if (results.len > 16) return error.UnsupportedEngineSignature;
+            if (results.len > 16) return self.unsupportedShape(sig);
             var rbuf: [16]_runner.TypedResult = undefined;
-            jit.invokeMulti(alloc, name, abuf[0..args.len], rbuf[0..results.len]) catch |err|
+            jit.invokeMulti(alloc, name, abuf[0..args.len], rbuf[0..results.len]) catch |err| {
+                if (err == error.UnsupportedEntrySignature) return self.unsupportedShape(sig);
                 return mapJitErr(err, jit);
+            };
             for (results, 0..) |*r, i| r.* = typedResultToValue(rbuf[i]);
             return;
         }
 
-        const got = jit.invoke(alloc, name, abuf[0..args.len]) catch |err|
+        const got = jit.invoke(alloc, name, abuf[0..args.len]) catch |err| {
+            if (err == error.UnsupportedEntrySignature) return self.unsupportedShape(sig);
             return mapJitErr(err, jit);
+        };
 
         if (sig.results.len == 0) return;
         // Single-result shape. `got == null` ⇒ the result ran via the JIT void
@@ -458,9 +508,9 @@ pub const Instance = struct {
         // so a ref result is not yet retrievable through this arm (a later slice
         // routes ref/v128/multi results via `invokeMulti`). Scalars decode by
         // valtype.
-        const bits = got orelse return error.UnsupportedEngineSignature;
+        const bits = got orelse return self.unsupportedShape(sig);
         results[0] = jitResultValue(sig.results[0], bits) orelse
-            return error.UnsupportedEngineSignature;
+            return self.unsupportedShape(sig);
     }
 };
 
@@ -490,6 +540,37 @@ fn jitResultValue(vt: _zir.ValType, bits: u64) ?_zwasm.Value {
         .v128 => null,
         .ref => null,
     };
+}
+
+/// #216 — report a failed `invoke` to the engine's trap hook, in the kind the C
+/// surface would have put on the `wasm_trap_t` and that kind's fixed message.
+///
+/// `ExportNotFound` and `NotAFunc` are excluded: they are this surface's
+/// by-name lookup failing, a step the C surface does not have (it resolves by
+/// index through `wasm_instance_exports`) and therefore never traps for.
+/// Everything else has a C counterpart that does — an arity mismatch included.
+///
+/// `UnsupportedEngineSignature` is excluded for the opposite reason: it is
+/// already reported, by `unsupportedShape`, which runs where the resolved
+/// `FuncType` still exists and so can name the signature the way the C path's
+/// `unsupportedShapeTrap` does. Both go through `api/instance.writeShape`.
+fn emitInvokeTrap(self: *Instance, err: Instance.InvokeError) void {
+    switch (err) {
+        error.ExportNotFound, error.NotAFunc => return,
+        // Already reported, WITH the signature, by `unsupportedShape`.
+        error.UnsupportedEngineSignature => return,
+        else => {},
+    }
+    const kind: _trap_surface.TrapKind = switch (err) {
+        // Two facade-only spellings of kinds `mapInterpTrap` knows under the
+        // C surface's names (`WasiExit`, and `unsupported` which it reaches
+        // from the JIT's error rather than from an interp trap).
+        error.ProcExit => .wasi_exit,
+        error.UnsupportedEngineSignature => .unsupported,
+        else => _trap_surface.mapInterpTrap(err),
+    };
+    const engine = (self.handle.store orelse return).engine;
+    _hooks.emitTrap(engine, self.handle.id, @intCast(@intFromEnum(kind)), _trap_surface.trapMessageFor(kind));
 }
 
 /// ADR-0200 — decode a self-describing JIT `TypedResult` (multi-value path) to a
@@ -1075,4 +1156,294 @@ test "facade Instance.call: one-shot typed shorthand matches typedFunc().call (d
 
     // Missing export surfaces through the same InvokeError channel.
     try testing.expectError(error.ExportNotFound, inst.call(Sig, "nope", .{ 1, 1 }));
+}
+
+// ============================================================
+// Embedder observability hooks (#216, ADR-0231)
+//
+// The facade's half of the acceptance: all five events observable from Zig,
+// on BOTH engines. The trap hook matters most here — this surface builds no
+// `wasm_trap_t`, so it reaches the funnel by a different route than the C one
+// (`emitInvokeTrap`), and only running both engines shows that route works
+// for each.
+// ============================================================
+
+/// What the five callbacks record. Passed as `user_data`, so the round-trip of
+/// that pointer is under test too.
+const HookLog = struct {
+    compiles_accepted: u32 = 0,
+    compiles_rejected: u32 = 0,
+    instantiates: u32 = 0,
+    instantiate_id: u64 = 0,
+    traps: u32 = 0,
+    trap_kind: i32 = -1,
+    trap_id: u64 = 0,
+    trap_message_len: usize = 0,
+    fuel_events: u32 = 0,
+    fuel_id: u64 = 0,
+    grows: u32 = 0,
+    grow_id: u64 = 0,
+    grow_memidx: u32 = 0xFFFF_FFFF,
+    grow_old: u64 = 0,
+    grow_new: u64 = 0,
+
+    fn of(ud: ?*anyopaque) *HookLog {
+        return @ptrCast(@alignCast(ud.?));
+    }
+
+    fn onCompile(ud: ?*anyopaque, _: usize, accepted: bool) callconv(.c) void {
+        const l = of(ud);
+        if (accepted) l.compiles_accepted += 1 else l.compiles_rejected += 1;
+    }
+
+    fn onInstantiate(ud: ?*anyopaque, id: u64) callconv(.c) void {
+        const l = of(ud);
+        l.instantiates += 1;
+        l.instantiate_id = id;
+    }
+
+    fn onTrap(ud: ?*anyopaque, id: u64, kind: i32, _: ?[*]const u8, msg_len: usize) callconv(.c) void {
+        const l = of(ud);
+        l.traps += 1;
+        l.trap_kind = kind;
+        l.trap_id = id;
+        l.trap_message_len = msg_len;
+    }
+
+    fn onFuel(ud: ?*anyopaque, id: u64) callconv(.c) void {
+        const l = of(ud);
+        l.fuel_events += 1;
+        l.fuel_id = id;
+    }
+
+    fn onGrow(ud: ?*anyopaque, id: u64, memidx: u32, old: u64, new: u64) callconv(.c) void {
+        const l = of(ud);
+        l.grows += 1;
+        l.grow_id = id;
+        l.grow_memidx = memidx;
+        l.grow_old = old;
+        l.grow_new = new;
+    }
+
+    fn register(self: *HookLog, eng: *_zwasm.Engine) void {
+        eng.setCompileHook(onCompile, self);
+        eng.setInstantiateHook(onInstantiate, self);
+        eng.setTrapHook(onTrap, self);
+        eng.setFuelExhaustedHook(onFuel, self);
+        eng.setMemoryGrowthHook(onGrow, self);
+    }
+};
+
+// (module (memory 1)
+//   (func (export "grow") (result i32) (memory.grow (i32.const 1)))
+//   (func (export "boom") unreachable)
+//   (func (export "spin") (result i32) (local $i i32)
+//     (local.set $i (i32.const 1000000))
+//     (loop $L (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+//              (br_if $L (local.get $i)))
+//     (i32.const 42)))
+// One module, three exports: the grow, the guest fault, and enough back-edge
+// crossings that a small fuel budget cannot reach the end on either engine.
+const hooks_probe_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    // type: ()->(i32) and ()->()
+    0x01, 0x08, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60,
+    0x00, 0x00,
+    0x03, 0x04, 0x03, 0x00, 0x01, 0x00, // func[0..2]: types 0, 1, 0
+    0x05, 0x03, 0x01, 0x00, 0x01, // memory: 1× {min 1}
+    0x07, 0x16, 0x03, // exports
+    0x04, 'g',  'r',
+    'o',  'w',  0x00,
+    0x00, 0x04, 'b',
+    'o',  'o',  'm',
+    0x00, 0x01, 0x04,
+    's',  'p',  'i',
+    'n',  0x00, 0x02,
+    0x0a, 0x27, 0x03, // code
+    0x06, 0x00, 0x41, 0x01, 0x40, 0x00, 0x0b, // grow: memory.grow 1
+    0x03, 0x00, 0x00, 0x0b, // boom: unreachable
+    0x1a, 0x01, 0x01, 0x7f, // spin: 1 i32 local
+    0x41, 0xc0, 0x84, 0x3d, 0x21, 0x00, // $i = 1_000_000
+    0x03, 0x40, 0x20, 0x00, 0x41, 0x01,
+    0x6b, 0x21, 0x00, 0x20, 0x00, 0x0d,
+    0x00, 0x0b, 0x41, 0x2a, 0x0b,
+};
+
+fn hookProbe(engine: _api_instance.EngineKind) !void {
+    var log: HookLog = .{};
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    log.register(&eng);
+
+    // A rejected compile is an event too. Truncated magic — no valid module
+    // can reach the engine's parser and come back accepted.
+    try testing.expectError(error.ParseFailed, eng.compile(&[_]u8{ 0x00, 0x61 }));
+    try testing.expectEqual(@as(u32, 1), log.compiles_rejected);
+    try testing.expectEqual(@as(u32, 0), log.compiles_accepted);
+
+    var mod = try eng.compile(&hooks_probe_wasm);
+    defer mod.deinit();
+    try testing.expectEqual(@as(u32, 1), log.compiles_accepted);
+
+    var inst = try mod.instantiate(.{ .engine = engine });
+    defer inst.deinit();
+    try testing.expectEqual(@as(u32, 1), log.instantiates);
+    const id = log.instantiate_id;
+    try testing.expect(id != 0);
+
+    var results = [_]_zwasm.Value{.{ .i32 = 0 }};
+    try inst.invoke("grow", &.{}, &results);
+    try testing.expectEqual(@as(i32, 1), results[0].i32); // old page count
+    try testing.expectEqual(@as(u32, 1), log.grows);
+    try testing.expectEqual(id, log.grow_id);
+    try testing.expectEqual(@as(u32, 0), log.grow_memidx);
+    try testing.expectEqual(@as(u64, 1), log.grow_old);
+    try testing.expectEqual(@as(u64, 2), log.grow_new);
+
+    // A REFUSED grow is the spec's -1, not an event: the count must not move.
+    inst.setMemoryPagesLimit(2);
+    try inst.invoke("grow", &.{}, &results);
+    try testing.expectEqual(@as(i32, -1), results[0].i32);
+    try testing.expectEqual(@as(u32, 1), log.grows);
+    inst.setMemoryPagesLimit(null);
+
+    // Fuel: one trap event of kind 17 AND one fuel event, same instance.
+    inst.setFuel(100);
+    try testing.expectError(error.OutOfFuel, inst.invoke("spin", &.{}, &results));
+    try testing.expectEqual(@as(u32, 1), log.traps);
+    try testing.expectEqual(@as(i32, 17), log.trap_kind); // ZWASM_TRAP_OUT_OF_FUEL
+    try testing.expectEqual(id, log.trap_id);
+    try testing.expect(log.trap_message_len > 0);
+    try testing.expectEqual(@as(u32, 1), log.fuel_events);
+    try testing.expectEqual(id, log.fuel_id);
+    inst.setFuel(null);
+
+    // A guest fault: the trap hook again, a different kind, and the fuel hook
+    // stays where it was — the pairing is kind 17's alone.
+    try testing.expectError(error.Unreachable, inst.invoke("boom", &.{}, &.{}));
+    try testing.expectEqual(@as(u32, 2), log.traps);
+    try testing.expectEqual(@as(i32, 1), log.trap_kind); // ZWASM_TRAP_UNREACHABLE
+    try testing.expectEqual(@as(u32, 1), log.fuel_events);
+
+    // A cleared slot stops firing; the others are untouched.
+    eng.setTrapHook(null, null);
+    try testing.expectError(error.Unreachable, inst.invoke("boom", &.{}, &.{}));
+    try testing.expectEqual(@as(u32, 2), log.traps);
+    try inst.invoke("grow", &.{}, &results);
+    try testing.expectEqual(@as(u32, 2), log.grows);
+}
+
+test "#216: all five hooks fire on the Zig facade, interp engine" {
+    try hookProbe(.interp);
+}
+
+test "#216: all five hooks fire on the Zig facade, jit engine" {
+    try hookProbe(.jit);
+}
+
+test "#216: an engine with no hooks registered runs the same probe unchanged" {
+    // The unregistered path is the one an embedder that never calls a setter
+    // gets, so it is the one a regression here would reach first.
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&hooks_probe_wasm);
+    defer mod.deinit();
+    var inst = try mod.instantiate(.{});
+    defer inst.deinit();
+
+    var results = [_]_zwasm.Value{.{ .i32 = 0 }};
+    try inst.invoke("grow", &.{}, &results);
+    try testing.expectEqual(@as(i32, 1), results[0].i32);
+    inst.setFuel(100);
+    try testing.expectError(error.OutOfFuel, inst.invoke("spin", &.{}, &results));
+    inst.setFuel(null);
+    try testing.expectError(error.Unreachable, inst.invoke("boom", &.{}, &.{}));
+}
+
+test "#216: instance ids are per-engine, monotonic, and not reused after a delete" {
+    var log: HookLog = .{};
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    log.register(&eng);
+    var mod = try eng.compile(&hooks_probe_wasm);
+    defer mod.deinit();
+
+    var first = try mod.instantiate(.{});
+    const first_id = log.instantiate_id;
+    first.deinit(); // the address is now free for the next instance to reuse
+
+    var second = try mod.instantiate(.{});
+    defer second.deinit();
+    try testing.expectEqual(@as(u32, 2), log.instantiates);
+    try testing.expect(log.instantiate_id > first_id);
+}
+
+test "#216: a start trap is reported even when the caller wants no wasm_trap_t" {
+    // `Linker.instantiate` passes `trap_out = null` (`src/zwasm/linker.zig`),
+    // and `wasm_instance_new`'s is nullable. Emitting as a side effect of
+    // building the handle therefore lost the event on both — the reason
+    // `trap_surface.reportTrap` exists apart from the allocation.
+    //
+    // (module (memory 1) (func $s unreachable) (start $s))
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type ()->()
+        0x03, 0x02, 0x01, 0x00, // func[0]: type 0
+        0x05, 0x03, 0x01, 0x00, 0x01, // memory: {min 1}
+        0x08, 0x01, 0x00, // start = func 0
+        0x0a, 0x05, 0x01, 0x03, 0x00, 0x00, 0x0b, // code: unreachable; end
+    };
+    var log: HookLog = .{};
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    log.register(&eng);
+    var mod = try eng.compile(&bytes);
+    defer mod.deinit();
+
+    var lk = eng.linker();
+    defer lk.deinit();
+    try testing.expectError(error.InstantiateFailed, lk.instantiate(&mod, .{}));
+
+    try testing.expectEqual(@as(u32, 1), log.traps);
+    try testing.expectEqual(@as(i32, 1), log.trap_kind); // ZWASM_TRAP_UNREACHABLE
+    try testing.expect(log.trap_id != 0); // the id the instantiation minted
+    // The instantiation failed, so no `instantiate` event stands beside it.
+    try testing.expectEqual(@as(u32, 0), log.instantiates);
+}
+
+test "#216: an unsupported JIT call shape is reported NAMING the signature" {
+    // The C path's `unsupportedShapeTrap` writes the shape; this surface used
+    // to report the kind's fixed text, so the same failure read differently
+    // depending on which surface a host was on. Both now call `writeShape`.
+    //
+    // 17 i32 params — one past the 16 the JIT host-invoke thunks cover, so the
+    // shape is refused by arity alone and the test needs no optional feature.
+    // (module (func (export "f") (param i32 ×17)))
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x15, 0x01, 0x60, 0x11, // type: 1× (17 params) -> ()
+        0x7f, 0x7f, 0x7f, 0x7f, 0x7f,
+        0x7f, 0x7f, 0x7f, 0x7f, 0x7f,
+        0x7f, 0x7f, 0x7f, 0x7f, 0x7f,
+        0x7f, 0x7f, 0x00,
+        0x03, 0x02, 0x01, 0x00, // func[0]: type 0
+        0x07, 0x05, 0x01, 0x01, 'f', 0x00, 0x00, // export "f"
+        0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b, // code: (no locals) end
+    };
+    var log: HookLog = .{};
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    log.register(&eng);
+    var mod = try eng.compile(&bytes);
+    defer mod.deinit();
+    var inst = try mod.instantiate(.{ .engine = .jit });
+    defer inst.deinit();
+
+    const args = [_]_zwasm.Value{.{ .i32 = 0 }} ** 17;
+    try testing.expectError(error.UnsupportedEngineSignature, inst.invoke("f", &args, &.{}));
+    try testing.expectEqual(@as(u32, 1), log.traps);
+    try testing.expectEqual(@as(i32, 20), log.trap_kind); // ZWASM_TRAP_UNSUPPORTED
+    // The kind's fixed text is "unsupported call shape"; the shape message is
+    // longer and names the params, which is the whole point of the fix.
+    try testing.expect(log.trap_message_len > "unsupported call shape".len);
 }
