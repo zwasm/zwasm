@@ -56,6 +56,8 @@ pub const FuncEntity = @import("instance/func.zig").FuncEntity;
 pub const Trap = trap_mod.Trap;
 pub const TraceEvent = trap_mod.TraceEvent;
 pub const TraceCallback = trap_mod.TraceCallback;
+pub const DebugHook = trap_mod.DebugHook;
+pub const DebugTrap = trap_mod.DebugTrap;
 
 pub const Frame = frame_mod.Frame;
 pub const Label = frame_mod.Label;
@@ -414,6 +416,21 @@ pub const Runtime = struct {
     /// Zero-cost when null.
     trace_cb: ?TraceCallback = null,
     trace_ctx: ?*anyopaque = null,
+    /// Called with the current frame's pc before each instruction the
+    /// interpreter runs; returning true abandons the call with
+    /// `Trap.Interrupted`. `dispatch.run` reads it once on entry, so a null
+    /// hook adds no per-instruction check. `debug_ctx` must be set with it,
+    /// and neither may be cleared while a call runs.
+    debug_hook: ?DebugHook = null,
+    debug_ctx: ?*anyopaque = null,
+    /// Called while `debug_hook` is set with the error that ends an
+    /// interpreted call and the pc of that call's frame, while the frame and
+    /// its locals are intact. Each enclosing call on this `Runtime` that
+    /// entered `run` with the hook set and that the error reaches reports it
+    /// again with its own pc. It hears every such error, including a thrown
+    /// exception a caller may still catch, a WASI exit and the hook's own
+    /// `Trap.Interrupted`, so the receiver decides which ones are traps.
+    debug_trap: ?DebugTrap = null,
 
     /// #216 — where a successful `memory.grow` is reported, derived rather
     /// than stored. `instance` is already the back-pointer this file keeps for

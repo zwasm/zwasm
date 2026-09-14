@@ -63,7 +63,22 @@ pub fn step(
 /// (empty sig + empty locals) is pushed for the duration. This
 /// keeps small handler tests green without forcing every test to
 /// stage a full frame.
+///
+/// `rt.debug_hook` is read once here and picks one of two loops, so with no
+/// hook the loop has no per-instruction check. A hook installed while a call
+/// runs is first seen by the next call into `run`; a tail call switches bodies
+/// inside the loop and does not re-enter.
 pub fn run(
+    rt: *Runtime,
+    table: *const DispatchTable,
+    initial_instrs: []const ZirInstr,
+) anyerror!void {
+    if (rt.debug_hook != null) return runImpl(true, rt, table, initial_instrs);
+    return runImpl(false, rt, table, initial_instrs);
+}
+
+inline fn runImpl(
+    comptime with_hook: bool,
     rt: *Runtime,
     table: *const DispatchTable,
     initial_instrs: []const ZirInstr,
@@ -72,6 +87,7 @@ pub fn run(
     rt.table = table;
     defer rt.table = saved_table;
 
+    const entry_depth = rt.frame_len;
     const ephemeral = rt.frame_len == 0;
     if (ephemeral) {
         const empty_sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
@@ -97,6 +113,23 @@ pub fn run(
     var prev_trampoline_locals: ?[]runtime.Value = null;
     defer if (prev_trampoline_locals) |l| rt.alloc.free(l);
 
+    // `debug_trap` hears the error that ends the call from here, errors raised
+    // outside an instruction (fuel, interrupt, the hook's own stop) included.
+    // Declared after the defer above so it runs first, while a tail callee's
+    // locals are still allocated; `invoke` pops the frame only after `run`
+    // returns, so its pc is where the call stopped. At another depth the frame
+    // is not this call's — a frame `run` pushed for itself, or a tail-call
+    // switch that failed after popping — and the report is left to the caller.
+    // With this `errdefer |err|` in the function, Zig 0.16 rejects returning a
+    // named error-set value, so the returns below spell `error.X`.
+    errdefer |err| {
+        if (comptime with_hook) {
+            if (rt.debug_trap) |report| {
+                if (entry_depth > 0 and rt.frame_len == entry_depth) report(rt.debug_ctx.?, rt.currentFrame().pc, err);
+            }
+        }
+    }
+
     var instrs = initial_instrs;
     while (true) {
         const f = rt.currentFrame();
@@ -109,15 +142,18 @@ pub fn run(
             if (rt.interrupt) |flag| {
                 rt.interrupt_tick +%= 1;
                 if (rt.interrupt_tick & runtime.Runtime.INTERRUPT_CHECK_MASK == 0 and
-                    flag.load(.monotonic) != 0) return Trap.Interrupted;
+                    flag.load(.monotonic) != 0) return error.Interrupted;
             }
             // ADR-0179 #3b: deterministic fuel — exact per-instruction decrement
             // (no throttle, unlike the interrupt poll), trap at exhaustion.
             if (rt.fuel) |*remaining| {
-                if (remaining.* == 0) return Trap.OutOfFuel;
+                if (remaining.* == 0) return error.OutOfFuel;
                 remaining.* -= 1;
             }
             const cur = f.pc;
+            if (comptime with_hook) {
+                if (rt.debug_hook.?(rt.debug_ctx.?, cur)) return error.Interrupted;
+            }
             try step(rt, table, &instrs[cur]);
             if (f.pc == cur) f.pc += 1;
         }
@@ -144,7 +180,7 @@ pub fn run(
             i -= 1;
             if (rt.operand_len == 0) {
                 rt.alloc.free(new_locals);
-                return Trap.StackOverflow;
+                return error.StackOverflow;
             }
             new_locals[i] = rt.popOperand();
         }
@@ -159,7 +195,7 @@ pub fn run(
             .func = next_callee,
         }) catch |e| {
             rt.alloc.free(new_locals);
-            return e;
+            return @as(anyerror!void, e);
         };
 
         // Free PREVIOUS iteration's trampoline alloc — that
@@ -289,6 +325,80 @@ test "trace_cb: null callback is zero-cost (no error path)" {
     };
     try run(&rt, &table, &instrs);
     try testing.expectEqual(@as(u32, 1), rt.operand_len);
+}
+
+test "debug_hook: stops before the instruction it rejects" {
+    var rt = Runtime.init(testing.allocator);
+    defer rt.deinit();
+    const table = buildSmokeTable();
+
+    const Hook = struct {
+        pcs: [8]u32 = undefined,
+        len: u32 = 0,
+
+        fn cb(ctx: *anyopaque, pc: u32) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.pcs[self.len] = pc;
+            self.len += 1;
+            return pc == 2;
+        }
+    };
+    var h: Hook = .{};
+    rt.debug_hook = Hook.cb;
+    rt.debug_ctx = @ptrCast(&h);
+
+    const instrs = [_]ZirInstr{
+        .{ .op = .@"i32.const", .payload = 1, .extra = 0 },
+        .{ .op = .@"i32.const", .payload = 2, .extra = 0 },
+        .{ .op = .@"i32.const", .payload = 3, .extra = 0 },
+    };
+    try testing.expectError(Trap.Interrupted, run(&rt, &table, &instrs));
+
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, h.pcs[0..h.len]);
+    try testing.expectEqual(@as(u32, 2), rt.operand_len);
+}
+
+test "debug_trap: hears the error that ends the call, with the call's frame still on the stack" {
+    var rt = Runtime.init(testing.allocator);
+    defer rt.deinit();
+    var t = DispatchTable.init();
+    t.interp[@intFromEnum(ZirOp.@"i32.const")] = StubHandlers.pushI32Const;
+    // .nop slot left null → step fails with Trap.Unreachable at pc 1.
+
+    const Sink = struct {
+        rt: *Runtime,
+        pc: ?u32 = null,
+        err: ?anyerror = null,
+        frame_len: u32 = 0,
+
+        fn hook(_: *anyopaque, _: u32) bool {
+            return false;
+        }
+        fn trap(ctx: *anyopaque, pc: u32, err: anyerror) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.pc = pc;
+            self.err = err;
+            self.frame_len = self.rt.frame_len;
+        }
+    };
+    var sink: Sink = .{ .rt = &rt };
+    rt.debug_hook = Sink.hook;
+    rt.debug_trap = Sink.trap;
+    rt.debug_ctx = @ptrCast(&sink);
+
+    // The call's frame, pushed as `invoke` pushes it; `run` leaves it to the caller.
+    try rt.pushFrame(.{ .sig = .{ .params = &.{}, .results = &.{} }, .locals = &.{}, .operand_base = 0, .pc = 0 });
+    defer _ = rt.popFrame();
+
+    const instrs = [_]ZirInstr{
+        .{ .op = .@"i32.const", .payload = 7, .extra = 0 },
+        .{ .op = .nop, .payload = 0, .extra = 0 },
+    };
+    try testing.expectError(Trap.Unreachable, run(&rt, &t, &instrs));
+
+    try testing.expectEqual(@as(?u32, 1), sink.pc);
+    try testing.expectEqual(@as(?anyerror, Trap.Unreachable), sink.err);
+    try testing.expectEqual(@as(u32, 1), sink.frame_len);
 }
 
 test "run: bubbles handler trap and stops iteration" {
