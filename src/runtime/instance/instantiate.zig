@@ -1129,6 +1129,10 @@ pub fn instantiateRuntime(
             if (type_idx >= types.items.len) return error.InvalidTypeIndex;
             funcs[i] = zir.ZirFunc.init(@intCast(imp_func_count + i), types.items[type_idx], code.locals);
             try lower.lowerFunctionBody(a, code.body, &funcs[i], types.items, &.{});
+            // `code.body` is a slice of `bytes`, so its distance from the start is its module offset.
+            std.debug.assert(@intFromPtr(code.body.ptr) >= @intFromPtr(bytes.ptr) and
+                @intFromPtr(code.body.ptr) + code.body.len <= @intFromPtr(bytes.ptr) + bytes.len);
+            funcs[i].body_offset = @intCast(@intFromPtr(code.body.ptr) - @intFromPtr(bytes.ptr));
             funcs[i].loop_info = try loop_info_mod.compute(a, &funcs[i]);
             verifier_mod.verify(&funcs[i]) catch return error.InvalidModule;
         }

@@ -1116,6 +1116,29 @@ test "facade setTableElementsLimit: host cap refuses table.grow past it (D-316)"
     try tab.grow(1, nullref); // 5 → 6 OK (no declared/spec table max here)
 }
 
+test "facade engine=.interp: a lowered instruction's module offset is body_offset + src_offsets (#452)" {
+    // (module (func (export "f") (result i32) (i32.const 42)))
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: ()->(i32)
+        0x03, 0x02, 0x01, 0x00, // func: 1× type 0
+        0x07, 0x05, 0x01, 0x01, 'f', 0x00, 0x00, // export "f" = func 0
+        0x0a, 0x06, 0x01, 0x04, 0x00, // code: 1 body, size 4, no locals
+        0x41, 0x2a, // @31 i32.const 42
+        0x0b, // @33 end
+    };
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&bytes);
+    defer mod.deinit();
+    var inst = try mod.instantiate(.{ .engine = .interp });
+    defer inst.deinit();
+
+    const func = inst.handle.runtime.?.funcs[0];
+    try testing.expectEqual(@as(u32, 31), func.body_offset);
+    try testing.expectEqualSlices(u32, &.{ 0, 2 }, func.src_offsets.items);
+}
+
 test "facade setFuel: exhausted budget traps OutOfFuel; ample budget completes + drains (ADR-0179 #3b)" {
     // (module (func (export "f") (result i32) (i32.const 42)))
     const bytes = [_]u8{
