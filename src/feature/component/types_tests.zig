@@ -360,6 +360,77 @@ test "component-instance decode: instantiate with arg + inline exports" {
     try testing.expectEqual(Sort.func, inl[0].sort);
 }
 
+test "instance index space: each minting construct records its own origin, and a re-export resolves to what it names" {
+    // import "i" (instance (type 0))                        -> instance 0 = import
+    const import_body = [_]u8{ 0x01, 0x00, 0x01, 'i', 0x05, 0x00 };
+    const inst_body_1 = [_]u8{
+        0x02,
+        0x01, 0x01, 0x00, 0x01, 'f', 0x01, 0x00, // inline: export "f" (func 0)      -> instance 1 = local 0
+        0x01, 0x01, 0x00, 0x01, 'x', 0x05, 0x01, // inline: export "x" (instance 1)  -> instance 2 = local 1
+    };
+    // alias export 2 "x" (instance)                         -> instance 3 = alias 0
+    const alias_body = [_]u8{ 0x01, 0x05, 0x00, 0x02, 0x01, 'x' };
+    // export "a" (instance 1)                               -> instance 4 = re_export 0
+    const export_body_1 = [_]u8{ 0x01, 0x00, 0x01, 'a', 0x05, 0x01, 0x00 };
+    // inline: export "g" (func 0)                           -> instance 5 = local 2
+    const inst_body_2 = [_]u8{ 0x01, 0x01, 0x01, 0x00, 0x01, 'g', 0x01, 0x00 };
+    const export_body_2 = [_]u8{
+        0x02,
+        0x00, 0x01, 'b', 0x05, 0x05, 0x00, // export "b" (instance 5)  -> instance 6 = re_export 1
+        0x00, 0x01, 'c', 0x05, 0x04, 0x00, // export "c" (instance 4)  -> instance 7 = re_export 2
+    };
+    const bytes = comptime buildComponent(&.{
+        .{ 10, &import_body },
+        .{ 5, &inst_body_1 },
+        .{ 6, &alias_body },
+        .{ 11, &export_body_1 },
+        .{ 5, &inst_body_2 },
+        .{ 11, &export_body_2 },
+    });
+    var info = try decodeBoth(bytes);
+    defer info.deinit();
+
+    const Tag = std.meta.Tag(types.InstanceOrigin);
+    const origins = info.instance_origins.items;
+    try testing.expectEqual(@as(usize, 8), origins.len);
+    try testing.expectEqual(@as(usize, 3), info.component_instances.items.len);
+    const want_tags = [_]Tag{ .import, .local, .local, .alias, .re_export, .local, .re_export, .re_export };
+    for (want_tags, origins) |want, got| try testing.expectEqual(want, std.meta.activeTag(got));
+    try testing.expectEqual(@as(u32, 0), origins[1].local);
+    try testing.expectEqual(@as(u32, 1), origins[2].local);
+    try testing.expectEqual(@as(u32, 0), origins[3].alias);
+    try testing.expectEqual(@as(u32, 2), origins[5].local);
+    try testing.expectEqual(@as(u32, 2), origins[7].re_export);
+
+    // Index 5 has four non-import indices below it but is the THIRD
+    // definition: an ordinal counted from the tags would land past the end.
+    try testing.expectEqual(@as(?u32, 2), info.localInstanceOrdinal(5));
+    // A re-export resolves to the definition it names, through a chain too
+    // (7 -> 4 -> 1).
+    try testing.expectEqual(@as(?u32, 2), info.localInstanceOrdinal(6));
+    try testing.expectEqual(@as(?u32, 0), info.localInstanceOrdinal(7));
+    try testing.expectEqual(@as(?u32, 0), info.localInstanceOrdinal(4));
+    // Imported and alias-minted instances define nothing locally.
+    try testing.expectEqual(@as(?u32, null), info.localInstanceOrdinal(0));
+    try testing.expectEqual(@as(?u32, null), info.localInstanceOrdinal(3));
+    try testing.expectEqualStrings("i", info.instanceOrigin(0).?.import);
+    try testing.expectEqual(@as(u32, 0), info.instanceOrigin(3).?.alias);
+    try testing.expect(info.instanceOrigin(8) == null);
+}
+
+test "instance index space: a re-export that does not name an earlier index resolves to nothing" {
+    // export "a" (instance 0) with no instance defined: the export's own entry
+    // is index 0, so it names itself. Validation rejects this; the resolver
+    // must still terminate rather than follow the self-loop.
+    const export_body = [_]u8{ 0x01, 0x00, 0x01, 'a', 0x05, 0x00, 0x00 };
+    const bytes = comptime buildComponent(&.{.{ 11, &export_body }});
+    var info = try decodeBoth(bytes);
+    defer info.deinit();
+    try testing.expectEqual(@as(usize, 1), info.instance_origins.items.len);
+    try testing.expect(info.instanceOrigin(0) == null);
+    try testing.expectEqual(@as(?u32, null), info.localInstanceOrdinal(0));
+}
+
 test "canon: bare async opt (no callback) decodes is_async" {
     // lift with opts{async 0x06}: is_async=true, callback stays null.
     const async_opt = [_]u8{ 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x00 };

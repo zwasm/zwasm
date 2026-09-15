@@ -10,6 +10,19 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A component exporting two or more interfaces exposes all of them.**
+  wit-component lays interface exports out as definition, export, definition,
+  export; an instance-sort `export` mints an instance index but defines nothing,
+  and resolving an index by COUNTING the non-import origins below it landed one
+  past the end from the second interface on. `exportedFuncs` silently dropped
+  the second interface and `invokeTyped` answered ExportNotResolved for it, on
+  both the single-module and the WASI-P2 graph path. Each instance origin now
+  records the construct that minted it (`import`, `local`, `alias`,
+  `re_export`) with the index of its entry, and a re-export resolves to the
+  earlier instance it names. Same class as D-527, one index space over.
+
 ## [2.7.0] - 2026-09-14
 
 ### Added

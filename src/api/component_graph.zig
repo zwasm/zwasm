@@ -489,14 +489,9 @@ pub const ComponentGraph = struct {
     /// The `GraphChild` an outer component-instance index resolves to (a
     /// LOCAL `.instantiate`); null for imports / synthetics / out of range.
     fn childOfInstanceIndex(self: *ComponentGraph, instance_index: u32) ?*GraphChild {
-        if (instance_index >= self.info.instance_origins.items.len) return null;
-        if (std.meta.activeTag(self.info.instance_origins.items[instance_index]) != .local) return null;
-        var local_ord: usize = 0;
-        for (self.info.instance_origins.items[0..instance_index]) |o| {
-            if (std.meta.activeTag(o) == .local) local_ord += 1;
-        }
-        if (local_ord >= self.child_of_instance.items.len) return null;
-        return self.child_of_instance.items[local_ord];
+        const d = self.info.localInstanceOrdinal(instance_index) orelse return null;
+        if (d >= self.child_of_instance.items.len) return null;
+        return self.child_of_instance.items[d];
     }
 };
 

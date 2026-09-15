@@ -1607,9 +1607,9 @@ pub fn resolveInstanceExportDefType(arena: std.mem.Allocator, info: *const types
 /// The instance-type DECLS of an IMPORTED component instance.
 fn instanceImportDecls(info: *const types.TypeInfo, instance_index: u32) TypeBridgeError![]const types.InstanceDecl {
     if (instance_index >= info.instance_origins.items.len) return TypeBridgeError.InvalidTypeIndex;
-    const import_name = switch (info.instance_origins.items[instance_index]) {
+    const import_name = switch (info.instanceOrigin(instance_index) orelse return TypeBridgeError.InvalidTypeIndex) {
         .import => |n| n,
-        .local => return TypeBridgeError.UnsupportedType,
+        .local, .alias, .re_export => return TypeBridgeError.UnsupportedType,
     };
     for (info.imports.items) |imp| {
         if (!std.mem.eql(u8, imp.name, import_name)) continue;

@@ -1,0 +1,14 @@
+package local:twoiface@0.1.0;
+
+interface first {
+  inc: func(v: u32) -> u32;
+}
+
+interface second {
+  double: func(v: u32) -> u32;
+}
+
+world two-iface {
+  export first;
+  export second;
+}
