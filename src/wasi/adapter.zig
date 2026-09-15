@@ -51,17 +51,22 @@ pub const P2ErrorCode = enum(u8) {
     name_too_long = 18,
     no_device = 19,
     no_entry = 20,
-    insufficient_memory = 23,
-    insufficient_space = 24,
-    not_directory = 25,
-    not_empty = 26,
-    unsupported = 28,
-    overflow = 31,
-    not_permitted = 32,
-    pipe = 33,
-    read_only = 34,
-    invalid_seek = 35,
-    cross_device = 37,
+    // `no-lock` is 21. Everything from here on was one too high until
+    // 2026-09-14: `unsupported` lowered as 28, which the guest reads as
+    // `no-tty`, so every err(unsupported) stub surfaced as ENOTTY in a
+    // rust-std guest. Pinned against the guest's own WIT in the D-307 test.
+    insufficient_memory = 22,
+    insufficient_space = 23,
+    not_directory = 24,
+    not_empty = 25,
+    unsupported = 27,
+    no_tty = 28,
+    overflow = 30,
+    not_permitted = 31,
+    pipe = 32,
+    read_only = 33,
+    invalid_seek = 34,
+    cross_device = 36,
 };
 
 /// D-307: map a Preview-1 `errno` onto the canonical Preview-2
@@ -318,13 +323,19 @@ pub const P2Op = enum {
     // directly (error / pollable / terminal handles); all route to the
     // generic drop.
     io_resource_drop,
-    // wasi:filesystem/types stream-mint + metadata methods rust-std links
+    // wasi:filesystem/types stream-mint + get-flags methods rust-std links
     // but a CLI/TCP guest never calls — honest err(unsupported), the
-    // FILESYSTEM error-code ordinal (28).
+    // FILESYSTEM error-code ordinal (27). rust-std's fs::write / read reach
+    // the via-stream pair, so a file-writing guest still fails here.
     fs_stub_via_stream_offset,
     fs_stub_via_stream,
     fs_stub_get_flags,
-    fs_stub_metadata_hash,
+    // wasi:filesystem/types metadata-hash + metadata-hash-at — wasi-libc fills
+    // st_ino / d_ino from them, so rust-std's fs::metadata, File::metadata and
+    // read_dir import BOTH; a world without the `-at` row fails to LINK, not
+    // to call. Real: a hash over the P1 filestat (shared with the 0.3 host).
+    fs_descriptor_metadata_hash,
+    fs_descriptor_metadata_hash_at,
     // wasi:sockets (ADR-0180 Phase 1) — TCP-client subset with REAL
     // implementations; everything else is an HONEST err(not-supported)
     // stub op shared by core-signature shape (the spec's typed signal for
@@ -455,7 +466,9 @@ pub fn p1Target(op: P2Op) P1Target {
         .fs_descriptor_read_directory, .fs_dir_entry_stream_read => .fd_readdir,
         .fs_dir_entry_stream_drop => .noop,
         .io_resource_drop => .noop,
-        .fs_stub_via_stream_offset, .fs_stub_via_stream, .fs_stub_get_flags, .fs_stub_metadata_hash => .noop,
+        .fs_stub_via_stream_offset, .fs_stub_via_stream, .fs_stub_get_flags => .noop,
+        .fs_descriptor_metadata_hash => .fd_filestat_get,
+        .fs_descriptor_metadata_hash_at => .path_filestat_get,
         // wasi:sockets — no P1 facility; the host backing is std.Io.net
         // (src/wasi/p2_sockets.zig), not a preview1 syscall.
         .sock_instance_network,
@@ -701,7 +714,8 @@ const table = [_]Entry{
     .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.write-via-stream", .op = .fs_stub_via_stream_offset, .gens = p2_only },
     .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.append-via-stream", .op = .fs_stub_via_stream, .gens = p2_only },
     .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.get-flags", .op = .fs_stub_get_flags, .gens = p2_only },
-    .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.metadata-hash", .op = .fs_stub_metadata_hash, .gens = p2_only },
+    .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.metadata-hash", .op = .fs_descriptor_metadata_hash, .gens = p2_only },
+    .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.metadata-hash-at", .op = .fs_descriptor_metadata_hash_at, .gens = p2_only },
     .{ .iface = "wasi:sockets/instance-network", .func = "instance-network", .op = .sock_instance_network },
     .{ .iface = "wasi:sockets/tcp-create-socket", .func = "create-tcp-socket", .op = .sock_create_tcp },
     .{ .iface = "wasi:sockets/tcp", .func = "[method]tcp-socket.start-bind", .op = .sock_tcp_start_bind },
@@ -937,6 +951,14 @@ test "classify: wasi:io/poll + subscribe methods" {
     try testing.expectEqual(P1Target.noop, p1Target(.poll_poll));
 }
 
+test "classify: 0.2 metadata-hash + metadata-hash-at are real P2 ops, distinct from the 0.3 rows" {
+    try testing.expectEqual(P2Op.fs_descriptor_metadata_hash, classifyImport("wasi:filesystem/types", "[method]descriptor.metadata-hash", .p2).?);
+    try testing.expectEqual(P2Op.fs_descriptor_metadata_hash_at, classifyImport("wasi:filesystem/types", "[method]descriptor.metadata-hash-at", .p2).?);
+    try testing.expectEqual(P2Op.fs3_metadata_hash_at, classifyImport("wasi:filesystem/types", "[method]descriptor.metadata-hash-at", .p3).?);
+    try testing.expectEqual(P1Target.fd_filestat_get, p1Target(.fs_descriptor_metadata_hash));
+    try testing.expectEqual(P1Target.path_filestat_get, p1Target(.fs_descriptor_metadata_hash_at));
+}
+
 test "classify: cli/environment + terminal + check-write (E2)" {
     try testing.expectEqual(P2Op.cli_get_environment, classifyImport("wasi:cli/environment", "get-environment", .any).?);
     try testing.expectEqual(P2Op.cli_initial_cwd, classifyImport("wasi:cli/environment", "initial-cwd", .any).?);
@@ -954,6 +976,15 @@ test "D-307: errno → P2 filesystem error-code ordinals" {
     try testing.expectEqual(P2ErrorCode.exist, errnoToP2ErrorCode(.exist));
     try testing.expectEqual(P2ErrorCode.is_directory, errnoToP2ErrorCode(.isdir));
     try testing.expectEqual(P2ErrorCode.not_directory, errnoToP2ErrorCode(.notdir));
+    // The tail of the enum, past `no-lock` (21), where the table used to be
+    // one too high. Ordinals from `wasm-tools component wit` on a rustc
+    // 1.97 wasm32-wasip2 guest (wasi:filesystem/types@0.2.0).
+    try testing.expectEqual(@as(u8, 22), @intFromEnum(P2ErrorCode.insufficient_memory));
+    try testing.expectEqual(@as(u8, 24), @intFromEnum(P2ErrorCode.not_directory));
+    try testing.expectEqual(@as(u8, 27), @intFromEnum(P2ErrorCode.unsupported));
+    try testing.expectEqual(@as(u8, 28), @intFromEnum(P2ErrorCode.no_tty));
+    try testing.expectEqual(@as(u8, 31), @intFromEnum(P2ErrorCode.not_permitted));
+    try testing.expectEqual(@as(u8, 36), @intFromEnum(P2ErrorCode.cross_device));
     // Errnos with no P2 counterpart fall back to `io`.
     try testing.expectEqual(P2ErrorCode.io, errnoToP2ErrorCode(.connreset));
 }

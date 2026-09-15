@@ -10,6 +10,31 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A rust-std `wasm32-wasip2` component that touches the filesystem now
+  instantiates.** wasi-libc fills `st_ino` / `d_ino` from
+  `wasi:filesystem/types@0.2` `[method]descriptor.metadata-hash-at` (stat,
+  readdir) and `metadata-hash` (fstat), so `fs::metadata`, `File::metadata`
+  and `fs::read_dir` all import both. The 0.2 adapter table had a row for
+  `metadata-hash` (an err(unsupported) stub) and none for `metadata-hash-at`,
+  so the whole world failed to LINK with `UnsupportedWasiImport` before a
+  single guest instruction ran; a `println!`-only guest passed because it
+  never linked the filesystem interface. Both are now real: a hash over the
+  P1 filestat, the same derivation the 0.3 host already used, so one object
+  has one identity whichever generation the guest speaks. Fixture:
+  `test/component/wasi_p2_fs_meta_rust.wasm`.
+
+- **The 0.2 filesystem `error-code` ordinals past `no-lock` were one too
+  high.** `unsupported` lowered as 28, which is `no-tty` in the WIT, so every
+  err(unsupported) stub (the `*-via-stream` and `get-flags` methods) reached
+  a rust-std guest as ENOTTY "Not a tty" instead of ENOTSUP; `not-directory`,
+  `not-permitted`, `read-only` and the rest of the tail were likewise shifted.
+  Pinned against the enum as `wasm-tools component wit` prints it from a
+  rustc 1.97 wasip2 guest. A file-writing rust-std guest still fails on the
+  0.2 path (it needs `write-via-stream`, which stays a stub), but it now
+  fails with the error the spec names.
+
 ## [2.7.0] - 2026-09-14
 
 ### Added
