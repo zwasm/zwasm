@@ -271,6 +271,20 @@ WASM_API_EXTERN wasm_instance_t* zwasm_instance_new_ex(
  * ADR-0200 D3. */
 WASM_API_EXTERN bool zwasm_instance_engine(const wasm_instance_t*, int32_t* out);
 
+/* ── Module introspection ────────────────────────────────────────────── */
+
+/* wasm_module_imports with a verdict (the _ex suffix as in
+ * zwasm_instance_new_ex: wasm.h fixes the stock signature, which returns void).
+ * true — *out holds one wasm_importtype_t per import, in section order, with
+ * no kind left out: a tag import's externtype has kind WASM_EXTERN_TAG and
+ * wasm_externtype_as_tagtype gives its parameter signature. false — *out is
+ * {0, NULL} and nothing has leaked; a NULL module or out reports false too.
+ * There is no partial answer, because a short vector reads exactly like a
+ * module with fewer imports. Release a true result with
+ * wasm_importtype_vec_delete. */
+WASM_API_EXTERN bool zwasm_module_imports_ex(
+    const wasm_module_t*, wasm_importtype_vec_t* out);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

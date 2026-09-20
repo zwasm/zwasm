@@ -141,28 +141,29 @@ fn buildImportExternType(it: sections.Import, func_types: ?sections.Types) ?*typ
     };
 }
 
-/// `wasm_module_imports(module, own importtype_vec* out)` — one
-/// `wasm_importtype_t` per import, in section order (module name + field
-/// name + the import's externtype). A tag import's externtype has kind
-/// `WASM_EXTERN_TAG`, and `wasm_externtype_as_tagtype` gives its functype.
-/// `out` is owned by the caller (`importtype_vec_delete`).
-pub export fn wasm_module_imports(m: ?*const Module, out: ?*types.ImportTypeVec) callconv(.c) void {
-    const o = out orelse return;
+/// Collect every import into `out`, one `wasm_importtype_t` per import in
+/// section order. True = `out` holds all of them. False = `out` is
+/// `{0, NULL}` and every entry built along the way has been released: a
+/// short list is indistinguishable from a module with fewer imports, so a
+/// partial answer is worse than none. Backs `wasm_module_imports` (which
+/// has no way to say false) and `zwasm_module_imports_ex` (which does).
+pub fn collectImports(m: ?*const Module, out: ?*types.ImportTypeVec) bool {
+    const o = out orelse return false;
     o.* = .{ .size = 0, .data = null };
-    const mod = m orelse return;
-    const bp = mod.bytes_ptr orelse return;
+    const mod = m orelse return false;
+    const bp = mod.bytes_ptr orelse return false;
     const bytes = bp[0..mod.bytes_len];
 
     var arena = std.heap.ArenaAllocator.init(ca);
     defer arena.deinit();
     const a = arena.allocator();
 
-    var parsed = parser.parse(a, bytes) catch return;
+    var parsed = parser.parse(a, bytes) catch return false;
     defer parsed.deinit(a);
-    const imp_sec = parsed.find(.import) orelse return; // no imports → empty vec
-    var imps = sections.decodeImports(a, imp_sec.body) catch return;
+    const imp_sec = parsed.find(.import) orelse return true; // no import section → complete and empty
+    var imps = sections.decodeImports(a, imp_sec.body) catch return false;
     defer imps.deinit();
-    if (imps.items.len == 0) return;
+    if (imps.items.len == 0) return true;
 
     var func_types: ?sections.Types = null;
     defer if (func_types) |*t| t.deinit();
@@ -170,24 +171,53 @@ pub export fn wasm_module_imports(m: ?*const Module, out: ?*types.ImportTypeVec)
 
     var built: std.ArrayList(?*types.ImportType) = .empty;
     defer built.deinit(ca);
+    // Unwind on any failure below. `wasm_importtype_delete` takes the entry's
+    // module/name vecs and its externtype with it, so an entry that reached
+    // `built` needs nothing else; the pieces of the entry being assembled when
+    // the failure hit are freed at the failure site, before they are handed over.
+    var complete = false;
+    defer if (!complete) {
+        for (built.items) |p| types.wasm_importtype_delete(p);
+        o.* = .{ .size = 0, .data = null };
+    };
+
     for (imps.items) |it| {
-        const et = buildImportExternType(it, func_types) orelse continue;
+        const et = buildImportExternType(it, func_types) orelse return false;
         var modv: vec.ByteVec = undefined;
         var nmv: vec.ByteVec = undefined;
         vec.wasm_byte_vec_new(&modv, it.module.len, it.module.ptr);
         vec.wasm_byte_vec_new(&nmv, it.name.len, it.name.ptr);
-        const imp = types.wasm_importtype_new(&modv, &nmv, et) orelse {
+        // An allocation failure there reads as `{0, NULL}`, which is also a
+        // legitimately empty name — only the length separates them.
+        const named = modv.size == it.module.len and nmv.size == it.name.len;
+        const imp = if (named) types.wasm_importtype_new(&modv, &nmv, et) else null;
+        const entry = imp orelse {
             types.wasm_externtype_delete(et);
-            if (modv.data) |p| ca.free(p[0..modv.size]);
-            if (nmv.data) |p| ca.free(p[0..nmv.size]);
-            continue;
+            if (modv.data) |q| ca.free(q[0..modv.size]);
+            if (nmv.data) |q| ca.free(q[0..nmv.size]);
+            return false;
         };
-        built.append(ca, imp) catch {
-            types.wasm_importtype_delete(imp);
-            continue;
+        built.append(ca, entry) catch {
+            types.wasm_importtype_delete(entry);
+            return false;
         };
     }
-    types.wasm_importtype_vec_new(o, built.items.len, if (built.items.len > 0) built.items.ptr else null);
+
+    types.wasm_importtype_vec_new(o, built.items.len, built.items.ptr);
+    if (o.size != built.items.len) return false; // the vec now owns nothing
+    complete = true;
+    return true;
+}
+
+/// `wasm_module_imports(module, own importtype_vec* out)` — one
+/// `wasm_importtype_t` per import, in section order (module name + field
+/// name + the import's externtype). A tag import's externtype has kind
+/// `WASM_EXTERN_TAG`, and `wasm_externtype_as_tagtype` gives its functype.
+/// `out` is owned by the caller (`importtype_vec_delete`). wasm.h returns
+/// void, so a failure is an empty vec here; `zwasm_module_imports_ex`
+/// reports it.
+pub export fn wasm_module_imports(m: ?*const Module, out: ?*types.ImportTypeVec) callconv(.c) void {
+    _ = collectImports(m, out);
 }
 
 // Index-space type descriptors (import prefix ++ defined section), used to
@@ -505,6 +535,13 @@ test "wasm_module_imports: a tag import keeps its position between the funcs" {
     try testing.expectEqual(@as(usize, 1), ft.params.size);
     try testing.expectEqual(@as(u8, 0), types.wasm_valtype_kind(ft.params.data.?[0].?)); // i32
     try testing.expectEqual(@as(usize, 0), ft.results.size);
+}
+
+test "collectImports: a null module or out is false, not an empty success" {
+    var imports: types.ImportTypeVec = .{ .size = 7, .data = null };
+    try testing.expect(!collectImports(null, &imports));
+    try testing.expectEqual(@as(usize, 0), imports.size);
+    try testing.expect(!collectImports(null, null));
 }
 
 test "wasm_module_imports: null-arg → empty vec, no crash" {

@@ -17,8 +17,9 @@
 //! would be a sandbox-bypass footgun (set_fuel doing nothing). Null
 //! instance/no-engine = no-op, matching wasm.h's null-tolerant style.
 //!
-//! `zwasm_version` is the one member here that is not instance-scoped: it
-//! answers for the library as a whole (ADR-0221).
+//! Two members here are not instance-scoped: `zwasm_version`, which answers
+//! for the library as a whole (ADR-0221), and `zwasm_module_imports_ex`,
+//! which reports what `wasm_module_imports`'s `void` return cannot (#475).
 //!
 //! Zone 3 (`src/api/`).
 
@@ -27,6 +28,8 @@ const build_options = @import("build_options");
 
 const capi = @import("instance.zig");
 const trap_surface = @import("trap_surface.zig");
+const module_introspect = @import("module_introspect.zig");
+const types = @import("types.zig");
 const vec = @import("vec.zig");
 const hooks = @import("../runtime/hooks.zig");
 
@@ -203,6 +206,15 @@ pub export fn zwasm_instance_engine(i: ?*const Instance, out: ?*i32) callconv(.c
     const kind: i32 = if (jit != null) 1 else if (inst.runtime != null) 2 else return false;
     if (out) |p| p.* = kind;
     return true;
+}
+
+/// #475 — `wasm_module_imports` with a verdict: true = `out` holds one
+/// `wasm_importtype_t` per import, in section order. False = `out` is
+/// `{0, NULL}` and nothing was leaked. The `_ex` suffix follows
+/// `zwasm_instance_new_ex`: wasm.h fixes the stock signature, so a result the
+/// upstream shape cannot carry goes in a sibling.
+pub export fn zwasm_module_imports_ex(m: ?*const capi.Module, out: ?*types.ImportTypeVec) callconv(.c) bool {
+    return module_introspect.collectImports(m, out);
 }
 
 // ============================================================
@@ -393,7 +405,6 @@ test "ADR-0200: zwasm_instance_new_ex(JIT) builds a JIT instance the C path can 
 
 const wasi_ext = @import("wasi.zig");
 const extern_new = @import("extern_new.zig");
-const types = @import("types.zig");
 
 /// `zwasm_instance_new_ex` engine selectors (`ZWASM_ENGINE_*` in zwasm.h).
 const engine_auto: u8 = 0;

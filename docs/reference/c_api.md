@@ -8,7 +8,7 @@ headers in [`include/`](../../include/):
 |------------------------------------|------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------|
 | [`wasm.h`](../../include/wasm.h)   | Upstream `WebAssembly/wasm-c-api`, vendored read-only (ADR-0004) | **Complete** — every declared `extern` function is implemented (293/293; `scripts/capi_surface_gap.sh` enforces gap=0) |
 | [`wasi.h`](../../include/wasi.h)   | Hand-authored project extension (ADR-0005)                       | WASI 0.1 host-setup (`zwasm_wasi_config_*`, `zwasm_store_set_wasi`) + the guest's exit status (`zwasm_store_wasi_exit_code`) — no canonical upstream `wasi.h` exists |
-| [`zwasm.h`](../../include/zwasm.h) | Hand-authored project extension (ADR-0179 #3a-4)                 | Runtime version (`zwasm_version`) + observability hooks (`zwasm_engine_set_*_hook`) + instance sandboxing setters (fuel / memory cap / interrupt) + `zwasm_trap_kind` + per-instance engine selection (`zwasm_instance_new_ex`) + `zwasm_instance_get_func` — see below |
+| [`zwasm.h`](../../include/zwasm.h) | Hand-authored project extension (ADR-0179 #3a-4)                 | Runtime version (`zwasm_version`) + observability hooks (`zwasm_engine_set_*_hook`) + instance sandboxing setters (fuel / memory cap / interrupt) + `zwasm_trap_kind` + per-instance engine selection (`zwasm_instance_new_ex`) + `zwasm_instance_get_func` + complete module introspection (`zwasm_module_imports_ex`) — see below |
 
 The header IS the reference — `wasm.h` is the upstream standard
 documented at <https://github.com/WebAssembly/wasm-c-api>. This page
@@ -144,12 +144,19 @@ or `ZWASM_ENGINE_INTERP`, never `AUTO`, so an instance that fell back says so
 (ADR-0200 D3).
 `zwasm_instance_get_func(instance, idx)` fetches an export function by index
 (caller owns the result → release with `wasm_func_delete`).
+`zwasm_module_imports_ex(module, &out)` is `wasm_module_imports` with a verdict,
+for the same reason `_ex` exists on instantiation: `wasm.h` fixes the stock
+signature at `void`, so a build that runs out of memory part-way can only answer
+with a short vector, which reads exactly like a module with fewer imports. It
+returns `true` only when `out` holds every import, and `false` with `out` empty
+and nothing leaked (#475).
 
 | Function                                                            | Effect                                                                                                                                   |
 |---------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
 | `zwasm_instance_set_fuel(i, n)` / `zwasm_instance_disable_fuel(i)`  | deterministic budget; exhaustion traps `all fuel consumed` (kind 17). Interp units = instructions                                        |
 | `zwasm_instance_fuel_remaining(i, &out)`                            | remaining budget; returns `false` when unmetered                                                                                         |
 | `zwasm_instance_engine(i, &out)`                                    | the engine RUNNING the instance (`ZWASM_ENGINE_JIT` / `_INTERP`, never `AUTO`); `false` on NULL (ADR-0200 D3)                            |
+| `zwasm_module_imports_ex(m, &out)`                                  | `wasm_module_imports` with a verdict: `true` = `out` holds every import in section order; `false` = `out` empty, nothing leaked (#475)   |
 | `zwasm_instance_set_memory_pages_limit(i, p)` / `…_clear_…(i)`    | host ceiling below the declared max; `memory.grow` past it returns the spec `-1`                                                         |
 | `zwasm_instance_interrupt(i)` / `zwasm_instance_clear_interrupt(i)` | cooperative cancel/timeout from any thread; traps `interrupted` (kind 16) at the next poll                                               |
 | `zwasm_engine_set_compile_hook(e, fn, ud)`                          | `fn(ud, wasm_len, accepted)` on every `wasm_module_new` / `wasm_module_validate`, accepted or rejected                                   |

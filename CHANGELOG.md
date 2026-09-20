@@ -10,6 +10,15 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+### Added
+
+- **`zwasm_module_imports_ex`** — `wasm_module_imports` with a verdict (#475).
+  `wasm.h` returns `void`, so the stock call answers an allocation failure
+  mid-build with a short vector, which reads exactly like a module with fewer
+  imports. The `_ex` sibling returns `true` only when `out` holds every import,
+  and on `false` leaves `out` empty with nothing leaked — never a partial
+  answer. The stock call is now that same walk with the verdict discarded.
+
 ### Fixed
 
 - **`wasm_module_imports` lists a tag import at its position** (#475). A tag
