@@ -10,6 +10,16 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`wasm_module_imports` lists a tag import at its position** (#475). A tag
+  import was dropped from the vector, so an embedder that walked the result
+  positionally bound every later import to the wrong declaration — and the
+  count alone gave no sign of it. The externtype is now a `WASM_EXTERN_TAG`
+  whose `wasm_externtype_as_tagtype` yields the tag's parameter signature; the
+  `tagtype` family `wasm.h` declares has been implemented since before the
+  comment that called it absent.
+
 ## [2.7.0] - 2026-09-14
 
 ### Added

@@ -121,22 +121,31 @@ fn memorytypeExtern(min: u64, max: ?u64) ?*types.ExternType {
     return types.wasm_memorytype_as_externtype(mt);
 }
 
-/// Build the `wasm_externtype_t` for one decoded import. Returns null for
-/// tag imports (no base-wasm-c-api `tagtype`) — the caller skips them.
+fn tagtypeExtern(typeidx: u32, func_types: ?sections.Types) ?*types.ExternType {
+    const ftype = functypeOf(typeidx, func_types) orelse return null;
+    const tt = types.wasm_tagtype_new(ftype) orelse {
+        types.wasm_functype_delete(ftype);
+        return null;
+    };
+    return types.wasm_tagtype_as_externtype(tt);
+}
+
+/// Build the `wasm_externtype_t` for one decoded import.
 fn buildImportExternType(it: sections.Import, func_types: ?sections.Types) ?*types.ExternType {
     return switch (it.payload) {
         .func_typeidx => |ti| functypeExtern(ti, func_types),
         .global => |g| globaltypeExtern(g.valtype, g.mutable),
         .table => |t| tabletypeExtern(t.elem_type, t.min, t.max),
         .memory => |mem| memorytypeExtern(mem.min, mem.max),
-        .tag_typeidx => null, // tagtype not in base wasm-c-api — skipped
+        .tag_typeidx => |ti| tagtypeExtern(ti, func_types),
     };
 }
 
-/// `wasm_module_imports(module, own importtype_vec* out)` — decode the
-/// module's import section into one `wasm_importtype_t` per import (module
-/// name + field name + the import's externtype). Tag imports are skipped
-/// (no base `tagtype`). `out` is owned by the caller (`importtype_vec_delete`).
+/// `wasm_module_imports(module, own importtype_vec* out)` — one
+/// `wasm_importtype_t` per import, in section order (module name + field
+/// name + the import's externtype). A tag import's externtype has kind
+/// `WASM_EXTERN_TAG`, and `wasm_externtype_as_tagtype` gives its functype.
+/// `out` is owned by the caller (`importtype_vec_delete`).
 pub export fn wasm_module_imports(m: ?*const Module, out: ?*types.ImportTypeVec) callconv(.c) void {
     const o = out orelse return;
     o.* = .{ .size = 0, .data = null };
@@ -159,7 +168,6 @@ pub export fn wasm_module_imports(m: ?*const Module, out: ?*types.ImportTypeVec)
     defer if (func_types) |*t| t.deinit();
     if (parsed.find(.type)) |ts| func_types = sections.decodeTypes(a, ts.body) catch null;
 
-    // Collect built importtypes (skipping unsupported), then publish the vec.
     var built: std.ArrayList(?*types.ImportType) = .empty;
     defer built.deinit(ca);
     for (imps.items) |it| {
@@ -450,6 +458,50 @@ test "wasm_module_imports: func import → importtype (env.f : (i32) -> ())" {
     const et = types.wasm_importtype_type(it).?;
     try testing.expectEqual(types.extern_func, types.wasm_externtype_kind(et));
     const ft = types.wasm_externtype_as_functype_const(et).?;
+    try testing.expectEqual(@as(usize, 1), ft.params.size);
+    try testing.expectEqual(@as(u8, 0), types.wasm_valtype_kind(ft.params.data.?[0].?)); // i32
+    try testing.expectEqual(@as(usize, 0), ft.results.size);
+}
+
+// (module (type (func (param i32)))
+//   (import "env" "before" (func (type 0)))
+//   (import "env" "error"  (tag  (type 0)))
+//   (import "env" "after"  (func (type 0))))
+const tag_import_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x05, 0x01, 0x60, 0x01, 0x7f, 0x00, // type (i32) -> ()
+    0x02, 0x27, 0x03, // import section, 3 entries
+    0x03, 'e', 'n', 'v', 0x06, 'b', 'e', 'f', 'o', 'r', 'e', 0x00, 0x00, // func
+    0x03, 'e', 'n', 'v', 0x05, 'e', 'r', 'r', 'o', 'r', 0x04, 0x00, 0x00, // tag
+    0x03, 'e', 'n', 'v', 0x05, 'a', 'f', 't', 'e', 'r', 0x00, 0x00, // func
+};
+
+test "wasm_module_imports: a tag import keeps its position between the funcs" {
+    const e = instance.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer instance.wasm_engine_delete(e);
+    const s = instance.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer instance.wasm_store_delete(s);
+    var bytes = tag_import_wasm;
+    const bv: vec.ByteVec = .{ .size = bytes.len, .data = &bytes };
+    const m = instance.wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
+    defer instance.wasm_module_delete(m);
+
+    var imports: types.ImportTypeVec = undefined;
+    wasm_module_imports(m, &imports);
+    defer types.wasm_importtype_vec_delete(&imports);
+
+    try testing.expectEqual(@as(usize, 3), imports.size);
+    const kinds = [_]u8{ types.extern_func, types.extern_tag, types.extern_func };
+    const names = [_][]const u8{ "before", "error", "after" };
+    for (kinds, names, 0..) |kind, name, i| {
+        const it = imports.data.?[i].?;
+        const nm = types.wasm_importtype_name(it).?;
+        try testing.expectEqualStrings(name, nm.data.?[0..nm.size]);
+        try testing.expectEqual(kind, types.wasm_externtype_kind(types.wasm_importtype_type(it).?));
+    }
+    // The tag's parameter signature survives the round-trip through externtype.
+    const tt = types.wasm_externtype_as_tagtype_const(types.wasm_importtype_type(imports.data.?[1].?).?).?;
+    const ft = types.wasm_tagtype_functype(tt).?;
     try testing.expectEqual(@as(usize, 1), ft.params.size);
     try testing.expectEqual(@as(u8, 0), types.wasm_valtype_kind(ft.params.data.?[0].?)); // i32
     try testing.expectEqual(@as(usize, 0), ft.results.size);
