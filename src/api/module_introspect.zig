@@ -36,14 +36,30 @@ fn valKindOf(vt: zir.ValType) u8 {
 }
 
 /// Build a `wasm_valtype_vec_t` from internal valtypes (each a fresh owned
-/// `wasm_valtype_t`). Empty vec for an empty slice.
-fn buildValTypeVec(vts: []const zir.ValType) types.ValTypeVec {
-    var out: types.ValTypeVec = .{ .size = 0, .data = null };
-    if (vts.len == 0) return out;
-    const tmp = ca.alloc(?*types.ValType, vts.len) catch return out;
+/// `wasm_valtype_t`). Empty vec for an empty slice; null when any part of it
+/// cannot be allocated, with everything built so far released.
+///
+/// The failures have to be told apart here, because none of them is visible
+/// downstream: a short vec reads as a shorter signature, a null element reads
+/// as `i32` through `wasm_valtype_kind`, and an empty one is what an empty
+/// slice legitimately gives — so a caller could only report the wrong
+/// signature as a good one (#475).
+fn buildValTypeVec(vts: []const zir.ValType) ?types.ValTypeVec {
+    if (vts.len == 0) return .{ .size = 0, .data = null };
+    const tmp = ca.alloc(?*types.ValType, vts.len) catch return null;
     defer ca.free(tmp);
-    for (vts, 0..) |vt, i| tmp[i] = types.wasm_valtype_new(valKindOf(vt));
+    for (vts, 0..) |vt, i| {
+        tmp[i] = types.wasm_valtype_new(valKindOf(vt)) orelse {
+            for (tmp[0..i]) |p| types.wasm_valtype_delete(p);
+            return null;
+        };
+    }
+    var out: types.ValTypeVec = undefined;
     types.wasm_valtype_vec_new(&out, vts.len, tmp.ptr); // copies the owned pointers in
+    if (out.size != vts.len) {
+        for (tmp) |p| types.wasm_valtype_delete(p);
+        return null;
+    }
     return out;
 }
 
@@ -54,8 +70,11 @@ fn buildValTypeVec(vts: []const zir.ValType) types.ValTypeVec {
 
 /// Owned `wasm_functype_t` from internal param/result valtypes.
 fn functypeFromValTypes(params: []const zir.ValType, results: []const zir.ValType) ?*types.FuncType {
-    var pv = buildValTypeVec(params);
-    var rv = buildValTypeVec(results);
+    var pv = buildValTypeVec(params) orelse return null;
+    var rv = buildValTypeVec(results) orelse {
+        types.wasm_valtype_vec_delete(&pv);
+        return null;
+    };
     return types.wasm_functype_new(&pv, &rv) orelse {
         types.wasm_valtype_vec_delete(&pv);
         types.wasm_valtype_vec_delete(&rv);

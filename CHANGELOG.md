@@ -16,10 +16,21 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   `wasm.h` returns `void`, so the stock call answers an allocation failure
   mid-build with a short vector, which reads exactly like a module with fewer
   imports. The `_ex` sibling returns `true` only when `out` holds every import,
-  and on `false` leaves `out` empty with nothing leaked — never a partial
-  answer. The stock call is now that same walk with the verdict discarded.
+  signatures included, and on `false` leaves `out` empty with nothing leaked —
+  never a partial answer. The stock call is now that same walk with the verdict
+  discarded.
 
 ### Fixed
+
+- **A signature that cannot be allocated is not reported as a different
+  signature** (#475). `buildValTypeVec` turned three distinct allocation
+  failures into ordinary-looking results: an empty vector (read as a shorter
+  parameter or result list), a vector holding a null element (read as `i32`,
+  because that is what `wasm_valtype_kind` answers for NULL), and an empty
+  vector that also leaked every valtype already built. `wasm_module_imports`,
+  `wasm_module_exports`, `wasm_extern_type` and `wasm_func_type` all published
+  the wrong signature as a good one. They now report no type at all, which each
+  of them already had a way to say.
 
 - **`wasm_module_imports` lists a tag import at its position** (#475). A tag
   import was dropped from the vector, so an embedder that walked the result
