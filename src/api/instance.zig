@@ -2148,13 +2148,29 @@ fn hostFuncThunk(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
 // wasm_extern_t + wasm_instance_exports (§9.3 / 3.7 chunk c)
 // ============================================================
 
-fn exportDescToExternKind(kind: sections.ExportDesc) ExternKind {
+/// Null for a tag export: it has no `wasm_extern_t` (`sections.ExportDesc.tag`).
+fn exportDescToExternKind(kind: sections.ExportDesc) ?ExternKind {
     return switch (kind) {
         .func => .func,
         .global => .global,
         .table => .table,
         .memory => .memory,
+        .tag => null,
     };
+}
+
+/// Position in the `wasm_instance_exports` vector of the export named
+/// `name` when it is a `kind` extern; null otherwise. The vector follows
+/// `exports_storage` minus the tag exports, so an index into one is not an
+/// index into the other.
+pub fn externSlotOf(inst: *const Instance, name: []const u8, kind: ExternKind) ?usize {
+    var slot: usize = 0;
+    for (inst.exports_storage) |exp| {
+        const k = exportDescToExternKind(exp.kind) orelse continue;
+        if (k == kind and std.mem.eql(u8, exp.name, name)) return slot;
+        slot += 1;
+    }
+    return null;
 }
 
 /// `wasm_extern_kind` — return the upstream-numeric tag.
@@ -2661,16 +2677,21 @@ pub export fn wasm_instance_exports(i: ?*const Instance, out: ?*ExternVec) callc
     const inst = i orelse return;
     const store = inst.store orelse return;
     const alloc = storeAllocator(store) orelse return;
-    if (inst.exports_storage.len == 0) return;
+    var want: usize = 0;
+    for (inst.exports_storage) |exp| {
+        if (exportDescToExternKind(exp.kind) != null) want += 1;
+    }
+    if (want == 0) return;
 
-    const buf = std.heap.c_allocator.alloc(?*Extern, inst.exports_storage.len) catch return;
+    const buf = std.heap.c_allocator.alloc(?*Extern, want) catch return;
     @memset(buf, null);
     var populated: usize = 0;
 
     for (inst.exports_storage, 0..) |exp, idx| {
+        const kind = exportDescToExternKind(exp.kind) orelse continue;
         const ext = alloc.create(Extern) catch break;
         ext.* = .{
-            .kind = exportDescToExternKind(exp.kind),
+            .kind = kind,
             .instance = @constCast(inst),
         };
         switch (ext.kind) {
@@ -2741,11 +2762,11 @@ pub export fn wasm_instance_exports(i: ?*const Instance, out: ?*ExternVec) callc
                 ext.global = gh;
             },
         }
-        buf[idx] = ext;
+        buf[populated] = ext;
         populated += 1;
     }
 
-    if (populated != inst.exports_storage.len) {
+    if (populated != want) {
         // Roll back partial state — release what we did populate
         // and the buffer itself so the caller sees an empty vec.
         for (buf[0..populated]) |opt_ext| {
@@ -2755,7 +2776,7 @@ pub export fn wasm_instance_exports(i: ?*const Instance, out: ?*ExternVec) callc
         return;
     }
 
-    o.* = .{ .size = inst.exports_storage.len, .data = buf.ptr };
+    o.* = .{ .size = want, .data = buf.ptr };
 }
 
 /// `wasm_func_call(func, args, results)` — invoke `func` with

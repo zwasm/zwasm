@@ -78,14 +78,6 @@ pub const Instance = struct {
     /// debt D-006 (the "linking-errors-pass-for-the-wrong-reason"
     /// gap exposed by the auto-register spike).
     export_types: []ExportType = &.{},
-    /// EH cross-module tag exports (10.E-xmodule-tags, ADR-0114).
-    /// Tag exports (export-kind 0x04) are filtered out of
-    /// `exports_storage` because the c_api `ExternKind` has no tag
-    /// variant (`sections.zig` decodeExports). This parallel side-
-    /// table records them (name → tag index) so a cross-module tag
-    /// import can resolve via `Linker.defineCrossModuleTag` without
-    /// polluting the c_api export-discovery path. Arena-backed.
-    tag_exports: []TagExport = &.{},
     /// 10.G op_gc cycle 21 (ADR-0116 §3a impl) — per-Instance
     /// GC type metadata materialised from `Module.types`
     /// (parser side-tables per ADR-0121 D2). Populated iff
@@ -151,19 +143,8 @@ pub const ExportType = union(sections.ImportKind) {
     table: struct { elem_type: zir.ValType, min: u32, max: ?u32 },
     memory: struct { idx_type: sections.MemoryEntry.IdxType = .i32, min: u64, max: ?u64 },
     global: struct { valtype: zir.ValType, mutable: bool },
-    // EH tag export type (10.E-xmodule-tags): the tag's func-type
-    // signature (param types; tags have no results). Used by cross-
-    // module tag import-vs-export matching (step 2+).
+    /// The tag's functype (params only; a tag has no results).
     tag: zir.FuncType,
-};
-
-/// One EH tag export (10.E-xmodule-tags). `tag_index` is the tag's
-/// index in the exporting module's tag space (imports ++ defined);
-/// for the spec EH source (try_table.0, no tag imports) this equals
-/// the defined-tag index, so it indexes `Runtime.tag_param_counts`.
-pub const TagExport = struct {
-    name: []const u8,
-    tag_index: u32,
 };
 
 // ============================================================

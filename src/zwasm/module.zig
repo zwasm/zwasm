@@ -14,8 +14,7 @@ const _sections = @import("../parse/sections.zig");
 const _zwasm = @import("../zwasm.zig");
 
 /// The shape of an imported / exported entity. Native-Zig mirror of the
-/// wasm-c-api `wasm_externkind_t`; `tag` covers the Wasm 3.0 EH tag
-/// import (no `tag` export kind exists in the binary format).
+/// wasm-c-api `wasm_externkind_t` plus the Wasm 3.0 EH `tag`.
 pub const ExternKind = enum { func, table, memory, global, tag };
 
 /// One decoded import: the two-level name (`module` + `name`) plus the
@@ -74,6 +73,7 @@ fn exportKind(k: _sections.ExportDesc) ExternKind {
         .table => .table,
         .memory => .memory,
         .global => .global,
+        .tag => .tag,
     };
 }
 

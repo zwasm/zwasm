@@ -724,10 +724,7 @@ pub fn runWasmCapturedFull(
     // the same helper `runWasmJitCaptured` calls, in the same order: after
     // instantiation, whose validity verdict and `(start)` come first).
     const entry_name: []const u8 = invoke_name orelse try resolveDefaultEntry(alloc, bytes);
-    const entry_idx = blk: {
-        for (instance.exports_storage, 0..) |exp, i| {
-            if (exp.kind == .func and std.mem.eql(u8, exp.name, entry_name)) break :blk i;
-        }
+    const entry_idx = wasm_c_api.externSlotOf(instance, entry_name, .func) orelse {
         diagnostic.setDiag(.instantiate, .no_func_export, .unknown, "--invoke: named func export not found", .{});
         return error.NoFuncExport;
     };

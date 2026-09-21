@@ -1027,6 +1027,9 @@ pub const ExportDesc = enum(u8) {
     table = 1,
     memory = 2,
     global = 3,
+    /// Wasm 3.0 EH. A tag export has no `wasm_extern_t` yet, so
+    /// `wasm_instance_exports` leaves it out (#479).
+    tag = 4,
 };
 
 pub const Export = struct {
@@ -1048,7 +1051,7 @@ pub const Exports = struct {
 /// Decode the body of an export section (Wasm 1.0 §5.5.10):
 ///   exportsec = vec(export)
 ///   export    = name:vec(byte), desc:exportdesc
-///   exportdesc = (func | table | memory | global) idx:u32
+///   exportdesc = (func | table | memory | global | tag) idx:u32
 pub fn decodeExports(parent_alloc: Allocator, body: []const u8) Error!Exports {
     var arena = std.heap.ArenaAllocator.init(parent_alloc);
     errdefer arena.deinit();
@@ -1059,18 +1062,7 @@ pub fn decodeExports(parent_alloc: Allocator, body: []const u8) Error!Exports {
     try checkVecCount(count, body, pos);
     const items = try alloc.alloc(Export, count);
 
-    // 10.E cycle 79 — Wasm 3.0 EH adds export-kind 0x04 (tag); the
-    // upstream `wasm-c-api` doesn't include it in `wasm_externkind_t`
-    // so the v2 c_api surface (`ExternKind`) doesn't either. To let
-    // EH-using modules (try_table.0.wasm exports `e0` as kind=4)
-    // instantiate, we recognise kind=4 at decode but FILTER the
-    // export from `items` — the body's tag references go through
-    // the tag section directly, not through exports_storage.
-    // ExportDesc stays at 4 variants; downstream switches don't
-    // need a `.tag` arm. Future-cycle: cross-instance tag imports
-    // (D-192 sibling) will need a richer kind type.
-    var write_i: usize = 0;
-    for (0..count) |_| {
+    for (items) |*item| {
         const name_len = try leb128.readUleb128(u32, body, &pos);
         if (pos + name_len > body.len) return Error.UnexpectedEnd;
         const name_copy = try alloc.dupe(u8, body[pos .. pos + name_len]);
@@ -1081,37 +1073,10 @@ pub fn decodeExports(parent_alloc: Allocator, body: []const u8) Error!Exports {
         pos += 1;
         if (kind_byte > 4) return Error.BadValType;
         const idx = try leb128.readUleb128(u32, body, &pos);
-        if (kind_byte == 4) continue; // drop tag exports (see comment above)
-        const kind: ExportDesc = @enumFromInt(kind_byte);
-        items[write_i] = .{ .name = name_copy, .kind = kind, .idx = idx };
-        write_i += 1;
+        item.* = .{ .name = name_copy, .kind = @enumFromInt(kind_byte), .idx = idx };
     }
     if (pos != body.len) return Error.TrailingBytes;
-    return .{ .arena = arena, .items = items[0..write_i] };
-}
-
-/// ADR-0134 D3 — find a TAG export (kind 0x04) by name, returning its
-/// index in the full tag index space, or null if absent. `decodeExports`
-/// deliberately DROPS tag exports (the wasm-c-api `ExternKind` has no tag
-/// variant); cross-module tag-identity resolution needs them, so this
-/// dedicated scan keeps them. No allocation — the name is compared
-/// against a borrowed body slice.
-pub fn findExportedTagIndex(body: []const u8, name: []const u8) Error!?u32 {
-    var pos: usize = 0;
-    const count = try leb128.readUleb128(u32, body, &pos);
-    for (0..count) |_| {
-        const name_len = try leb128.readUleb128(u32, body, &pos);
-        if (pos + name_len > body.len) return Error.UnexpectedEnd;
-        const ename = body[pos .. pos + name_len];
-        pos += name_len;
-        if (pos >= body.len) return Error.UnexpectedEnd;
-        const kind_byte = body[pos];
-        pos += 1;
-        if (kind_byte > 4) return Error.BadValType;
-        const idx = try leb128.readUleb128(u32, body, &pos);
-        if (kind_byte == 4 and std.mem.eql(u8, ename, name)) return idx;
-    }
-    return null;
+    return .{ .arena = arena, .items = items };
 }
 
 // scanInitExpr / readValType / skipLeb128 extracted to
@@ -1127,19 +1092,6 @@ pub const readValType = init_expr.readValType;
 // ============================================================
 
 const testing = std.testing;
-
-test "findExportedTagIndex: returns the tag index for a kind=4 export (ADR-0134 D3)" {
-    // 2 exports: "f" (func, idx 0) then "e0" (tag, idx 0). decodeExports
-    // drops the tag; findExportedTagIndex keeps it.
-    const body = [_]u8{
-        0x02, // count
-        0x01, 0x66, 0x00, 0x00, // "f" func 0
-        0x02, 0x65, 0x30, 0x04, 0x00, // "e0" tag 0
-    };
-    try testing.expectEqual(@as(?u32, 0), try findExportedTagIndex(&body, "e0"));
-    try testing.expectEqual(@as(?u32, null), try findExportedTagIndex(&body, "f")); // func, not tag
-    try testing.expectEqual(@as(?u32, null), try findExportedTagIndex(&body, "absent"));
-}
 
 test "decodeTypes: empty section (count=0)" {
     var t = try decodeTypes(testing.allocator, &[_]u8{0x00});
@@ -1956,6 +1908,21 @@ test "decodeExports: single func export" {
     try testing.expectEqualStrings("main", ex.items[0].name);
     try testing.expectEqual(ExportDesc.func, ex.items[0].kind);
     try testing.expectEqual(@as(u32, 0), ex.items[0].idx);
+}
+
+test "decodeExports: a tag export stays in items at its position (#478)" {
+    const body = [_]u8{
+        0x02, // count
+        0x02, 0x65, 0x30, 0x04, 0x03, // "e0" tag 3
+        0x01, 0x66, 0x00, 0x00, // "f" func 0
+    };
+    var ex = try decodeExports(testing.allocator, &body);
+    defer ex.deinit();
+    try testing.expectEqual(@as(usize, 2), ex.items.len);
+    try testing.expectEqualStrings("e0", ex.items[0].name);
+    try testing.expectEqual(ExportDesc.tag, ex.items[0].kind);
+    try testing.expectEqual(@as(u32, 3), ex.items[0].idx);
+    try testing.expectEqual(ExportDesc.func, ex.items[1].kind);
 }
 
 test "decodeExports: empty section" {

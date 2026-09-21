@@ -1139,15 +1139,18 @@ pub const JitInstance = struct {
     /// address-derived token per ADR-0114 D7). An importer writes the
     /// returned `source_id` into its own `tag_ids[import_idx]` so a
     /// cross-module throw and catch compare equal. Null if `name` is not
-    /// an exported tag (tag exports are dropped by `decodeExports`, so
-    /// this uses the dedicated `sections.findExportedTagIndex` scan).
+    /// an exported tag.
     pub fn exportedTagTarget(self: *JitInstance, allocator: Allocator, name: []const u8) ?setup_mod.TagImportTarget {
         var module = parser.parse(allocator, self.wasm_bytes) catch return null;
         defer module.deinit(allocator);
         const exp_sec = module.find(.@"export") orelse return null;
-        const tag_idx = (sections.findExportedTagIndex(exp_sec.body, name) catch return null) orelse return null;
-        if (self.owned.rt.tag_ids_ptr) |p| {
-            if (tag_idx < self.owned.rt.tag_ids_count) return .{ .source_id = p[tag_idx] };
+        var exports = sections.decodeExports(allocator, exp_sec.body) catch return null;
+        defer exports.deinit();
+        for (exports.items) |e| {
+            if (e.kind != .tag or !std.mem.eql(u8, e.name, name)) continue;
+            const p = self.owned.rt.tag_ids_ptr orelse return null;
+            if (e.idx < self.owned.rt.tag_ids_count) return .{ .source_id = p[e.idx] };
+            return null;
         }
         return null;
     }

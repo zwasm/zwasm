@@ -315,6 +315,7 @@ pub export fn wasm_module_exports(m: ?*const Module, out: ?*types.ExportTypeVec)
             .global => if (e.idx < globals.items.len) globaltypeExtern(globals.items[e.idx].valtype, globals.items[e.idx].mutable) else null,
             .table => if (e.idx < tables.items.len) tabletypeExtern(tables.items[e.idx].elem_type, tables.items[e.idx].min, tables.items[e.idx].max) else null,
             .memory => if (e.idx < mems.items.len) memorytypeExtern(mems.items[e.idx].min, mems.items[e.idx].max) else null,
+            .tag => null,
         };
         const ext = et orelse continue;
         var nmv: vec.ByteVec = undefined;

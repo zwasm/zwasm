@@ -84,6 +84,20 @@ fn collectGlobalEntries(a: Allocator, imports_buf: ?sections.Imports, globals: ?
     return out;
 }
 
+/// Size of the tag index space (imported tags ++ defined tags).
+fn totalTagCount(a: Allocator, module: anytype, imports_buf: ?sections.Imports) Error!u32 {
+    var n: u32 = 0;
+    if (imports_buf) |ib| for (ib.items) |imp| {
+        if (imp.kind == .tag) n += 1;
+    };
+    if (module.find(.tag)) |ts| {
+        const tags = try sections.decodeTags(a, ts.body);
+        defer a.free(tags);
+        n += @intCast(tags.len);
+    }
+    return n;
+}
+
 pub fn compileWasmForAot(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledWasm {
     return compileWasm(allocator, wasm_bytes);
 }
@@ -588,6 +602,7 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
             const total_memories_empty: u32 = num_memory_imports + defined_memories;
             const total_globals_empty: u32 = num_global_imports + defined_globals_section;
             const total_funcs_empty: u32 = sig_count;
+            const total_tags_empty = try totalTagCount(a, module, imports_buf);
             var seen_names: std.StringHashMap(void) = .init(a);
             defer seen_names.deinit();
             try seen_names.ensureTotalCapacity(@intCast(exports.items.len));
@@ -599,6 +614,7 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
                     .table => e.idx < total_tables_empty,
                     .memory => e.idx < total_memories_empty,
                     .global => e.idx < total_globals_empty,
+                    .tag => e.idx < total_tags_empty,
                 };
                 if (!ok) return Error.ExportIdxOutOfRange;
             }
@@ -928,6 +944,7 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
             break :blk @intCast(ms_buf.items.len);
         } else 0;
         const total_memories: u32 = num_memory_imports + defined_memories;
+        const total_tags = try totalTagCount(a, module, imports_buf);
 
         // Track names for duplicate detection. Backed by the
         // arena `a` (function-local), released on compileWasm
@@ -943,6 +960,7 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
                 .table => e.idx < total_tables,
                 .memory => e.idx < total_memories,
                 .global => e.idx < total_globals,
+                .tag => e.idx < total_tags,
             };
             if (!ok) return Error.ExportIdxOutOfRange;
         }

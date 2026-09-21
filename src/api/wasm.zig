@@ -246,6 +246,7 @@ pub const wasm_val_delete = vec.wasm_val_delete;
 pub const ExternKind = instance.ExternKind;
 pub const Extern = instance.Extern;
 pub const storeAllocator = instance.storeAllocator;
+pub const externSlotOf = instance.externSlotOf;
 pub const Config = config.Config;
 pub const wasm_engine_new = instance.wasm_engine_new;
 pub const wasm_engine_new_with_config = config.wasm_engine_new_with_config;

@@ -560,6 +560,7 @@ pub const Linker = struct {
                     if (exp.idx >= source_rt.tables.len) return error.UnknownImport;
                     try self.defineTable(module, exp.name, source_rt.tables[exp.idx]);
                 },
+                .tag => try self.defineCrossModuleTag(module, exp.name, source_inst, exp.idx),
             }
         }
     }
@@ -853,6 +854,39 @@ test "Linker.defineInstance: registers every export (func/table/memory/global) u
     try testing.expect(lk.findEntry("a", "mem") != null);
     try testing.expect(lk.findEntry("a", "g") != null);
     try testing.expect(lk.findEntry("a", "t") != null);
+}
+
+test "Linker.defineInstance: a tag export is registered, and a tag import links through it (#478)" {
+    // A: (type (func (param i32))) (tag (type 0)) (export "t" (tag 0))
+    const a_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x01, 0x7f, 0x00, // type: (i32)->()
+        0x0d, 0x03, 0x01, 0x00, 0x00, // tag: 1× type 0
+        0x07, 0x05, 0x01, 0x01, 't', 0x04, 0x00, // export "t"=tag0
+    };
+    // B: (type (func (param i32))) (import "a" "t" (tag (type 0)))
+    const b_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x01, 0x7f, 0x00,
+        0x02, 0x08, 0x01, 0x01, 'a', 0x01, 't', 0x04, 0x00, 0x00, // import a.t (tag type 0)
+    };
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod_a = try eng.compile(&a_bytes);
+    defer mod_a.deinit();
+    var inst_a = try mod_a.instantiate(.{ .engine = .interp });
+    defer inst_a.deinit();
+
+    var lk = eng.linker();
+    defer lk.deinit();
+    try lk.defineInstance("a", &inst_a);
+    try testing.expectEqual(@as(usize, 1), lk.entries.items.len);
+    try testing.expect(lk.findEntry("a", "t") != null);
+
+    var mod_b = try eng.compile(&b_bytes);
+    defer mod_b.deinit();
+    var inst_b = try lk.instantiate(&mod_b, .{ .engine = .interp });
+    defer inst_b.deinit();
 }
 
 test "start function may be an IMPORTED host func (wit-component start-shim shape)" {

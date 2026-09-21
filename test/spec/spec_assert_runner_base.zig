@@ -2205,6 +2205,7 @@ fn crossModuleNonFuncImportMismatch(
         .table => 1,
         .memory => 2,
         .global => 3,
+        .tag => 4,
     };
     if (want_kind_byte != exp_kind_byte) return true;
     switch (imp.kind) {
@@ -2223,9 +2224,7 @@ fn crossModuleNonFuncImportMismatch(
             const want = imp.payload.memory;
             return crossModuleMemoryMismatch(allocator, &module, e.idx, want.min, want.max);
         },
-        // Unreachable: a tag import (want_kind_byte=4) can't match any
-        // ExportDesc kind byte (0-3, tags filtered from exports), so
-        // the kind-byte check above already returned. 10.E.
+        // A tag's params are matched at instantiate (`checkImportTypeMatches`).
         .tag => return false,
     }
 }

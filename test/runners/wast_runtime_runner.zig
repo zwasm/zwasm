@@ -680,14 +680,16 @@ fn buildImports(ctx: *RunnerContext, wasm_bytes: []const u8) !?[]?*const wasm_c_
         // for the corpus.
         for (source_instance.exports_storage) |exp| {
             if (!std.mem.eql(u8, exp.name, it.name)) continue;
+            const kind: wasm_c_api.ExternKind = switch (exp.kind) {
+                .func => .func,
+                .table => .table,
+                .memory => .memory,
+                .global => .global,
+                .tag => continue, // no wasm_extern_t for a tag
+            };
             const ext = try a.create(wasm_c_api.Extern);
             ext.* = .{
-                .kind = switch (exp.kind) {
-                    .func => .func,
-                    .table => .table,
-                    .memory => .memory,
-                    .global => .global,
-                },
+                .kind = kind,
                 .instance = source_instance,
                 .table_idx = if (exp.kind == .table) exp.idx else 0,
                 .memory_idx = if (exp.kind == .memory) exp.idx else 0,
@@ -1056,19 +1058,15 @@ fn lookupResultArity(ctx: *RunnerContext, export_name: []const u8) !usize {
     const am = ctx.current orelse return error.NoCurrentModule;
     const inst = am.instance orelse return error.NoCurrentModule;
     am.ensureExports();
-    for (inst.exports_storage, 0..) |exp, i| {
-        if (exp.kind == .func and std.mem.eql(u8, exp.name, export_name)) {
-            if (i >= am.exports.size) return error.ExportNotFound;
-            const ext = am.exports.data.?[i] orelse return error.ExportNotFound;
-            const fn_ptr = wasm_c_api.wasm_extern_as_func(ext) orelse return error.NotAFunction;
-            // Func handle carries instance + func_idx; fish the sig
-            // through the instance's func_ptrs_storage.
-            if (inst.func_ptrs_storage.len <= fn_ptr.func_idx) return error.ExportNotFound;
-            const zfunc = inst.func_ptrs_storage[fn_ptr.func_idx];
-            return zfunc.sig.results.len;
-        }
-    }
-    return error.ExportNotFound;
+    const i = wasm_c_api.externSlotOf(inst, export_name, .func) orelse return error.ExportNotFound;
+    if (i >= am.exports.size) return error.ExportNotFound;
+    const ext = am.exports.data.?[i] orelse return error.ExportNotFound;
+    const fn_ptr = wasm_c_api.wasm_extern_as_func(ext) orelse return error.NotAFunction;
+    // Func handle carries instance + func_idx; fish the sig
+    // through the instance's func_ptrs_storage.
+    if (inst.func_ptrs_storage.len <= fn_ptr.func_idx) return error.ExportNotFound;
+    const zfunc = inst.func_ptrs_storage[fn_ptr.func_idx];
+    return zfunc.sig.results.len;
 }
 
 const InvokeResult = struct {
@@ -1088,14 +1086,7 @@ fn invokeExport(
     const inst = am.instance orelse return error.NoCurrentModule;
     am.ensureExports();
 
-    var entry_idx: ?usize = null;
-    for (inst.exports_storage, 0..) |exp, i| {
-        if (exp.kind == .func and std.mem.eql(u8, exp.name, export_name)) {
-            entry_idx = i;
-            break;
-        }
-    }
-    const idx = entry_idx orelse return error.ExportNotFound;
+    const idx = wasm_c_api.externSlotOf(inst, export_name, .func) orelse return error.ExportNotFound;
     if (idx >= am.exports.size) return error.ExportNotFound;
     const ext = am.exports.data.?[idx] orelse return error.ExportNotFound;
     const fn_ptr = wasm_c_api.wasm_extern_as_func(ext) orelse return error.NotAFunction;

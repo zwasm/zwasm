@@ -209,13 +209,8 @@ fn invokeExport(bytes: []const u8, name: []const u8, args: ?[]const u8, out: *st
     var exports: wasm.ExternVec = .{ .size = 0, .data = null };
     wasm.wasm_instance_exports(instance, &exports);
     defer wasm.wasm_extern_vec_delete(&exports);
-    var entry: ?*const wasm.Func = null;
-    for (instance.exports_storage, 0..) |exp, i| {
-        if (exp.kind == .func and std.mem.eql(u8, exp.name, name)) {
-            entry = wasm.wasm_extern_as_func(exports.data.?[i].?);
-            break;
-        }
-    }
+    const i = wasm.externSlotOf(instance, name, .func).?;
+    const entry = wasm.wasm_extern_as_func(exports.data.?[i].?);
     return invokeFormatted(testing.allocator, entry.?, args, out);
 }
 

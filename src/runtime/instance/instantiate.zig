@@ -460,13 +460,8 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
         }
     }
     if (module.find(.@"export")) |exp_section| {
-        // Manual export scan tolerant of Wasm 3.0 export-kind
-        // extensions (e.g., `tag = 4` from the EH proposal which
-        // `sections.decodeExports` currently rejects with
-        // `BadValType` — see try_table.0.wasm). Only `kind == 0`
-        // (func) contributes to the declared-funcrefs set; other
-        // kinds (table / memory / global / tag / future) are
-        // ignored. Malformed body still rejects via `return false`.
+        // Only `kind == 0` (func) contributes to the declared-funcrefs
+        // set; a malformed body still rejects via `return false`.
         const body = exp_section.body;
         var pos: usize = 0;
         const count = leb128.readUleb128(u32, body, &pos) catch return false;
@@ -836,6 +831,8 @@ fn preDecodeSectionBodies(alloc: std.mem.Allocator, module: *Module) bool {
 /// - Global: walk imports + decoded globals for type info.
 /// - Table: walk imports + decoded tables for elem_type + limits.
 /// - Memory: walk imports + decoded memories for limits.
+/// - Tag: walk imports + decoded tags for the typeidx; the type is
+///   the tag's functype.
 /// `types` is the module's RETAINED type section (`Instance.export_src_types`):
 /// a func entry's `sig` aliases `types.items[typeidx]`, so the `Types` must
 /// outlive the returned slice. Decoding a throwaway copy here instead left
@@ -871,6 +868,11 @@ pub fn buildExportTypes(
     defer if (defined_memories) |*m| m.deinit();
     if (module.find(.memory)) |s| {
         defined_memories = try sections.decodeMemory(a, s.body);
+    }
+    var defined_tags: ?[]sections.TagEntry = null;
+    defer if (defined_tags) |t| a.free(t);
+    if (module.find(.tag)) |s| {
+        defined_tags = try sections.decodeTags(a, s.body);
     }
 
     for (exports_items, 0..) |exp, i| {
@@ -958,6 +960,26 @@ pub fn buildExportTypes(
                 if (def_idx >= dg.len) return error.UnsupportedImport;
                 const g = dg[def_idx];
                 break :blk .{ .global = .{ .valtype = g.valtype, .mutable = g.mutable } };
+            },
+            .tag => blk: {
+                var imp_count: u32 = 0;
+                if (imports_decoded) |im| {
+                    var idx: u32 = 0;
+                    for (im.items) |it| {
+                        if (it.kind != .tag) continue;
+                        if (idx == exp.idx) {
+                            const t = types orelse return error.UnsupportedImport;
+                            break :blk .{ .tag = t.items[it.payload.tag_typeidx] };
+                        }
+                        idx += 1;
+                    }
+                    imp_count = idx;
+                }
+                const def_idx = exp.idx - imp_count;
+                const dt = defined_tags orelse return error.UnsupportedImport;
+                if (def_idx >= dt.len) return error.UnsupportedImport;
+                const t = types orelse return error.UnsupportedImport;
+                break :blk .{ .tag = t.items[dt[def_idx].typeidx] };
             },
         };
     }
@@ -1638,29 +1660,6 @@ pub fn instantiateRuntime(
         // first: `export_types` aliases its entries.
         inst.export_src_types = if (module.find(.type)) |ts_sec| try sections.decodeTypes(a, ts_sec.body) else null;
         inst.export_types = try buildExportTypes(a, module, exports.items, imports_decoded, if (inst.export_src_types) |*t| t else null);
-        // EH cross-module tag exports (10.E-xmodule-tags): tag exports
-        // (kind 0x04) are dropped from exports_storage (c_api ExternKind
-        // lacks a tag variant), so scan the export section directly for
-        // them into the parallel `tag_exports` side-table.
-        const body = export_section.body;
-        var tag_list: std.ArrayList(instance_mod.TagExport) = .empty;
-        var pos: usize = 0;
-        const count = try leb128.readUleb128(u32, body, &pos);
-        var k: u32 = 0;
-        while (k < count) : (k += 1) {
-            const name_len = try leb128.readUleb128(u32, body, &pos);
-            if (pos + name_len > body.len) return error.InvalidModule;
-            const name = try a.dupe(u8, body[pos .. pos + name_len]);
-            pos += name_len;
-            if (pos >= body.len) return error.InvalidModule;
-            const kind_byte = body[pos];
-            pos += 1;
-            const exp_idx = try leb128.readUleb128(u32, body, &pos);
-            if (kind_byte == 4) {
-                try tag_list.append(a, .{ .name = name, .tag_index = exp_idx });
-            }
-        }
-        inst.tag_exports = tag_list.items;
     }
 }
 

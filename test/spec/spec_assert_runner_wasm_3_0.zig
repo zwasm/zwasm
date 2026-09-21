@@ -1416,15 +1416,12 @@ pub fn main(init: std.process.Init) !void {
                                         }
                                     }
                                 },
+                                .tag => {
+                                    // An importer's `(import <as> <name> (tag …))`
+                                    // resolves via the Linker (10.E-xmodule-tags).
+                                    cur_linker.defineCrossModuleTag(d.func_name, exp.name, inst, exp.idx) catch {};
+                                },
                             }
-                        }
-                        // 10.E-xmodule-tags cycle 116 — bind each EH tag
-                        // export (from the parallel tag_exports side-table,
-                        // since tags are absent from exports_storage) so an
-                        // importer's `(import <as> <name> (tag …))` resolves
-                        // via the Linker.
-                        for (inst.handle.tag_exports) |te| {
-                            cur_linker.defineCrossModuleTag(d.func_name, te.name, inst, te.tag_index) catch {};
                         }
                         // 10.M-D195b cycle 72 — also register the
                         // instance under the `<as>` name so tagged
