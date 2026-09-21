@@ -38,6 +38,8 @@ Full coverage of the wasm-c-api families:
   (EH). `wasm_module_imports` returns one importtype per import in section
   order, a tag import included — its externtype has kind `WASM_EXTERN_TAG`
   and `wasm_externtype_as_tagtype` gives its parameter signature (#475).
+  `wasm_module_exports` lists a tag export the same way (#478); a tag has no
+  `wasm_extern_t`, so `wasm_instance_exports` omits it (#479).
 - **Values + vectors**: `wasm_val_*`, `wasm_*_vec_new`/`_copy`/`_delete`.
 - **Traps + frames**: `wasm_trap_*`, `wasm_frame_*`.
 - **Refs + sharing**: `wasm_ref_*` (`_same`/`_as_*`/`_copy`), host_info

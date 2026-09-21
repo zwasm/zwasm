@@ -245,9 +245,10 @@ const GlobalInfo = struct { valtype: zir.ValType, mutable: bool };
 const TableInfo = struct { elem_type: zir.ValType, min: u64, max: ?u64 };
 
 /// `wasm_module_exports(module, own exporttype_vec* out)` — decode the
-/// export section into one `wasm_exporttype_t` per export. Unlike imports,
-/// an export carries only an index, so the type is resolved through the
-/// per-kind index space (import prefix ++ the defined section). `out` is
+/// export section into one `wasm_exporttype_t` per export, in section
+/// order. Unlike imports, an export carries only an index, so the type is
+/// resolved through the per-kind index space (import prefix ++ the defined
+/// section). A tag export's externtype has kind `WASM_EXTERN_TAG`. `out` is
 /// owned by the caller (`exporttype_vec_delete`).
 pub export fn wasm_module_exports(m: ?*const Module, out: ?*types.ExportTypeVec) callconv(.c) void {
     const o = out orelse return;
@@ -276,6 +277,7 @@ pub export fn wasm_module_exports(m: ?*const Module, out: ?*types.ExportTypeVec)
     var globals: std.ArrayList(GlobalInfo) = .empty;
     var tables: std.ArrayList(TableInfo) = .empty;
     var mems: std.ArrayList(sections.MemoryEntry) = .empty;
+    var tag_tis: std.ArrayList(u32) = .empty;
     if (parsed.find(.import)) |imp_sec| {
         var imps = sections.decodeImports(a, imp_sec.body) catch return;
         defer imps.deinit();
@@ -284,7 +286,7 @@ pub export fn wasm_module_exports(m: ?*const Module, out: ?*types.ExportTypeVec)
             .global => |g| globals.append(a, .{ .valtype = g.valtype, .mutable = g.mutable }) catch return,
             .table => |t| tables.append(a, .{ .elem_type = t.elem_type, .min = t.min, .max = t.max }) catch return,
             .memory => |mem| mems.append(a, mem) catch return,
-            .tag_typeidx => {},
+            .tag_typeidx => |ti| tag_tis.append(a, ti) catch return,
         };
     }
     if (parsed.find(.function)) |fs| {
@@ -306,6 +308,10 @@ pub export fn wasm_module_exports(m: ?*const Module, out: ?*types.ExportTypeVec)
         defer md.deinit();
         for (md.items) |mem| mems.append(a, mem) catch return;
     }
+    if (parsed.find(.tag)) |ts| {
+        const tags = sections.decodeTags(a, ts.body) catch return;
+        for (tags) |t| tag_tis.append(a, t.typeidx) catch return;
+    }
 
     var built: std.ArrayList(?*types.ExportType) = .empty;
     defer built.deinit(ca);
@@ -315,7 +321,7 @@ pub export fn wasm_module_exports(m: ?*const Module, out: ?*types.ExportTypeVec)
             .global => if (e.idx < globals.items.len) globaltypeExtern(globals.items[e.idx].valtype, globals.items[e.idx].mutable) else null,
             .table => if (e.idx < tables.items.len) tabletypeExtern(tables.items[e.idx].elem_type, tables.items[e.idx].min, tables.items[e.idx].max) else null,
             .memory => if (e.idx < mems.items.len) memorytypeExtern(mems.items[e.idx].min, mems.items[e.idx].max) else null,
-            .tag => null,
+            .tag => if (e.idx < tag_tis.items.len) tagtypeExtern(tag_tis.items[e.idx], func_types) else null,
         };
         const ext = et orelse continue;
         var nmv: vec.ByteVec = undefined;
@@ -605,6 +611,43 @@ test "wasm_module_exports: func + memory exports → exporttype_vec (idx → typ
     const e1 = exports.data.?[1].?;
     try testing.expectEqualStrings("mem", types.wasm_exporttype_name(e1).?.data.?[0..3]);
     try testing.expectEqual(types.extern_memory, types.wasm_externtype_kind(types.wasm_exporttype_type(e1).?));
+}
+
+// (type (func)) (func) (tag (type 0)) (export "e0" (tag 0)) (export "f" (func 0))
+const tag_export_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type () -> ()
+    0x03, 0x02, 0x01, 0x00, // func[0] : type 0
+    0x0d, 0x03, 0x01, 0x00, 0x00, // tag[0] : type 0
+    0x07, 0x0a, 0x02, 0x02, 'e', '0', 0x04, 0x00, 0x01, 'f', 0x00, 0x00, // export "e0"→tag0, "f"→func0
+    0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b, // code: empty body
+};
+
+test "wasm_module_exports: a tag export is listed at its position with the tag's signature (#478)" {
+    const e = instance.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer instance.wasm_engine_delete(e);
+    const s = instance.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer instance.wasm_store_delete(s);
+    var bytes = tag_export_wasm;
+    const bv: vec.ByteVec = .{ .size = bytes.len, .data = &bytes };
+    const m = instance.wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
+    defer instance.wasm_module_delete(m);
+
+    var exports: types.ExportTypeVec = undefined;
+    wasm_module_exports(m, &exports);
+    defer types.wasm_exporttype_vec_delete(&exports);
+
+    try testing.expectEqual(@as(usize, 2), exports.size);
+    const e0 = exports.data.?[0].?;
+    try testing.expectEqualStrings("e0", types.wasm_exporttype_name(e0).?.data.?[0..2]);
+    const et0 = types.wasm_exporttype_type(e0).?;
+    try testing.expectEqual(types.extern_tag, types.wasm_externtype_kind(et0));
+    const ft = types.wasm_tagtype_functype(types.wasm_externtype_as_tagtype_const(et0).?).?;
+    try testing.expectEqual(@as(usize, 0), ft.params.size);
+    try testing.expectEqual(@as(usize, 0), ft.results.size);
+    const e1 = exports.data.?[1].?;
+    try testing.expectEqualStrings("f", types.wasm_exporttype_name(e1).?.data.?[0..1]);
+    try testing.expectEqual(types.extern_func, types.wasm_externtype_kind(types.wasm_exporttype_type(e1).?));
 }
 
 test "wasm_module_exports: null-arg → empty vec, no crash" {

@@ -22,6 +22,15 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A tag export is listed at its position** (#478). The parser dropped a
+  tag export on decode, so `wasm_module_exports`, the Zig facade's
+  `Module.exports` and every other reader of the decoded list never saw it,
+  and the JIT re-scanned the raw section to find one. A tag export is now
+  decoded like the other four kinds: `wasm_module_exports` reports it with
+  kind `WASM_EXTERN_TAG` and the tag's signature, and an out-of-range tag
+  export index is rejected like the others. A tag has no `wasm_extern_t` yet,
+  so `wasm_instance_exports` still omits it (#479).
+
 - **A signature that cannot be allocated is not reported as a different
   signature** (#475). `buildValTypeVec` turned three distinct allocation
   failures into ordinary-looking results: an empty vector (read as a shorter

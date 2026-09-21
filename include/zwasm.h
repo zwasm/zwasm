@@ -285,6 +285,11 @@ WASM_API_EXTERN bool zwasm_instance_engine(const wasm_instance_t*, int32_t* out)
 WASM_API_EXTERN bool zwasm_module_imports_ex(
     const wasm_module_t*, wasm_importtype_vec_t* out);
 
+/* The stock wasm_module_exports lists one wasm_exporttype_t per export, in
+ * section order, a tag export included (kind WASM_EXTERN_TAG). A tag has no
+ * wasm_extern_t yet, so wasm_instance_exports leaves it out: that vector is
+ * shorter than wasm_module_exports' by the tag exports (#479). */
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
