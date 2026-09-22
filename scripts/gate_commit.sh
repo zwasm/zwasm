@@ -14,7 +14,8 @@
 #  12. scripts/check_wasi03_coverage_claims.sh --gate       — gate; ALWAYS (same reason).
 #  13. scripts/check_doc_fossils.sh --gate                  — gate; ALWAYS (same reason).
 #  14. scripts/check_ci_changes_detect.sh --gate            — gate; ALWAYS (it guards the doc-only short-circuit itself).
-#  14. zig build test (Mac native)                          — skipped on docs-only.
+#  15. scripts/check_gate_exclusions.sh --gate              — gate; ALWAYS (same: no build input behind the short-circuit).
+#  16. zig build test (Mac native)                          — skipped on docs-only.
 #
 # Per the A6 gate consolidation study (§9.12-A / A6), docs/config-only
 # diffs cannot move src/-related gate outcomes, so they short-circuit.
@@ -159,6 +160,8 @@ echo "[gate_commit] check_doc_fossils --gate ..."
 bash scripts/check_doc_fossils.sh --gate > /dev/null
 echo "[gate_commit] check_ci_changes_detect --gate ..."
 bash scripts/check_ci_changes_detect.sh --gate > /dev/null
+echo "[gate_commit] check_gate_exclusions --gate ..."
+bash scripts/check_gate_exclusions.sh --gate > /dev/null
 
 # --- gates: zone + file_size + skip_adrs (skipped on docs-only) ---------
 

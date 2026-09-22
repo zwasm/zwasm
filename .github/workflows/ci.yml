@@ -124,7 +124,10 @@ jobs:
           files="$(git diff --name-only "$range")"
           echo "changed files:"; printf '%s\n' "$files"
           # Paths that do NOT need the 3-host build/test gate (docs / meta only).
-          nondoc="$(printf '%s\n' "$files" | grep -vE '(^|/)[^/]*\.md$|^docs/|^\.dev/|^\.claude/|^LICENSE$' || true)"
+          # A list of exclusions, so a new build input is gated unless someone
+          # lists its path; `check_gate_exclusions.sh` fails the gate when a
+          # listed path is one the build reads.
+          nondoc="$(printf '%s\n' "$files" | grep -vEf scripts/gate_exclusions.regex || true)"
           # `docs/examples/` is not documentation despite the path: `build.zig`
           # compiles and runs the embedding consumers there — run_c_host,
           # run_zig_host and run_zig_host_jit are in `test-all`, run_rust_host
@@ -133,7 +136,8 @@ jobs:
           # reported success (#297). Whole directory, not the four files
           # build.zig names today: a fifth example must not re-open this by
           # being forgotten here. The `.md` rule still applies inside it, so
-          # `docs/examples/README.md` stays doc-only.
+          # `docs/examples/README.md` stays doc-only. Not in the regex file:
+          # ERE cannot subtract, and the guard mirrors this carve-out.
           examples="$(printf '%s\n' "$files" | grep -E '^docs/examples/' | grep -vE '(^|/)[^/]*\.md$' || true)"
           if [ -n "${nondoc//[[:space:]]/}" ] || [ -n "${examples//[[:space:]]/}" ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"; echo "non-doc changes -> run 3-host gate"
@@ -165,6 +169,12 @@ jobs:
       - name: The changes job's own doc-only decision
         shell: bash
         run: bash scripts/check_ci_changes_detect.sh --gate
+      # Here and not in `ci_gate.sh`: a change that widens the exclusion list
+      # can classify itself as doc-only, and then the gate this would sit in
+      # never runs (#298).
+      - name: No build input behind the doc-only skip
+        shell: bash
+        run: bash scripts/check_gate_exclusions.sh --gate
 
   gate:
     name: gate (${{ matrix.name }})

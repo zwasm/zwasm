@@ -1,0 +1,5 @@
+(^|/)[^/]*\.md$
+^docs/
+^\.dev/
+^\.claude/
+^LICENSE$

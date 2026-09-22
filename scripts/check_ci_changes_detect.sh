@@ -63,6 +63,10 @@ git -C "$REPO" init -q -b work .
 git -C "$REPO" config user.email check@example.invalid
 git -C "$REPO" config user.name check
 echo base > "$REPO/README.md"
+# The step reads the exclusion list relative to its working directory, so the
+# throwaway repository carries the real one at the same path.
+mkdir -p "$REPO/scripts"
+cp scripts/gate_exclusions.regex "$REPO/scripts/"
 git -C "$REPO" add -A
 git -C "$REPO" commit -qm base
 BASE=$(git -C "$REPO" rev-parse HEAD)
