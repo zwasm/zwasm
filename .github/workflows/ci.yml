@@ -68,7 +68,8 @@ permissions:
 # A merge-group run needs no special case: its ref is the queue's own
 # `refs/heads/gh-readonly-queue/...`, distinct per entry, so entries never
 # cancel each other — including the speculative ones a `max_entries_to_build`
-# above 1 would create.
+# above 1 would create. A `main` run that fails is reported by
+# `main_failure.yml` (#312); its bot actor gets no notification from GitHub.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}-{1}', github.event_name, github.sha) || '' }}
   cancel-in-progress: true

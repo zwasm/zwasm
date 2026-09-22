@@ -1,0 +1,90 @@
+# main-failure — a failed `push` run of `ci` on `main` lands as one comment on
+# the open `ci:main-failure` issue (#312). Its actor is the merge queue's bot,
+# so GitHub's own "failed workflow" notification reaches nobody. This is a
+# separate `workflow_run` workflow, not a job in `ci.yml`, so that `ci.yml`
+# keeps `contents: read` — a fork PR's run must never hold `issues: write`.
+
+name: main-failure
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "id of the `ci` run to report"
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  report:
+    name: report
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.event == 'push')
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.inputs.run_id || github.event.workflow_run.id }}
+      LABEL: ci:main-failure
+      TITLE: "ci: the push to main failed its extended run"
+    steps:
+      - name: Report the failed run
+        shell: bash
+        run: |
+          set -euo pipefail
+          run="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID")"
+          conclusion="$(jq -r .conclusion <<<"$run")"
+          event="$(jq -r .event <<<"$run")"
+          branch="$(jq -r .head_branch <<<"$run")"
+          if [ "$conclusion" != failure ] || [ "$event" != push ] || [ "$branch" != main ]; then
+            echo "run $RUN_ID: $event on $branch concluded $conclusion -> nothing to report"
+            exit 0
+          fi
+          sha="$(jq -r .head_sha <<<"$run" | cut -c1-9)"
+          url="$(jq -r .html_url <<<"$run")"
+          title="$(jq -r '.head_commit.message | split("\n")[0]' <<<"$run")"
+
+          body="$RUNNER_TEMP/comment.md"
+          printf '[run %s](%s) — `%s` %s\n' "$RUN_ID" "$url" "$sha" "$title" > "$body"
+          # `ci-required` only echoes the legs' verdict, so its log carries no signature.
+          gh run view "$RUN_ID" --json jobs \
+            --jq '.jobs[] | select(.conclusion == "failure" and .name != "ci-required") | "\(.databaseId)\t\(.name)"' \
+          | while IFS=$'\t' read -r job_id job_name; do
+            printf '\n**%s**\n\n````\n' "$job_name" >> "$body"
+            gh run view --job "$job_id" --log-failed \
+              | grep -E 'error:|FAIL|failed to respond' \
+              | sed -E 's/^[^\t]*\t[^\t]*\t[^ ]* //' | cut -c1-200 | head -20 >> "$body" || true
+            printf '````\n' >> "$body"
+          done
+
+          oldest_open() { gh issue list --label "$LABEL" --state open --json number --jq '[.[].number] | min // empty'; }
+          issue="$(oldest_open)"
+          if [ -z "$issue" ]; then
+            issue_body="$RUNNER_TEMP/issue.md"
+            cat > "$issue_body" <<'EOF'
+          Every `push` run of `ci` on `main` that concludes `failure` lands here as one comment: the run, the commit, the failing jobs, and the lines of their logs that carry the failure's signature. The run's actor is the merge queue's bot, so GitHub's own failed-workflow notification reaches nobody (#312).
+
+          A person closes this issue; nothing closes it automatically. A later green run on `main` does not re-run the failed SHA's extended checks, so it clears nothing. Close it once every failure reported below is either re-run green or filed on its own.
+          EOF
+            issue="$(gh issue create --title "$TITLE" --label "$LABEL" --body-file "$issue_body" | grep -oE '[0-9]+$')"
+            echo "opened #$issue"
+            # Two reports can both find no tracker and both open one. The lowest
+            # number is the tracker; a concurrency group would instead drop the
+            # middle report of a burst (only one run per group stays pending).
+            oldest="$(oldest_open)"
+            if [ "$oldest" != "$issue" ]; then
+              gh issue close "$issue" --comment "opened by a concurrent report; the tracker is #$oldest"
+              issue="$oldest"
+            fi
+          fi
+          gh issue comment "$issue" --body-file "$body"
+          echo "commented on #$issue"

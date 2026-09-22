@@ -104,8 +104,11 @@ in) — plus
 inside the script (ADR-0225). The extended
 static/build checks (lint, the build-option DCE matrix, AOT cross-compile,
 `zone_check`) run on the merge to `main`, not per PR — they are up to ~20
-cold-cache builds and would dominate every PR's wall-clock. All three legs are
-blocking (ADR-0211 D3). There is no additional hidden gate beyond CI.
+cold-cache builds and would dominate every PR's wall-clock. A failure of that
+`main` run is reported as a comment on the open `ci:main-failure` issue, since
+the run's actor is the merge queue's bot and GitHub notifies nobody (#312).
+All three legs are blocking (ADR-0211 D3). There is no additional hidden gate
+beyond CI.
 
 A green `zig build test` / `test-all` on a single OS is **not** sufficient
 evidence for changes that touch platform branches, ABI boundaries, or feature
