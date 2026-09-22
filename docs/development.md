@@ -112,9 +112,12 @@ evidence for changes that touch platform branches, ABI boundaries, or feature
 flips — each OS masks the other two's failures (a POSIX run says nothing about
 Windows; aarch64 nothing about x86_64). Let the 3-OS PR gate judge those.
 
-Doc-only PRs (Markdown, `docs/`, `.dev/`, `.claude/`, `LICENSE`) skip the
-heavy 3-OS legs automatically and are gated by the fast `doc-truth` job
-instead.
+Doc-only pushes (Markdown, `docs/`, `.dev/`, `.claude/`, `LICENSE` — the list
+is `scripts/gate_exclusions.regex`) skip the heavy 3-OS legs automatically and
+are gated by the fast `doc-truth` job instead. The decision is per push, not
+per PR: a doc-only push rides on the previous head's `ci-required` when that
+succeeded, and pays in full after a failed or cancelled one; the merge queue's
+own run gates the merged tree in full regardless (ADR-0227).
 
 To run what CI runs, locally, on your own machine — the script defines the
 leg's content except for the one blocking step beside it:
