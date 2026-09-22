@@ -89,10 +89,24 @@ git -C "$REPO" add -A
 git -C "$REPO" commit -qm example
 EXAMPLE=$(git -C "$REPO" rev-parse HEAD)
 
+# A PR's second push: doc on top of code, and code on top of doc.
+git -C "$REPO" reset -q --hard "$CODE"
+echo doc >> "$REPO/README.md"
+git -C "$REPO" add -A
+git -C "$REPO" commit -qm doc-after-code
+CODE_DOC=$(git -C "$REPO" rev-parse HEAD)
+
+git -C "$REPO" reset -q --hard "$DOC"
+mkdir -p "$REPO/src"
+echo code > "$REPO/src/thing.zig"
+git -C "$REPO" add -A
+git -C "$REPO" commit -qm code-after-doc
+DOC_CODE=$(git -C "$REPO" rev-parse HEAD)
+
 fails=0
 cases=0
 
-check() { # name event base head want
+check() { # name event base head want [before after verdict]
   cases=$((cases + 1))
   local out
   : > "$TMP/gh_output"
@@ -103,7 +117,7 @@ check() { # name event base head want
   (
     cd "$REPO"
     EVENT="$2" \
-    PR_BASE="$3" PR_HEAD="$4" \
+    PR_BASE="$3" PR_HEAD="$4" PR_BEFORE="${6:-}" PR_AFTER="${7:-}" PR_BEFORE_VERDICT="${8:-}" \
     PUSH_BEFORE="$3" PUSH_HEAD="$4" \
     MG_BASE="$3" MG_HEAD="$4" \
     GITHUB_OUTPUT="$TMP/gh_output" \
@@ -129,6 +143,15 @@ check "merge_group base empty"      merge_group ""      "$CODE"    true
 check "pull_request doc-only"       pull_request "$BASE" "$DOC"     false
 check "pull_request code"           pull_request "$BASE" "$CODE"    true
 check "pull_request docs/examples"  pull_request "$BASE" "$EXAMPLE" true
+# `synchronize` (#298): the push's own range decides when the previous head's
+# ci-required succeeded; the PR's whole diff otherwise, and when `before` is
+# unreachable.
+check "pull_request doc push after green code"     pull_request "$BASE" "$CODE_DOC" false "$CODE" "$CODE_DOC" success
+check "pull_request doc push after red code"       pull_request "$BASE" "$CODE_DOC" true  "$CODE" "$CODE_DOC" failure
+check "pull_request doc push after cancelled code" pull_request "$BASE" "$CODE_DOC" true  "$CODE" "$CODE_DOC" cancelled
+check "pull_request doc push, verdict unknown"     pull_request "$BASE" "$CODE_DOC" true  "$CODE" "$CODE_DOC" ""
+check "pull_request code push after doc"           pull_request "$BASE" "$DOC_CODE" true  "$DOC"  "$DOC_CODE" success
+check "pull_request before unreachable"            pull_request "$BASE" "$CODE_DOC" true  0000000000000000000000000000000000000000 "$CODE_DOC" success
 check "push doc-only"               push         "$BASE" "$DOC"     false
 check "push code"                   push         "$BASE" "$CODE"    true
 check "workflow_dispatch"           workflow_dispatch "" ""         true

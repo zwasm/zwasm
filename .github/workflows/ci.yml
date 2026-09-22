@@ -30,7 +30,10 @@
 # expensive matrix never runs for a pure docs/comment PR — but `ci-required`
 # (the single required status check) still reports success, so the PR stays
 # mergeable without burning three runners. Keep the branch ruleset's required
-# check pointed at `ci-required`, NOT the individual `gate (...)` legs.
+# check pointed at `ci-required`, NOT the individual `gate (...)` legs. On a
+# PR the decision is per push, riding on the previous head's success (#298):
+# the merge queue's run gates the merged tree in full regardless (ADR-0227
+# D2/D3).
 #
 # The cheap `doc-truth` job runs for EVERY PR, doc-only included — checks whose
 # subject is prose must not be skipped by the doc-only short-circuit.
@@ -82,6 +85,9 @@ jobs:
     name: detect changes
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: read
     outputs:
       code: ${{ steps.detect.outputs.code }}
     steps:
@@ -89,12 +95,33 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      # A doc-only push can only ride on a head whose `ci-required` succeeded;
+      # any other conclusion (failed, cancelled by this push, still running,
+      # unqueryable) makes the push pay for the whole PR. Its own step so the
+      # decision below stays a pure function of its inputs for
+      # check_ci_changes_detect.sh.
+      - name: Previous head's verdict
+        id: prev
+        if: github.event_name == 'pull_request' && github.event.before != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BEFORE: ${{ github.event.before }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PR_BEFORE}/check-runs?check_name=ci-required" --jq '.check_runs[0].conclusion // "none"' 2>/dev/null)" || v=unknown
+          echo "previous head ${PR_BEFORE}: ci-required=${v}"
+          echo "conclusion=${v}" >> "$GITHUB_OUTPUT"
       - name: Detect non-doc changes
         id: detect
         env:
           EVENT: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          # Set on `synchronize` only: the head before and after this push.
+          PR_BEFORE: ${{ github.event.before }}
+          PR_AFTER: ${{ github.event.after }}
+          PR_BEFORE_VERDICT: ${{ steps.prev.outputs.conclusion }}
           PUSH_BEFORE: ${{ github.event.before }}
           PUSH_HEAD: ${{ github.sha }}
           MG_BASE: ${{ github.event.merge_group.base_sha }}
@@ -103,7 +130,17 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT" = "pull_request" ]; then
-            range="${PR_BASE}...${PR_HEAD}"
+            # A PR run answers for THIS push: a doc-only push rides on the
+            # previous head's successful gate, and a rebase widens the range
+            # back to the base (its merge-base moves), so it pays in full. An
+            # unreachable `before` (opened / reopened / ready_for_review, or
+            # a force-push that dropped it) or a previous verdict other than
+            # success falls back to the whole PR.
+            if [ "$PR_BEFORE_VERDICT" = "success" ] && git cat-file -e "${PR_BEFORE}^{commit}" 2>/dev/null; then
+              range="${PR_BEFORE}...${PR_AFTER}"
+            else
+              range="${PR_BASE}...${PR_HEAD}"
+            fi
           elif [ "$EVENT" = "merge_group" ]; then
             # The group's head contains its base, so the two-dot range is the
             # push analogue, and it covers the whole group when entries are
