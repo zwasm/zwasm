@@ -1001,6 +1001,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    aot_diff_mod.addImport("build_options", build_options_mod); // the version an `.unsound` row expires at
     const aot_diff_exe = b.addExecutable(.{
         .name = "zwasm-aot-process-diff",
         .root_module = aot_diff_mod,
@@ -1021,6 +1022,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    aot_diff_unit_mod.addImport("build_options", build_options_mod);
     const aot_diff_unit_tests = b.addTest(.{ .root_module = aot_diff_unit_mod });
     const run_aot_diff_unit = b.addRunArtifact(aot_diff_unit_tests);
     test_step.dependOn(&run_aot_diff_unit.step);
