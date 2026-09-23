@@ -184,3 +184,15 @@ this revision: the expectation table is empty and all three OS legs report zero
 of both. The same change gave each run its own scratch roots — shared fixed
 roots let two overlapping runs delete each other's working directories, which
 is how a run came to be half-empty and green in the first place (issue #284).
+
+## Revision 2026-09-23 — an `.unsound` row expires at the version it names
+
+The anti-regression list said a `.unsound` row is report-only; it did not say
+until when. One such row removes a fixture from the gate for good, while the
+summary still prints GATING. An `.unsound` outcome is ASLR-dependent, so a
+single run cannot tell a fixed row from a lucky one — the deadline is therefore
+a zwasm VERSION rather than a date, and re-measuring falls out of cutting a
+tag. Every `.unsound` row now carries `review_by`; once the build's version
+reaches it the row reds the lane (EXPIRED-ROW) until it is renewed or deleted,
+and a row no driven corpus holds reds it too (STALE-ROW). The `.wrong_result`
+arm gained the cache-lane gate the `.match` arm always had (issue #307 item 5).

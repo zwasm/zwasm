@@ -36,8 +36,11 @@
 //!     actually serves — and exit cleanly while doing it.
 //!   - `.unsound` — ASLR-dependent outcome (D-516 baked helper addresses):
 //!     crash on most runs, may accidentally "work" under a lucky/absent
-//!     slide. Reported, never gated, until the de-baking stage flips it to
-//!     an implicit `.match`.
+//!     slide. One run cannot tell a fixed row from a lucky one, so the row
+//!     is reported rather than gated — but only until the `review_by`
+//!     version it names, at which point EXPIRED-ROW reds the lane and the
+//!     row must be renewed or deleted. The deadline is a version, not a
+//!     date: the re-measurement then falls out of cutting a tag.
 //! Everything else defaults to `.match` — any divergence is a finding and
 //! the gate exits non-zero.
 //!
@@ -52,6 +55,7 @@
 //!        `zwasm-aot-process-diff <zwasm-cli> <corpus-dir> [corpus-dir...]`
 
 const std = @import("std");
+const build_options = @import("build_options");
 
 const Expectation = union(enum) {
     match,
@@ -59,7 +63,32 @@ const Expectation = union(enum) {
     unsound: []const u8, // ASLR-dependent (D-516 class) — report only
 };
 
-const KnownEntry = struct { name: []const u8, exp: Expectation };
+/// `review_by` is the zwasm version by which an `.unsound` row must be
+/// re-measured — required on that class, `""` on the gated ones.
+const KnownEntry = struct { name: []const u8, exp: Expectation, review_by: []const u8 };
+
+comptime {
+    for (known_table, 0..) |a, i| {
+        // A duplicate name would be found by `rowFor` once and counted once,
+        // leaving the second row permanently STALE.
+        for (known_table[i + 1 ..]) |b| {
+            if (std.mem.eql(u8, a.name, b.name)) {
+                @compileError("known_table lists '" ++ a.name ++ "' twice");
+            }
+        }
+        switch (a.exp) {
+            .unsound => if (a.review_by.len == 0) @compileError(
+                "`.unsound` row '" ++ a.name ++ "' has no review_by — an ungated row with no end is a permanent silencer",
+            ),
+            else => {},
+        }
+        if (a.review_by.len != 0) {
+            _ = std.SemanticVersion.parse(a.review_by) catch @compileError(
+                "known_table row '" ++ a.name ++ "' has a review_by that is not a semantic version: '" ++ a.review_by ++ "'",
+            );
+        }
+    }
+}
 
 // Keys are fixture basenames (unique across all driven corpora).
 //
@@ -69,14 +98,35 @@ const KnownEntry = struct { name: []const u8, exp: Expectation };
 // crafted gc_struct/eh_throw/mem_grow shapes) and D-518 (start function).
 // Every fixture the producer accepts now MATCHES its source `.wasm`. A
 // future finding gets a new row citing a fresh D-NNN; fixing it trips
-// RATCHET-FLIP to force the row's removal in the same PR.
+// RATCHET-FLIP to force the row's removal in the same PR. An `.unsound` row
+// also carries the version by which it must be re-measured.
 const known_table = [_]KnownEntry{};
 
-fn expectationFor(name: []const u8) Expectation {
-    for (known_table) |e| {
-        if (std.mem.eql(u8, e.name, name)) return e.exp;
+// Zig refuses to index a zero-length array or slice at all, and the table is
+// empty today, so nothing here reads the table by index: the lookup hands
+// back the row it walked to, and `hits` (a slice over a runtime buffer) is
+// the only thing subscripted.
+const known_rows: []const KnownEntry = &known_table;
+
+const Row = struct { idx: usize, exp: Expectation };
+
+fn rowFor(name: []const u8) ?Row {
+    for (known_rows, 0..) |e, i| {
+        if (std.mem.eql(u8, e.name, name)) return .{ .idx = i, .exp = e.exp };
     }
-    return .match;
+    return null;
+}
+
+/// Has `current` reached the version an `.unsound` row named? Ordered as
+/// semantic versions, not lexicographically — 2.10.0 is past 2.8.0.
+///
+/// A version neither side can parse fails EXPIRED: the comptime block already
+/// rejects an unparsable `review_by`, so reaching this means the build's own
+/// version string is malformed, and reding the lane is the louder answer.
+fn rowExpired(review_by: []const u8, current: []const u8) bool {
+    const want = std.SemanticVersion.parse(review_by) catch return true;
+    const now = std.SemanticVersion.parse(current) catch return true;
+    return now.order(want) != .lt;
 }
 
 const Verdict = enum { matched, unexpected, ratchet_flip, expected_diverge, unsound };
@@ -261,6 +311,26 @@ fn run(init: std.process.Init) !u8 {
     var unsound_reported: u32 = 0;
     var unexpected: u32 = 0; // gate
     var ratchet_flips: u32 = 0; // gate (a known_table entry now matches)
+    // Per row, so a row the corpora no longer hold is a finding too: a
+    // divergence pinned against a fixture that left cannot be re-measured,
+    // and the row would sit here excusing nothing.
+    var hits_buf = [_]u32{0} ** known_table.len;
+    const hits: []u32 = &hits_buf;
+
+    // Before the corpora, not after: an expired row is a bookkeeping failure
+    // that a full run's output would bury.
+    for (known_rows) |e| {
+        switch (e.exp) {
+            .unsound => {},
+            else => continue,
+        }
+        if (!rowExpired(e.review_by, build_options.version)) continue;
+        unexpected += 1;
+        try stdout.print(
+            "EXPIRED-ROW  {s}: .unsound row was to be re-measured by {s}; renew or delete it\n",
+            .{ e.name, e.review_by },
+        );
+    }
 
     var n_dirs: u32 = 0;
     var corpus_empty = false;
@@ -465,7 +535,9 @@ fn run(init: std.process.Init) !u8 {
             else
                 cache_crashed_lane;
 
-            const exp = expectationFor(entry.name);
+            const row = rowFor(entry.name);
+            if (row) |r| hits[r.idx] += 1;
+            const exp: Expectation = if (row) |r| r.exp else .match;
             switch (verdict(exp, equal, cache_equal, cache_matches_cwasm, crashed_lane != null, cache_crashed_lane != null)) {
                 .matched => matched += 1,
                 .unexpected => {
@@ -542,6 +614,18 @@ fn run(init: std.process.Init) !u8 {
         }
     }
 
+    // After the walk, not inside it: the rows are spread across the driven
+    // corpora and only the whole walk knows whether each was reached.
+    for (known_rows, hits) |e, n| {
+        if (n != 0) continue;
+        unexpected += 1;
+        try stdout.print(
+            "STALE-ROW  known_table lists '{s}', which no driven corpus holds — remove the\n" ++
+                "      row, or name a corpus that carries the fixture\n",
+            .{e.name},
+        );
+    }
+
     if (n_dirs == 0) {
         try stdout.print("usage: zwasm-aot-process-diff <zwasm-cli> <corpus-dir> [corpus-dir...]\n", .{});
         try stdout.flush();
@@ -555,11 +639,10 @@ fn run(init: std.process.Init) !u8 {
     if (corpus_empty or total == 0) {
         try stdout.print("NOT-GATING: corpus-empty\n", .{});
     } else if (unsound_reported != 0) {
-        // `.unsound` rows are report-only by design (see the header), so a run
-        // carrying them gates over fewer fixtures than its total suggests. No
-        // expiry mechanism while `known_table` is empty — the summary says how
-        // many fixtures the word GATING does not cover.
-        try stdout.print("GATING ({d} report-only, not gated)\n", .{unsound_reported});
+        // `.unsound` rows are report-only until the `review_by` version each
+        // names, so a run carrying them gates over fewer fixtures than its
+        // total suggests — the summary says how many the word GATING misses.
+        try stdout.print("GATING ({d} report-only until their review_by version)\n", .{unsound_reported});
     } else {
         try stdout.print("GATING\n", .{});
     }
@@ -591,7 +674,9 @@ fn run(init: std.process.Init) !u8 {
     try stdout.flush();
     // Gate: an unexpected divergence is a fidelity regression (or a new
     // finding to triage into the table with a D-NNN); a ratchet flip means a
-    // known gap was fixed and the table must be updated in the same PR.
+    // known gap was fixed and the table must be updated in the same PR. An
+    // expired or stale row lands in `unexpected` too — a row that excuses a
+    // fixture is part of what this lane claims.
     if (unexpected != 0 or ratchet_flips != 0 or skipped_spawn != 0 or refused_produce != 0) return 1;
     return 0;
 }
@@ -627,4 +712,12 @@ test "verdict: a known divergence does not excuse a cache lane from exiting clea
     try t.expectEqual(Verdict.unexpected, verdict(known, false, false, true, true, true));
     // Still unexpected when the cache ALSO diverges — one arm, two reasons.
     try t.expectEqual(Verdict.unexpected, verdict(known, false, false, false, true, true));
+}
+
+test "rowExpired: a review_by is reached, and ordered as a version rather than a string" {
+    const t = std.testing;
+    try t.expect(!rowExpired("2.8.0", "2.7.1"));
+    try t.expect(rowExpired("2.8.0", "2.8.0"));
+    // 2.10.0 sorts BEFORE 2.8.0 lexicographically; the row is still due.
+    try t.expect(rowExpired("2.8.0", "2.10.0"));
 }
