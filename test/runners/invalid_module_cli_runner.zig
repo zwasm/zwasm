@@ -11,6 +11,7 @@
 //!        `zwasm-cli-invalid-module <zwasm-cli> <fixture-dir>`
 
 const std = @import("std");
+const spawned_cli = @import("spawned_cli");
 
 const Fixture = struct { file: []const u8, reason: []const u8 };
 
@@ -57,6 +58,7 @@ pub fn main(init: std.process.Init) !u8 {
     _ = arg_it.next().?;
     const cli = arg_it.next() orelse return error.MissingCliPath;
     const fixture_dir = arg_it.next() orelse return error.MissingFixtureDir;
+    try spawned_cli.assertRunnerBuildMode(gpa, io, cli);
 
     // Scratch for `compile`'s output, tagged per run (the shape of
     // default_entry_runner.zig).

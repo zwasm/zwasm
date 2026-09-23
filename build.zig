@@ -996,12 +996,28 @@ pub fn build(b: *std.Build) void {
     // runner's expectation table (D-516/D-517/D-518) — the gate trips on any
     // UNEXPECTED divergence and on RATCHET-FLIPs (a pinned gap now matching,
     // forcing the table update in the fixing PR).
+    // D-598: what a runner that drives the CLI as a SPAWNED BINARY can settle
+    // about it by asking. One module, imported by all five such runners.
+    const spawned_cli_mod = b.createModule(.{
+        .root_source_file = b.path("test/support/spawned_cli.zig"),
+    });
+    spawned_cli_mod.addImport("build_options", build_options_mod); // the mode `exe_rs` is actually built at
+    const spawned_cli_test_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/support/spawned_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    spawned_cli_test_mod.addImport("build_options", build_options_mod);
+    const run_spawned_cli_unit = b.addRunArtifact(b.addTest(.{ .root_module = spawned_cli_test_mod }));
+    test_step.dependOn(&run_spawned_cli_unit.step);
+
     const aot_diff_mod = createSanitizedModule(b, sanitize_opts, .{
         .root_source_file = b.path("test/aot/aot_process_diff.zig"),
         .target = target,
         .optimize = optimize,
     });
     aot_diff_mod.addImport("build_options", build_options_mod); // the version an `.unsound` row expires at
+    aot_diff_mod.addImport("spawned_cli", spawned_cli_mod);
     const aot_diff_exe = b.addExecutable(.{
         .name = "zwasm-aot-process-diff",
         .root_module = aot_diff_mod,
@@ -1273,6 +1289,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    cli_stdin_mod.addImport("spawned_cli", spawned_cli_mod);
     const cli_stdin_exe = b.addExecutable(.{
         .name = "zwasm-cli-stdin",
         .root_module = cli_stdin_mod,
@@ -1293,6 +1310,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    cli_argv0_mod.addImport("spawned_cli", spawned_cli_mod);
     const cli_argv0_exe = b.addExecutable(.{
         .name = "zwasm-cli-argv0",
         .root_module = cli_argv0_mod,
@@ -1314,6 +1332,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    cli_default_entry_mod.addImport("spawned_cli", spawned_cli_mod);
     const cli_default_entry_exe = b.addExecutable(.{
         .name = "zwasm-cli-default-entry",
         .root_module = cli_default_entry_mod,
@@ -1335,6 +1354,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    cli_invalid_module_mod.addImport("spawned_cli", spawned_cli_mod);
     const cli_invalid_module_exe = b.addExecutable(.{
         .name = "zwasm-cli-invalid-module",
         .root_module = cli_invalid_module_mod,
@@ -1720,6 +1740,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_cli_argv0.step); // issue #256 CLI argv[0] = base name
     test_all_step.dependOn(&run_cli_default_entry.step); // issue #220 default-entry parity across the two run drivers
     test_all_step.dependOn(&run_cli_invalid_module.step); // issue #233 the same verdict from run, run --engine=jit and compile
+    test_all_step.dependOn(&run_spawned_cli_unit.step); // the `--version` mode parser all five spawning runners go through
     test_all_step.dependOn(&run_wasi_p1.step);
     // §9.7 / 7.8 row close (D-045 chunks 1-14 fully discharged):
     // wire test-spec-assert into test-all on ALL hosts. Three-host

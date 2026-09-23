@@ -30,14 +30,16 @@ inline fn eq(a: []const u8, b: []const u8) bool {
 /// Format the canonical `--version` line: version + build identity, so a
 /// distributed binary's `zwasm --version` reveals which wasm/wasi/engine
 /// build it is (previously only the no-arg banner showed this; the version
-/// flag is the authoritative build identity, wasmtime-aligned). Levels are
-/// passed in as `@tagName` strings to keep this pure (no build_options
-/// coupling) and unit-testable.
-pub fn versionLine(buf: []u8, version: []const u8, wasm_level: []const u8, wasi_level: []const u8, engine: []const u8) []const u8 {
+/// flag is the authoritative build identity, wasmtime-aligned). `mode` is the
+/// optimize mode it was built at: a harness that drives this binary can then
+/// check what it is about to measure instead of trusting the wiring that
+/// produced it (D-598). All of them are passed in as `@tagName` strings to
+/// keep this pure (no build_options coupling) and unit-testable.
+pub fn versionLine(buf: []u8, version: []const u8, wasm_level: []const u8, wasi_level: []const u8, engine: []const u8, mode: []const u8) []const u8 {
     return std.fmt.bufPrint(
         buf,
-        "zwasm v{s} (wasm: {s}, wasi: {s}, engine: {s})\n",
-        .{ version, wasm_level, wasi_level, engine },
+        "zwasm v{s} (wasm: {s}, wasi: {s}, engine: {s}, mode: {s})\n",
+        .{ version, wasm_level, wasi_level, engine, mode },
     ) catch "zwasm\n";
 }
 
@@ -58,7 +60,7 @@ pub const usage =
     \\    [--cache[=DIR]]                            Transparent compilation cache (content-keyed .cwasm reuse)
     \\    [--cache-clear]                            Delete this build's cache subdirectory (combine with --cache to repopulate)
     \\  zwasm compile <file.wasm> -o <out.cwasm>     Compile to a .cwasm AOT artifact
-    \\  zwasm --version | -V                         Print the version
+    \\  zwasm --version | -V                         Print the version + build identity
     \\  zwasm --help | -h | help                     Print this help
     \\  zwasm                                        Print version + build options
     \\
@@ -83,13 +85,14 @@ test "classify: null is banner, unknown token is unknown" {
     try std.testing.expectEqual(Action.unknown, classify("foo.wasm"));
 }
 
-test "versionLine: carries version + wasm/wasi/engine build identity" {
+test "versionLine: carries version + wasm/wasi/engine/mode build identity" {
     var buf: [192]u8 = undefined;
-    const line = versionLine(&buf, "9.9.9", "wasm_3_0", "wasi_0_2", "interp_only");
+    const line = versionLine(&buf, "9.9.9", "wasm_3_0", "wasi_0_2", "interp_only", "ReleaseSafe");
     try std.testing.expect(std.mem.find(u8, line, "zwasm v9.9.9") != null);
     try std.testing.expect(std.mem.find(u8, line, "wasm: wasm_3_0") != null);
     try std.testing.expect(std.mem.find(u8, line, "wasi: wasi_0_2") != null);
     try std.testing.expect(std.mem.find(u8, line, "engine: interp_only") != null);
+    try std.testing.expect(std.mem.find(u8, line, "mode: ReleaseSafe") != null);
 }
 
 test "usage text names both shipped subcommands + every run flag main.zig parses" {
