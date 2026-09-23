@@ -29,7 +29,11 @@
 //!   - `.wrong_result` — deterministic divergence (mini-runtime logic gap:
 //!     D-517 memory.grow unsupported, D-518 start-function skipped). A lane
 //!     match here is a RATCHET FLIP: the gap was fixed, the table entry must
-//!     be removed in the same PR (the gate trips to force it).
+//!     be removed in the same PR (the gate trips to force it). The row
+//!     excuses lane B from agreeing with lane A's RESULT, and a crash in
+//!     either is annotated rather than gated. It excuses nothing of the
+//!     cache lanes: they must reproduce lane B — which is what the cache
+//!     actually serves — and exit cleanly while doing it.
 //!   - `.unsound` — ASLR-dependent outcome (D-516 baked helper addresses):
 //!     crash on most runs, may accidentally "work" under a lucky/absent
 //!     slide. Reported, never gated, until the de-baking stage flips it to
@@ -73,6 +77,43 @@ fn expectationFor(name: []const u8) Expectation {
         if (std.mem.eql(u8, e.name, name)) return e.exp;
     }
     return .match;
+}
+
+const Verdict = enum { matched, unexpected, ratchet_flip, expected_diverge, unsound };
+
+/// The whole judgement, as a pure function of the lane facts — `main` only
+/// prints what this returns.
+///
+/// `cache_equal` compares the cache lanes against lane A, which is the right
+/// question only while lane B is expected to agree with A too. On a
+/// `.wrong_result` fixture B diverges by the pinned gap, so the cache lanes
+/// diverge from A for that same reason and `cache_equal` can no longer see a
+/// broken cache. `cache_matches_cwasm` is the question that survives the row.
+fn verdict(
+    exp: Expectation,
+    equal: bool,
+    cache_equal: bool,
+    cache_matches_cwasm: bool,
+    crashed: bool,
+    cache_crashed: bool,
+) Verdict {
+    const all_agree = equal and cache_equal and !crashed;
+    return switch (exp) {
+        .match => if (all_agree) .matched else .unexpected,
+        // A crash is never agreement: `runLane` reports it as the harness's
+        // 255 with no stdout, so a cache lane that died beside a lane B that
+        // also died satisfies `cache_matches_cwasm` on the numbers alone —
+        // hence `cache_crashed` on its own. A crash in lane A or B stays
+        // annotated, not gated: that tolerance predates the cache lanes and
+        // narrowing it would widen this row beyond what it pins.
+        .wrong_result => if (all_agree)
+            .ratchet_flip
+        else if (!cache_matches_cwasm or cache_crashed)
+            .unexpected
+        else
+            .expected_diverge,
+        .unsound => .unsound,
+    };
 }
 
 /// Guests needing a preopened dir (mirrors diff_runner.zig) — both lanes get
@@ -357,6 +398,11 @@ fn run(init: std.process.Init) !u8 {
                 std.mem.eql(u8, lane_a.stdout, lane_miss.stdout) and
                 lane_a.exit == lane_hit.exit and
                 std.mem.eql(u8, lane_a.stdout, lane_hit.stdout);
+            // Against lane B, not lane A — see `verdict`.
+            const cache_matches_cwasm = lane_b.exit == lane_miss.exit and
+                std.mem.eql(u8, lane_b.stdout, lane_miss.stdout) and
+                lane_b.exit == lane_hit.exit and
+                std.mem.eql(u8, lane_b.stdout, lane_hit.stdout);
 
             // `--engine interp --cache` must BYPASS the cache (D-496: the
             // explicit interp choice wins; the artifact is JIT code). Probe
@@ -406,66 +452,81 @@ fn run(init: std.process.Init) !u8 {
             // can also return, so two symmetric crashes make `equal` true. A
             // crash is therefore never a match — it is the outcome the lane
             // exists to catch.
-            const crashed_lane: ?[]const u8 = if (lane_a.crashed)
-                "A (.wasm)"
-            else if (lane_b.crashed)
-                "B (.cwasm)"
-            else if (lane_miss.crashed)
+            const cache_crashed_lane: ?[]const u8 = if (lane_miss.crashed)
                 "C (cache miss)"
             else if (lane_hit.crashed)
                 "C (cache hit)"
             else
                 null;
+            const crashed_lane: ?[]const u8 = if (lane_a.crashed)
+                "A (.wasm)"
+            else if (lane_b.crashed)
+                "B (.cwasm)"
+            else
+                cache_crashed_lane;
 
-            switch (expectationFor(entry.name)) {
-                .match => {
-                    if (equal and cache_equal and crashed_lane == null) {
-                        matched += 1;
-                    } else {
-                        unexpected += 1;
-                        if (crashed_lane) |lane| try stdout.print(
-                            "LANE-CRASHED  {s}: lane {s} did not exit cleanly; its exit code is the harness's, not the guest's\n",
-                            .{ entry.name, lane },
-                        );
-                        if (!equal) try stdout.print(
-                            "AOT-DIVERGE  {s}: wasm(exit={d}, {d}B stdout) vs cwasm(exit={d}, {d}B stdout{s})\n",
-                            .{
-                                entry.name,  lane_a.exit,       lane_a.stdout.len,
-                                lane_b.exit, lane_b.stdout.len, if (lane_b.crashed) ", CRASHED" else "",
-                            },
-                        );
-                        if (!cache_equal) try stdout.print(
-                            "CACHE-DIVERGE  {s}: wasm(exit={d}, {d}B) vs cache-miss(exit={d}, {d}B) / cache-hit(exit={d}, {d}B)\n",
-                            .{
-                                entry.name,          lane_a.exit,          lane_a.stdout.len,
-                                lane_miss.exit,      lane_miss.stdout.len, lane_hit.exit,
-                                lane_hit.stdout.len,
-                            },
-                        );
+            const exp = expectationFor(entry.name);
+            switch (verdict(exp, equal, cache_equal, cache_matches_cwasm, crashed_lane != null, cache_crashed_lane != null)) {
+                .matched => matched += 1,
+                .unexpected => {
+                    unexpected += 1;
+                    switch (exp) {
+                        .match => {
+                            if (crashed_lane) |lane| try stdout.print(
+                                "LANE-CRASHED  {s}: lane {s} did not exit cleanly; its exit code is the harness's, not the guest's\n",
+                                .{ entry.name, lane },
+                            );
+                            if (!equal) try stdout.print(
+                                "AOT-DIVERGE  {s}: wasm(exit={d}, {d}B stdout) vs cwasm(exit={d}, {d}B stdout{s})\n",
+                                .{
+                                    entry.name,  lane_a.exit,       lane_a.stdout.len,
+                                    lane_b.exit, lane_b.stdout.len, if (lane_b.crashed) ", CRASHED" else "",
+                                },
+                            );
+                            if (!cache_equal) try stdout.print(
+                                "CACHE-DIVERGE  {s}: wasm(exit={d}, {d}B) vs cache-miss(exit={d}, {d}B) / cache-hit(exit={d}, {d}B)\n",
+                                .{
+                                    entry.name,          lane_a.exit,          lane_a.stdout.len,
+                                    lane_miss.exit,      lane_miss.stdout.len, lane_hit.exit,
+                                    lane_hit.stdout.len,
+                                },
+                            );
+                        },
+                        .wrong_result => |reason| {
+                            if (cache_crashed_lane) |lane| try stdout.print(
+                                "CACHE-CRASHED  {s}: known divergence ({s}) — lane {s} did not exit cleanly; its exit code is the harness's, not the guest's\n",
+                                .{ entry.name, reason, lane },
+                            );
+                            if (!cache_matches_cwasm) try stdout.print(
+                                "CACHE-DIVERGE  {s}: known divergence ({s}) — cwasm(exit={d}, {d}B) vs cache-miss(exit={d}, {d}B) / cache-hit(exit={d}, {d}B)\n",
+                                .{
+                                    entry.name,        reason,              lane_b.exit,
+                                    lane_b.stdout.len, lane_miss.exit,      lane_miss.stdout.len,
+                                    lane_hit.exit,     lane_hit.stdout.len,
+                                },
+                            );
+                        },
+                        .unsound => unreachable, // `verdict` never returns .unexpected for this arm
                     }
                 },
-                .wrong_result => |reason| {
-                    // The flip test reads every lane the `.match` arm reads —
-                    // a known divergence whose CACHE lane broke, or that now
-                    // "agrees" only because both lanes crashed, is not fixed.
-                    if (equal and cache_equal and crashed_lane == null) {
-                        ratchet_flips += 1;
-                        try stdout.print(
-                            "RATCHET-FLIP  {s}: known divergence ({s}) now MATCHES — remove its known_table entry in this PR\n",
-                            .{ entry.name, reason },
-                        );
-                    } else {
-                        expected_diverged += 1;
-                        const crash_note: []const u8 = if (crashed_lane != null) ", a lane CRASHED" else "";
-                        try stdout.print("EXPECTED-DIVERGE  {s}: {s} (wasm exit={d} / cwasm exit={d}{s})\n", .{
-                            entry.name, reason, lane_a.exit, lane_b.exit, crash_note,
-                        });
-                    }
+                .ratchet_flip => {
+                    ratchet_flips += 1;
+                    try stdout.print(
+                        "RATCHET-FLIP  {s}: known divergence ({s}) now MATCHES — remove its known_table entry in this PR\n",
+                        .{ entry.name, exp.wrong_result },
+                    );
                 },
-                .unsound => |reason| {
+                .expected_diverge => {
+                    expected_diverged += 1;
+                    const crash_note: []const u8 = if (crashed_lane != null) ", a lane CRASHED" else "";
+                    try stdout.print("EXPECTED-DIVERGE  {s}: {s} (wasm exit={d} / cwasm exit={d}{s})\n", .{
+                        entry.name, exp.wrong_result, lane_a.exit, lane_b.exit, crash_note,
+                    });
+                },
+                .unsound => {
                     unsound_reported += 1;
                     try stdout.print("UNSOUND-{s}  {s}: {s}\n", .{
-                        if (equal) "MATCH" else "DIVERGE", entry.name, reason,
+                        if (equal) "MATCH" else "DIVERGE", entry.name, exp.unsound,
                     });
                 },
             }
@@ -533,4 +594,37 @@ fn run(init: std.process.Init) !u8 {
     // known gap was fixed and the table must be updated in the same PR.
     if (unexpected != 0 or ratchet_flips != 0 or skipped_spawn != 0 or refused_produce != 0) return 1;
     return 0;
+}
+
+test "verdict: a `.match` fixture needs every lane to agree, and a crash is never a match" {
+    const t = std.testing;
+    try t.expectEqual(Verdict.matched, verdict(.match, true, true, true, false, false));
+    try t.expectEqual(Verdict.unexpected, verdict(.match, false, true, true, false, false));
+    try t.expectEqual(Verdict.unexpected, verdict(.match, true, false, true, false, false));
+    try t.expectEqual(Verdict.unexpected, verdict(.match, true, true, true, true, false));
+}
+
+test "verdict: a known divergence still gates its cache lanes against the cwasm lane" {
+    const t = std.testing;
+    const known: Expectation = .{ .wrong_result = "D-000 example" };
+    try t.expectEqual(Verdict.ratchet_flip, verdict(known, true, true, true, false, false));
+    try t.expectEqual(Verdict.expected_diverge, verdict(known, false, false, true, false, false));
+    // The one this arm could not see before: lane B diverges by the pinned
+    // gap (so `cache_equal` is false for that reason alone) AND the cache
+    // lanes no longer reproduce lane B.
+    try t.expectEqual(Verdict.unexpected, verdict(known, false, false, false, false, false));
+    // A crash in lane A or B is still annotated, not gated — the row is about
+    // the result, and that tolerance predates the cache lanes.
+    try t.expectEqual(Verdict.expected_diverge, verdict(known, false, false, true, true, false));
+}
+
+test "verdict: a known divergence does not excuse a cache lane from exiting cleanly" {
+    const t = std.testing;
+    const known: Expectation = .{ .wrong_result = "D-000 example" };
+    // Lane B and both cache lanes die by signal with no stdout: `runLane`
+    // reports 255 for each, so `cache_matches_cwasm` is true on the numbers
+    // and only the crash flag separates this from an expected divergence.
+    try t.expectEqual(Verdict.unexpected, verdict(known, false, false, true, true, true));
+    // Still unexpected when the cache ALSO diverges — one arm, two reasons.
+    try t.expectEqual(Verdict.unexpected, verdict(known, false, false, false, true, true));
 }

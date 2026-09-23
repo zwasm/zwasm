@@ -1013,6 +1013,18 @@ pub fn build(b: *std.Build) void {
     const test_aot_diff_step = b.step("test-aot-diff", "Cross-process .wasm-vs-.cwasm differential (AOT campaign Phase II)");
     test_aot_diff_step.dependOn(&run_aot_diff.step);
 
+    // The runner's judgement is a pure function of the lane facts
+    // (`verdict`); this covers the rows a real corpus cannot produce on
+    // demand — a known-divergent fixture whose cache lane broke.
+    const aot_diff_unit_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/aot/aot_process_diff.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const aot_diff_unit_tests = b.addTest(.{ .root_module = aot_diff_unit_mod });
+    const run_aot_diff_unit = b.addRunArtifact(aot_diff_unit_tests);
+    test_step.dependOn(&run_aot_diff_unit.step);
+
     // `zig build test-realworld-run` — Phase 6 / §9.6 / 6.1
     // chunk b. Drives each fixture through `cli_run.runWasm`
     // end-to-end (engine → store → WASI → instantiate → entry
@@ -1604,9 +1616,9 @@ pub fn build(b: *std.Build) void {
     // guest's argv. It used to trail the path and be dropped, and the module
     // still ran `test` through the first-func-export fallback #220 removed.
     run_oob_trap.addArgs(&.{
-        "run",      "--engine",
-        "jit",      "--invoke",
-        "test",     "test/edge_cases/p7/memory_bounds/past_limit_load_i32.wasm",
+        "run",  "--engine",
+        "jit",  "--invoke",
+        "test", "test/edge_cases/p7/memory_bounds/past_limit_load_i32.wasm",
     });
     run_oob_trap.expectExitCode(1); // a genuine trap → exit 1 (interp-parity)
     // has_side_effects: `expectExitCode` routes through `addCheck`, which flips
@@ -1701,6 +1713,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_fuzz.step); // §14.3 / D-256 fuzz smoke (seed corpus)
     test_all_step.dependOn(&run_fuzz_exec.step); // D-469 interp-vs-JIT exec differential (exec_seed; toolchain-free, 3-host)
     test_all_step.dependOn(&run_aot_diff.step); // AOT campaign Phase II cross-process .wasm-vs-.cwasm differential (toolchain-free, 3-host)
+    test_all_step.dependOn(&run_aot_diff_unit.step); // the `verdict` / `rowExpired` rows the empty known_table cannot reach
     test_all_step.dependOn(&run_cli_stdin.step); // issue #257 CLI stdin → guest fd 0
     test_all_step.dependOn(&run_cli_argv0.step); // issue #256 CLI argv[0] = base name
     test_all_step.dependOn(&run_cli_default_entry.step); // issue #220 default-entry parity across the two run drivers
