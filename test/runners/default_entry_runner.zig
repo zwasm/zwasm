@@ -14,6 +14,7 @@
 //!        `zwasm-cli-default-entry <zwasm-cli> <fixture-dir>`
 
 const std = @import("std");
+const spawned_cli = @import("spawned_cli");
 
 const Observed = struct {
     stdout: []u8,
@@ -167,6 +168,7 @@ pub fn main(init: std.process.Init) !u8 {
     _ = arg_it.next().?;
     const cli = arg_it.next() orelse return error.MissingCliPath;
     const fixture_dir = arg_it.next() orelse return error.MissingFixtureDir;
+    try spawned_cli.assertRunnerBuildMode(gpa, io, cli);
 
     // Scratch for the compiled artifacts, tagged per run so two overlapping
     // runs in one checkout cannot delete each other's tree (the same shape as

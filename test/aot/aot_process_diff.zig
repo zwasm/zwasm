@@ -56,6 +56,7 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
+const spawned_cli = @import("spawned_cli");
 
 const Expectation = union(enum) {
     match,
@@ -268,6 +269,7 @@ fn run(init: std.process.Init) !u8 {
     // Lanes run with per-fixture cwds — the CLI path must survive them.
     const cli = try cwd.realPathFileAlloc(io, cli_arg, gpa);
     defer gpa.free(cli);
+    try spawned_cli.assertRunnerBuildMode(gpa, io, cli);
     // Scratch under .zig-cache (gitignored); artifact written per fixture
     // under the SAME basename as the source (argv[0] parity, magic-detected).
     //

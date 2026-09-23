@@ -10,6 +10,14 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+### Changed
+
+- **`zwasm --version` names the build mode** (#307). The line gains a `mode:`
+  field carrying the optimize mode the binary was built at
+  (`zwasm v2.7.0 (wasm: v3_0, wasi: p2, engine: both, mode: ReleaseSafe)`), so
+  a bug report and a harness driving the CLI can both tell a Debug build from
+  a release one without knowing how it was produced.
+
 ### Added
 
 - **`zwasm_module_imports_ex`** — `wasm_module_imports` with a verdict (#475).

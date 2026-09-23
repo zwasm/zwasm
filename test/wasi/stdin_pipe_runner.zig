@@ -12,6 +12,7 @@
 //!        `zwasm-cli-stdin <zwasm-cli> <stdin_echo.wasm>`
 
 const std = @import("std");
+const spawned_cli = @import("spawned_cli");
 
 const payload = "hello\n";
 
@@ -50,6 +51,7 @@ pub fn main(init: std.process.Init) !u8 {
     _ = arg_it.next().?;
     const cli = arg_it.next() orelse return error.MissingCliPath;
     const fixture = arg_it.next() orelse return error.MissingFixturePath;
+    try spawned_cli.assertRunnerBuildMode(gpa, io, cli);
 
     const engine_flags: []const []const []const u8 = &.{ &.{}, &.{"--engine=interp"}, &.{"--engine=jit"} };
     var failed: u32 = 0;

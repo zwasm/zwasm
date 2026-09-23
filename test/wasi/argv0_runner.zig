@@ -14,6 +14,7 @@
 //!        `zwasm-cli-argv0 <zwasm-cli> </abs/path/to/argv0_echo.wasm>`
 
 const std = @import("std");
+const spawned_cli = @import("spawned_cli");
 
 const Observed = struct { stdout: []u8, exit: u8 };
 
@@ -54,6 +55,7 @@ pub fn main(init: std.process.Init) !u8 {
     // case changes the child's cwd, so resolve it once here.
     const cli = try std.Io.Dir.cwd().realPathFileAlloc(io, arg_it.next() orelse return error.MissingCliPath, gpa);
     defer gpa.free(cli);
+    try spawned_cli.assertRunnerBuildMode(gpa, io, cli);
     const fixture = arg_it.next() orelse return error.MissingFixturePath;
     if (!std.Io.Dir.path.isAbsolute(fixture)) return error.FixturePathNotAbsolute;
 

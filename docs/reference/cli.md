@@ -13,7 +13,7 @@ job, not a runtime's. Dispatch source:
 zwasm                                     # version + build-options banner
 zwasm run <file.wasm|.cwasm> [args...]    # run a module
 zwasm compile <file.wasm> -o <out.cwasm>  # compile to a .cwasm AOT artifact
-zwasm --version | -V                      # version + build identity (wasm/wasi/engine)
+zwasm --version | -V                      # version + build identity (wasm/wasi/engine/mode)
 zwasm --help | -h | help                  # usage
 ```
 
