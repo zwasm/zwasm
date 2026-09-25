@@ -1055,6 +1055,42 @@ test "E2 (bundle exit): a real Rust wasm32-wasip2 component runs + prints via zw
     try testing.expectEqualStrings("hello from a real rust wasip2 component\n", capture.items);
 }
 
+test "0.2 metadata-hash + metadata-hash-at: a rust-std wasip2 guest's fs::metadata / File::metadata / read_dir link and answer" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/wasi_p2_fs_meta_rust.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    // The host seeds the files: rust-std writes through `write-via-stream`,
+    // which the 0.2 host stubs, so a guest-side fs::write would fail before
+    // the hash methods were ever reached.
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "hello" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "x" });
+    _ = try host.addPreopen(tmp.dir.handle, "/work");
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    host.stdout_buffer = &capture;
+
+    // rust-std's wasip2 backend fills st_ino / d_ino from
+    // `[method]descriptor.metadata-hash-at` (stat, readdir) and
+    // `metadata-hash` (fstat), so the guest IMPORTS both; before the `-at`
+    // row existed the whole world failed to link as UnsupportedWasiImport.
+    // The guest asserts fs::metadata by path and by fd (the same st_ino from
+    // both routes), the preopen dir, NotFound on a missing path, Unsupported
+    // from fs::read (the read-via-stream stub's error-code ordinal, as the
+    // guest decodes it), and a sorted read_dir, then prints.
+    try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
+    try testing.expectEqualStrings("META-OK a.txt,b.txt\n", capture.items);
+}
+
 test "D2: WASI-P2 get-directories returns a preopen descriptor list (realloc from trampoline)" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

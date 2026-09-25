@@ -1345,8 +1345,41 @@ fn p2FsStubViaStream(caller: *Caller, _: u32, retptr: u32) WasiP2Error!void {
 fn p2FsStubGetFlags(caller: *Caller, _: u32, retptr: u32) WasiP2Error!void {
     return fsStubWriteUnsupported(caller, retptr, 1);
 }
-fn p2FsStubMetadataHash(caller: *Caller, _: u32, retptr: u32) WasiP2Error!void {
-    return fsStubWriteUnsupported(caller, retptr, 8);
+
+/// Store a `result<metadata-hash-value{lower: u64, upper: u64}, error-code>`
+/// at `retptr` (disc@0, the align-8 record at +8, error-code at +8 on the
+/// err arm). The hash itself is `ctx_mod.metadataHash`, the same derivation
+/// the 0.3 host writes, so a guest sees one identity per object across gens.
+fn writeMetadataHashResult(mem: Memory, retptr: u32, r: FilestatResult) WasiP2Error!void {
+    switch (r) {
+        .ok => |fs| {
+            const hv = ctx_mod.metadataHash(fs);
+            try mem.write(retptr, @as(u8, 0));
+            try mem.write(retptr + 8, hv[0]);
+            try mem.write(retptr + 16, hv[1]);
+        },
+        .err => |errno| try writeP1Err(mem, retptr, 8, errno),
+    }
+}
+
+/// `wasi:filesystem/types` `[method]descriptor.metadata-hash` (self, retptr):
+/// hash the fd's P1 filestat. wasi-libc's fstat() reads st_ino from this.
+fn p2DescriptorMetadataHash(caller: *Caller, self_handle: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const fd: wasi_p1.Fd = @intCast(try ctx.resources.rep(WasiP2Ctx.DESCRIPTOR_RT, self_handle));
+    const mem = try ctxMemory(caller);
+    try writeMetadataHashResult(mem, retptr, try descriptorFilestat(ctx, mem, fd));
+}
+
+/// `wasi:filesystem/types` `[method]descriptor.metadata-hash-at` (self,
+/// path_flags, path_ptr, path_len, retptr): the path form, via P1
+/// `path_filestat_get` with the same symlink-follow bit as `stat-at`.
+/// wasi-libc's stat() and readdir() read st_ino / d_ino from this.
+fn p2DescriptorMetadataHashAt(caller: *Caller, self_handle: u32, path_flags: u32, path_ptr: u32, path_len: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const dirfd: wasi_p1.Fd = @intCast(try ctx.resources.rep(WasiP2Ctx.DESCRIPTOR_RT, self_handle));
+    const mem = try ctxMemory(caller);
+    try writeMetadataHashResult(mem, retptr, try pathFilestat(ctx, mem, dirfd, path_flags, path_ptr, path_len));
 }
 
 fn p2SockStubSubscribe(caller: *Caller, _: u32) WasiP2Error!u32 {
@@ -1427,7 +1460,8 @@ fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: a
         .fs_stub_via_stream_offset => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2FsStubViaStreamOffset),
         .fs_stub_via_stream => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2FsStubViaStream),
         .fs_stub_get_flags => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2FsStubGetFlags),
-        .fs_stub_metadata_hash => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2FsStubMetadataHash),
+        .fs_descriptor_metadata_hash => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorMetadataHash),
+        .fs_descriptor_metadata_hash_at => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorMetadataHashAt),
         .sock_instance_network => try lk.defineFuncCtx(module, name, ctx, fn (*Caller) WasiP2Error!u32, p2InstanceNetwork),
         .sock_create_tcp => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2CreateTcpSocket),
         .sock_tcp_start_bind => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2TcpStartBind),

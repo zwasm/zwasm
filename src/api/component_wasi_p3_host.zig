@@ -478,25 +478,12 @@ fn fs3IsSameObject(caller: *Caller, self_handle: u32, other_handle: u32, retptr:
 }
 
 /// `metadata-hash` family → `result<metadata-hash-value{lower,upper},
-/// error-code>` (payload@8): a Wyhash over (dev, ino, size, mtim) — stable
-/// while the object is unmodified, changes when it changes (the spec's
-/// encouraged properties; none is required).
-fn fs3HashOf(fs: wasi_p1.Filestat) [2]u64 {
-    var h = std.hash.Wyhash.init(0x7a77_6173_6d5f_6673); // "zwasm_fs"
-    h.update(std.mem.asBytes(&fs.dev));
-    h.update(std.mem.asBytes(&fs.ino));
-    h.update(std.mem.asBytes(&fs.size));
-    h.update(std.mem.asBytes(&fs.mtim));
-    const lo = h.final();
-    var h2 = std.hash.Wyhash.init(lo);
-    h2.update(std.mem.asBytes(&fs.ino));
-    return .{ lo, h2.final() };
-}
-
+/// error-code>` (payload@8). The hash is `ctx_mod.metadataHash`, shared
+/// with the 0.2 host.
 fn writeFs3HashResult(mem: Memory, retptr: u32, r: FilestatResult) WasiP2Error!void {
     switch (r) {
         .ok => |fs| {
-            const hv = fs3HashOf(fs);
+            const hv = ctx_mod.metadataHash(fs);
             try mem.write(retptr, @as(u8, 0));
             try mem.write(retptr + 8, hv[0]);
             try mem.write(retptr + 16, hv[1]);
@@ -2492,7 +2479,7 @@ pub fn registerP3Arms(lk: *Linker, module: []const u8, name: []const u8, op: ada
         .fs3_stat, .fs3_stat_at, .fs3_get_type, .fs3_get_flags, .fs3_set_times, .fs3_set_times_at, .fs3_set_size, .fs3_advise, .fs3_sync, .fs3_sync_data, .fs3_open_at, .fs3_create_directory_at, .fs3_remove_directory_at, .fs3_unlink_file_at, .fs3_readlink_at, .fs3_rename_at, .fs3_symlink_at, .fs3_link_at, .fs3_is_same_object, .fs3_metadata_hash, .fs3_metadata_hash_at => return error.UnsupportedWasiImport,
         // Every non-P3 op belongs to the facade classifier; listing the
         // tags (not `else`) keeps this switch compile-time exhaustive too.
-        .cli_get_stdout, .cli_get_stderr, .cli_get_stdin, .cli_stdout_write_via_stream, .cli_stderr_write_via_stream, .cli_stdin_read_via_stream, .out_stream_write, .out_stream_blocking_write_and_flush, .out_stream_blocking_flush, .out_stream_drop, .in_stream_read, .in_stream_blocking_read, .in_stream_drop, .cli_exit, .cli_exit_with_code, .clocks_wall_now, .clocks_monotonic_now, .clocks_system_now, .clocks_system_get_resolution, .clocks_monotonic_get_resolution, .clocks_wait_until, .clocks_wait_for, .random_get_bytes, .fs_descriptor_read, .fs_descriptor_write, .fs_descriptor_open_at, .fs_descriptor_sync, .fs_descriptor_stat, .fs_descriptor_get_type, .fs_descriptor_drop, .fs_get_directories, .poll_pollable_ready, .poll_pollable_block, .poll_poll, .in_stream_subscribe, .out_stream_subscribe, .clocks_subscribe_instant, .clocks_subscribe_duration, .cli_get_environment, .cli_get_arguments, .cli_initial_cwd, .cli_get_terminal_stdin, .cli_get_terminal_stdout, .cli_get_terminal_stderr, .out_stream_check_write, .random_get_u64, .random_insecure_get_bytes, .random_insecure_get_u64, .random_insecure_seed, .fs_descriptor_stat_at, .fs_descriptor_create_directory_at, .fs_descriptor_link_at, .fs_descriptor_readlink_at, .fs_descriptor_remove_directory_at, .fs_descriptor_rename_at, .fs_descriptor_symlink_at, .fs_descriptor_sync_data, .fs_descriptor_unlink_file_at, .fs_descriptor_read_directory, .fs_dir_entry_stream_read, .fs_dir_entry_stream_drop, .io_resource_drop, .fs_stub_via_stream_offset, .fs_stub_via_stream, .fs_stub_get_flags, .fs_stub_metadata_hash, .sock_instance_network, .sock_create_tcp, .sock_tcp_start_bind, .sock_tcp_finish_bind, .sock_tcp_start_connect, .sock_tcp_finish_connect, .sock_tcp_subscribe, .sock_tcp_shutdown, .sock_tcp_is_listening, .sock_tcp_drop, .sock_tcp_start_listen, .sock_tcp_finish_listen, .sock_tcp_accept, .sock_tcp_local_address, .sock_tcp_remote_address, .sock_tcp_set_backlog, .sock_stub_unit2, .sock_stub_unit3i, .sock_stub_unit3l, .sock_stub_unit15, .sock_stub_val1, .sock_stub_val4, .sock_stub_val8, .sock_stub_val15_4, .sock_stub_resolve, .sock_stub_recv, .sock_stub_send, .sock_stub_subscribe => return false,
+        .cli_get_stdout, .cli_get_stderr, .cli_get_stdin, .cli_stdout_write_via_stream, .cli_stderr_write_via_stream, .cli_stdin_read_via_stream, .out_stream_write, .out_stream_blocking_write_and_flush, .out_stream_blocking_flush, .out_stream_drop, .in_stream_read, .in_stream_blocking_read, .in_stream_drop, .cli_exit, .cli_exit_with_code, .clocks_wall_now, .clocks_monotonic_now, .clocks_system_now, .clocks_system_get_resolution, .clocks_monotonic_get_resolution, .clocks_wait_until, .clocks_wait_for, .random_get_bytes, .fs_descriptor_read, .fs_descriptor_write, .fs_descriptor_open_at, .fs_descriptor_sync, .fs_descriptor_stat, .fs_descriptor_get_type, .fs_descriptor_drop, .fs_get_directories, .poll_pollable_ready, .poll_pollable_block, .poll_poll, .in_stream_subscribe, .out_stream_subscribe, .clocks_subscribe_instant, .clocks_subscribe_duration, .cli_get_environment, .cli_get_arguments, .cli_initial_cwd, .cli_get_terminal_stdin, .cli_get_terminal_stdout, .cli_get_terminal_stderr, .out_stream_check_write, .random_get_u64, .random_insecure_get_bytes, .random_insecure_get_u64, .random_insecure_seed, .fs_descriptor_stat_at, .fs_descriptor_create_directory_at, .fs_descriptor_link_at, .fs_descriptor_readlink_at, .fs_descriptor_remove_directory_at, .fs_descriptor_rename_at, .fs_descriptor_symlink_at, .fs_descriptor_sync_data, .fs_descriptor_unlink_file_at, .fs_descriptor_read_directory, .fs_dir_entry_stream_read, .fs_dir_entry_stream_drop, .io_resource_drop, .fs_stub_via_stream_offset, .fs_stub_via_stream, .fs_stub_get_flags, .fs_descriptor_metadata_hash, .fs_descriptor_metadata_hash_at, .sock_instance_network, .sock_create_tcp, .sock_tcp_start_bind, .sock_tcp_finish_bind, .sock_tcp_start_connect, .sock_tcp_finish_connect, .sock_tcp_subscribe, .sock_tcp_shutdown, .sock_tcp_is_listening, .sock_tcp_drop, .sock_tcp_start_listen, .sock_tcp_finish_listen, .sock_tcp_accept, .sock_tcp_local_address, .sock_tcp_remote_address, .sock_tcp_set_backlog, .sock_stub_unit2, .sock_stub_unit3i, .sock_stub_unit3l, .sock_stub_unit15, .sock_stub_val1, .sock_stub_val4, .sock_stub_val8, .sock_stub_val15_4, .sock_stub_resolve, .sock_stub_recv, .sock_stub_send, .sock_stub_subscribe => return false,
     }
     return true;
 }

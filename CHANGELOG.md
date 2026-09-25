@@ -57,6 +57,33 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   `tagtype` family `wasm.h` declares has been implemented since before the
   comment that called it absent.
 
+- **A rust-std `wasm32-wasip2` component that touches the filesystem now
+  instantiates.** wasi-libc fills `st_ino` / `d_ino` from
+  `wasi:filesystem/types@0.2` `[method]descriptor.metadata-hash-at` (stat,
+  readdir) and `metadata-hash` (fstat), so `fs::metadata`, `File::metadata`
+  and `fs::read_dir` all import both. The 0.2 adapter table had a row for
+  `metadata-hash` (an err(unsupported) stub) and none for `metadata-hash-at`,
+  so the whole world failed to LINK with `UnsupportedWasiImport` before a
+  single guest instruction ran; a `println!`-only guest passed because it
+  never linked the filesystem interface. Both are now real: a hash over the
+  P1 filestat, the same derivation the 0.3 host already used, so one object
+  has one identity whichever generation the guest speaks. Fixture:
+  `test/component/wasi_p2_fs_meta_rust.wasm`. A guest that reads or writes a
+  file's contents still fails on the 0.2 path: rust-std does both through
+  `read-via-stream` / `write-via-stream`, which stay err(unsupported) stubs.
+
+- **The 0.2 filesystem `error-code` ordinals past `no-lock` were one too
+  high.** `P2ErrorCode` named only the members the P1 errnos map onto, each
+  with a hand-written ordinal, and after `no-entry` (20) it left a gap of two
+  where `no-lock` takes one. `unsupported` lowered as 28, which is `no-tty` in
+  the WIT, so every err(unsupported) stub (the `*-via-stream` and `get-flags`
+  methods) reached a rust-std guest as ENOTTY "Not a tty" instead of ENOTSUP;
+  `not-directory`, `not-permitted`, `read-only` and the rest of the tail were
+  shifted the same way, so every 0.2 filesystem error past `no-lock` reached
+  the guest as its neighbour. The enum now declares all 37 members in WIT
+  order with no explicit values, so the ordinals cannot drift from the
+  declaration.
+
 ## [2.7.0] - 2026-09-14
 
 ### Added

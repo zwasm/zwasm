@@ -569,8 +569,25 @@ pub fn ctxUdpSocket(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*p2sock.UdpSocket {
     return &ctx.udp_sockets.items[rep];
 }
 
-/// `wasi:io/streams` `[resource-drop]output-stream` (self): drop the handle.
 pub const FilestatResult = union(enum) { ok: wasi_p1.Filestat, err: wasi_p1.Errno };
+
+/// `metadata-hash-value{lower, upper}` for one filestat, shared by the 0.2
+/// (`component_wasi_p2`) and 0.3 (`component_wasi_p3_host`) `metadata-hash`
+/// families so a guest sees ONE identity per object whichever generation it
+/// speaks: a Wyhash over (dev, ino, size, mtim) — stable while the object is
+/// unmodified, changes when it changes (the spec's encouraged properties;
+/// none is required).
+pub fn metadataHash(fs: wasi_p1.Filestat) [2]u64 {
+    var h = std.hash.Wyhash.init(0x7a77_6173_6d5f_6673); // "zwasm_fs"
+    h.update(std.mem.asBytes(&fs.dev));
+    h.update(std.mem.asBytes(&fs.ino));
+    h.update(std.mem.asBytes(&fs.size));
+    h.update(std.mem.asBytes(&fs.mtim));
+    const lo = h.final();
+    var h2 = std.hash.Wyhash.init(lo);
+    h2.update(std.mem.asBytes(&fs.ino));
+    return .{ lo, h2.final() };
+}
 
 /// Stat the fd bound to `self` via P1 `fd_filestat_get` into a scratch buffer,
 /// returning the raw `Filestat` (the shared P1→P2 front-half for stat/get-type).
