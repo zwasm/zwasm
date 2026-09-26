@@ -367,6 +367,7 @@ const greet_component_path = "test/component/greet_component.wasm";
 /// u32`; component A imports it + exports `add-five(x)=adder(x,5)`; the outer
 /// instantiates B, instantiates A `with "adder"=B.adder`, re-exports add-five.
 const adder_graph_path = "test/component/adder_graph.wasm";
+const reexport_graph_path = "test/component/reexport_graph.wasm";
 
 /// D-305 security fixture: a 2-component graph (cf. strlen_graph) where A calls
 /// B's `firstbyte(s: string)->u32` with an OUT-OF-BOUNDS (ptr,len) far past A's
@@ -503,6 +504,29 @@ test "C2-3b-2 (EXIT): a 2-component graph links + runs (A calls B across compone
     defer graph.deinit();
 
     // add-five(10) = adder(10, 5) = 15 — the call crosses from component A into B.
+    var results = [_]Value{.{ .i32 = 0 }};
+    try graph.invokeFlat("add-five", &.{.{ .i32 = 10 }}, &results);
+    try testing.expectEqual(@as(i32, 15), results[0].i32);
+}
+
+test "a graph whose children are reached through their instance exports links + runs" {
+    // `adder_graph` with every child instance exported and every reference to
+    // a child made through the export's index: the `with` arg aliases
+    // B's re-export (instance 1) and the outer func export aliases A's
+    // (instance 3). Both are `.re_export` origins, so the provider lookup
+    // (`resolveProvider`) and the export lookup (`resolveExport`) resolve a
+    // child only if they follow the re-export to the `instantiate` it names.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, reexport_graph_path, testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var graph = try instantiateGraph(&eng, testing.allocator, bytes, .{});
+    defer graph.deinit();
+
     var results = [_]Value{.{ .i32 = 0 }};
     try graph.invokeFlat("add-five", &.{.{ .i32 = 10 }}, &results);
     try testing.expectEqual(@as(i32, 15), results[0].i32);
@@ -1815,6 +1839,61 @@ test "D-527: a component with two exports validates (the func index space counts
         if (std.meta.activeTag(ex.sort) != .func) continue;
         try testing.expect(ex.index < info.component_funcs.items.len);
     }
+}
+
+test "a component exporting two interfaces exposes and invokes both (an instance export is not an instance definition)" {
+    // wit-component lays two interface exports out as shim-instance (;0;),
+    // export (;1;), shim-instance (;2;), export (;3;). An instance export mints
+    // an index but defines nothing, so resolving index 2 must land on the
+    // SECOND `instance`-section definition. Counting every non-import index
+    // below 2 lands one past the end, and the second interface vanished:
+    // absent from `exportedFuncs`, and `invokeTyped` answered ExportNotResolved.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/two_iface.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    const first = "local:twoiface/first@0.1.0#inc";
+    const second = "local:twoiface/second@0.1.0#double";
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    // Both instantiation paths: `open` picks the single-module one for this
+    // component, and the graph builder is what a multi-module guest (every
+    // wit-bindgen Rust build) reaches.
+    var opened = try open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+    try testing.expect(opened == .single);
+    var built = try cwasi.buildWasiP2Component(&eng, testing.allocator, bytes, &host, .{});
+    defer built.deinit();
+
+    for ([_]*const ctypes.TypeInfo{ opened.typeInfo(), &built.info }) |info| {
+        const funcs = try info.exportedFuncs(testing.allocator);
+        defer ctypes.TypeInfo.freeExportedFuncs(testing.allocator, funcs);
+        try testing.expectEqual(@as(usize, 2), funcs.len);
+        try testing.expectEqualStrings(first, funcs[0].name);
+        try testing.expectEqualStrings(second, funcs[1].name);
+        try testing.expectEqual(ctypes.PrimValType.u32, funcs[1].ty.params[0].ty.primitive);
+        try testing.expectEqual(ctypes.PrimValType.u32, funcs[1].ty.result.?.primitive);
+    }
+
+    // The bodies differ (v+1, v*2), so the second interface resolving to the
+    // first one's instance would show up here as 21, not only as a failure.
+    const a = (try opened.invokeTyped(first, &.{.{ .u32 = 20 }}, testing.allocator)).?;
+    defer a.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 21), a.u32);
+    const b = (try opened.invokeTyped(second, &.{.{ .u32 = 20 }}, testing.allocator)).?;
+    defer b.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 40), b.u32);
+
+    const bb = (try invokeTypedBuilt(&built, second, &.{.{ .u32 = 21 }}, testing.allocator)).?;
+    defer bb.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 42), bb.u32);
 }
 
 test "ADR-0205 A: official wasip3 binary decodes the async-support canon builtins" {

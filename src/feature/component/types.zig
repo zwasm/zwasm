@@ -470,12 +470,28 @@ pub const ComponentFuncDef = union(enum) {
     re_export: u32,
 };
 
-/// Where a component-instance index originates: an `import` (whose name is the
-/// WASI interface, e.g. `"wasi:cli/stdout@0.2.0"`) or any local definition
-/// (instantiate / alias). The host classifies only imported interfaces.
+/// Where a component-instance index originates. Each of the four constructs
+/// that mint an instance index (`Binary.md`) has its own variant. An `import`
+/// carries the interface name it imports; the other three carry the index of
+/// the entry that minted them. Resolving an instance index is therefore one
+/// lookup, never a count of earlier indices. (A count went wrong as soon as an
+/// alias or an export was minted between two definitions: wit-component lays
+/// out every interface export as definition, export, definition, export, …)
 pub const InstanceOrigin = union(enum) {
+    /// An instance `import`; the name is the interface, e.g.
+    /// `"wasi:cli/stdout@0.2.0"`. The host classifies only these.
     import: []const u8,
-    local,
+    /// An `instance`-section definition (instantiate or inline exports):
+    /// index into `component_instances`.
+    local: u32,
+    /// An instance-sort `alias` (an instance exported by another instance):
+    /// index into `aliases`.
+    alias: u32,
+    /// A component-level `export` of an instance: index into `exports`. It
+    /// defines nothing; it re-exports the instance `exports[i].index` names,
+    /// which is always an EARLIER index (validate.zig checks the bound at the
+    /// export's definition point).
+    re_export: u32,
 };
 
 /// `alias ::= sort aliastarget` — introduces a new index in `sort`'s space.
@@ -686,10 +702,9 @@ pub const TypeInfo = struct {
             },
             else => return null,
         };
-        if (ce.instance >= self.instance_origins.items.len) return null;
-        const full = switch (self.instance_origins.items[ce.instance]) {
+        const full = switch (self.instanceOrigin(ce.instance) orelse return null) {
             .import => |name| name,
-            .local => return null,
+            .local, .alias, .re_export => return null,
         };
         const at = std.mem.findScalar(u8, full, '@');
         const interface = if (at) |i| full[0..i] else full;
@@ -732,27 +747,53 @@ pub const TypeInfo = struct {
         alloc.free(funcs);
     }
 
-    /// The WIT `functype` of a lifted func export, or null when the export
-    /// does not resolve to a concrete local functype (alias-minted types
-    /// stay deferred — concrete components lift with an explicit type).
+    /// The origin that DEFINES instance-space index `instance_index`: a
+    /// `re_export` is followed to the instance it re-exports, so the result is
+    /// never `.re_export`. Null when out of range, or when a re-export does not
+    /// name an earlier index (validation rejects that; the check keeps the walk
+    /// terminating on unvalidated input). This is `liftForFuncIndex`'s twin one
+    /// index space over: D-527 made an export mint an index in both spaces,
+    /// but only the func side learned to follow a re-export to its definition.
+    /// Every instance-space resolver goes through here, so an imported
+    /// instance re-exported by the component still answers as that import.
+    pub fn instanceOrigin(self: *const TypeInfo, instance_index: u32) ?InstanceOrigin {
+        var idx = instance_index;
+        while (idx < self.instance_origins.items.len) {
+            const origin = self.instance_origins.items[idx];
+            switch (origin) {
+                .re_export => |ei| {
+                    if (ei >= self.exports.items.len) return null;
+                    const target = self.exports.items[ei].index;
+                    if (target >= idx) return null;
+                    idx = target;
+                },
+                .import, .local, .alias => return origin,
+            }
+        }
+        return null;
+    }
+
+    /// The `component_instances` index that defines instance-space index
+    /// `instance_index` (re-exports followed); null for an imported or
+    /// alias-minted instance, or an out-of-range index.
+    pub fn localInstanceOrdinal(self: *const TypeInfo, instance_index: u32) ?u32 {
+        return switch (self.instanceOrigin(instance_index) orelse return null) {
+            .local => |d| if (d < self.component_instances.items.len) d else null,
+            .import, .alias, .re_export => null,
+        };
+    }
+
+    /// Map an instance-space index to its LOCAL component-instance
+    /// definition; null for import- or alias-originated or out-of-range
+    /// indices.
+    fn localInstanceDef(self: *const TypeInfo, instance_index: u32) ?ComponentInstanceDef {
+        const d = self.localInstanceOrdinal(instance_index) orelse return null;
+        return self.component_instances.items[d];
+    }
+
     /// Resolve a func-export PATH to its component-func index: a top-level
     /// func export name, or `<instance-export>#<func>` addressing a func
     /// inside an exported INSTANCE (wit-bindgen interface exports; D-322).
-    /// Map an instance-space index to its LOCAL component-instance
-    /// definition; null for import-originated or out-of-range indices.
-    /// (The instance space mints indices for imports too — count only
-    /// the `.local` origins below the index to find the defs ordinal.)
-    fn localInstanceDef(self: *const TypeInfo, instance_index: u32) ?ComponentInstanceDef {
-        if (instance_index >= self.instance_origins.items.len) return null;
-        if (std.meta.activeTag(self.instance_origins.items[instance_index]) != .local) return null;
-        var local_ord: usize = 0;
-        for (self.instance_origins.items[0..instance_index]) |o| {
-            if (std.meta.activeTag(o) == .local) local_ord += 1;
-        }
-        if (local_ord >= self.component_instances.items.len) return null;
-        return self.component_instances.items[local_ord];
-    }
-
     fn exportedFuncIndex(self: *const TypeInfo, path: []const u8) ?u32 {
         if (std.mem.findScalar(u8, path, '#')) |hash| {
             const iface = path[0..hash];
@@ -792,6 +833,9 @@ pub const TypeInfo = struct {
         return null;
     }
 
+    /// The WIT `functype` of a lifted func export, or null when the export
+    /// does not resolve to a concrete local functype (alias-minted types
+    /// stay deferred — concrete components lift with an explicit type).
     pub fn resolveFuncType(self: *const TypeInfo, export_name: []const u8) ?FuncType {
         const fi = self.exportedFuncIndex(export_name) orelse return null;
         const lift = self.liftForFuncIndex(fi) orelse return null;
@@ -1776,12 +1820,14 @@ pub fn decodeTypeInfo(parent: Allocator, component: *const decode.Component) Err
                         else => {},
                     },
                     .func => try component_funcs.append(a, .{ .alias = al.target }),
-                    .instance => try instance_origins.append(a, .local),
+                    .instance => try instance_origins.append(a, .{ .alias = @intCast(al_abs) }),
                     .type => try type_space.append(a, .{ .named = .{ .alias = @intCast(al_abs) } }),
                     else => {},
                 }
             },
-            .instance => for (component_instances.items[cinst_before..]) |_| try instance_origins.append(a, .local),
+            .instance => for (component_instances.items[cinst_before..], cinst_before..) |_, abs| {
+                try instance_origins.append(a, .{ .local = @intCast(abs) });
+            },
             .@"export" => for (exports.items[exports_before..], exports_before..) |*ex, ex_abs| {
                 // An export ADDS to its sort's index space (D-527). Appending in
                 // definition order keeps every later sortidx in bounds; omitting
@@ -1801,7 +1847,7 @@ pub fn decodeTypeInfo(parent: Allocator, component: *const decode.Component) Err
                     },
                     .instance => {
                         ex.sort_space_len_at_def = @intCast(instance_origins.items.len);
-                        try instance_origins.append(a, .local);
+                        try instance_origins.append(a, .{ .re_export = @intCast(ex_abs) });
                     },
                     else => {},
                 }

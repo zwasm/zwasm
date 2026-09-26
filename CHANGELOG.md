@@ -57,6 +57,33 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   `tagtype` family `wasm.h` declares has been implemented since before the
   comment that called it absent.
 
+- **A component exporting two or more interfaces exposes all of them.**
+  wit-component lays interface exports out as definition, export, definition,
+  export; an instance-sort `export` mints an instance index but defines nothing,
+  and resolving an index by COUNTING the non-import origins below it landed one
+  past the end from the second interface on. `exportedFuncs` silently dropped
+  the second interface and `invokeTyped` answered ExportNotResolved for it, on
+  both the single-module and the WASI-P2 graph path. Each instance origin now
+  records the construct that minted it: an `import` carries its interface name,
+  and `local`, `alias` and `re_export` carry the index of the entry that minted
+  them. A re-export resolves to the earlier instance it names. D-527 made an
+  export mint an index in both the func and the instance space, but only the
+  func-side resolver learned to follow a re-export to its definition; this is
+  the instance-side twin.
+
+- **A composed graph can reach a child through the child's instance export.**
+  The graph's provider lookup (a child's import satisfied by another child's
+  func) and export lookup (an outer func export aliasing a child's func)
+  counted origins too, so a `with` arg or outer export that aliased a func
+  through an exported child instance resolved to no child.
+
+- **An imported instance that the component re-exports still resolves as that
+  import.** A func or type aliased through the re-export (`(import "wasi:cli/…"
+  (instance))`, `(export "…" (instance 0))`, then `alias export` on the
+  re-export) now classifies as the WASI import it is and types against the
+  import's instance-type decls. Before, the lowering host answered null and the
+  type bridge `UnsupportedType`.
+
 ## [2.7.0] - 2026-09-14
 
 ### Added
