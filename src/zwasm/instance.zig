@@ -1094,6 +1094,148 @@ test "facade setTableElementsLimit: host cap refuses table.grow past it (D-316)"
     try tab.grow(1, nullref); // 5 → 6 OK (no declared/spec table max here)
 }
 
+test "facade engine=.interp: a lowered instruction's module offset is body_offset + src_offsets (#452)" {
+    // (module (func (export "f") (result i32) (i32.const 42)))
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: ()->(i32)
+        0x03, 0x02, 0x01, 0x00, // func: 1× type 0
+        0x07, 0x05, 0x01, 0x01, 'f', 0x00, 0x00, // export "f" = func 0
+        0x0a, 0x06, 0x01, 0x04, 0x00, // code: 1 body, size 4, no locals
+        0x41, 0x2a, // @31 i32.const 42
+        0x0b, // @33 end
+    };
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&bytes);
+    defer mod.deinit();
+    var inst = try mod.instantiate(.{ .engine = .interp });
+    defer inst.deinit();
+
+    const func = inst.handle.runtime.?.funcs[0];
+    try testing.expectEqual(@as(u32, 31), func.body_offset);
+    try testing.expectEqualSlices(u32, &.{ 0, 2 }, func.src_offsets.items);
+}
+
+test "facade engine=.interp: the debug hook sees a callee, and each frame reports the error with its own module offset (#452)" {
+    // (module (func $f (export "f") (result i32) (call $g)) (func $g (result i32) (unreachable)))
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: ()->(i32)
+        0x03, 0x03, 0x02, 0x00, 0x00, // func: 2× type 0
+        0x07, 0x05, 0x01, 0x01, 'f', 0x00, 0x00, // export "f" = func 0
+        0x0a, 0x0a, 0x02, // code: 2 bodies
+        0x04, 0x00, 0x10, 0x01, 0x0b, // $f: @32 call 1, @34 end
+        0x03, 0x00, 0x00, 0x0b, // $g: @37 unreachable, @38 end
+    };
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&bytes);
+    defer mod.deinit();
+    var inst = try mod.instantiate(.{ .engine = .interp });
+    defer inst.deinit();
+
+    const Probe = struct {
+        rt: *_zwasm.runtime.Runtime,
+        stop_at: ?u32 = null,
+        seen: [8]u32 = undefined,
+        n_seen: usize = 0,
+        reported: [8]u32 = undefined,
+        errs: [8]anyerror = undefined,
+        n_reported: usize = 0,
+
+        fn moduleOffset(self: *@This(), pc: u32) u32 {
+            const func = self.rt.currentFrame().func.?;
+            return func.body_offset + func.src_offsets.items[pc];
+        }
+        fn hook(ctx: *anyopaque, pc: u32) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const off = self.moduleOffset(pc);
+            self.seen[self.n_seen] = off;
+            self.n_seen += 1;
+            return if (self.stop_at) |at| at == off else false;
+        }
+        fn trap(ctx: *anyopaque, pc: u32, err: anyerror) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.reported[self.n_reported] = self.moduleOffset(pc);
+            self.errs[self.n_reported] = err;
+            self.n_reported += 1;
+        }
+    };
+    const rt = inst.handle.runtime.?;
+    var probe: Probe = .{ .rt = rt };
+    rt.debug_hook = Probe.hook;
+    rt.debug_trap = Probe.trap;
+    rt.debug_ctx = @ptrCast(&probe);
+
+    var results = [_]_zwasm.Value{.{ .i32 = 0 }};
+
+    // The call into $g re-enters `run`, so the hook sees $g too; the trap is
+    // reported by $g's frame first, then by $f's at its call.
+    try testing.expectError(error.Unreachable, inst.invoke("f", &.{}, &results));
+    try testing.expectEqualSlices(u32, &.{ 32, 37 }, probe.seen[0..probe.n_seen]);
+    try testing.expectEqualSlices(u32, &.{ 37, 32 }, probe.reported[0..probe.n_reported]);
+    for (probe.errs[0..probe.n_reported]) |e| try testing.expectEqual(@as(anyerror, _zwasm.runtime.Trap.Unreachable), e);
+
+    // A stop the hook asks for ends the call with Interrupted, which every frame reports as well.
+    probe = .{ .rt = rt, .stop_at = 37 };
+    try testing.expectError(error.Interrupted, inst.invoke("f", &.{}, &results));
+    try testing.expectEqualSlices(u32, &.{ 37, 32 }, probe.reported[0..probe.n_reported]);
+    for (probe.errs[0..probe.n_reported]) |e| try testing.expectEqual(@as(anyerror, _zwasm.runtime.Trap.Interrupted), e);
+}
+
+test "facade engine=.interp: a trap in a tail callee is reported with the callee's frame and live locals (#452)" {
+    // (module (func $f (export "f") (param i32) (result i32) (return_call $g (i32.add (local.get 0) (i32.const 1))))
+    //         (func $g (param i32) (result i32) (unreachable)))
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+        0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, // type: (i32)->(i32)
+        0x03, 0x03, 0x02, 0x00, 0x00, // func: 2× type 0
+        0x07, 0x05, 0x01, 0x01, 'f', 0x00, 0x00, // export "f" = func 0
+        0x0a, 0x0f, 0x02, // code: 2 bodies
+        0x09, 0x00, 0x20, 0x00, 0x41, 0x01, 0x6a, 0x12, 0x01, 0x0b, // $f: @38 return_call 1
+        0x03, 0x00, 0x00, 0x0b, // $g: @43 unreachable
+    };
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&bytes);
+    defer mod.deinit();
+    var inst = try mod.instantiate(.{ .engine = .interp });
+    defer inst.deinit();
+
+    const Probe = struct {
+        rt: *_zwasm.runtime.Runtime,
+        reports: usize = 0,
+        offset: u32 = 0,
+        local0: i32 = 0,
+
+        fn hook(_: *anyopaque, _: u32) bool {
+            return false;
+        }
+        fn trap(ctx: *anyopaque, pc: u32, _: anyerror) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const frame = self.rt.currentFrame();
+            const func = frame.func.?;
+            self.reports += 1;
+            self.offset = func.body_offset + func.src_offsets.items[pc];
+            // The tail callee's locals are freed when `run` unwinds; this read
+            // is only sound if the report comes first.
+            self.local0 = frame.locals[0].i32;
+        }
+    };
+    const rt = inst.handle.runtime.?;
+    var probe: Probe = .{ .rt = rt };
+    rt.debug_hook = Probe.hook;
+    rt.debug_trap = Probe.trap;
+    rt.debug_ctx = @ptrCast(&probe);
+
+    var results = [_]_zwasm.Value{.{ .i32 = 0 }};
+    try testing.expectError(error.Unreachable, inst.invoke("f", &.{.{ .i32 = 41 }}, &results));
+    try testing.expectEqual(@as(usize, 1), probe.reports);
+    try testing.expectEqual(@as(u32, 43), probe.offset);
+    try testing.expectEqual(@as(i32, 42), probe.local0);
+}
+
 test "facade setFuel: exhausted budget traps OutOfFuel; ample budget completes + drains (ADR-0179 #3b)" {
     // (module (func (export "f") (result i32) (i32.const 42)))
     const bytes = [_]u8{

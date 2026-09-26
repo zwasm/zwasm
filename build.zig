@@ -1546,6 +1546,23 @@ pub fn build(b: *std.Build) void {
     const run_zig_host_step = b.step("run-zig-host", "Build + run the native Zig host example");
     run_zig_host_step.dependOn(&run_zig_host.step);
 
+    // `zig build gdbstub-poc` — discussion #452: a GDB remote stub over the
+    // interpreter that LLDB's Wasm plugin can drive. Evidence for the debugger
+    // design, not a supported tool, so it is built only on request.
+    const gdbstub_poc_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/debugger/gdbstub_poc.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gdbstub_poc_mod.addImport("zwasm", zwasm_lib_mod);
+    const gdbstub_poc_exe = b.addExecutable(.{
+        .name = "zwasm-gdbstub-poc",
+        .root_module = gdbstub_poc_mod,
+    });
+    const gdbstub_poc_install = b.addInstallArtifact(gdbstub_poc_exe, .{});
+    const gdbstub_poc_step = b.step("gdbstub-poc", "Build the GDB remote stub proof of concept (#452; not in test-all)");
+    gdbstub_poc_step.dependOn(&gdbstub_poc_install.step);
+
     // `zig build run-zig-host-jit` (ADR-0200) — the JIT-backed mini-consumer:
     // `Module.instantiate(.{ .engine = .jit })` calling a multi-arg + a SIMD-body
     // export. Counterpart to `docs/examples/c_host/jit_engine.c`. Run in test-all.
