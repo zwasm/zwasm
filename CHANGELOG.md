@@ -30,6 +30,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A function with 65,535 or more vregs no longer takes the process down on
+  the JIT** (#487). The buffer-size arithmetic ran in the cap's `u16` and
+  wrapped one step before `SlotOverflow` could decline; it runs in `usize`, so
+  such a function compiles when few of its values are live at once, and
+  declines when they are not.
+
 - **A tag export is listed at its position** (#478). The parser dropped a
   tag export on decode, so `wasm_module_exports`, the Zig facade's
   `Module.exports` and every other reader of the decoded list never saw it,

@@ -232,7 +232,8 @@ pub fn computeWith(
     // D-289: allocator-backed (was `[max_slots+1]` stack arrays — 65536 entries
     // would blow the stack). active_len/free_len never exceed n_slots ≤
     // min(ranges.len, max_slots), so size to that tight bound.
-    const buf_cap: usize = @min(live.ranges.len, @as(usize, max_slots)) + 1;
+    // `@min` narrows to the comptime bound's type (u16): widen BEFORE the + 1 (#487).
+    const buf_cap: usize = @as(usize, @min(live.ranges.len, max_slots)) + 1;
     const active_buf = try allocator.alloc(ActiveEntry, buf_cap);
     defer allocator.free(active_buf);
     var active_len: u16 = 0;
@@ -559,6 +560,49 @@ test "compute: >4095 simultaneously-live ranges no longer SlotOverflow (D-289/D-
     try testing.expectEqual(@as(u16, 0), alloc.slots[0]);
     try testing.expectEqual(@as(u16, n - 1), alloc.slots[n - 1]);
     try regalloc.verify(&f, alloc);
+}
+
+test "compute: 65535 simultaneously-live ranges fill the cap exactly, no panic (#487)" {
+    // Pins: the buffer-size arithmetic runs in usize, not the cap's u16.
+    const n: usize = max_slots;
+    var f = freshFunc();
+    defer f.deinit(testing.allocator);
+    const ranges = try testing.allocator.alloc(LiveRange, n);
+    defer testing.allocator.free(ranges);
+    for (ranges) |*r| r.* = .{ .def_pc = 0, .last_use_pc = 100_000 };
+    f.liveness = .{ .ranges = ranges };
+    const alloc = try compute(testing.allocator, &f);
+    defer regalloc.deinit(testing.allocator, alloc);
+    try testing.expectEqual(max_slots, alloc.n_slots);
+    // `verify` is quadratic; fully overlapping ranges mint slot ids in vreg
+    // order, so the linear check is exact.
+    for (alloc.slots, 0..) |s, v| try testing.expectEqual(@as(u16, @intCast(v)), s);
+}
+
+test "compute: 65535 sequential ranges share slot 0 (the ffmpeg shape, #487)" {
+    // Pins: many vregs with few live at once compile, rather than decline.
+    const n: usize = max_slots;
+    var f = freshFunc();
+    defer f.deinit(testing.allocator);
+    const ranges = try testing.allocator.alloc(LiveRange, n);
+    defer testing.allocator.free(ranges);
+    for (ranges, 0..) |*r, i| r.* = .{ .def_pc = @intCast(i), .last_use_pc = @intCast(i) };
+    f.liveness = .{ .ranges = ranges };
+    const alloc = try compute(testing.allocator, &f);
+    defer regalloc.deinit(testing.allocator, alloc);
+    try testing.expectEqual(@as(u16, 1), alloc.n_slots);
+    for (alloc.slots) |s| try testing.expectEqual(@as(u16, 0), s);
+}
+
+test "compute: 65536 simultaneously-live ranges decline with SlotOverflow, not a panic (#487)" {
+    const n: usize = @as(usize, max_slots) + 1;
+    var f = freshFunc();
+    defer f.deinit(testing.allocator);
+    const ranges = try testing.allocator.alloc(LiveRange, n);
+    defer testing.allocator.free(ranges);
+    for (ranges) |*r| r.* = .{ .def_pc = 0, .last_use_pc = 100_000 };
+    f.liveness = .{ .ranges = ranges };
+    try testing.expectError(error.SlotOverflow, compute(testing.allocator, &f));
 }
 
 test "compute: three sequential non-overlapping ranges all share slot 0 (n_slots = 1)" {

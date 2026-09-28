@@ -1,4 +1,4 @@
-// FILE-SIZE-EXEMPT: (cap=2950) append-only e2e JIT test aggregator (per ADR-0099 D1); #385 adds the one cross-module case that can tell the callee's runtime apart, beside the D-225 cases it contrasts with; ADR-0228 (#388/#390/#413) adds the bridge's ABI matrix as inline fixtures — the same `initLinked` chain the D-225 cases use, so they stay beside them.
+// FILE-SIZE-EXEMPT: (cap=3010) append-only e2e JIT test aggregator (per ADR-0099 D1); #385 adds the one cross-module case that can tell the callee's runtime apart, beside the D-225 cases it contrasts with; ADR-0228 (#388/#390/#413) adds the bridge's ABI matrix as inline fixtures — the same `initLinked` chain the D-225 cases use, so they stay beside them; #487 adds the one generated-body case (65600 vregs — the fixture would be 130 KB), beside the inline ones it is run by.
 // One self-contained test per behaviour (inline .wasm bytes + wat comment);
 // splitting by concept would scatter the runI32Export harness + duplicate
 // imports for negligible gain (N4 test-dup); growth is by independent test
@@ -2959,3 +2959,48 @@ test "runI32Export: a `loop` between the `br` and the block's `.end` preserves t
 // Trap-KIND execution tests (ADR-0164 A / D-292: unreachable=5, oob_memory=6,
 // div_by_zero=7, int_overflow=8) live in the sibling `runner_trap_test.zig`
 // (split to keep this file under the 2000-line hard cap; mirrors runner_gc_test).
+
+test "runI32Export: a function with 65600 vregs compiles on the JIT and returns 42 (#487)" {
+    if (builtin.os.tag == .windows) return skip.phaseEnd(.win64);
+    // (module (func (export "test") (result i32)
+    //   (i32.const 0) (drop)   ;; × 65600
+    //   (i32.const 42)))
+    // Pins: a function past the u16 slot cap in vreg COUNT compiles while few
+    // values are live at once (the ffmpeg.wasm shape). Generated, not a
+    // fixture: the body alone is ~130 KB.
+    const pairs: usize = 65600;
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    try body.append(testing.allocator, 0x00); // no locals
+    for (0..pairs) |_| try body.appendSlice(testing.allocator, &.{ 0x41, 0x00, 0x1a }); // i32.const 0; drop
+    try body.appendSlice(testing.allocator, &.{ 0x41, 0x2a, 0x0b }); // i32.const 42; end
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(testing.allocator);
+    try bytes.appendSlice(testing.allocator, &.{ 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00 });
+    try bytes.appendSlice(testing.allocator, &.{ 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f }); // type: () -> i32
+    try bytes.appendSlice(testing.allocator, &.{ 0x03, 0x02, 0x01, 0x00 }); // func: func0 → type0
+    try bytes.appendSlice(testing.allocator, &.{ 0x07, 0x08, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x00, 0x00 }); // export "test"
+    var body_size: [8]u8 = undefined;
+    const body_size_n = appendUleb(&body_size, body.items.len);
+    try bytes.append(testing.allocator, 0x0a);
+    var sec_size: [8]u8 = undefined;
+    const sec_size_n = appendUleb(&sec_size, 1 + body_size_n + body.items.len);
+    try bytes.appendSlice(testing.allocator, sec_size[0..sec_size_n]);
+    try bytes.append(testing.allocator, 0x01); // one body
+    try bytes.appendSlice(testing.allocator, body_size[0..body_size_n]);
+    try bytes.appendSlice(testing.allocator, body.items);
+
+    try testing.expectEqual(@as(u32, 42), try runI32Export(testing.allocator, bytes.items, "test"));
+}
+
+fn appendUleb(out: *[8]u8, value: usize) usize {
+    var v = value;
+    var n: usize = 0;
+    while (true) : (n += 1) {
+        const byte: u8 = @intCast(v & 0x7f);
+        v >>= 7;
+        out[n] = if (v != 0) byte | 0x80 else byte;
+        if (v == 0) return n + 1;
+    }
+}
