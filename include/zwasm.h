@@ -262,7 +262,9 @@ WASM_API_EXTERN wasm_func_t* zwasm_instance_get_func(wasm_instance_t*, uint32_t 
  * ZWASM_TRAP_INVALID_MODULE verdict or a ZWASM_TRAP_BINDING_ERROR cross-store
  * import is written through trap_out (when non-NULL) with a NULL return. The
  * cross-store refusal is decided before any engine-specific capability check,
- * so all three engine kinds give the same reason for it. */
+ * so all three engine kinds give the same reason for it. Any other engine_kind
+ * value is AUTO, not an error, so a header newer than the library lands on AUTO
+ * silently; zwasm_instance_engine reads back what actually ran. */
 WASM_API_EXTERN wasm_instance_t* zwasm_instance_new_ex(
     wasm_store_t*, const wasm_module_t*, const wasm_extern_vec_t*,
     wasm_trap_t**, uint8_t engine_kind);

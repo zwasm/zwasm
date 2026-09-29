@@ -142,7 +142,9 @@ fallback is at instantiation only — a decline reached at call time, where the
 instance is already JIT-backed, traps `ZWASM_TRAP_UNSUPPORTED` naming the shape
 (#431). To force the engine from C, use
 `zwasm_instance_new_ex(store, module, imports, trap_out, engine_kind)`
-with `ZWASM_ENGINE_AUTO` / `ZWASM_ENGINE_JIT` / `ZWASM_ENGINE_INTERP`.
+with `ZWASM_ENGINE_AUTO` / `ZWASM_ENGINE_JIT` / `ZWASM_ENGINE_INTERP`; any
+other `engine_kind` is AUTO, not an error, so a header newer than the library
+lands on AUTO silently.
 `zwasm_instance_engine(instance, &out)` reads the kind back — `ZWASM_ENGINE_JIT`
 or `ZWASM_ENGINE_INTERP`, never `AUTO`, so an instance that fell back says so
 (ADR-0200 D3).
