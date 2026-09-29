@@ -48,7 +48,9 @@ refused with the reason rather than silently skipped (ADR-0230).
 The sandboxing flags (`--fuel`/`--timeout`/`--max-memory`/`--max-table-elements`) apply to `.wasm`
 **and `.cwasm`** runs (the artifact loads into the full runtime — ADR-0203);
 a component run combined with them is refused loudly (exit 2) rather than
-running unsandboxed.
+running unsandboxed. Without them a core-module run is unbounded on every
+engine: no fuel budget, no deadline, no memory ceiling below the module's own
+maximum. A component run keeps the Zig API's finite defaults instead.
 
 ### `compile`
 

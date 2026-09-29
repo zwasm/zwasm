@@ -125,6 +125,12 @@ WASM_API_EXTERN void zwasm_engine_set_memory_growth_hook(
 
 /* ── Fuel (deterministic budget) ─────────────────────────────────────── */
 
+/* An instance made through this C API starts unmetered: no fuel budget and no
+ * memory ceiling below the module's own maximum, as in wasmtime's C API. The
+ * fuel, memory-cap and interrupt setters bound a live instance, so none of them
+ * reaches the start function wasm_instance_new runs (#465, #489). The Zig API
+ * instantiates with finite defaults instead. */
+
 /* Fuel units are engine-specific: interpreter = instructions executed;
  * JIT = poll-site crossings. Every loop back-edge is a poll site, and so is a
  * function's entry — always on aarch64, but on x86_64 only in a function that

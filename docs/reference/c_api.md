@@ -157,6 +157,11 @@ with a short vector, which reads exactly like a module with fewer imports. It
 returns `true` only when `out` holds every import, and `false` with `out` empty
 and nothing leaked (#475).
 
+An instance starts unmetered — no fuel budget, no memory ceiling below the
+module's own maximum — as in wasmtime's C API. The setters below bound a live
+instance, so none of them reaches the start function `wasm_instance_new` runs
+(#465, #489). The Zig API instantiates with finite defaults instead.
+
 | Function                                                            | Effect                                                                                                                                   |
 |---------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
 | `zwasm_instance_set_fuel(i, n)` / `zwasm_instance_disable_fuel(i)`  | deterministic budget; exhaustion traps `all fuel consumed` (kind 17). Interp units = instructions                                        |
