@@ -177,8 +177,9 @@ axis to `.unmetered` (e.g. `.{ .fuel = .unmetered }`) for trusted code. `Instanc
 another thread (timeout or cancellation → `error.Interrupted`);
 `setFuel`/`setMemoryPagesLimit`/`setTableElementsLimit` adjust the budgets on a
 live instance. The **JIT engine carries the same triad**: polls at
-function entry + every loop back-edge deliver interruption and fuel (units there
-= entries + loop iterations), and `memory.grow` honours the host cap. From C,
+every loop back-edge and at function entry (on x86_64 only in a function that
+uses the runtime) deliver interruption and fuel (units there = those
+crossings), and `memory.grow` honours the host cap. From C,
 use the `zwasm_instance_*` setters in [`include/zwasm.h`](include/zwasm.h);
 from the CLI, `--fuel` / `--timeout` / `--max-memory` (both engines).
 

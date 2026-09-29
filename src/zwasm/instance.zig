@@ -47,7 +47,8 @@ pub const Instance = struct {
 
     /// ADR-0179 #3a — request cooperative interruption of this instance from
     /// any thread (timeout / host cancellation). The running guest traps
-    /// `error.Interrupted` at the next function entry or loop back-edge poll.
+    /// `error.Interrupted` at the next loop back-edge or function entry poll
+    /// (which entries poll on the JIT: `setFuel`).
     /// Idempotent. Call `clearInterrupt` before re-invoking. Routes to the
     /// active engine (ADR-0200): interp flag storage or the JIT's own flag.
     pub fn interrupt(self: *Instance) void {
@@ -100,7 +101,8 @@ pub const Instance = struct {
 
     /// ADR-0179 #3b — set the deterministic execution budget (fuel). The interp
     /// decrements once per executed instruction; the JIT meters poll-site
-    /// crossings (function prologue + loop back-edges) — engines meter
+    /// crossings (loop back-edges + function prologues, which x86_64 emits
+    /// only in a function that uses the runtime pointer) — engines meter
     /// differently by design. Both trap `error.OutOfFuel` at exhaustion. `null`
     /// = unmetered. Routes to the active engine (ADR-0200).
     pub fn setFuel(self: *Instance, fuel: ?u64) void {

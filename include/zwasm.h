@@ -126,10 +126,13 @@ WASM_API_EXTERN void zwasm_engine_set_memory_growth_hook(
 /* ── Fuel (deterministic budget) ─────────────────────────────────────── */
 
 /* Fuel units are engine-specific: interpreter = instructions executed;
- * JIT = poll-site crossings (function entry + loop back-edges). A budget
- * armed on an instance whose engine you did not force therefore has no
- * portable unit — pin the engine with zwasm_instance_new_ex when the
- * exact count matters. */
+ * JIT = poll-site crossings. Every loop back-edge is a poll site, and so is a
+ * function's entry — always on aarch64, but on x86_64 only in a function that
+ * uses the runtime (memory, a global, a call, an instruction that can trap).
+ * On x86_64 a leaf that uses none, such as a bare (i32.const 7), costs no fuel
+ * and does not observe an interrupt. A budget armed on an instance whose engine
+ * you did not force therefore has no portable unit — pin the engine with
+ * zwasm_instance_new_ex when the exact count matters. */
 
 /* Arm (or re-arm) the fuel budget. Exhaustion traps with kind
  * ZWASM_TRAP_OUT_OF_FUEL ("all fuel consumed"). */
@@ -162,8 +165,8 @@ WASM_API_EXTERN void zwasm_instance_clear_memory_pages_limit(wasm_instance_t*);
 /* ── Cooperative interruption (cancel / host-driven timeout) ─────────── */
 
 /* Callable from any thread; the running guest traps with kind
- * ZWASM_TRAP_INTERRUPTED at its next poll (function entry / loop
- * back-edge). Idempotent; clear before re-invoking. */
+ * ZWASM_TRAP_INTERRUPTED at its next poll (a loop back-edge, or a function
+ * entry on the JIT's terms above). Idempotent; clear before re-invoking. */
 WASM_API_EXTERN void zwasm_instance_interrupt(wasm_instance_t*);
 WASM_API_EXTERN void zwasm_instance_clear_interrupt(wasm_instance_t*);
 
