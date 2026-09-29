@@ -130,11 +130,13 @@ documented exception. Multi-store use across threads is Phase 11's design.
 
 **Engine selection.** Stock `wasm_instance_new` builds an `.auto`-engine
 instance: the JIT where it takes the module, the interpreter where the JIT
-*declines* it (an import it cannot satisfy, a body it cannot compile) — except
-for one decline that has no fallback: a module importing a function from
-another instance this Store backs with the JIT cannot run on the interpreter at
-all, and returns `NULL` with no trap. A module the JIT judges *invalid* is not
-retried on the interpreter: `NULL`, with a
+*declines* it (an import it cannot satisfy, a body it cannot compile). A
+function imported from another instance this Store backs with the JIT binds on
+the JIT, and the interpreter cannot bind it at all, so a decline there has no
+fallback: a signature with a `v128` parameter or a struct or array reference
+type, or a chain rooted in a `wasm_func_new` callback that a JIT-backed module
+re-exports (#437), returns `NULL` with no trap. A module the JIT judges
+*invalid* is not retried on the interpreter: `NULL`, with a
 `ZWASM_TRAP_INVALID_MODULE` trap whose message names the verdict (#233). The
 fallback is at instantiation only — a decline reached at call time, where the
 instance is already JIT-backed, traps `ZWASM_TRAP_UNSUPPORTED` naming the shape
