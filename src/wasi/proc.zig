@@ -15,8 +15,9 @@
 //! `proc_exit` is the odd one out: it has no return value
 //! (witx `noreturn`). We model it by recording `host.exit_code`
 //! and unwinding through a channel of the engine's own — the
-//! interp thunk returns `error.WasiExit` (`src/api/wasi.zig`),
-//! the JIT stub raises the trap flag (`jit_dispatch.zig`).
+//! interp thunk returns `error.ProcExit` (`src/api/wasi.zig`),
+//! the same error the p2/p3 `wasi:cli/exit` unwinds with; the
+//! JIT stub raises the trap flag (`jit_dispatch.zig`).
 //! Neither reads `host.exit_code` back: it is the recorded
 //! status, not the unwind signal. Both surface as a trap at the
 //! C-API binding.
@@ -53,8 +54,7 @@ fn writeBytes(mem: []u8, offset: u32, src: []const u8) p1.Errno {
 /// `proc_exit(rval) -> noreturn` — request termination of the
 /// instance with exit code `rval`. The handler only records
 /// `host.exit_code` and returns `Errno.success`; unwinding is the
-/// caller's, per engine (`error.WasiExit` from the interp thunk,
-/// the trap flag from the JIT stub). The recorded status is what
+/// caller's, per engine (file header). The recorded status is what
 /// `zwasm_store_wasi_exit_code` and `src/cli/run.zig` read, and
 /// `wasm_func_call` clears it before each call so it describes
 /// that call alone (#341).

@@ -3905,7 +3905,7 @@ test "wasm_instance_new: rejects WASI imports when no host is configured" {
 //
 // End-to-end fixture: instantiating + calling main triggers
 // the host thunk for proc_exit, which sets host.exit_code=42
-// and unwinds the dispatch loop with `error.WasiExit`.
+// and unwinds the dispatch loop with `error.ProcExit`.
 const proc_exit_42_wasm = [_]u8{
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
     // type section: 2 types, (i32) -> () and () -> ()
@@ -3955,7 +3955,7 @@ test "wasm_func_call: dispatches main → proc_exit(42) → host.exit_code (4.7d
     const args: ValVec = .{ .size = 0, .data = null };
     var results: ValVec = .{ .size = 0, .data = null };
     const trap = wasm_func_call(main_fn, &args, &results);
-    // proc_exit unwinds via error.WasiExit, surfaces as a Trap.
+    // proc_exit unwinds via error.ProcExit, surfaces as a Trap.
     try testing.expect(trap != null);
     defer trap_surface.wasm_trap_delete(trap);
 

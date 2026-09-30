@@ -30,6 +30,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A preview1 `proc_exit` no longer takes the embedder down through the Zig
+  facade** (#490). The interpreter's thunk unwound under a second error name
+  that `Instance.invoke` did not know, so it panicked; both engine arms now
+  return `error.ProcExit`, the name the component exit paths already used.
+
 - **A function with 65,535 or more vregs no longer takes the process down on
   the JIT** (#487). The buffer-size arithmetic ran in the cap's `u16` and
   wrapped one step before `SlotOverflow` could decline; it runs in `usize`, so

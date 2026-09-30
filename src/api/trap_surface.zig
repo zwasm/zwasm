@@ -200,11 +200,11 @@ pub fn mapInterpTrap(err: anyerror) TrapKind {
         error.OutOfFuel => .out_of_fuel,
         // #331 — a host callback trapped, or the binding could not complete.
         error.HostTrap => .binding_error,
-        // #331 — the interp's preview1 `proc_exit` thunk unwinds with this; the
-        // JIT reaches the same kind through stub code 18. Without this arm the
+        // #331 — the interp's `proc_exit` unwind (`src/wasi/proc.zig`); the JIT
+        // reaches the same kind through stub code 18. Without this arm the
         // `else` below reports a clean exit as an embedder failure, which is how
         // the two engines came to disagree (interp 0 vs JIT 1).
-        error.WasiExit => .wasi_exit,
+        error.ProcExit => .wasi_exit,
         else => .binding_error,
     };
 }

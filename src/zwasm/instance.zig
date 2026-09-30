@@ -564,10 +564,8 @@ fn emitInvokeTrap(self: *Instance, err: Instance.InvokeError) void {
         else => {},
     }
     const kind: _trap_surface.TrapKind = switch (err) {
-        // Two facade-only spellings of kinds `mapInterpTrap` knows under the
-        // C surface's names (`WasiExit`, and `unsupported` which it reaches
-        // from the JIT's error rather than from an interp trap).
-        error.ProcExit => .wasi_exit,
+        // A facade-only spelling: the C surface reaches `unsupported` from the
+        // JIT's error rather than from an interp trap.
         error.UnsupportedEngineSignature => .unsupported,
         else => _trap_surface.mapInterpTrap(err),
     };
@@ -639,11 +637,11 @@ fn jitTrapToError(code: u32) Instance.InvokeError {
     };
 }
 
-/// Narrow `dispatch.run`'s `anyerror!void` return back to the
-/// `Trap`-shaped set the spec actually defines. `else => @panic`
-/// guards against future dispatch additions that emit non-Trap
-/// errors (a new variant must be added to `runtime.Trap` and
-/// echoed here — caught at compile time of the new path's tests).
+/// Narrow `dispatch.run`'s `anyerror!void` return back to `InvokeError`.
+/// Nothing checks this switch at compile time — `anyerror` admits any name —
+/// so the `else` guards "every error the loop or a host thunk can return is
+/// named here" by panicking rather than misfiling one. A missing name shows
+/// only in a test that reaches it (#490: a thunk's second spelling of ProcExit).
 fn mapDispatchErr(err: anyerror) Instance.InvokeError {
     return switch (err) {
         error.Unreachable => error.Unreachable,
@@ -670,7 +668,7 @@ fn mapDispatchErr(err: anyerror) Instance.InvokeError {
         // as the OutOfMemory trap ("allocation size too large"; wasmtime
         // gc/array-alloc-too-large). The JIT path traps via its 0-sentinel.
         error.OutOfHeap => error.OutOfMemory,
-        // A host func (e.g. wasi:cli/exit) requested process exit — unwind cleanly.
+        // preview1 `proc_exit` or p2/p3 `wasi:cli/exit` — a clean unwind (#490).
         error.ProcExit => error.ProcExit,
         else => @panic("zwasm.Instance.invoke: dispatch returned non-Trap error variant"),
     };

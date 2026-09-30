@@ -167,8 +167,7 @@ pub export fn zwasm_wasi_config_inherit_stdio(h: ?*wasi_host.Host) callconv(.c) 
 // (right-to-left, since Wasm pushes left-to-right), invokes the
 // corresponding `src/wasi/*.zig` handler with `host` + `mem` +
 // the args, and pushes the resulting Errno back as an i32.
-// `proc_exit` is the odd one out: returns `error.WasiExit` so
-// the dispatch loop unwinds with `host.exit_code` set.
+// `proc_exit` is the odd one out: it unwinds (see `src/wasi/proc.zig`).
 
 /// Type-erased thunk pointer surface. The `*anyopaque` ctx is
 /// the `*wasi_host.Host` installed on the Store at
@@ -189,7 +188,7 @@ fn thunkProcExit(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const rval = rt.popOperand().u32;
     _ = wasi_proc.procExit(host, rval);
-    return error.WasiExit;
+    return error.ProcExit;
 }
 
 fn pushErrno(rt: *runtime.Runtime, errno: Errno) !void {

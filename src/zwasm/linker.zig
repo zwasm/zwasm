@@ -920,6 +920,39 @@ test "start function may be an IMPORTED host func (wit-component start-shim shap
     try testing.expectEqual(@as(u32, 1), ticks);
 }
 
+// (module (import "wasi_snapshot_preview1" "proc_exit" (func (param i32)))
+//   (func (export "_start") i32.const 3 call 0)
+//   (func (export "f")))
+const proc_exit_3_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+    0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x00, 0x00, // types: (i32)->(), ()->()
+    0x02, 0x24, 0x01, 0x16, 'w', 'a', 's', 'i', '_', 's', 'n', 'a', 'p', 's', 'h', 'o', 't', '_', 'p', 'r', 'e', 'v', 'i', 'e', 'w', '1', //
+    0x09, 'p', 'r', 'o', 'c', '_', 'e', 'x', 'i', 't', 0x00, 0x00, // import proc_exit: type 0
+    0x03, 0x03, 0x02, 0x01, 0x01, // funcs: 2x type 1
+    0x07, 0x0e, 0x02, 0x06, '_', 's', 't', 'a', 'r', 't', 0x00, 0x01, 0x01, 'f', 0x00, 0x02, // exports
+    0x0a, 0x0b, 0x02, 0x06, 0x00, 0x41, 0x03, 0x10, 0x00, 0x0b, 0x02, 0x00, 0x0b, // code
+};
+
+test "preview1 proc_exit unwinds as error.ProcExit on both engine arms (#490)" {
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&proc_exit_3_wasm);
+    defer mod.deinit();
+
+    // The interp arm, through the Linker's WASI host (the Linker pins `.interp`).
+    var lk = eng.linker();
+    defer lk.deinit();
+    try lk.defineWasi(.{});
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    try testing.expectError(error.ProcExit, inst.invoke("_start", &.{}, &.{}));
+
+    // The JIT arm binds preview1 without a host.
+    var jit_inst = try mod.instantiate(.{ .engine = .jit });
+    defer jit_inst.deinit();
+    try testing.expectError(error.ProcExit, jit_inst.invoke("_start", &.{}, &.{}));
+}
+
 test "Linker.defineWasi: WasiConfig.envs populate the host environ (D-177)" {
     var eng = try _zwasm.Engine.init(testing.allocator, .{});
     defer eng.deinit();

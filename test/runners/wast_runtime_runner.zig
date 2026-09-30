@@ -993,7 +993,7 @@ fn trapKindName(k: wasm_c_api.TrapKind) []const u8 {
         // #331 — host-originated WASI termination. No spec corpus reaches it
         // (the testsuite imports no WASI), so this name only ever appears in a
         // mismatch message, where naming the kind beats naming nothing.
-        .wasi_exit => "WasiExit",
+        .wasi_exit => "ProcExit",
         .invalid_module => "InvalidModule", // #233 — an instantiation verdict, not a call-time trap
         .unsupported => "UnsupportedCallShape", // #431 — the engine declined the call's shape, it did not fault
     };
