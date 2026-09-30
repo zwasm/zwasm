@@ -534,12 +534,14 @@ pub fn clearWasiExitStatus(store: *const Store) void {
 /// since the last entry into guest code.
 ///
 /// The set walked here is every host a guest in this Store can write, and it
-/// is closed on both sides: an instance's host always came from
+/// is closed on both sides: a C-surface instance's host always came from
 /// `store.wasi_host` at capture time, `zwasm_store_set_wasi` frees a host
 /// nothing captured on the spot rather than retiring it, and a capture
 /// reserves the retirement slot it may later need — so a displaced host cannot
 /// fall out of the list and become unreadable while its instances stay
-/// callable. It is the same set `wasm_store_delete` frees.
+/// callable. Those are the hosts `wasm_store_delete` frees. The third source
+/// is the Zig facade's Linkers (#490): each registers its host on creation and
+/// removes it before freeing it, and outlives every instance bound to it.
 ///
 /// Scanning is sound because AT MOST ONE host in it carries a status at any
 /// read point. A `proc_exit` unwinds the whole call, so the guest that wrote
@@ -557,6 +559,10 @@ pub fn activeWasiHost(store: *const Store) ?*wasi_host.Host {
         if (typed.exit_code != null) return typed;
     }
     for (store.retired_wasi_hosts.items) |h| {
+        const typed: *wasi_host.Host = @ptrCast(@alignCast(h));
+        if (typed.exit_code != null) return typed;
+    }
+    for (store.linker_wasi_hosts.items) |h| {
         const typed: *wasi_host.Host = @ptrCast(@alignCast(h));
         if (typed.exit_code != null) return typed;
     }

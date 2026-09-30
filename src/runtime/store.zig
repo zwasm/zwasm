@@ -77,6 +77,12 @@ pub const Store = struct {
     /// `wasm_store_delete` frees each one exactly like `wasi_host`.
     /// Erased to `*anyopaque` for the same Zone-1 reason.
     retired_wasi_hosts: std.ArrayList(*anyopaque) = .empty,
+    /// Hosts the Zig facade's `Linker.defineWasi` created on this Store
+    /// (#490). Linker-owned, list included: it lives in the facade Engine's
+    /// allocator, which this Store does not know, and the last `Linker.deinit`
+    /// frees it — Linkers die before their Engine, so it is empty here at
+    /// `wasm_store_delete`.
+    linker_wasi_hosts: std.ArrayList(*anyopaque) = .empty,
     /// Per-Store zombie-instance list (ADR-0014 §2.1 / 6.K.2
     /// sub-change 4). When `instantiateRuntime` traps mid-
     /// element-segment processing, prior writes into a foreign

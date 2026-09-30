@@ -113,6 +113,15 @@ pub const Instance = struct {
         }
     }
 
+    /// The code a preview1 `proc_exit` recorded when it ended the last
+    /// outermost `invoke` into any instance of this Engine, or null when that
+    /// invoke did not exit. Only a `Linker.defineWasi` host records one — the
+    /// JIT arm's own preview1 binding keeps no code.
+    pub fn wasiExitCode(self: *const Instance) ?u32 {
+        const h = _api_instance.activeWasiHost(self.c_store) orelse return null;
+        return h.exit_code;
+    }
+
     /// Remaining fuel, or `null` if unmetered / no live runtime.
     pub fn fuelRemaining(self: *Instance) ?u64 {
         if (self.handle.runtime) |rt| return rt.fuel;
@@ -286,10 +295,10 @@ pub const Instance = struct {
         NotAFunc,
         ArgArityMismatch,
         ResultArityMismatch,
-        /// A WASI host function requested process exit (e.g. `wasi:cli/exit`):
-        /// the host records the exit code out-of-band and returns this to unwind
-        /// the guest (a clean noreturn termination, NOT a wasm trap). The
-        /// component-run caller catches it and reads the recorded code.
+        /// A WASI host function requested process exit (preview1 `proc_exit`,
+        /// `wasi:cli/exit`): the host records the exit code out-of-band and
+        /// returns this to unwind the guest (a clean noreturn termination, NOT
+        /// a wasm trap). `wasiExitCode` reads a preview1 code back.
         ProcExit,
         /// ADR-0200 — the selected engine (currently the JIT) cannot yet invoke
         /// this export's signature (e.g. v128 / ref args, FP/v128 results, or an
@@ -321,6 +330,17 @@ pub const Instance = struct {
         // constant did not move, so what regressed was `dispatch.run`'s
         // compilation in the caller, not any added work. `inline` returns both
         // rows to within the control's own drift.
+        //
+        // The exit status is the C surface's entry protocol (#341, ADR-0224),
+        // on the Store every instance of this Engine shares.
+        const store = self.c_store;
+        const nested_entry = store.wasi_call_depth > 0;
+        _api_instance.clearWasiExitStatus(store);
+        store.wasi_call_depth +|= 1;
+        defer {
+            store.wasi_call_depth -|= 1;
+            if (nested_entry) _api_instance.clearWasiExitStatus(store);
+        }
         return self.invokeInner(name, args, results) catch |err| {
             emitInvokeTrap(self, err);
             return err;

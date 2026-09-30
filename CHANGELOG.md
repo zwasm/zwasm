@@ -20,6 +20,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Added
 
+- **`Instance.wasiExitCode`** — the Zig facade's counterpart to
+  `zwasm_store_wasi_exit_code` (#490). After an `invoke` that a preview1
+  `proc_exit` ended with `error.ProcExit`, it returns the guest's code; like the
+  C surface since #341, the status describes that call alone.
+
 - **`zwasm_module_imports_ex`** — `wasm_module_imports` with a verdict (#475).
   `wasm.h` returns `void`, so the stock call answers an allocation failure
   mid-build with a short vector, which reads exactly like a module with fewer

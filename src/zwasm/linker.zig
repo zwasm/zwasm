@@ -207,6 +207,15 @@ pub const Linker = struct {
         self.ctx_storage.deinit(self.engine.alloc);
         self.entries.deinit(self.engine.alloc);
         if (self.wasi_host) |h| {
+            const hosts = &self.engine.c_store.linker_wasi_hosts;
+            for (hosts.items, 0..) |r, i| if (r == @as(*anyopaque, @ptrCast(h))) {
+                _ = hosts.swapRemove(i);
+                break;
+            };
+            if (hosts.items.len == 0) {
+                hosts.deinit(self.engine.alloc);
+                hosts.* = .empty; // the Store still walks it
+            }
             h.deinit();
             self.engine.alloc.destroy(h);
             self.wasi_host = null;
@@ -247,6 +256,8 @@ pub const Linker = struct {
             try h.setEnvs(keys, vals);
         }
 
+        // Where `Instance.invoke` clears and `wasiExitCode` finds the status (#490).
+        try self.engine.c_store.linker_wasi_hosts.append(self.engine.alloc, @ptrCast(h));
         self.wasi_host = h;
     }
 
@@ -945,12 +956,151 @@ test "preview1 proc_exit unwinds as error.ProcExit on both engine arms (#490)" {
     try lk.defineWasi(.{});
     var inst = try lk.instantiate(&mod, .{});
     defer inst.deinit();
+    try testing.expectEqual(@as(?u32, null), inst.wasiExitCode());
     try testing.expectError(error.ProcExit, inst.invoke("_start", &.{}, &.{}));
+    try testing.expectEqual(@as(?u32, 3), inst.wasiExitCode());
+    try inst.invoke("f", &.{}, &.{});
+    try testing.expectEqual(@as(?u32, null), inst.wasiExitCode());
 
-    // The JIT arm binds preview1 without a host.
+    // The JIT arm binds preview1 without a host, so it has no code to report.
     var jit_inst = try mod.instantiate(.{ .engine = .jit });
     defer jit_inst.deinit();
     try testing.expectError(error.ProcExit, jit_inst.invoke("_start", &.{}, &.{}));
+    try testing.expectEqual(@as(?u32, null), jit_inst.wasiExitCode());
+}
+
+test "Instance.wasiExitCode: a nested exit a host callback swallows does not outlive its invoke (#490)" {
+    // (module (import "env" "cb" (func)) (import "wasi_snapshot_preview1" "proc_exit" (func (param i32)))
+    //   (func (export "g") call 0 i32.const 7 call 1))
+    const outer_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+        0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x00, 0x00, // types: (i32)->(), ()->()
+        0x02, 0x2d, 0x02, 0x03, 'e', 'n', 'v', 0x02, 'c', 'b', 0x00, 0x01, // import env.cb: type 1
+        0x16, 'w', 'a', 's', 'i', '_', 's', 'n', 'a', 'p', 's', 'h', 'o', 't', '_', 'p', 'r', 'e', 'v', 'i', 'e', 'w', '1', //
+        0x09, 'p', 'r', 'o', 'c', '_', 'e', 'x', 'i', 't', 0x00, 0x00, // import proc_exit: type 0
+        0x03, 0x02, 0x01, 0x01, // func: 1x type 1
+        0x07, 0x05, 0x01, 0x01, 'g', 0x00, 0x02, // export "g" = func 2
+        0x0a, 0x0a, 0x01, 0x08, 0x00, 0x10, 0x00, 0x41, 0x07, 0x10, 0x01, 0x0b, // code
+    };
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var inner_mod = try eng.compile(&proc_exit_3_wasm);
+    defer inner_mod.deinit();
+    var outer_mod = try eng.compile(&outer_bytes);
+    defer outer_mod.deinit();
+
+    // Two Linkers, two hosts: the inner exit (3) lands on one, the outer (7) on the other.
+    var lk_inner = eng.linker();
+    defer lk_inner.deinit();
+    try lk_inner.defineWasi(.{});
+    var inner = try lk_inner.instantiate(&inner_mod, .{});
+    defer inner.deinit();
+
+    var lk_outer = eng.linker();
+    defer lk_outer.deinit();
+    try lk_outer.defineWasi(.{});
+    const Ctx = struct { inner: *_zwasm.Instance, seen: ?u32 = 0 };
+    var ctx: Ctx = .{ .inner = &inner };
+    const H = struct {
+        fn cb(caller: *Caller) anyerror!void {
+            const c = caller.data(Ctx);
+            c.inner.invoke("_start", &.{}, &.{}) catch |err| {
+                if (err != error.ProcExit) return err;
+                c.seen = c.inner.wasiExitCode();
+            };
+        }
+    };
+    try lk_outer.defineFuncCtx("env", "cb", &ctx, fn (*Caller) anyerror!void, H.cb);
+    var outer = try lk_outer.instantiate(&outer_mod, .{});
+    defer outer.deinit();
+
+    try testing.expectError(error.ProcExit, outer.invoke("g", &.{}, &.{}));
+    try testing.expectEqual(@as(?u32, null), ctx.seen); // cleared on the nested way out, as on the C surface
+    try testing.expectEqual(@as(?u32, 7), outer.wasiExitCode());
+}
+
+test "Instance.wasiExitCode: an exit in another Linker's instance reaches the caller (#490)" {
+    // (module (import "a" "run" (func)) (func (export "g") call 0))
+    const outer_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+        0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type: ()->()
+        0x02, 0x09, 0x01, 0x01, 'a', 0x03, 'r', 'u', 'n', 0x00, 0x00, // import a.run
+        0x03, 0x02, 0x01, 0x00, // func: 1x type 0
+        0x07, 0x05, 0x01, 0x01, 'g', 0x00, 0x01, // export "g" = func 1
+        0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b, // code: call 0
+    };
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var src_mod = try eng.compile(&proc_exit_3_wasm);
+    defer src_mod.deinit();
+    var outer_mod = try eng.compile(&outer_bytes);
+    defer outer_mod.deinit();
+
+    var lk_src = eng.linker();
+    defer lk_src.deinit();
+    try lk_src.defineWasi(.{});
+    var src = try lk_src.instantiate(&src_mod, .{});
+    defer src.deinit();
+
+    var lk = eng.linker(); // no WASI of its own
+    defer lk.deinit();
+    try lk.defineCrossModuleFunc("a", "run", &src, "_start");
+    var outer = try lk.instantiate(&outer_mod, .{});
+    defer outer.deinit();
+
+    try testing.expectError(error.ProcExit, outer.invoke("g", &.{}, &.{}));
+    try testing.expectEqual(@as(?u32, 3), outer.wasiExitCode());
+}
+
+test "Instance.wasiExitCode: an import-free instance outlives its Linker's WASI host (#490)" {
+    // (module (func (export "f") (result i32) i32.const 42))
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
+        0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, 'f',
+        0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x41,
+        0x2a, 0x0b,
+    };
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&bytes);
+    defer mod.deinit();
+
+    var lk = eng.linker();
+    try lk.defineWasi(.{});
+    var inst = lk.instantiate(&mod, .{}) catch |err| {
+        lk.deinit();
+        return err;
+    };
+    defer inst.deinit();
+    lk.deinit(); // the lifetime contract allows it: `inst` imports nothing
+
+    // The freed host is off the Store's list, so nothing below can reach it.
+    try testing.expectEqual(@as(usize, 0), eng.c_store.linker_wasi_hosts.items.len);
+    var results = [_]_zwasm.Value{.{ .i32 = 0 }};
+    try inst.invoke("f", &.{}, &results);
+    try testing.expectEqual(@as(?u32, null), inst.wasiExitCode());
+}
+
+test "Linker.defineWasi: the host registry is allocated from the Engine's allocator (#490)" {
+    // A Host on its own, then a Linker's whole `defineWasi`: the difference is
+    // the registry, and it must be counted here, not taken from the C heap.
+    var fa: std.testing.FailingAllocator = .init(testing.allocator, .{});
+    const a = fa.allocator();
+    const h = try a.create(_wasi_host.Host);
+    h.* = try _wasi_host.Host.init(a);
+    const host_allocs = fa.allocations;
+    h.deinit();
+    a.destroy(h);
+
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    eng.alloc = a;
+    var lk = eng.linker();
+    defer lk.deinit();
+    const before = fa.allocations;
+    try lk.defineWasi(.{});
+    try testing.expectEqual(host_allocs + 1, fa.allocations - before);
 }
 
 test "Linker.defineWasi: WasiConfig.envs populate the host environ (D-177)" {
