@@ -1297,8 +1297,9 @@ pub fn build(b: *std.Build) void {
     const run_cli_stdin = b.addRunArtifact(cli_stdin_exe);
     run_cli_stdin.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
     run_cli_stdin.addArg(b.pathFromRoot("test/wasi/stdin_echo.wasm"));
+    run_cli_stdin.addArg(b.pathFromRoot("test/wasi/fdstat_stdio.wasm"));
     run_cli_stdin.has_side_effects = true;
-    const test_cli_stdin_step = b.step("test-cli-stdin", "Pipe bytes through `zwasm run` and check the guest reads them on fd 0 (issue #257)");
+    const test_cli_stdin_step = b.step("test-cli-stdin", "Pipe bytes through `zwasm run` and check the guest reads them on fd 0 (issue #257) and does not see a tty (issue #494)");
     test_cli_stdin_step.dependOn(&run_cli_stdin.step);
 
     // `zig build test-cli-argv0` — issue #256: the REAL CLI must hand the

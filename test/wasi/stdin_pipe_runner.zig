@@ -1,15 +1,18 @@
 // DBG-INIT-EXEMPT: no zwasm import — the engine runs in the spawned CLI, which reads ZWASM_DEBUG itself (cli/main.zig); std.process.spawn with no environ_map hands the child this process's environment, so a channel set on this lane reaches it.
-//! CLI stdin regression (issue #257): `zwasm run` must hand a core module
-//! the process stdin. Spawns the REAL CLI with bytes piped into fd 0 and
-//! checks the `stdin_echo.wasm` guest echoes them back (stdout = the bytes,
-//! exit code = the byte count), on `--engine interp`, `--engine jit` and the
-//! default. A null-device stdin must read as EOF (exit 0, empty stdout).
+//! CLI stdin regression (issues #257, #494): `zwasm run` must hand a core
+//! module the process stdin, and must not call it a tty. Spawns the REAL CLI
+//! with bytes piped into fd 0 and checks the `stdin_echo.wasm` guest echoes
+//! them back (stdout = the bytes, exit code = the byte count), and that the
+//! `fdstat_stdio.wasm` guest sees neither fd 0 nor fd 1 as a character device
+//! (stdout "00"), on `--engine interp`, `--engine jit` and the default. A
+//! null-device stdin must read as EOF (exit 0, empty stdout) and is not a tty
+//! either.
 //!
 //! Why a subprocess: the in-process runners build the WASI host themselves;
 //! only the CLI's own `main.zig` decides what the guest's fd 0 is.
 //!
 //! Usage: `zig build test-cli-stdin` /
-//!        `zwasm-cli-stdin <zwasm-cli> <stdin_echo.wasm>`
+//!        `zwasm-cli-stdin <zwasm-cli> <stdin_echo.wasm> <fdstat_stdio.wasm>`
 
 const std = @import("std");
 const spawned_cli = @import("spawned_cli");
@@ -50,18 +53,20 @@ pub fn main(init: std.process.Init) !u8 {
     defer arg_it.deinit();
     _ = arg_it.next().?;
     const cli = arg_it.next() orelse return error.MissingCliPath;
-    const fixture = arg_it.next() orelse return error.MissingFixturePath;
+    const echo_fixture = arg_it.next() orelse return error.MissingFixturePath;
+    const fdstat_fixture = arg_it.next() orelse return error.MissingFixturePath;
     try spawned_cli.assertRunnerBuildMode(gpa, io, cli);
 
     const engine_flags: []const []const []const u8 = &.{ &.{}, &.{"--engine=interp"}, &.{"--engine=jit"} };
     var failed: u32 = 0;
     for (engine_flags) |flags| {
+        const label: []const u8 = if (flags.len == 0) "default" else flags[0];
+
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
         try argv.appendSlice(gpa, &.{ cli, "run" });
         try argv.appendSlice(gpa, flags);
-        try argv.append(gpa, fixture);
-        const label: []const u8 = if (flags.len == 0) "default" else flags[0];
+        try argv.append(gpa, echo_fixture);
 
         const piped = try runCli(gpa, io, argv.items, payload);
         defer gpa.free(piped.stdout);
@@ -73,7 +78,21 @@ pub fn main(init: std.process.Init) !u8 {
         const eof_ok = eof.exit == 0 and eof.stdout.len == 0;
         std.debug.print("cli-stdin {s:<15} no-stdin: exit {d} stdout \"{f}\" {s}\n", .{ label, eof.exit, std.zig.fmtString(eof.stdout), if (eof_ok) "ok" else "FAIL" });
 
-        if (!piped_ok or !eof_ok) failed += 1;
+        // #494: a pipe and the null device are not ttys, and the runner's
+        // stdout is a pipe too; the guest must print "00" for fds 0 and 1.
+        argv.items[argv.items.len - 1] = fdstat_fixture;
+
+        const piped_fdstat = try runCli(gpa, io, argv.items, payload);
+        defer gpa.free(piped_fdstat.stdout);
+        const piped_fdstat_ok = piped_fdstat.exit == 0 and std.mem.eql(u8, piped_fdstat.stdout, "00");
+        std.debug.print("cli-fdstat {s:<15} piped:    exit {d} stdout \"{f}\" {s}\n", .{ label, piped_fdstat.exit, std.zig.fmtString(piped_fdstat.stdout), if (piped_fdstat_ok) "ok" else "FAIL" });
+
+        const null_fdstat = try runCli(gpa, io, argv.items, null);
+        defer gpa.free(null_fdstat.stdout);
+        const null_fdstat_ok = null_fdstat.exit == 0 and std.mem.eql(u8, null_fdstat.stdout, "00");
+        std.debug.print("cli-fdstat {s:<15} no-stdin: exit {d} stdout \"{f}\" {s}\n", .{ label, null_fdstat.exit, std.zig.fmtString(null_fdstat.stdout), if (null_fdstat_ok) "ok" else "FAIL" });
+
+        if (!piped_ok or !eof_ok or !piped_fdstat_ok or !null_fdstat_ok) failed += 1;
     }
     return if (failed != 0) 1 else 0;
 }

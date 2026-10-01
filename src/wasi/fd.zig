@@ -614,13 +614,22 @@ pub fn preadSlice(host: *Host, fd: p1.Fd, dest: []u8, offset: u64, n_out: *usize
 // fd_fdstat_get / fd_fdstat_set_flags  (§9.4 / 4.5 chunk a)
 // ============================================================
 
-fn filetypeFor(kind: host_mod.FdKind) p1.Filetype {
-    return switch (kind) {
-        .stdin, .stdout, .stderr => .character_device,
-        .file => .regular_file,
-        .dir => .directory,
-        .closed => .unknown,
+/// The filetype `fd_fdstat_get` and the stdio arm of `fd_filestat_get` report.
+/// A stdio slot has no host handle; it is `character_device` only when the
+/// stream `fd_read` / `fd_write` would actually use (a capture buffer and a
+/// `stdin_bytes` slice are not host fds) is a tty, and `unknown` otherwise —
+/// wasmtime's answer, and the only bit wasi-libc's `isatty` reads.
+fn filetypeFor(host: *const Host, slot: *const host_mod.OpenFd) p1.Filetype {
+    const stream: std.Io.File = switch (slot.kind) {
+        .stdin => if (host.stdin_bytes == null and host.stdin_inherit) std.Io.File.stdin() else return .unknown,
+        .stdout => if (host.stdout_buffer == null) std.Io.File.stdout() else return .unknown,
+        .stderr => if (host.stderr_buffer == null) std.Io.File.stderr() else return .unknown,
+        .file => return .regular_file,
+        .dir => return .directory,
+        .closed => return .unknown,
     };
+    const io = host.io orelse return .unknown;
+    return if (stream.isTty(io) catch false) .character_device else .unknown;
 }
 
 /// `fd_fdstat_get(fd, *fdstat_out) → errno` — write the
@@ -644,7 +653,7 @@ pub fn fdFdstatGet(
 
     const dst = mem[fdstat_ptr..][0..24];
     @memset(dst, 0);
-    dst[0] = @intFromEnum(filetypeFor(slot.kind));
+    dst[0] = @intFromEnum(filetypeFor(host, slot));
     std.mem.writeInt(u16, dst[2..4], slot.fs_flags, .little);
     std.mem.writeInt(u64, dst[8..16], slot.rights_base, .little);
     std.mem.writeInt(u64, dst[16..24], slot.rights_inheriting, .little);
@@ -1146,8 +1155,8 @@ fn kindToFiletype(kind: std.Io.File.Kind) p1.Filetype {
 }
 
 /// Wasm WASI snapshot-1 `fd_filestat_get` — write the `Filestat` of an
-/// open fd. Stdio fds report `character_device` (what wasi-libc expects
-/// for a tty-like stream); a `.file` / `.dir` slot with a host handle is
+/// open fd. A stdio fd's filestat is synthetic except for the filetype,
+/// which `filetypeFor` answers; a `.file` / `.dir` slot with a host handle is
 /// `stat`-ed via `std.Io.File.stat`. Out-of-range / closed → `badf`.
 pub fn fdFilestatGet(host: *Host, mem: []u8, fd: p1.Fd, filestat_ptr: u32) p1.Errno {
     const slot = host.translateFd(fd) orelse return .badf;
@@ -1164,7 +1173,7 @@ pub fn fdFilestatGet(host: *Host, mem: []u8, fd: p1.Fd, filestat_ptr: u32) p1.Er
         .stdin, .stdout, .stderr => .{
             .dev = 0,
             .ino = 0,
-            .filetype = .character_device,
+            .filetype = filetypeFor(host, slot),
             .nlink = 1,
             .size = 0,
             .atim = 0,
@@ -1412,14 +1421,14 @@ test "fdSeek / fdTell: stdio returns spipe" {
     try testing.expectEqual(p1.Errno.spipe, fdTell(&h, &mem, 0, 0));
 }
 
-test "fdFdstatGet: stdout writes 24-byte block (character_device, the stdio write rights)" {
+test "fdFdstatGet: stdout writes 24-byte block (unknown filetype without io, the stdio write rights)" {
     var h = try Host.init(testing.allocator);
     defer h.deinit();
     var mem: [32]u8 = @splat(0xAB);
     const e = fdFdstatGet(&h, &mem, 1, 0);
     try testing.expectEqual(p1.Errno.success, e);
-    // filetype = character_device (2)
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.character_device)), mem[0]);
+    // filetype = unknown (0): no io, so no host fd to ask (#494)
+    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.unknown)), mem[0]);
     // reserved byte zeroed
     try testing.expectEqual(@as(u8, 0), mem[1]);
     // fs_flags = 0
@@ -1430,6 +1439,29 @@ test "fdFdstatGet: stdout writes 24-byte block (character_device, the stdio writ
     try testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, mem[16..24], .little));
     // The 25th byte should be untouched.
     try testing.expectEqual(@as(u8, 0xAB), mem[24]);
+}
+
+test "fdFdstatGet: a stdio fd backed by a capture buffer or a byte slice is not a tty even with io (#494)" {
+    // The question goes to the stream fd_read / fd_write would use; a capture
+    // buffer and a stdin_bytes slice are not host fds, so the answer is
+    // `unknown` whatever the test process's own stdio is.
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    h.stdout_buffer = &capture;
+    h.stdin_bytes = "x";
+    h.stdin_inherit = true;
+    var mem: [32]u8 = @splat(0xAB);
+    try testing.expectEqual(p1.Errno.success, fdFdstatGet(&h, &mem, 1, 0));
+    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.unknown)), mem[0]);
+    try testing.expectEqual(p1.Errno.success, fdFdstatGet(&h, &mem, 0, 0));
+    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.unknown)), mem[0]);
+    // `fd_filestat_get` answers the same way (#494).
+    var fs: [64]u8 = @splat(0xAA);
+    try testing.expectEqual(p1.Errno.success, fdFilestatGet(&h, &fs, 1, 0));
+    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.unknown)), fs[16]);
 }
 
 test "fdFdstatGet: out-of-range fd returns badf; out-of-bounds ptr returns fault" {
@@ -1967,13 +1999,13 @@ test "fdPrestatGet + fdPrestatDirName: a preopen reports its Prestat + dir name"
     try testing.expectEqualStrings("/sandbox", mem[8..16]);
 }
 
-test "fdFilestatGet: stdout reports character_device; bad fd is badf" {
+test "fdFilestatGet: stdout reports unknown without io; bad fd is badf" {
     var h = try Host.init(testing.allocator);
     defer h.deinit();
     var mem: [64]u8 = @splat(0xAA);
     try testing.expectEqual(p1.Errno.success, fdFilestatGet(&h, &mem, 1, 0));
     // Filestat.filetype is at offset 16 (dev u64 @0, ino u64 @8, filetype @16).
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.character_device)), mem[16]);
+    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.unknown)), mem[16]);
     try testing.expectEqual(p1.Errno.badf, fdFilestatGet(&h, &mem, 99, 0));
 }
 

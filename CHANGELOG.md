@@ -35,6 +35,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A guest on a piped or redirected stdin no longer sees a tty** (#494).
+  `fd_fdstat_get` and `fd_filestat_get` answered `character_device` for fds
+  0 / 1 / 2 whatever the host fd was, which wasi-libc's `isatty` reads as a
+  terminal, so sqlite3's WASI build printed its banner and prompt on batch
+  input. A stdio fd is now `character_device` only when the host fd is one,
+  and `unknown` otherwise: wasmtime's answer.
+
 - **A preview1 `proc_exit` no longer takes the embedder down through the Zig
   facade** (#490). The interpreter's thunk unwound under a second error name
   that `Instance.invoke` did not know, so it panicked; both engine arms now
