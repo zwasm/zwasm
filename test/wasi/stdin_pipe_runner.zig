@@ -31,8 +31,13 @@ fn runCli(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, stdin: ?
     defer child.kill(io);
     if (stdin) |bytes| {
         // Written and closed before the guest can read: the bytes already sit
-        // in the pipe, the same shape as the issue's reproduction.
-        try child.stdin.?.writeStreamingAll(io, bytes);
+        // in the pipe, the same shape as the issue's reproduction. A guest
+        // that never reads fd 0 (`fdstat_stdio`) may have exited already, and
+        // the write then fails with EPIPE; the exit code and stdout decide.
+        child.stdin.?.writeStreamingAll(io, bytes) catch |err| switch (err) {
+            error.BrokenPipe => {},
+            else => return err,
+        };
         child.stdin.?.close(io);
         child.stdin = null;
     }
