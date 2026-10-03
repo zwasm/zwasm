@@ -1,6 +1,7 @@
 ;; WASI Preview 2 cli/environment + terminal + check-write component (E2 step 4).
-;; A sandboxed non-tty always-writable host: get-environment/get-arguments are
-;; empty, initial-cwd + get-terminal-stdout are none, output-stream.check-write
+;; A sandboxed always-writable host: get-environment/get-arguments are empty,
+;; initial-cwd is none, get-terminal-stdout is none because the test hands the
+;; host a capture buffer rather than a terminal (#507), output-stream.check-write
 ;; reports a permit. Each result is asserted; a mismatch traps (unreachable).
 (component
   ;; ---- wasi:cli/environment ----

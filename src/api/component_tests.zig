@@ -1037,7 +1037,7 @@ test "D3-7: a WASI-P2 component drives wasi:io/poll (subscribe + poll + ready/bl
     try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
 }
 
-test "E2: WASI-P2 cli/environment + terminal + check-write (sandboxed non-tty host)" {
+test "E2: WASI-P2 cli/environment + terminal + check-write (a capture is not a terminal)" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1049,6 +1049,11 @@ test "E2: WASI-P2 cli/environment + terminal + check-write (sandboxed non-tty ho
     var host = try wasi_host.Host.init(testing.allocator);
     defer host.deinit();
     host.io = io;
+    // get-terminal-stdout answers from the stream the host would write to (#507);
+    // a capture pins `none` wherever the test process's own stdout points.
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    host.stdout_buffer = &capture;
 
     // get-environment/get-arguments empty, initial-cwd + get-terminal-stdout none,
     // check-write reports a permit. The guest asserts each + traps on mismatch.
