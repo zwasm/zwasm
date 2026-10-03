@@ -219,6 +219,41 @@ test "lower: D-093 (d-1) — dead-code i32.add after br is not emitted" {
     try testing.expectEqual(ZirOp.end, f.instrs.items[7].op);
 }
 
+test "lower: each instruction records its opcode's body offset; dead code records none" {
+    var f = newFunc(i32_result_sig);
+    defer f.deinit(testing.allocator);
+
+    const body = [_]u8{
+        0x41, 0x01, // @0  i32.const 1
+        0x02, 0x7F, // @2  block (result i32)
+        0x41, 0x04, // @4  i32.const 4
+        0x41, 0x08, // @6  i32.const 8
+        0x0C, 0x00, // @8  br 0
+        0x6A, // @10 i32.add (dead)
+        0x0B, // @11 end (block)
+        0x6A, // @12 i32.add
+        0x0B, // @13 end_fn
+    };
+    try lowerFunctionBody(testing.allocator, &body, &f, &.{}, &.{});
+
+    try testing.expectEqualSlices(u32, &.{ 0, 2, 4, 6, 8, 11, 12, 13 }, f.src_offsets.items);
+    try testing.expectEqual(f.instrs.items.len, f.src_offsets.items.len);
+}
+
+test "lower: a prefixed opcode records the offset of its prefix byte" {
+    var f = newFunc(i32_result_sig);
+    defer f.deinit(testing.allocator);
+
+    const body = [_]u8{
+        0x43, 0x00, 0x00, 0x00, 0x00, // @0 f32.const 0
+        0xFC, 0x00, // @5 i32.trunc_sat_f32_s
+        0x0B, // @7 end
+    };
+    try lowerFunctionBody(testing.allocator, &body, &f, &.{}, &.{});
+
+    try testing.expectEqualSlices(u32, &.{ 0, 5, 7 }, f.src_offsets.items);
+}
+
 test "lower: D-093 (d-1) — nested block inside dead code emits no ZirInstrs" {
     var f = newFunc(empty_sig);
     defer f.deinit(testing.allocator);

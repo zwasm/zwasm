@@ -89,3 +89,7 @@ pub const TraceEvent = struct {
 };
 
 pub const TraceCallback = *const fn (ctx: *anyopaque, ev: TraceEvent) void;
+
+/// `Runtime.debug_hook` / `Runtime.debug_trap` (discussion #452).
+pub const DebugHook = *const fn (ctx: *anyopaque, pc: u32) bool;
+pub const DebugTrap = *const fn (ctx: *anyopaque, pc: u32, err: anyerror) void;
