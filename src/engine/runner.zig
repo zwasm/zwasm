@@ -1102,12 +1102,11 @@ pub const JitInstance = struct {
     ///
     /// ADR-0228 — a re-exported IMPORT answers with the target this instance
     /// itself resolved (`import_targets`), so the importer's thunk enters the
-    /// defining module directly. Null while that import is unresolved — a
-    /// WASI or embedder host func is planted in `dispatch`, not here, and
-    /// re-exporting one stays unsupported. The returned target names the
-    /// defining instance's runtime, arena and module bytes, not this one's:
-    /// the defining instance must outlive every importer that took it, and
-    /// nothing counts the takers. Today the C API keeps that by never freeing
+    /// defining module directly. An embedder host callback instead uses its
+    /// dispatch entry with this instance's runtime, which owns the payload
+    /// that entry reads. Null while the import is unresolved or WASI-backed.
+    /// The runtime and signature owner must outlive every importer holding
+    /// the target. Today the C API keeps that by never freeing
     /// a JIT instance before its store (`api/instance.zig` `parkJitAsZombie`
     /// / `Module.jit_borrowers`); other callers keep it by hand.
     pub fn exportedFuncTarget(self: *JitInstance, allocator: Allocator, name: []const u8) ?setup_mod.FuncImportTarget {
@@ -1121,9 +1120,16 @@ pub const JitInstance = struct {
     /// export shares the import's field name, so it resolves by index.
     pub fn funcTarget(self: *JitInstance, idx: u32) ?setup_mod.FuncImportTarget {
         if (idx < self.compiled.num_imports) {
-            if (idx >= self.import_targets.len) return null;
-            const t = self.import_targets[idx];
-            return if (t.callee_entry != 0) t else null;
+            if (idx < self.import_targets.len) {
+                const t = self.import_targets[idx];
+                if (t.callee_entry != 0) return t;
+            }
+            if (idx >= self.owned.host_payloads.len or self.owned.host_payloads[idx] == 0) return null;
+            return .{
+                .callee_rt = @intFromPtr(&self.owned.rt),
+                .callee_entry = self.owned.dispatch[idx],
+                .sig = self.compiled.func_sigs[idx],
+            };
         }
         if (idx >= self.compiled.func_sigs.len) return null;
         return .{

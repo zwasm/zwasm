@@ -1,24 +1,14 @@
-/* zwasm v2 — C-API conformance: a re-exported HOST callback links across the
- * chain and is reached by the importer's call (#427).
+/* C-API conformance: a host callback re-export links on each engine (#437).
+ * The no-argument modules are the reproduction posted in #437:
  *
- *   h: a `wasm_func_new` callback (i32) -> (i32), returns arg + 1
- *   B: (module (import "h" "f" (func $f (param i32) (result i32))) (export "f" (func $f)))
- *   C: (module (import "b" "f" (func $f (param i32) (result i32)))
- *             (func (export "test") (param i32) (result i32) (local.get 0) (call $f)))
+ * B: (module (import "h" "f" (func $f (result i32))) (export "f" (func $f)))
+ * C: (module (import "b" "f" (func $f (result i32)))
+ *            (func (export "main") (result i32) (call $f)))
  *
- * C's import is satisfied with B's export extern, which is the host callback
- * re-exported. The binder copies the callback binding B holds into C, so
- * C's `call` runs the callback on C's own operand stack — the same route a
- * `call_indirect` through B's slot takes. B is deleted before C is called;
- * the callback handle stays, as it must (nothing counts its takers).
- *
- * Run on `interp` only. On `auto` the re-exporter compiles — a module whose
- * only func is a host-callback import has nothing the JIT declines — so B is
- * JIT-backed and has no interpreter runtime for C's binder to read, and the
- * JIT's own target lookup has no entry address for an import slot a host
- * callback fills. C links on neither engine there. That is the JIT-side hole
- * (#388's) plus the unchanged rule that an interp importer cannot bind a
- * JIT-backed source; measured on `main` at 8c6e19cb4, untouched by #427.
+ * Also exercise an argument, a host callback in slot 1 with a decoy in
+ * slot 0, and a second re-export hop. Delete the host handle and both
+ * re-exporters before calling C. A callback trap must cross the bridge,
+ * and the next successful call must not inherit its trap state.
  */
 
 #include <stdio.h>
@@ -29,12 +19,27 @@
 #include <wasm.h>
 #include <zwasm.h>
 
-/* (module (import "h" "f" (func (param i32) (result i32))) (export "f" (func 0))) */
 static const uint8_t kBWasm[] = {
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-    0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,             /* type (i32)->(i32) */
-    0x02, 0x07, 0x01, 0x01, 0x68, 0x01, 0x66, 0x00, 0x00,       /* import h.f */
-    0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00,                   /* export "f" -> 0 (the import) */
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60,
+    0x01, 0x7f, 0x01, 0x7f, 0x02, 0x11, 0x02, 0x01, 0x68, 0x05, 0x64, 0x65,
+    0x63, 0x6f, 0x79, 0x00, 0x00, 0x01, 0x68, 0x01, 0x66, 0x00, 0x00, 0x07,
+    0x05, 0x01, 0x01, 0x66, 0x00, 0x01, 0x00, 0x0b, 0x04, 0x6e, 0x61, 0x6d,
+    0x65, 0x01, 0x04, 0x01, 0x01, 0x01, 0x66,
+};
+
+static const uint8_t kNoArgBWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+    0x00, 0x01, 0x7f, 0x02, 0x07, 0x01, 0x01, 0x68, 0x01, 0x66, 0x00, 0x00,
+    0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, 0x00, 0x0b, 0x04, 0x6e, 0x61,
+    0x6d, 0x65, 0x01, 0x04, 0x01, 0x00, 0x01, 0x66,
+};
+
+static const uint8_t kNoArgCWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+    0x00, 0x01, 0x7f, 0x02, 0x07, 0x01, 0x01, 0x62, 0x01, 0x66, 0x00, 0x00,
+    0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x6d, 0x61, 0x69, 0x6e,
+    0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b, 0x00, 0x0b,
+    0x04, 0x6e, 0x61, 0x6d, 0x65, 0x01, 0x04, 0x01, 0x00, 0x01, 0x66,
 };
 
 /* (module (import "b" "f" (func (param i32) (result i32)))
@@ -48,7 +53,7 @@ static const uint8_t kCWasm[] = {
     0x0a, 0x08, 0x01, 0x06, 0x00, 0x20, 0x00, 0x10, 0x00, 0x0b, /* local.get 0; call 0 */
 };
 
-static const uint8_t kEngines[] = { ZWASM_ENGINE_INTERP };
+static const uint8_t kEngines[] = { ZWASM_ENGINE_INTERP, ZWASM_ENGINE_JIT, ZWASM_ENGINE_AUTO };
 
 static const char* engine_name(uint8_t kind) {
     switch (kind) {
@@ -58,9 +63,34 @@ static const char* engine_name(uint8_t kind) {
     }
 }
 
-static wasm_trap_t* add_one(const wasm_val_vec_t* args, wasm_val_vec_t* results) {
+typedef struct {
+    wasm_store_t* store;
+    int trap;
+} callback_env_t;
+
+static int finalized;
+
+static void finalize_callback(void* data) {
+    finalized++;
+    free(data);
+}
+
+static wasm_trap_t* add_one(void* data, const wasm_val_vec_t* args, wasm_val_vec_t* results) {
+    callback_env_t* env = data;
+    if (env->trap) {
+        const char text[] = "callback trap";
+        wasm_message_t message = { sizeof(text), (wasm_byte_t*) text };
+        return wasm_trap_new(env->store, &message);
+    }
     results->data[0].kind = WASM_I32;
-    results->data[0].of.i32 = args->data[0].of.i32 + 1;
+    results->data[0].of.i32 = args->size ? args->data[0].of.i32 + 1 : 42;
+    return NULL;
+}
+
+static wasm_trap_t* decoy(const wasm_val_vec_t* args, wasm_val_vec_t* results) {
+    (void) args;
+    results->data[0].kind = WASM_I32;
+    results->data[0].of.i32 = -99;
     return NULL;
 }
 
@@ -96,38 +126,60 @@ static void unlink_all(link_t* l) {
     l->module = NULL;
 }
 
-static int chain_on(uint8_t engine) {
+static int chain_on(uint8_t engine, int no_arg) {
     int rc = 1;
     const char* who = engine_name(engine);
-    link_t b = { 0 }, c = { 0 };
+    link_t b = { 0 }, middle = { 0 }, c = { 0 };
+    wasm_func_t* decoy_fn = NULL;
+    callback_env_t* env = NULL;
+    finalized = 0;
     wasm_func_t* host_fn = NULL;
     wasm_engine_t* eng = wasm_engine_new();
     wasm_store_t* store = eng ? wasm_store_new(eng) : NULL;
     if (!eng || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
 
-    wasm_functype_t* ft = wasm_functype_new_1_1(wasm_valtype_new(WASM_I32), wasm_valtype_new(WASM_I32));
-    host_fn = wasm_func_new(store, ft, add_one);
+    wasm_functype_t* ft = no_arg
+        ? wasm_functype_new_0_1(wasm_valtype_new(WASM_I32))
+        : wasm_functype_new_1_1(wasm_valtype_new(WASM_I32), wasm_valtype_new(WASM_I32));
+    env = malloc(sizeof(*env));
+    if (!env) { wasm_functype_delete(ft); goto cleanup; }
+    *env = (callback_env_t) { store, 0 };
+    host_fn = wasm_func_new_with_env(store, ft, add_one, env, finalize_callback);
+    if (!no_arg) decoy_fn = wasm_func_new(store, ft, decoy);
     wasm_functype_delete(ft);
-    if (!host_fn) { fprintf(stderr, "[%s] wasm_func_new failed\n", who); goto cleanup; }
+    if (!host_fn) { free(env); env = NULL; goto cleanup; }
+    if (!no_arg && !decoy_fn) goto cleanup;
 
-    wasm_extern_t* b_externs[1] = { wasm_func_as_extern(host_fn) };
-    wasm_extern_vec_t b_imports = { 1, b_externs };
-    if (link_up(store, engine, who, "B (re-exporting the host callback)", kBWasm, sizeof(kBWasm), &b_imports, &b) != 0) goto cleanup;
+    const uint8_t* bw = no_arg ? kNoArgBWasm : kBWasm;
+    size_t blen = no_arg ? sizeof(kNoArgBWasm) : sizeof(kBWasm);
+    wasm_extern_t* b_externs[2] = { NULL, NULL };
+    if (!no_arg) b_externs[0] = wasm_func_as_extern(decoy_fn);
+    b_externs[no_arg ? 0 : 1] = wasm_func_as_extern(host_fn);
+    wasm_extern_vec_t b_imports = { no_arg ? 1 : 2, b_externs };
+    if (link_up(store, engine, who, "B", bw, blen, &b_imports, &b) != 0) goto cleanup;
 
-    wasm_extern_t* c_externs[1] = { b.exports.data[0] };
+    b_externs[no_arg ? 0 : 1] = b.exports.data[0];
+    if (link_up(store, engine, who, "middle", bw, blen, &b_imports, &middle) != 0) goto cleanup;
+
+    wasm_extern_t* c_externs[1] = { middle.exports.data[0] };
     wasm_extern_vec_t c_imports = { 1, c_externs };
-    if (link_up(store, engine, who, "C (importing B's re-export)", kCWasm, sizeof(kCWasm), &c_imports, &c) != 0) goto cleanup;
+    const uint8_t* cw = no_arg ? kNoArgCWasm : kCWasm;
+    size_t clen = no_arg ? sizeof(kNoArgCWasm) : sizeof(kCWasm);
+    if (link_up(store, engine, who, "C", cw, clen, &c_imports, &c) != 0) goto cleanup;
     if (wasm_extern_kind(c.exports.data[0]) != WASM_EXTERN_FUNC) {
-        fprintf(stderr, "[%s] C is missing its `test` export\n", who);
+        fprintf(stderr, "[%s] C is missing a function export\n", who);
         goto cleanup;
     }
 
-    /* The re-exporter goes before the call; the callback handle stays. */
+    unlink_all(&middle);
     unlink_all(&b);
+    wasm_func_delete(host_fn);
+    host_fn = NULL;
+    if (finalized != 0) { fprintf(stderr, "[%s] callback finalized before the call\n", who); goto cleanup; }
 
     wasm_val_t args_data[1] = { { WASM_I32, { 41 } } };
     wasm_val_t results[1] = { { WASM_I32, { 0 } } };
-    wasm_val_vec_t args = { 1, args_data };
+    wasm_val_vec_t args = { no_arg ? 0 : 1, args_data };
     wasm_val_vec_t res = { 1, results };
     wasm_trap_t* trap = wasm_func_call(wasm_extern_as_func(c.exports.data[0]), &args, &res);
     if (trap) {
@@ -140,20 +192,35 @@ static int chain_on(uint8_t engine) {
                 who, (int) results[0].kind, (int) results[0].of.i32);
         goto cleanup;
     }
+    env->trap = 1;
+    trap = wasm_func_call(wasm_extern_as_func(c.exports.data[0]), &args, &res);
+    if (!trap) { fprintf(stderr, "[%s] callback trap was lost\n", who); goto cleanup; }
+    wasm_trap_delete(trap);
+    env->trap = 0;
+    results[0].of.i32 = 0;
+    trap = wasm_func_call(wasm_extern_as_func(c.exports.data[0]), &args, &res);
+    if (trap) { wasm_trap_delete(trap); fprintf(stderr, "[%s] stale callback trap\n", who); goto cleanup; }
+    if (results[0].kind != WASM_I32 || results[0].of.i32 != 42) goto cleanup;
     rc = 0;
 
 cleanup:
     unlink_all(&c);
+    unlink_all(&middle);
     unlink_all(&b);
     if (host_fn) wasm_func_delete(host_fn);
+    if (decoy_fn) wasm_func_delete(decoy_fn);
     if (store) wasm_store_delete(store);
     if (eng) wasm_engine_delete(eng);
+    if (rc == 0 && finalized != 1) { fprintf(stderr, "[%s] callback finalized %d times\n", who, finalized); return 1; }
     return rc;
 }
 
 int main(void) {
     for (size_t i = 0; i < sizeof(kEngines) / sizeof(kEngines[0]); i++) {
-        if (chain_on(kEngines[i]) != 0) return 1;
+        for (int no_arg = 0; no_arg <= 1; no_arg++) {
+            if (chain_on(kEngines[i], no_arg) != 0) return 1;
+            printf("%s: %s callback chain, trap and lifetime passed\n", engine_name(kEngines[i]), no_arg ? "no-argument" : "slot-1");
+        }
     }
     return 0;
 }
