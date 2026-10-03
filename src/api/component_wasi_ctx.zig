@@ -278,6 +278,11 @@ pub const WasiP2Ctx = struct {
     /// heap) and its borrowed view (`request.get-options`).
     pub const HTTP_REQOPTS_RT: u32 = 16;
     pub const HTTP_REQOPTS_VIEW_RT: u32 = 17;
+    /// `wasi:cli/terminal-input` / `terminal-output`, minted by
+    /// `get-terminal-*` when the stdio fd is a tty. Rep unused: the resource
+    /// carries no host handle (a guest only asks whether it exists), so the
+    /// generic drop releases the slot and nothing else.
+    pub const TERMINAL_RT: u32 = 18;
 
     /// Iteration state of one live directory-entry-stream: the directory's
     /// P1 fd + the P1 readdir cookie to resume after.
