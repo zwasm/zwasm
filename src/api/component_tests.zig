@@ -4,6 +4,7 @@
 //! test-isolation; mirrors `validator_tests.zig`). The impl file stays lean.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
@@ -1037,7 +1038,7 @@ test "D3-7: a WASI-P2 component drives wasi:io/poll (subscribe + poll + ready/bl
     try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
 }
 
-test "E2: WASI-P2 cli/environment + terminal + check-write (sandboxed non-tty host)" {
+test "E2: WASI-P2 cli/environment + terminal + check-write (a capture is not a terminal)" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1049,10 +1050,62 @@ test "E2: WASI-P2 cli/environment + terminal + check-write (sandboxed non-tty ho
     var host = try wasi_host.Host.init(testing.allocator);
     defer host.deinit();
     host.io = io;
+    // get-terminal-stdout answers from the stream the host would write to (#507);
+    // a capture pins `none` wherever the test process's own stdout points.
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    host.stdout_buffer = &capture;
 
     // get-environment/get-arguments empty, initial-cwd + get-terminal-stdout none,
     // check-write reports a permit. The guest asserts each + traps on mismatch.
     try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
+}
+
+/// A raw Linux syscall's return, or `error.Syscall` when it failed.
+fn linuxOk(rc: usize) !usize {
+    return if (std.os.linux.errno(rc) == .SUCCESS) rc else error.Syscall;
+}
+
+test "E2: get-terminal-stderr is some on a pty, and the handle drops (#507)" {
+    // A pty is the only terminal a test can own, and fd 2 the only stdio fd it
+    // can point there: fd 1 carries the test runner's protocol, and the test
+    // process's own stdin/stdout are whatever `zig build` gave it. The pty is
+    // opened with Linux ioctls, so the test is Linux-pinned (ADR-0122 D3).
+    // SIBLING-AT: src/api/component_tests.zig (the cli_env test above pins the `none` arm on every OS; `some` needs a tty, which only Linux can mint here)
+    if (comptime builtin.os.tag != .linux) return;
+    const linux = std.os.linux;
+    const master: i32 = @intCast(try linuxOk(linux.open("/dev/ptmx", .{ .ACCMODE = .RDWR, .NOCTTY = true }, 0)));
+    defer _ = linux.close(master);
+    var unlock: c_int = 0;
+    _ = try linuxOk(linux.ioctl(master, linux.T.IOCSPTLCK, @intFromPtr(&unlock)));
+    var ptn: c_uint = 0;
+    _ = try linuxOk(linux.ioctl(master, linux.T.IOCGPTN, @intFromPtr(&ptn)));
+    var path_buf: [32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "/dev/pts/{d}", .{ptn}, 0);
+    const slave: i32 = @intCast(try linuxOk(linux.open(path, .{ .ACCMODE = .RDWR, .NOCTTY = true }, 0)));
+    defer _ = linux.close(slave);
+    const saved_stderr: i32 = @intCast(try linuxOk(linux.dup(2)));
+    defer {
+        _ = linux.dup2(saved_stderr, 2);
+        _ = linux.close(saved_stderr);
+    }
+    _ = try linuxOk(linux.dup2(slave, 2));
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/wasi_p2_terminal_stderr.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io; // no stderr_buffer: fd 2 is the stream the host would write
+
+    // The guest traps on `none` and drops the handle it got; a clean return is
+    // the `some` arm and the TERMINAL_RT drop both working.
+    try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
+    try testing.expect(wasi_fd.stdioIsTty(&host, .stderr));
 }
 
 test "E2 (bundle exit): a real Rust wasm32-wasip2 component runs + prints via zwasm" {

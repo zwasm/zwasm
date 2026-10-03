@@ -381,9 +381,10 @@ fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
     // fd (rep = `dir_streams` index), so those only release the handle slot.
     if (try ctx.resources.dropAny(self_handle)) |h| {
         switch (h.rt) {
-            // Pollables / dir-entry-streams / networks / socket streams carry
-            // no exclusively-owned host fd — only the handle slot is released.
-            WasiP2Ctx.POLLABLE_RT, WasiP2Ctx.DIR_STREAM_RT, WasiP2Ctx.NETWORK_RT, WasiP2Ctx.SOCK_POLLABLE_RT, WasiP2Ctx.SOCK_INPUT_STREAM_RT, WasiP2Ctx.SOCK_OUTPUT_STREAM_RT => {},
+            // Pollables / dir-entry-streams / networks / socket streams /
+            // terminals carry no exclusively-owned host fd — only the handle
+            // slot is released.
+            WasiP2Ctx.POLLABLE_RT, WasiP2Ctx.DIR_STREAM_RT, WasiP2Ctx.NETWORK_RT, WasiP2Ctx.SOCK_POLLABLE_RT, WasiP2Ctx.SOCK_INPUT_STREAM_RT, WasiP2Ctx.SOCK_OUTPUT_STREAM_RT, WasiP2Ctx.TERMINAL_RT => {},
             // The tcp-socket handle owns the OS socket.
             WasiP2Ctx.TCP_SOCKET_RT => {
                 const sock = ctxTcpSocket(ctx, h.rep) catch return; // slot already gone
@@ -1014,9 +1015,10 @@ fn p2Poll(caller: *Caller, in_ptr: u32, in_len: u32, retptr: u32) WasiP2Error!vo
 
 // ---- wasi:cli/environment + terminal-* + output-stream.check-write (E2) ----
 //
-// A sandboxed, non-tty, always-writable host. get-environment / get-arguments
-// return the empty list; initial-cwd + get-terminal-* return `none`;
-// check-write reports a large byte permit so the guest proceeds to write.
+// A sandboxed, always-writable host. get-environment / get-arguments return
+// the empty list; initial-cwd returns `none`; get-terminal-* answer from the
+// host's stdio fd; check-write reports a large byte permit so the guest
+// proceeds to write.
 
 /// Copy `s` into a fresh `cabi_realloc` backing, returning (ptr, len).
 fn allocGuestString(ctx: *WasiP2Ctx, mem: Memory, s: []const u8) WasiP2Error!struct { ptr: u32, len: u32 } {
@@ -1068,11 +1070,27 @@ fn p2GetEnvironment(caller: *Caller, retptr: u32) WasiP2Error!void {
     try mem.write(retptr + 4, n);
 }
 
-/// An `option<...>` host query with no value (`initial-cwd`, `get-terminal-*`)
-/// → `none`: write the option discriminant 0 at `retptr`.
+/// An `option<...>` host query with no value (`initial-cwd`) → `none`: write
+/// the option discriminant 0 at `retptr`.
 fn p2ReturnNone(caller: *Caller, retptr: u32) WasiP2Error!void {
     const mem = try ctxMemory(caller);
     try mem.write(retptr, @as(u8, 0)); // option disc: none
+}
+
+/// `wasi:cli/terminal-std{in,out,err}` `get-terminal-*` (retptr) ->
+/// `option<own<terminal-*>>`: `some(handle)` iff the host's stdio fd is a tty
+/// by `wasi_fd.stdioIsTty` (the preview1 filetype's predicate), else `none`.
+fn p2GetTerminal(comptime kind: wasi_host.FdKind) fn (*Caller, u32) WasiP2Error!void {
+    return struct {
+        fn f(caller: *Caller, retptr: u32) WasiP2Error!void {
+            const ctx = caller.data(WasiP2Ctx);
+            const mem = try ctxMemory(caller);
+            if (!wasi_fd.stdioIsTty(ctx.host, kind)) return mem.write(retptr, @as(u8, 0)); // none
+            const handle = try ctx.resources.new(WasiP2Ctx.TERMINAL_RT, 0);
+            try mem.write(retptr, @as(u8, 1)); // some
+            try mem.write(retptr + 4, handle);
+        }
+    }.f;
 }
 
 /// `wasi:io/streams` `[method]output-stream.check-write` (self, retptr) ->
@@ -1433,7 +1451,10 @@ fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: a
         .clocks_subscribe_instant, .clocks_subscribe_duration => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u64) WasiP2Error!u32, p2SubscribeClock),
         .cli_get_environment => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetEnvironment),
         .cli_get_arguments => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetArguments),
-        .cli_initial_cwd, .cli_get_terminal_stdin, .cli_get_terminal_stdout, .cli_get_terminal_stderr => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ReturnNone),
+        .cli_initial_cwd => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ReturnNone),
+        .cli_get_terminal_stdin => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetTerminal(.stdin)),
+        .cli_get_terminal_stdout => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetTerminal(.stdout)),
+        .cli_get_terminal_stderr => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetTerminal(.stderr)),
         .out_stream_check_write => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2CheckWrite),
         .random_get_u64, .random_insecure_get_u64 => try lk.defineFuncCtx(module, name, ctx, fn (*Caller) WasiP2Error!i64, p2RandomGetU64),
         .random_insecure_seed => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2RandomInsecureSeed),

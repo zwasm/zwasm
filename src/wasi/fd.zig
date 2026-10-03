@@ -614,22 +614,32 @@ pub fn preadSlice(host: *Host, fd: p1.Fd, dest: []u8, offset: u64, n_out: *usize
 // fd_fdstat_get / fd_fdstat_set_flags  (§9.4 / 4.5 chunk a)
 // ============================================================
 
-/// The filetype `fd_fdstat_get` and the stdio arm of `fd_filestat_get` report.
-/// A stdio slot has no host handle; it is `character_device` only when the
-/// stream `fd_read` / `fd_write` would actually use (a capture buffer and a
-/// `stdin_bytes` slice are not host fds) is a tty, and `unknown` otherwise —
-/// wasmtime's answer, and the only bit wasi-libc's `isatty` reads.
-fn filetypeFor(host: *const Host, slot: *const host_mod.OpenFd) p1.Filetype {
-    const stream: std.Io.File = switch (slot.kind) {
-        .stdin => if (host.stdin_bytes == null and host.stdin_inherit) std.Io.File.stdin() else return .unknown,
-        .stdout => if (host.stdout_buffer == null) std.Io.File.stdout() else return .unknown,
-        .stderr => if (host.stderr_buffer == null) std.Io.File.stderr() else return .unknown,
-        .file => return .regular_file,
-        .dir => return .directory,
-        .closed => return .unknown,
+/// Whether a stdio fd is a terminal: true only when the stream `fd_read` /
+/// `fd_write` would actually use is a tty. A capture buffer and a
+/// `stdin_bytes` slice are not host fds, and without `io` nothing can be
+/// asked. The preview1 filetype (`filetypeFor`) and the preview2
+/// `get-terminal-*` answers both derive from this — wasmtime's answer, and
+/// the only bit wasi-libc's `isatty` reads on either path.
+pub fn stdioIsTty(host: *const Host, kind: host_mod.FdKind) bool {
+    const stream: std.Io.File = switch (kind) {
+        .stdin => if (host.stdin_bytes == null and host.stdin_inherit) std.Io.File.stdin() else return false,
+        .stdout => if (host.stdout_buffer == null) std.Io.File.stdout() else return false,
+        .stderr => if (host.stderr_buffer == null) std.Io.File.stderr() else return false,
+        .file, .dir, .closed => return false,
     };
-    const io = host.io orelse return .unknown;
-    return if (stream.isTty(io) catch false) .character_device else .unknown;
+    const io = host.io orelse return false;
+    return stream.isTty(io) catch false;
+}
+
+/// The filetype `fd_fdstat_get` and the stdio arm of `fd_filestat_get` report:
+/// a stdio slot is `character_device` iff `stdioIsTty`, `unknown` otherwise.
+fn filetypeFor(host: *const Host, slot: *const host_mod.OpenFd) p1.Filetype {
+    return switch (slot.kind) {
+        .stdin, .stdout, .stderr => if (stdioIsTty(host, slot.kind)) .character_device else .unknown,
+        .file => .regular_file,
+        .dir => .directory,
+        .closed => .unknown,
+    };
 }
 
 /// `fd_fdstat_get(fd, *fdstat_out) → errno` — write the
@@ -1462,6 +1472,20 @@ test "fdFdstatGet: a stdio fd backed by a capture buffer or a byte slice is not 
     var fs: [64]u8 = @splat(0xAA);
     try testing.expectEqual(p1.Errno.success, fdFilestatGet(&h, &fs, 1, 0));
     try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.unknown)), fs[16]);
+}
+
+test "stdioIsTty: false without io, false behind a capture or a byte slice, false for non-stdio kinds (#507)" {
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.stdin_inherit = true;
+    for ([_]host_mod.FdKind{ .stdin, .stdout, .stderr, .file, .dir, .closed }) |k| try testing.expect(!stdioIsTty(&h, k));
+    h.io = testing.io;
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    h.stdout_buffer = &capture;
+    h.stderr_buffer = &capture;
+    h.stdin_bytes = "x";
+    for ([_]host_mod.FdKind{ .stdin, .stdout, .stderr }) |k| try testing.expect(!stdioIsTty(&h, k));
 }
 
 test "fdFdstatGet: out-of-range fd returns badf; out-of-bounds ptr returns fault" {
