@@ -226,9 +226,8 @@ pub fn writeSlice(host: *Host, fd: p1.Fd, bytes: []const u8) p1.Errno {
 
 /// `fd_read(fd, iovec_ptr, iovec_count, *nread_out) → errno` —
 /// scatter read into `iovec_count` Iovec entries from the host
-/// fd. Stdio-only first pass: fd 0 reads from
-/// `host.stdin_bytes`; advances `host.stdin_pos`. EOF (no more
-/// bytes) returns success with `*nread_out = 0`.
+/// fd. fd 0 reads through `readStdin`. EOF (no more bytes) returns
+/// success with `*nread_out = 0`.
 pub fn fdRead(
     host: *Host,
     mem: []u8,
@@ -256,15 +255,10 @@ pub fn fdRead(
         const dst = sliceMem(mem, buf, buf_len) orelse return .fault;
 
         if (dst.len == 0) continue; // an empty iovec reads nothing and is not EOF
-        const n = if (host.stdin_bytes == null and host.stdin_inherit) blk: {
-            const io = host.io orelse return .nosys;
-            // The host's stdin reports end-of-input as an error; to the guest
-            // it is a read of zero bytes.
-            break :blk std.Io.File.stdin().readStreaming(io, &.{dst}) catch |e| switch (e) {
-                error.EndOfStream => 0,
-                else => return .io,
-            };
-        } else readStdinSlice(host, dst);
+        const n = readStdin(host, dst) catch |e| return switch (e) {
+            error.NoHostIo => .nosys,
+            error.Io => .io,
+        };
         if (n == 0) break; // EOF or no stdin source
         total += @intCast(n);
         if (n < dst.len) break; // short read; spec lets us stop
@@ -272,17 +266,71 @@ pub fn fdRead(
     return writeU32LE(mem, nread_ptr, total);
 }
 
-/// Read up to `dest.len` bytes from `host.stdin_bytes` into `dest`, advancing
-/// `stdin_pos`. Returns the count read (0 = EOF / no source). Factored from
-/// `fdRead` so the WASI-P2 `input-stream.read` trampoline reuses the same source
-/// (it reads into a cabi_realloc'd guest buffer rather than iovecs).
-pub fn readStdinSlice(host: *Host, dest: []u8) usize {
+pub const ReadStdinError = error{ NoHostIo, Io };
+
+/// One read of the guest's fd 0 into `dest`, for every surface that serves it
+/// (preview1 `fd_read`, the preview2 `input-stream`, the preview3 stream
+/// source): the host process's own stdin, one read at a time, when
+/// `stdin_inherit` is set and no `stdin_bytes` were given — so a terminal
+/// works and a pipe is not capped — else the byte slice at `stdin_pos`.
+/// Returns 0 at EOF or with no source; `NoHostIo` when inheriting without io.
+pub fn readStdin(host: *Host, dest: []u8) ReadStdinError!usize {
+    if (host.stdin_bytes == null and host.stdin_inherit) {
+        const io = host.io orelse return error.NoHostIo;
+        // The host's stdin reports end-of-input as an error; to the guest it
+        // is a read of zero bytes.
+        return std.Io.File.stdin().readStreaming(io, &.{dest}) catch |e| switch (e) {
+            error.EndOfStream => 0,
+            else => error.Io,
+        };
+    }
     const src = host.stdin_bytes orelse return 0;
     const remaining = src.len - host.stdin_pos;
     const n = @min(remaining, dest.len);
     @memcpy(dest[0..n], src[host.stdin_pos .. host.stdin_pos + n]);
     host.stdin_pos += n;
     return n;
+}
+
+/// Whether `readStdin` would return without waiting: a byte is queued on the
+/// inherited host stdin, or it has ended. A byte slice, no source and a
+/// missing io all answer at once, so they are ready too. preview2's
+/// `input-stream.read` asks this before reading, since it may not wait.
+pub fn stdinReady(host: *const Host) bool {
+    if (host.stdin_bytes != null or !host.stdin_inherit or host.io == null) return true;
+    return hostStdinReady(std.Io.File.stdin().handle);
+}
+
+fn hostStdinReady(handle: std.Io.File.Handle) bool {
+    switch (@import("builtin").os.tag) {
+        .windows => {
+            const win = std.os.windows;
+            const k32 = struct {
+                extern "kernel32" fn GetFileType(h: win.HANDLE) callconv(.winapi) win.DWORD;
+                extern "kernel32" fn PeekNamedPipe(h: win.HANDLE, buf: ?*anyopaque, n: win.DWORD, read: ?*win.DWORD, avail: ?*win.DWORD, left: ?*win.DWORD) callconv(.winapi) c_int;
+                extern "kernel32" fn WaitForSingleObject(h: win.HANDLE, ms: win.DWORD) callconv(.winapi) win.DWORD;
+            };
+            return switch (k32.GetFileType(handle)) {
+                // FILE_TYPE_PIPE: bytes queued; a peek that fails is a broken
+                // pipe, which a read reports at once.
+                3 => blk: {
+                    var avail: win.DWORD = 0;
+                    if (k32.PeekNamedPipe(handle, null, 0, null, &avail, null) == 0) break :blk true;
+                    break :blk avail > 0;
+                },
+                // FILE_TYPE_CHAR: the console handle is signaled while input is queued.
+                2 => k32.WaitForSingleObject(handle, 0) == 0,
+                else => true, // a file or an unknown kind never waits
+            };
+        },
+        else => {
+            // NVAL (the fd is not open) counts as ready: the read then reports
+            // the failure instead of an empty list forever.
+            var fds = [_]std.posix.pollfd{.{ .fd = handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            const n = std.posix.poll(&fds, 0) catch return true;
+            return n > 0 and (fds[0].revents & (std.posix.POLL.IN | std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL)) != 0;
+        },
+    }
 }
 
 /// Scatter-read a file fd into the iovecs at the file's cursor via
@@ -1472,6 +1520,43 @@ test "fdFdstatGet: a stdio fd backed by a capture buffer or a byte slice is not 
     var fs: [64]u8 = @splat(0xAA);
     try testing.expectEqual(p1.Errno.success, fdFilestatGet(&h, &fs, 1, 0));
     try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.unknown)), fs[16]);
+}
+
+test "readStdin: a byte slice is served at stdin_pos, no source is EOF, inheriting without io is NoHostIo (#508)" {
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    var buf: [4]u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), try readStdin(&h, &buf)); // no source
+    h.stdin_bytes = "abcdef";
+    try testing.expectEqual(@as(usize, 4), try readStdin(&h, &buf));
+    try testing.expectEqualStrings("abcd", &buf);
+    try testing.expectEqual(@as(usize, 2), try readStdin(&h, &buf));
+    try testing.expectEqualStrings("ef", buf[0..2]);
+    try testing.expectEqual(@as(usize, 0), try readStdin(&h, &buf)); // EOF
+    // bytes win over inherit; inherit alone needs io
+    h.stdin_inherit = true;
+    try testing.expectEqual(@as(usize, 0), try readStdin(&h, &buf));
+    h.stdin_bytes = null;
+    try testing.expectError(error.NoHostIo, readStdin(&h, &buf));
+}
+
+test "hostStdinReady: a handle that is not open is ready, so the read can report the failure (#508)" {
+    const bogus: std.Io.File.Handle = switch (@import("builtin").os.tag) {
+        .windows => @ptrFromInt(0xDEAD0),
+        else => 1_000_000,
+    };
+    try testing.expect(hostStdinReady(bogus));
+}
+
+test "stdinReady: a byte slice, no source and inheriting without io never wait (#508)" {
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    try testing.expect(stdinReady(&h)); // no source: a read is EOF at once
+    h.stdin_bytes = "x";
+    try testing.expect(stdinReady(&h));
+    h.stdin_bytes = null;
+    h.stdin_inherit = true;
+    try testing.expect(stdinReady(&h)); // no io: the read fails at once
 }
 
 test "stdioIsTty: false without io, false behind a capture or a byte slice, false for non-stdio kinds (#507)" {
