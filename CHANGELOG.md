@@ -42,6 +42,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   host's stdio fd is a tty, by the predicate the preview1 filetype uses since
   #494, and `none` otherwise: wasmtime's answer.
 
+- **Host callbacks re-exported by JIT-backed modules can be imported on
+  JIT and AUTO** (#437). Importer instantiation no longer returns NULL for
+  these callbacks. The JIT resolves them through the re-exporting instance's
+  dispatch entry and runtime.
+
 - **A guest on a piped or redirected stdin no longer sees a tty** (#494).
   `fd_fdstat_get` and `fd_filestat_get` answered `character_device` for fds
   0 / 1 / 2 whatever the host fd was, which wasi-libc's `isatty` reads as a
