@@ -35,6 +35,15 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A component reads the process stdin on demand, a terminal included**
+  (#508). The component host served fd 0 from a byte slice only, so the CLI
+  read a piped stdin to EOF before the guest ran, capped at 64 MiB, and handed
+  a terminal stdin over as EOF. Every surface that serves fd 0 (preview1
+  `fd_read`, the preview2 `input-stream`, the preview3 stream source) now
+  reads through one function, which inherits the host's stdin one read at a
+  time; the up-front read and its cap are gone. `input-stream.read` answers
+  an empty list while nothing is queued, as it may not wait.
+
 - **A component on a real terminal sees one** (#507). `get-terminal-stdin`,
   `-stdout` and `-stderr` answered `none` whatever the host fd was, and the
   preview1 adapter every wasip2 toolchain links derives the stdio filetype,

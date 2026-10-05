@@ -532,7 +532,7 @@ pub const WasiP2Ctx = struct {
             const mem = try self.memory();
             // D-335: cap is in ELEMENTS; slice cap*elem_size bytes, COMPLETE in elements.
             const buf = mem.sliceAt(pr.ptr, pr.cap * pr.elem_size) catch return WasiP2Error.OutOfBounds;
-            const n: u32 = @intCast(wasi_fd.readStdinSlice(self.host, buf));
+            const n: u32 = @intCast(try readStdinP2(self.host, buf));
             end.state = .done;
             end.setPendingEvent(.{ .code = .stream_read, .index = m, .payload = (async_mod.ReturnCode{ .completed = @intCast(n / pr.elem_size) }).encode() });
             _ = self.pending_reads.remove(m);
@@ -551,7 +551,7 @@ pub fn ctxMemory(caller: *Caller) WasiP2Error!Memory {
     return caller.memory() orelse return WasiP2Error.NoMemory;
 }
 
-pub const WasiP2Error = error{ NoMemory, OutOfBounds, WriteFailed, NoRealloc, ReallocFailed, ProcExit, OutOfMemory, NoHostIo, Unreachable, UnsupportedAsyncBuiltin } ||
+pub const WasiP2Error = error{ NoMemory, OutOfBounds, WriteFailed, ReadFailed, NoRealloc, ReallocFailed, ProcExit, OutOfMemory, NoHostIo, Unreachable, UnsupportedAsyncBuiltin } ||
     resource_table.Error || Memory.Error || async_mod.Error;
 
 pub const Memory = @import("../zwasm/memory.zig").Memory;
@@ -565,6 +565,14 @@ pub fn ctxTcpSocket(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*p2sock.TcpSocket {
 
 pub fn ctxIo(ctx: *WasiP2Ctx) WasiP2Error!std.Io {
     return ctx.host.io orelse WasiP2Error.NoHostIo;
+}
+
+/// `wasi_fd.readStdin` with its errors in this layer's set.
+pub fn readStdinP2(host: *wasi_host.Host, dest: []u8) WasiP2Error!usize {
+    return wasi_fd.readStdin(host, dest) catch |e| switch (e) {
+        error.NoHostIo => WasiP2Error.NoHostIo,
+        error.Io => WasiP2Error.ReadFailed,
+    };
 }
 
 /// The live `UdpSocket` behind a UDP3 handle rep (shared with the P3 host
@@ -1235,7 +1243,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
             // D-335: `count` is in ELEMENTS; slice count*elem_size bytes, and
             // COMPLETE in elements (n bytes read / elem_size).
             const buf = mem.sliceAt(ptr, count * abc.elem_size) catch return WasiP2Error.OutOfBounds;
-            const n: u32 = @intCast(wasi_fd.readStdinSlice(abc.ctx.host, buf));
+            const n: u32 = @intCast(try readStdinP2(abc.ctx.host, buf));
             return (async_mod.ReturnCode{ .completed = @intCast(n / abc.elem_size) }).encode();
         }
     }

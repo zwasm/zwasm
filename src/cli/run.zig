@@ -472,7 +472,7 @@ pub fn runComponentCaptured(
     if (stdout_capture) |b| host.stdout_buffer = b;
     if (argv.len > 0) try host.setArgs(argv);
     if (env_keys.len > 0) try host.setEnvs(env_keys, env_vals); // D-295 P0: --env KEY=VAL
-    stdin.applyTo(&host); // components serve fd 0 from a byte slice only
+    stdin.applyTo(&host); // the guest's fd 0 source
     // `--dir` preopens feed the P2 host: `get-directories` enumerates them and
     // the descriptor `*-at` methods resolve against their fds (CLI-scoped fd
     // lifetime, like the core-module paths).
@@ -549,10 +549,9 @@ pub fn runWasmCaptured(
 /// One host→guest directory mapping for a WASI preopen (`--dir`, D-243).
 pub const PreopenDir = struct { host_path: []const u8, guest_path: []const u8 };
 
-/// What the guest's fd 0 reads (#257). `.inherit` serves the host process's
-/// stdin on demand — no size cap, no read-ahead, a terminal works — and is
-/// what `zwasm run` passes for a core module. Components read from a byte
-/// slice only, so their CLI path reads a piped stdin up front into `.bytes`.
+/// What the guest's fd 0 reads (#257, #508). `.inherit` serves the host
+/// process's stdin on demand — no size cap, no read-ahead, a terminal works —
+/// and is what `zwasm run` passes for a core module and a component alike.
 pub const StdinSource = union(enum) {
     none,
     bytes: []const u8,

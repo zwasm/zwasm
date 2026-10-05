@@ -162,7 +162,7 @@ pub const Host = struct {
     /// Tests set both; `stdin_pos` is mutated as the guest reads.
     stdin_bytes: ?[]const u8 = null,
     /// When `stdin_bytes` is null, serve the guest's fd 0 from the host
-    /// process's own stdin, one `fd_read` at a time (#257). A byte slice
+    /// process's own stdin, one read at a time (#257, #508). A byte slice
     /// would have to be read to EOF before the guest runs, which caps the
     /// input and blocks on a pipe that never closes; reading on demand has
     /// neither problem and lets a terminal work interactively. Needs `io`.

@@ -239,9 +239,12 @@ fn inStreamReadImpl(caller: *Caller, self_handle: u32, len: u64, retptr: u32, bl
     if (h.rt == WasiP2Ctx.SOCK_INPUT_STREAM_RT) return sockStreamRead(ctx, mem, h.rep, len, retptr, blocking);
     if (h.rt != WasiP2Ctx.INPUT_STREAM_RT) return resource_table.Error.TypeMismatch;
     const n: u32 = @intCast(@min(len, std.math.maxInt(u32)));
-    const data_ptr: u32 = if (n == 0) 0 else try ctx.reallocGuest(n, 1);
-    const got: u32 = if (n == 0) 0 else @intCast(wasi_fd.readStdinSlice(ctx.host, mem.sliceAt(data_ptr, n) catch return WasiP2Error.OutOfBounds));
-    if (got == 0 and n != 0) {
+    // `read` may not wait: nothing queued on an inherited stdin is ok([]).
+    // `blocking-read` waits for the first byte or the close.
+    const ready = blocking or wasi_fd.stdinReady(ctx.host);
+    const data_ptr: u32 = if (n == 0 or !ready) 0 else try ctx.reallocGuest(n, 1);
+    const got: u32 = if (n == 0 or !ready) 0 else @intCast(try ctx_mod.readStdinP2(ctx.host, mem.sliceAt(data_ptr, n) catch return WasiP2Error.OutOfBounds));
+    if (got == 0 and n != 0 and ready) {
         try mem.write(retptr, @as(u8, 1)); // err disc
         try mem.write(retptr + 4, @as(u8, 1)); // stream-error::closed (variant case 1)
     } else {
