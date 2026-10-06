@@ -257,9 +257,12 @@ WASM_API_EXTERN wasm_func_t* zwasm_instance_get_func(wasm_instance_t*, uint32_t 
  * trap_out.
  * JIT forces the native JIT: a declined module fails instantiation, returning
  * NULL with no trap — no silent downgrade; an invalid one returns NULL with
- * the same trap AUTO gives. INTERP forces the interpreter, which unlike the
- * other two rejects a module importing wasi_snapshot_preview1 when no WASI
- * host is configured on the store. */
+ * the same trap AUTO gives. INTERP forces the interpreter.
+ * A wasi_snapshot_preview1 import is positional like any other: the extern the
+ * embedder put in its slot binds, on every engine. A NULL slot (or a NULL
+ * vector) is served by the store's WASI host — every preview1 field on the
+ * interpreter, the fields its dispatch implements on the JIT — and with no host
+ * configured the interpreter, unlike the other two, rejects the module. */
 #define ZWASM_ENGINE_AUTO 0
 #define ZWASM_ENGINE_JIT 1
 #define ZWASM_ENGINE_INTERP 2

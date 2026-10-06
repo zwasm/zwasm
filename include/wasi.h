@@ -25,10 +25,13 @@
  *   zwasm_store_set_wasi(store, cfg);   // takes ownership of cfg
  *   wasm_instance_t* inst = wasm_instance_new(store, module, NULL, NULL);
  *
- * After `_set_wasi`, modules importing `wasi_snapshot_preview1.*`
- * resolve those imports against the configured host. Without
- * `_set_wasi`, modules that import WASI fail at
- * `wasm_instance_new` with a binding-error trap.
+ * After `_set_wasi`, a `wasi_snapshot_preview1.*` import whose slot
+ * in the import vector the embedder left NULL (or the whole vector)
+ * resolves against the configured host; a slot the embedder filled
+ * binds that extern, as under any other module name. Without
+ * `_set_wasi`, a NULL slot fails `wasm_instance_new` on the
+ * interpreter (NULL, no trap); the JIT plants a stub for a field its
+ * dispatch implements.
  *
  * Names use the `zwasm_` prefix to signal that these are
  * project extensions, not cross-runtime portable.

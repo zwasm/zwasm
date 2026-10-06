@@ -730,24 +730,27 @@ fn crossModuleHostCall(arena_alloc: std.mem.Allocator, rt: *runtime.Runtime, fun
 /// dependency.
 const CrossStore = error{CrossStoreImport};
 
-/// The INTERPRETER's WASI rule: `buildBindings` serves any
-/// `wasi_snapshot_preview1` import from `store.wasi_host` — or refuses it when
-/// the field is one it has no thunk for — and never reads the embedder's
-/// vector slot for it.
+/// #488 — a `wasi_snapshot_preview1` import is positional like any other: the
+/// extern in its slot binds, on both engines, and only a NULL slot (or no
+/// vector at all, the CLI's case) is served by the store's WASI host. Which
+/// fields a host can serve differs per engine — `api/wasi.zig`'s thunks here,
+/// `jit_dispatch`'s on the JIT; which externs an embedder can supply does not.
 fn isWasiImport(it: sections.Import) bool {
     return std.mem.eql(u8, it.module, "wasi_snapshot_preview1");
 }
 
-/// The JIT's WASI rule, and NOT the same set: `setup` plants only the fields
-/// `jit_dispatch` implements, so `collectFromExterns` DOES read the slot of a
-/// preview1 name whose field it does not know, and binds whatever sits there.
-///
-/// The cross-store precheck must skip by THIS predicate. It guards that binder,
-/// and skipping the interpreter's wider set let a cross-store extern through
-/// under an unrecognised preview1 field — the #436 use-after-free, by another
-/// door. A skip is only safe where the slot is genuinely never read.
-fn jitPlantsWasi(it: sections.Import) bool {
-    return it.kind == .func and jit_dispatch.lookup(it.module, it.name) != null;
+/// NULL, past the end of a short vector, or no vector: the host's slot.
+fn slotIsNull(imports_array: ?[]const ?*const Extern, idx: usize) bool {
+    const arr = imports_array orelse return true;
+    return idx >= arr.len or arr[idx] == null;
+}
+
+/// Whether `setup` plants this import from `jit_dispatch` instead of binding
+/// its slot: a field the dispatch implements, in a slot the embedder left
+/// NULL. Every JIT-path skip is by this predicate, so a filled slot is read —
+/// and judged by the cross-store rule (#436) — whatever name it sits under.
+fn jitPlantsWasi(it: sections.Import, slot_is_null: bool) bool {
+    return slot_is_null and it.kind == .func and jit_dispatch.lookup(it.module, it.name) != null;
 }
 
 /// The `ExternKind` an import declaration requires. Null for a tag import: EH
@@ -803,7 +806,7 @@ fn buildBindings(
 
     const bindings = try arena_alloc.alloc(runtime_instance_import.ImportBinding, imports_decoded.items.len);
     for (imports_decoded.items, 0..) |it, idx| {
-        if (isWasiImport(it)) {
+        if (isWasiImport(it) and slotIsNull(imports_array, idx)) {
             if (it.kind != .func) return error.UnsupportedWasiImport;
             const thunk = wasi.lookupWasiThunk(it.name) orelse return error.UnsupportedWasiImport;
             const wasi_host_ptr = store.wasi_host orelse return error.WasiNotConfigured;
@@ -1191,8 +1194,8 @@ fn hasNonFuncConcreteHeapType(sig: zir.FuncType, types: ?*const sections.Types) 
 
 /// D-478 / #360 — resolve the JIT path's func imports. Returns
 /// `error.Unsupported` for any import the JIT cannot satisfy (caller rejects →
-/// `.interp`). Empty slices mean "all imports are WASI / none" — those are
-/// planted by setup via `jit_dispatch`, so no binder is consulted (no
+/// `.interp`). Empty slices mean "every import is host-served WASI / none" —
+/// those are planted by setup via `jit_dispatch`, so no binder is consulted (no
 /// regression on the WASI-only JIT path, which needs no `store.wasi_host` at
 /// bind time).
 ///
@@ -1220,14 +1223,14 @@ fn collectFuncImportTargets(
         local_state.asBuilder();
 
     // #436 — the store rule runs before the CAPABILITY filter below, over an
-    // import of any kind: that filter declines a non-func import as a shape the
-    // JIT lacks, and a decline would hide why a forced `.jit` refused. It does
-    // NOT run before the kind judgement, which `buildBindings` owns for both
-    // engines — an extern of the wrong kind never binds, so reporting the
-    // boundary instead would make the engines disagree on one input.
+    // import of any kind and under any module name: that filter declines a
+    // non-func import as a shape the JIT lacks, and a decline would hide why a
+    // forced `.jit` refused. It does NOT run before the kind judgement, which
+    // `buildBindings` owns for both engines — an extern of the wrong kind never
+    // binds, so reporting the boundary instead would make the engines disagree
+    // on one input.
     if (builder.imports) |arr| {
         for (imports.items, 0..) |it, i| {
-            if (jitPlantsWasi(it)) continue; // planted by setup; the slot is never read
             if (i >= arr.len) break; // #392 — a short vector is the caller's error
             const ext = arr[i] orelse continue;
             if (ext.kind != (wantedExternKind(it) orelse continue)) continue;
@@ -1238,9 +1241,9 @@ fn collectFuncImportTargets(
     // First pass: only func imports are JIT-satisfiable; detect whether any
     // needs a binding resolved here (a non-WASI func import).
     var needs_binding = false;
-    for (imports.items) |it| {
+    for (imports.items, 0..) |it, i| {
         if (it.kind != .func) return error.Unsupported;
-        if (!jitPlantsWasi(it)) needs_binding = true;
+        if (!jitPlantsWasi(it, slotIsNull(builder.imports, i))) needs_binding = true;
     }
     if (!needs_binding) return .{};
 
@@ -1258,7 +1261,7 @@ fn collectFuncImportTargets(
     var func_idx: u32 = 0;
     for (imports.items, 0..) |it, i| {
         defer func_idx += 1; // every import is a func (checked above)
-        if (jitPlantsWasi(it)) continue; // WASI → setup plants it
+        if (jitPlantsWasi(it, true)) continue; // no vector on this path: WASI → setup plants it
         if (i >= bindings.len or bindings[i] != .func) return error.Unsupported;
         const hc = bindings[i].func.host_call;
         if (hc.fn_ptr != hostFuncThunk) return error.Unsupported; // cross-module / non-embedder
@@ -1288,7 +1291,7 @@ fn collectFromExterns(
     var any_cross = false;
     for (items, 0..) |it, i| {
         const func_idx: u32 = @intCast(i);
-        if (jitPlantsWasi(it)) continue; // WASI → setup plants it
+        if (jitPlantsWasi(it, slotIsNull(arr, i))) continue; // WASI → setup plants it
         if (i >= arr.len) return error.Unsupported; // #392 — short vector
         const ext = arr[i] orelse return error.Unsupported;
         if (ext.kind != .func) return error.Unsupported;
@@ -3889,7 +3892,8 @@ test "wasm_instance_new: rejects WASI imports when no host is configured" {
     const m = wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
     defer wasm_module_delete(m);
 
-    // Module imports wasi_snapshot_preview1.fd_write but no host is configured.
+    // Module imports wasi_snapshot_preview1.fd_write, the vector is NULL (so
+    // the slot is the host's, #488) and no host is configured.
     // D-496 — this is the INTERP rejection contract (interp rejects an
     // unsatisfiable WASI import at instantiation). The JIT contract differs by
     // design (D-451: it plants WASI thunks that stub-dispatch even without a host),
@@ -3897,6 +3901,55 @@ test "wasm_instance_new: rejects WASI imports when no host is configured" {
     // on the JIT and no-op the syscalls.
     const inst = instanceNewWithEngine(s, m, null, null, .interp);
     try testing.expect(inst == null);
+}
+
+fn sevenCallback(env: ?*anyopaque, args: ?*const vec.ValVec, results: ?*vec.ValVec) callconv(.c) ?*trap_surface.Trap {
+    _ = args;
+    const calls: *i32 = @ptrCast(@alignCast(env.?));
+    calls.* += 1;
+    results.?.data.?[0] = .{ .kind = .i32, .of = .{ .i32 = 7 } };
+    return null;
+}
+
+test "wasm_instance_new: a wasi_snapshot_preview1 import binds the extern in its slot, host or no host (#488)" {
+    const extern_new = @import("extern_new.zig");
+    const types = @import("types.zig");
+    const e = wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer wasm_engine_delete(e);
+    const s = wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_store_delete(s);
+
+    // (i32 i32 i32 i32) -> (i32): fd_write's shape, so the slot type-checks.
+    var p_arr = [_]?*types.ValType{ types.wasm_valtype_new(0), types.wasm_valtype_new(0), types.wasm_valtype_new(0), types.wasm_valtype_new(0) };
+    var r_arr = [_]?*types.ValType{types.wasm_valtype_new(0)};
+    var pv: types.ValTypeVec = undefined;
+    var rv: types.ValTypeVec = undefined;
+    types.wasm_valtype_vec_new(&pv, p_arr.len, &p_arr);
+    types.wasm_valtype_vec_new(&rv, r_arr.len, &r_arr);
+    const ft = types.wasm_functype_new(&pv, &rv) orelse return error.FuncTypeAllocFailed;
+    defer types.wasm_functype_delete(ft);
+    var calls: i32 = 0;
+    const hf = extern_new.wasm_func_new_with_env(s, ft, sevenCallback, &calls, null) orelse return error.FuncNewFailed;
+    defer wasm_func_delete(hf);
+
+    var bytes = wasi_fd_write_import_wasm;
+    const bv: ByteVec = .{ .size = bytes.len, .data = &bytes };
+    const m = wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
+    defer wasm_module_delete(m);
+
+    var imports_arr = [_]?*Extern{extern_new.wasm_func_as_extern(hf)};
+    var imports_vec: ExternVec = .{ .size = imports_arr.len, .data = &imports_arr };
+    // No WASI host on the store: the only thing that can satisfy the import is
+    // the slot, which the pre-#488 binder never read (NULL here).
+    const inst = instanceNewWithEngine(s, m, &imports_vec, null, .interp) orelse return error.InstanceAllocFailed;
+    defer wasm_instance_delete(inst);
+
+    const rt = inst.runtime.?;
+    try testing.expectEqual(@as(usize, 1), rt.host_calls.len);
+    const hc = rt.host_calls[0] orelse return error.ImportUnbound;
+    try testing.expect(hc.fn_ptr == hostFuncThunk);
+    // ADR-0224 — the host is captured only by a slot it serves; none here.
+    try testing.expect(!s.wasi_host_captured);
 }
 
 // (module

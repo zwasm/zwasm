@@ -63,6 +63,12 @@ ownership). See the worked example in
 [`include/wasi.h`](../../include/wasi.h) and
 [`docs/examples/c_host/`](../examples/c_host/).
 
+The host serves a `wasi_snapshot_preview1` import only where the embedder left
+its slot in the import vector NULL (or passed no vector); a slot the embedder
+filled binds that extern on both engines, as under any other module name
+(#488). Which fields a host can serve differs per engine — every preview1
+field on the interpreter, the ones its dispatch implements on the JIT.
+
 **Reading the exit status.** A WASI command ends by calling `proc_exit` —
 including when it succeeds, since a `wasi-libc` `_start` that returns normally
 calls `proc_exit(0)` — and zwasm surfaces that as a trap. So `wasm_func_call`
