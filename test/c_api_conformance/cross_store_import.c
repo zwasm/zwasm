@@ -66,22 +66,13 @@
  * first, while the JIT's cross-store precheck ran before any kind judgement and
  * named the boundary with a BINDING_ERROR.
  *
- * Some slots are EXEMPT, and what draws that line is what the JIT PLANTS — not
- * the module name. `setup` plants a `wasi_snapshot_preview1` import only where
- * `jit_dispatch` implements that field; a planted slot is satisfied out of band
- * from the store's own WASI host, the embedder's vector slot for it is never
- * read, and so no alias crosses anything. The rule is about a binding that
- * would reach into another store's guts; where no binding is built from the
- * slot, there is nothing to reach. A precheck that walked a planted slot anyway
- * refused — with `Final` severity, so `auto` did not even fall back — a module
- * the interpreter instantiated fine.
- *
- * The exemption stops exactly there. An UNKNOWN preview1 field is planted by
- * nobody, so `collectFromExterns` reads its slot and binds whatever sits in it
- * — a cross-store extern included, which deleting the other store then leaves
- * as freed code under the importer's call. So the last two cases are a pair and
- * must pass together: `fd_write` (planted → exempt, links on all three engines)
- * and `custom` (planted by nobody → the store rule applies, refused).
+ * A `wasi_snapshot_preview1` slot is under the rule like any other (#488): a
+ * slot the embedder fills is read and bound on both engines, and only a NULL
+ * slot is the store's WASI host's. So the last two cases are a pair: B's `get`
+ * in the slot of `fd_write`, a field the host could serve, is refused exactly
+ * as in the slot of `custom`, a field it could not — the name is data. Before
+ * #488 the JIT skipped the store rule for a field it planted, and the
+ * interpreter refused `custom` for a reason of its own with no trap.
  *
  * Run on `auto`, `jit` and `interp`: the JIT-backed and interp paths reach the
  * check through different binders, so a guard on one is no evidence about the
@@ -168,7 +159,7 @@ static const unsigned char kWasiImporterWasm[] = {
 
 /* (module (import "wasi_snapshot_preview1" "custom" (func $c (result i32)))
  *         (func (export "test") (result i32) (call $c)))
- * `custom` is a field no `jit_dispatch` entry implements, so nothing plants it. */
+ * `custom` is a field no WASI host implements. */
 static const unsigned char kWasiUnknownImporterWasm[] = {
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
     0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,                   /* type ()->(i32) */
@@ -845,14 +836,11 @@ cleanup:
     return rc;
 }
 
-/* The exemption: a `wasi_snapshot_preview1` slot is outside the store rule.
- * Store A has a WASI host, so its `fd_write` import is satisfied from that host
- * and the embedder's slot for it is never read. Store B's `get` extern is put
- * in that one slot anyway — the boundary it would cross is never crossed,
- * because nothing is bound from it. All three engines must instantiate; the
- * precheck that walked the slot refused on `auto` and `jit` (and `Final`, so
- * `auto` did not fall back to the interp that accepted it). */
-static int wasi_slot_is_exempt_from_the_store_rule(uint8_t engine) {
+/* A filled `wasi_snapshot_preview1` slot is under the store rule (#488). Store A
+ * has a WASI host that could serve `fd_write`, but the embedder filled the slot
+ * with store B's `get`, and a filled slot is bound, not served — so the boundary
+ * is crossed and refused on all three engines. `guest` is the importer module. */
+static int wasi_slot_refused_across_stores(uint8_t engine, const uint8_t* guest, size_t guest_len, const char* label) {
     int rc = 1;
     const char* who = engine_name(engine);
     wasm_module_t* exporter_module = NULL;
@@ -884,104 +872,13 @@ static int wasi_slot_is_exempt_from_the_store_rule(uint8_t engine) {
         goto cleanup;
     }
 
-    wasm_byte_vec_t importer_binary = { sizeof(kWasiImporterWasm), (wasm_byte_t*) kWasiImporterWasm };
+    wasm_byte_vec_t importer_binary = { guest_len, (wasm_byte_t*) guest };
     importer_module = wasm_module_new(store_a, &importer_binary);
-    if (!importer_module) { fprintf(stderr, "[%s] wasi-importer failed to parse\n", who); goto cleanup; }
+    if (!importer_module) { fprintf(stderr, "[%s] %s: importer failed to parse\n", who, label); goto cleanup; }
     wasm_extern_t* import_externs[1] = { exporter_exports.data[0] };
     wasm_extern_vec_t imports = { 1, import_externs };
     importer = zwasm_instance_new_ex(store_a, importer_module, &imports, &itrap, engine);
-    if (!importer) {
-        wasm_message_t msg = { 0, NULL };
-        if (itrap) wasm_trap_message(itrap, &msg);
-        fprintf(stderr, "[%s] a WASI import slot was subjected to the store rule: "
-                        "refused with trap kind %d \"%.*s\"\n",
-                who, itrap ? (int) zwasm_trap_kind(itrap) : -1,
-                msg.data ? (int) msg.size : 0, msg.data ? msg.data : "");
-        if (msg.data) wasm_byte_vec_delete(&msg);
-        goto cleanup;
-    }
-    if (itrap) {
-        fprintf(stderr, "[%s] the WASI-import instance came back with a trap\n", who);
-        goto cleanup;
-    }
-    rc = 0;
-
-cleanup:
-    if (itrap) wasm_trap_delete(itrap);
-    if (importer) wasm_instance_delete(importer);
-    if (importer_module) wasm_module_delete(importer_module);
-    if (exporter_exports.data) wasm_extern_vec_delete(&exporter_exports);
-    if (exporter) wasm_instance_delete(exporter);
-    if (exporter_module) wasm_module_delete(exporter_module);
-    if (store_a) wasm_store_delete(store_a);
-    if (store_b) wasm_store_delete(store_b);
-    if (eng) wasm_engine_delete(eng);
-    return rc;
-}
-
-/* The edge of that exemption: the preview1 MODULE name is not the exemption.
- * `custom` is a field the JIT plants for nobody, so `collectFromExterns` reads
- * the embedder's slot and binds what is in it — here store B's `get`. A skip by
- * module name let exactly this through, and deleting store B then left the
- * importer calling freed code (exit 70, on `auto` and `jit`). The store rule
- * must be asked for an unplanted slot.
- *
- * The engines split on WHY it is refused, so the assertion splits too. On
- * `auto` and `jit` the store rule is what answers, with a BINDING_ERROR naming
- * the boundary. `interp` never gets that far: `buildBindings` serves every
- * preview1 name from the store's WASI host and has no thunk for `custom`, so it
- * refuses earlier and for a reason of its own — NULL with NO trap. Requiring a
- * trap there would assert the interpreter's error path, not this guard, so only
- * the refusal itself is asserted on `interp`. */
-static int unknown_wasi_field_is_not_exempt(uint8_t engine) {
-    int rc = 1;
-    const char* who = engine_name(engine);
-    wasm_module_t* exporter_module = NULL;
-    wasm_instance_t* exporter = NULL;
-    wasm_extern_vec_t exporter_exports = { 0, NULL };
-    wasm_module_t* importer_module = NULL;
-    wasm_instance_t* importer = NULL;
-    wasm_trap_t* itrap = NULL;
-    wasm_engine_t* eng = wasm_engine_new();
-    wasm_store_t* store_a = eng ? wasm_store_new(eng) : NULL;
-    wasm_store_t* store_b = eng ? wasm_store_new(eng) : NULL;
-    if (!eng || !store_a || !store_b) { fputs("engine/store new failed\n", stderr); goto cleanup; }
-
-    zwasm_wasi_config_t* cfg = zwasm_wasi_config_new();
-    if (!cfg) { fprintf(stderr, "[%s] wasi config new failed\n", who); goto cleanup; }
-    zwasm_store_set_wasi(store_a, cfg); /* takes ownership */
-
-    wasm_byte_vec_t exporter_binary = { sizeof(kExporterWasm), (wasm_byte_t*) kExporterWasm };
-    exporter_module = wasm_module_new(store_b, &exporter_binary);
-    if (!exporter_module) { fprintf(stderr, "[%s] exporter failed to parse\n", who); goto cleanup; }
-    wasm_extern_vec_t no_imports = { 0, NULL };
-    wasm_trap_t* etrap = NULL;
-    exporter = zwasm_instance_new_ex(store_b, exporter_module, &no_imports, &etrap, engine);
-    if (etrap) wasm_trap_delete(etrap);
-    if (!exporter) { fprintf(stderr, "[%s] exporter failed to instantiate in store B\n", who); goto cleanup; }
-    wasm_instance_exports(exporter, &exporter_exports);
-    if (exporter_exports.size < 1 || !exporter_exports.data[0]) {
-        fprintf(stderr, "[%s] exporter exposed nothing\n", who);
-        goto cleanup;
-    }
-
-    wasm_byte_vec_t importer_binary = {
-        sizeof(kWasiUnknownImporterWasm), (wasm_byte_t*) kWasiUnknownImporterWasm
-    };
-    importer_module = wasm_module_new(store_a, &importer_binary);
-    if (!importer_module) { fprintf(stderr, "[%s] wasi-unknown importer failed to parse\n", who); goto cleanup; }
-    wasm_extern_t* import_externs[1] = { exporter_exports.data[0] };
-    wasm_extern_vec_t imports = { 1, import_externs };
-    importer = zwasm_instance_new_ex(store_a, importer_module, &imports, &itrap, engine);
-    if (engine == ZWASM_ENGINE_INTERP) {
-        if (importer) {
-            fprintf(stderr, "[%s] an unknown WASI field bound an extern from another store\n", who);
-            goto cleanup;
-        }
-    } else if (refusal_is_binding_error(importer, itrap, who,
-                                        "an unknown WASI field fed from another store") != 0) {
-        goto cleanup;
-    }
+    if (refusal_is_binding_error(importer, itrap, who, label) != 0) goto cleanup;
     rc = 0;
 
 cleanup:
@@ -1009,8 +906,10 @@ int main(void) {
         if (shared_module_crosses_stores(kEngines[i]) != 0) return 1;
         if (kind_mismatch_outranks_the_store_rule(kEngines[i]) != 0) return 1;
         if (kind_mismatch_refused_within_one_store(kEngines[i]) != 0) return 1;
-        if (wasi_slot_is_exempt_from_the_store_rule(kEngines[i]) != 0) return 1;
-        if (unknown_wasi_field_is_not_exempt(kEngines[i]) != 0) return 1;
+        if (wasi_slot_refused_across_stores(kEngines[i], kWasiImporterWasm, sizeof(kWasiImporterWasm),
+                                            "another store's func in a preview1 slot the host could serve") != 0) return 1;
+        if (wasi_slot_refused_across_stores(kEngines[i], kWasiUnknownImporterWasm, sizeof(kWasiUnknownImporterWasm),
+                                            "another store's func in a preview1 slot the host could not serve") != 0) return 1;
     }
     return 0;
 }

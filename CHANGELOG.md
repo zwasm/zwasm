@@ -35,6 +35,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A `wasi_snapshot_preview1` import binds the extern the embedder supplies,
+  on both engines** (#488). The interpreter served every such import from the
+  store's WASI host and never read the slot; the JIT read it only for fields
+  its dispatch does not implement. A NULL slot is still the host's.
+
 - **A component reads the process stdin on demand, a terminal included**
   (#508). The component host served fd 0 from a byte slice only, so the CLI
   read a piped stdin to EOF before the guest ran, capped at 64 MiB, and handed
