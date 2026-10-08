@@ -128,6 +128,9 @@ pub const Lowerer = struct {
     out: *ZirFunc,
     pos: usize,
     module_types: []const FuncType,
+    /// Body offset of the opcode being lowered; `emit` records it for every
+    /// instruction that opcode produces.
+    op_start: usize = 0,
 
     /// D-115 d-39: per-untyped-`select` (0x1B) resolved operand
     /// valtype bytes, in body-walk order. Sourced from
@@ -189,6 +192,7 @@ pub const Lowerer = struct {
         while (!fn_done) {
             if (self.pos >= self.body.len) return Error.UnexpectedEnd;
             const op = self.body[self.pos];
+            self.op_start = self.pos;
             self.pos += 1;
             try self.dispatch(op, &fn_done);
         }
@@ -635,6 +639,7 @@ pub const Lowerer = struct {
         // stays positionally correct in `self.body`.
         if (self.unreachable_at_depth != null) return;
         try self.out.instrs.append(self.alloc, .{ .op = op, .payload = payload, .extra = extra });
+        try self.out.src_offsets.append(self.alloc, @intCast(self.op_start));
     }
 
     /// Wasm 2.0+ prefix-0xFC opcode group. Sub-opcode is uleb32.
