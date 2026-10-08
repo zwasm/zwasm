@@ -804,6 +804,9 @@ fn buildBindings(
     defer imports_decoded.deinit();
     if (imports_decoded.items.len == 0) return null;
 
+    var importer_types: ?sections.Types = null; // decoded on the first host-callback func import
+    defer if (importer_types) |*t| t.deinit();
+
     const bindings = try arena_alloc.alloc(runtime_instance_import.ImportBinding, imports_decoded.items.len);
     for (imports_decoded.items, 0..) |it, idx| {
         if (isWasiImport(it) and slotIsNull(imports_array, idx)) {
@@ -883,8 +886,15 @@ fn buildBindings(
                 .func => {
                     const hf = ext.func orelse return error.UnknownImportModule;
                     const payload = hf.host orelse return error.UnknownImportModule;
+                    if (importer_types == null) {
+                        const type_sec = module.find(.type) orelse return error.ImportTypeMismatch;
+                        importer_types = try sections.decodeTypes(arena_alloc, type_sec.body);
+                    }
+                    if (!hostPayloadMatchesImport(payload, it.payload.func_typeidx, &importer_types.?))
+                        return error.ImportTypeMismatch;
                     // Reuse the `.wasi` void source arm (as native defineFunc
                     // does): "host callback, invoked by funcidx via host_calls[]".
+                    // Its type was compared above, which that arm relies on.
                     bindings[idx] = .{ .func = .{
                         .host_call = .{ .fn_ptr = hostFuncThunk, .ctx = @ptrCast(payload) },
                         .source = .wasi,
@@ -1272,6 +1282,17 @@ fn collectFuncImportTargets(
     return .{ .host = try out.toOwnedSlice(ta) };
 }
 
+/// #514 — a host callback binds to a func import only by the rule a
+/// cross-module export does (`funcTypeImportCompatible`, read in the
+/// importer's type space). A callback has no type-def, so it counts as final.
+/// Both engines check this before binding: `buildBindings` and
+/// `collectFromExterns`.
+fn hostPayloadMatchesImport(payload: *const HostFuncPayload, want_tidx: u32, types: *const sections.Types) bool {
+    if (want_tidx >= types.items.len) return false;
+    const provided: zir.FuncType = .{ .params = payload.params, .results = payload.results };
+    return validator_helpers.funcTypeImportCompatible(types.items[want_tidx], provided, types);
+}
+
 /// C ABI half of `collectFuncImportTargets`: every import is a func (the
 /// caller checked), so the import index IS the func-import index. A host
 /// callback is a standalone entity (`instance == null`); anything carrying a
@@ -1302,6 +1323,7 @@ fn collectFromExterns(
             continue;
         }
         const payload = fh.host orelse return error.Unsupported;
+        if (!hostPayloadMatchesImport(payload, it.payload.func_typeidx, &types)) return error.Unsupported;
         const dp = jit_host_bridge.dispatchPtrFor(payload.params, payload.results, func_idx) orelse return error.Unsupported;
         try host.append(ta, .{ .idx = func_idx, .dispatch_ptr = dp, .payload = @intFromPtr(payload) });
     }
