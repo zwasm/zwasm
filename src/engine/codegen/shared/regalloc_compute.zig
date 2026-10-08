@@ -158,6 +158,11 @@ pub fn computeWith(
         }
         const inclusive: ?bool = switch (ins.op) {
             .call, .@"memory.grow" => false,
+            // #505: call_ref's callee and table.grow's callout clobber the pool
+            // like `call`; a try_table's landing pad is reached through the
+            // throw dispatcher and the exnref reify, so a vreg that outlives
+            // the block spills at the block's pc.
+            .call_ref, .@"table.grow", .try_table => false,
             // D-235: a subtyping module's call_indirect inserts a
             // `jitCallIndirectResolve` trampoline CALL before marshalling, so
             // its operands (idx + args, last_use AT the op PC) must force-spill
@@ -673,6 +678,25 @@ test "alloc-op force-spill: vreg strictly spanning struct.new also spills (super
     defer regalloc.deinit(testing.allocator, alloc);
     try testing.expect(alloc.slots[0] >= max_reg_slots_gpr_default);
     try regalloc.verify(&f, alloc);
+}
+
+test "#505: a vreg spanning call_ref / table.grow / try_table force-spills (strict crossing)" {
+    const ops = [_]zir.ZirOp{ .call_ref, .@"table.grow", .try_table };
+    for (ops) |op| {
+        var f = freshFunc();
+        defer f.deinit(testing.allocator);
+        try f.instrs.append(testing.allocator, .{ .op = .@"i32.const", .payload = 7 });
+        try f.instrs.append(testing.allocator, .{ .op = op, .payload = 0 });
+        try f.instrs.append(testing.allocator, .{ .op = .drop });
+        const ranges = [_]LiveRange{
+            .{ .def_pc = 0, .last_use_pc = 2 },
+        };
+        f.liveness = .{ .ranges = &ranges };
+        const alloc = try compute(testing.allocator, &f);
+        defer regalloc.deinit(testing.allocator, alloc);
+        try testing.expect(alloc.slots[0] >= max_reg_slots_gpr_default);
+        try regalloc.verify(&f, alloc);
+    }
 }
 
 test "call (non-alloc): operand consumed AT call PC stays in register (strict bound preserved)" {
