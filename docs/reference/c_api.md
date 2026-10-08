@@ -65,8 +65,9 @@ ownership). See the worked example in
 
 The host serves a `wasi_snapshot_preview1` import only where the embedder left
 its slot in the import vector NULL (or passed no vector); a slot the embedder
-filled binds that extern on both engines, as under any other module name
-(#488). Which fields a host can serve differs per engine — every preview1
+filled binds that extern on both engines when its type matches the import's
+declaration, and fails the instantiation when it does not, as under any other
+module name (#488, #514). Which fields a host can serve differs per engine — every preview1
 field on the interpreter, the ones its dispatch implements on the JIT.
 
 **Reading the exit status.** A WASI command ends by calling `proc_exit` —

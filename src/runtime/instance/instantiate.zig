@@ -1710,9 +1710,11 @@ fn checkImportTypeMatches(
                     if (types.finals[want_tidx] and !cm.source_final) return error.ImportTypeMismatch;
                 },
                 .wasi => {
-                    // WASI binding-side guarantees the lookup
-                    // matched the (module, name); no further
-                    // signature compare required here.
+                    // The binding side guarantees the signature: a WASI thunk by the
+                    // (module, name) lookup, a C API host callback by `buildBindings`'s
+                    // compare against the import's type (#514), a facade entry by
+                    // `Linker`'s `sigEqual`. Nothing is re-checked here, so a new producer
+                    // of a `.wasi` binding owes its own compare.
                 },
             }
         },

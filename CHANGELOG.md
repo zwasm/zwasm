@@ -35,6 +35,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A host function in an import slot binds only when its type matches the
+  import's, on both engines** (#514). A `wasm_func_new` callback bound to a
+  func import with no type compare, so a mistyped callback was called with the
+  import's signature. It is now held to the rule a cross-module export is, and
+  a mismatch fails the instantiation like any other import kind.
+
 - **A `wasi_snapshot_preview1` import binds the extern the embedder supplies,
   on both engines** (#488). The interpreter served every such import from the
   store's WASI host and never read the slot; the JIT read it only for fields
