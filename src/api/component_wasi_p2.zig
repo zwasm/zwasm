@@ -387,7 +387,7 @@ fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
             // Pollables / dir-entry-streams / networks / socket streams /
             // terminals carry no exclusively-owned host fd — only the handle
             // slot is released.
-            WasiP2Ctx.POLLABLE_RT, WasiP2Ctx.DIR_STREAM_RT, WasiP2Ctx.NETWORK_RT, WasiP2Ctx.SOCK_POLLABLE_RT, WasiP2Ctx.SOCK_INPUT_STREAM_RT, WasiP2Ctx.SOCK_OUTPUT_STREAM_RT, WasiP2Ctx.TERMINAL_RT => {},
+            WasiP2Ctx.POLLABLE_RT, WasiP2Ctx.DIR_STREAM_RT, WasiP2Ctx.NETWORK_RT, WasiP2Ctx.SOCK_POLLABLE_RT, WasiP2Ctx.SOCK_INPUT_STREAM_RT, WasiP2Ctx.SOCK_OUTPUT_STREAM_RT, WasiP2Ctx.TERMINAL_RT, WasiP2Ctx.STDIN_POLLABLE_RT => {},
             // The tcp-socket handle owns the OS socket.
             WasiP2Ctx.TCP_SOCKET_RT => {
                 const sock = ctxTcpSocket(ctx, h.rep) catch return; // slot already gone
@@ -913,24 +913,23 @@ fn p2DescriptorRead(caller: *Caller, self_handle: u32, length: u64, offset: u64,
 
 // ---- wasi:io/poll (D3-7) ----
 //
-// A synchronous host has no async readiness: every resource it models is
-// always ready (a file read never blocks, stdio is immediate, a clock duration
-// is checked at poll time). So every pollable's `ready` is true, `block` is a
-// noop, and `poll` reports all input pollables ready. `subscribe`-style methods
-// mint a POLLABLE_RT handle; its rep is unused (kept 0). This matches the spec
-// contract (poll never fails; readiness errors surface via the source op).
+// A synchronous host answers a pollable ready at once (POLLABLE_RT, rep
+// unused) unless its source can wait: a socket stream (SOCK_POLLABLE_RT,
+// ADR-0180) and stdin (STDIN_POLLABLE_RT) answer from the host fd, and `block`
+// / `poll` sleep in 2 ms steps until one is ready. Only a socket gives up, after
+// 30 s; stdin waits as long as `blocking-read` would. A clock pollable ignores
+// its deadline and is always ready.
 
-/// `wasi:io/streams`/`wasi:clocks` `subscribe*` → mint a pollable handle. The
-/// source handle / clock argument is irrelevant for an always-ready host.
+/// `wasi:io/streams`/`wasi:clocks` `subscribe*` → mint a pollable handle for
+/// `self`'s source; see the readiness rule above.
 fn p2Subscribe(caller: *Caller, self_handle: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
-    // A socket-backed stream subscribes a REAL readiness pollable (ADR-0180);
-    // every other resource keeps the synchronous host's always-ready handle.
     const h = ctx.resources.peek(self_handle) catch return ctx.resources.new(WasiP2Ctx.POLLABLE_RT, 0);
     if (h.rt == WasiP2Ctx.SOCK_INPUT_STREAM_RT)
         return ctx.resources.new(WasiP2Ctx.SOCK_POLLABLE_RT, (h.rep & 0x00FF_FFFF) | (1 << 24));
     if (h.rt == WasiP2Ctx.SOCK_OUTPUT_STREAM_RT)
         return ctx.resources.new(WasiP2Ctx.SOCK_POLLABLE_RT, (h.rep & 0x00FF_FFFF) | (2 << 24));
+    if (h.rt == WasiP2Ctx.INPUT_STREAM_RT) return ctx.resources.new(WasiP2Ctx.STDIN_POLLABLE_RT, 0);
     return ctx.resources.new(WasiP2Ctx.POLLABLE_RT, 0);
 }
 
@@ -947,6 +946,16 @@ fn sockPollableReady(ctx: *WasiP2Ctx, rep: u32) bool {
     return sock.ready(interest) catch true;
 }
 
+/// Whether the pollable `h` is ready now, or null when `h` is not a pollable.
+fn pollableReady(ctx: *WasiP2Ctx, h: resource_table.ResourceHandle) ?bool {
+    return switch (h.rt) {
+        WasiP2Ctx.POLLABLE_RT => true,
+        WasiP2Ctx.SOCK_POLLABLE_RT => sockPollableReady(ctx, h.rep),
+        WasiP2Ctx.STDIN_POLLABLE_RT => wasi_fd.stdinReady(ctx.host),
+        else => null,
+    };
+}
+
 /// `wasi:clocks/monotonic-clock` `subscribe-instant`/`subscribe-duration`
 /// (when: u64) → pollable. Same always-ready handle; the deadline is ignored.
 fn p2SubscribeClock(caller: *Caller, _: u64) WasiP2Error!u32 {
@@ -954,63 +963,57 @@ fn p2SubscribeClock(caller: *Caller, _: u64) WasiP2Error!u32 {
     return ctx.resources.new(WasiP2Ctx.POLLABLE_RT, 0);
 }
 
-/// `wasi:io/poll` `[method]pollable.ready` (self) -> bool: always ready (1).
+/// `wasi:io/poll` `[method]pollable.ready` (self) -> bool.
 fn p2PollableReady(caller: *Caller, self_handle: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const h = try ctx.resources.peek(self_handle);
-    if (h.rt == WasiP2Ctx.SOCK_POLLABLE_RT) return @intFromBool(sockPollableReady(ctx, h.rep));
-    if (h.rt != WasiP2Ctx.POLLABLE_RT) return resource_table.Error.TypeMismatch;
-    return 1;
+    return @intFromBool(pollableReady(ctx, h) orelse return resource_table.Error.TypeMismatch);
 }
 
-/// `wasi:io/poll` `[method]pollable.block` (self): a synchronous host never
-/// blocks — return immediately once the handle is validated.
+/// `wasi:io/poll` `[method]pollable.block` (self): wait until `self` is ready.
 fn p2PollableBlock(caller: *Caller, self_handle: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const h = try ctx.resources.peek(self_handle);
-    if (h.rt == WasiP2Ctx.SOCK_POLLABLE_RT) {
-        const io = try ctxIo(ctx);
-        var waited: u32 = 0;
-        while (!sockPollableReady(ctx, h.rep) and waited < 30_000) : (waited += 2) {
-            io.sleep(.{ .nanoseconds = 2 * std.time.ns_per_ms }, .awake) catch break;
-        }
-        return;
+    if (pollableReady(ctx, h) orelse return resource_table.Error.TypeMismatch) return;
+    const io = try ctxIo(ctx);
+    const capped = h.rt != WasiP2Ctx.STDIN_POLLABLE_RT;
+    var waited: u32 = 0;
+    while (!pollableReady(ctx, h).? and (!capped or waited < 30_000)) : (waited +|= 2) {
+        io.sleep(.{ .nanoseconds = 2 * std.time.ns_per_ms }, .awake) catch break;
     }
-    if (h.rt != WasiP2Ctx.POLLABLE_RT) return resource_table.Error.TypeMismatch;
 }
 
 /// `wasi:io/poll` `poll(in: list<borrow<pollable>>) -> list<u32>` (in_ptr,
-/// in_len, retptr): every pollable is always ready, so return the full index
-/// set `[0, in_len)` as a freshly `cabi_realloc`'d `list<u32>` and write
-/// `(data_ptr, in_len)` at `retptr`. Each input handle is validated.
+/// in_len, retptr): wait until at least one pollable is ready, then return the
+/// ready index set as a freshly `cabi_realloc`'d `list<u32>`, writing
+/// `(data_ptr, ready_n)` at `retptr`. Each handle must exist; one that is not
+/// a pollable counts as ready.
 fn p2Poll(caller: *Caller, in_ptr: u32, in_len: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
     const data_ptr: u32 = if (in_len == 0) 0 else try ctx.reallocGuest(in_len * 4, 4);
-    // Spec: block until >= 1 pollable is ready, then return the ready index
-    // set. Non-socket pollables are always ready (synchronous host);
-    // socket-backed entries consult poll(2) (ADR-0180) — so the wait loop
-    // only ever engages when EVERY entry is socket-backed and idle.
     var waited: u32 = 0;
     while (true) {
         var ready_n: u32 = 0;
+        var capped = true;
         var i: u32 = 0;
         while (i < in_len) : (i += 1) {
             const h = try ctx.resources.peek(try mem.read(u32, in_ptr + i * 4));
-            const is_ready = if (h.rt == WasiP2Ctx.SOCK_POLLABLE_RT) sockPollableReady(ctx, h.rep) else true;
+            const is_ready = pollableReady(ctx, h) orelse true;
+            if (h.rt == WasiP2Ctx.STDIN_POLLABLE_RT) capped = false;
             if (is_ready) {
                 try mem.write(data_ptr + ready_n * 4, i);
                 ready_n += 1;
             }
         }
-        if (ready_n > 0 or in_len == 0 or waited >= 30_000) {
+        if (ready_n > 0 or in_len == 0 or (capped and waited >= 30_000)) {
             try mem.write(retptr, data_ptr); // list data ptr
             try mem.write(retptr + 4, ready_n); // list length
             return;
         }
         const io = try ctxIo(ctx);
         io.sleep(.{ .nanoseconds = 2 * std.time.ns_per_ms }, .awake) catch break;
-        waited += 2;
+        waited +|= 2;
     }
     try mem.write(retptr, data_ptr);
     try mem.write(retptr + 4, @as(u32, 0));

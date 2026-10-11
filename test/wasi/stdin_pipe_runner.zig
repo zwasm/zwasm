@@ -12,12 +12,14 @@
 //! echo answers while the writer still holds stdin open (no read-to-EOF), a
 //! 65 MiB payload goes through whole (no size cap), and `stdin_read_p2.wasm`'s
 //! first non-blocking `read` on an empty open pipe is ok(empty), not a wait.
+//! `stdin_poll_p2.wasm` blocks on its stdin pollable before one non-blocking
+//! `read`, and the bytes arrive only after it has blocked (#512).
 //!
 //! Why a subprocess: the in-process runners build the WASI host themselves;
 //! only the CLI's own `main.zig` decides what the guest's fd 0 is.
 //!
 //! Usage: `zig build test-cli-stdin` /
-//!        `zwasm-cli-stdin <zwasm-cli> <stdin_echo.wasm> <fdstat_stdio.wasm> <stdin_echo_p2.wasm> <stdin_read_p2.wasm>`
+//!        `zwasm-cli-stdin <zwasm-cli> <stdin_echo.wasm> <fdstat_stdio.wasm> <stdin_echo_p2.wasm> <stdin_read_p2.wasm> <stdin_poll_p2.wasm>`
 
 const std = @import("std");
 const spawned_cli = @import("spawned_cli");
@@ -89,8 +91,9 @@ const Watchdog = struct {
 
 /// Spawn the CLI with stdin held open, and read exactly `bytes.len` bytes of
 /// stdout BEFORE the writer closes: the guest must answer from a live pipe.
-/// `handshake` first reads one byte of stdout before writing anything.
-fn runCliLive(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, bytes: []const u8, handshake: bool) !Observed {
+/// `handshake` first reads one byte of stdout before writing anything;
+/// `delay_ms` waits that long after the spawn before writing.
+fn runCliLive(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, bytes: []const u8, handshake: bool, delay_ms: u32) !Observed {
     var child = try std.process.spawn(io, .{ .argv = argv, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
     defer child.kill(io);
     var wd: Watchdog = .{ .io = io, .id = child.id.? };
@@ -103,15 +106,18 @@ fn runCliLive(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, byte
     const out = try gpa.alloc(u8, bytes.len + @as(usize, if (handshake) 1 else 0));
     errdefer gpa.free(out);
     if (handshake) try rd.interface.readSliceAll(out[0..1]);
+    if (delay_ms != 0) try io.sleep(.{ .nanoseconds = @as(u64, delay_ms) * std.time.ns_per_ms }, .awake);
     const writer = try std.Thread.spawn(.{}, feedStdin, .{ io, child.stdin.?, bytes });
-    try rd.interface.readSliceAll(out[if (handshake) 1 else 0..]);
+    // Short when the guest exits first; the row then fails on the bytes.
+    const start: usize = if (handshake) 1 else 0;
+    const got = try rd.interface.readSliceShort(out[start..]);
     writer.join();
     child.stdin.?.close(io);
     child.stdin = null;
     const rest = try rd.interface.allocRemaining(gpa, .limited(1024));
     defer gpa.free(rest);
     const term = try child.wait(io);
-    return .{ .stdout = out, .exit = if (rest.len != 0) 254 else switch (term) {
+    return .{ .stdout = try gpa.realloc(out, start + got), .exit = if (rest.len != 0) 254 else switch (term) {
         .exited => |c| c,
         else => 255,
     } };
@@ -128,6 +134,7 @@ pub fn main(init: std.process.Init) !u8 {
     const fdstat_fixture = arg_it.next() orelse return error.MissingFixturePath;
     const echo_p2_fixture = arg_it.next() orelse return error.MissingFixturePath;
     const read_p2_fixture = arg_it.next() orelse return error.MissingFixturePath;
+    const poll_p2_fixture = arg_it.next() orelse return error.MissingFixturePath;
     try spawned_cli.assertRunnerBuildMode(gpa, io, cli);
 
     const engine_flags: []const []const []const u8 = &.{ &.{}, &.{"--engine=interp"}, &.{"--engine=jit"} };
@@ -183,7 +190,7 @@ pub fn main(init: std.process.Init) !u8 {
 
         if (flags.len != 0) continue; // the pipe rows below do not depend on the engine
 
-        const live = try runCliLive(gpa, io, argv.items, payload, false);
+        const live = try runCliLive(gpa, io, argv.items, payload, false, 0);
         defer gpa.free(live.stdout);
         const live_ok = live.exit == 0 and std.mem.eql(u8, live.stdout, payload);
         std.debug.print("cli-stdin-p2 {s:<13} live:     exit {d} stdout \"{f}\" {s}\n", .{ label, live.exit, std.zig.fmtString(live.stdout), if (live_ok) "ok" else "FAIL" });
@@ -191,18 +198,24 @@ pub fn main(init: std.process.Init) !u8 {
         const big = try gpa.alloc(u8, 65 * 1024 * 1024);
         defer gpa.free(big);
         for (big, 0..) |*b, i| b.* = @truncate(i *% 31);
-        const large = try runCliLive(gpa, io, argv.items, big, false);
+        const large = try runCliLive(gpa, io, argv.items, big, false, 0);
         defer gpa.free(large.stdout);
         const large_ok = large.exit == 0 and std.mem.eql(u8, large.stdout, big);
         std.debug.print("cli-stdin-p2 {s:<13} 65 MiB:   exit {d} {d} bytes back {s}\n", .{ label, large.exit, large.stdout.len, if (large_ok) "ok" else "FAIL" });
 
         argv.items[argv.items.len - 1] = read_p2_fixture;
-        const nb = try runCliLive(gpa, io, argv.items, payload, true);
+        const nb = try runCliLive(gpa, io, argv.items, payload, true, 0);
         defer gpa.free(nb.stdout);
         const nb_ok = nb.exit == 0 and nb.stdout.len == payload.len + 1 and nb.stdout[0] == 'E' and std.mem.eql(u8, nb.stdout[1..], payload);
         std.debug.print("cli-stdin-p2 {s:<13} read():   exit {d} stdout \"{f}\" {s}\n", .{ label, nb.exit, std.zig.fmtString(nb.stdout), if (nb_ok) "ok" else "FAIL" });
 
-        if (!live_ok or !large_ok or !nb_ok) failed += 1;
+        argv.items[argv.items.len - 1] = poll_p2_fixture;
+        const polled = try runCliLive(gpa, io, argv.items, payload, false, 300);
+        defer gpa.free(polled.stdout);
+        const polled_ok = polled.exit == 0 and std.mem.eql(u8, polled.stdout, payload);
+        std.debug.print("cli-stdin-p2 {s:<13} block():  exit {d} stdout \"{f}\" {s}\n", .{ label, polled.exit, std.zig.fmtString(polled.stdout), if (polled_ok) "ok" else "FAIL" });
+
+        if (!live_ok or !large_ok or !nb_ok or !polled_ok) failed += 1;
     }
     return if (failed != 0) 1 else 0;
 }

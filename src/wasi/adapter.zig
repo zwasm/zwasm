@@ -164,8 +164,8 @@ pub const P2Op = enum {
     fs_descriptor_drop,
     // wasi:filesystem/preopens.
     fs_get_directories,
-    // wasi:io/poll — pollable resource + the poll free func. A synchronous host
-    // is always ready, so these are bookkeeping-only (no P1 syscall).
+    // wasi:io/poll — pollable resource + the poll free func. No P1 syscall:
+    // readiness is the host's own (`component_wasi_p2.zig`, wasi:io/poll).
     poll_pollable_ready,
     poll_pollable_block,
     poll_poll,
@@ -609,7 +609,7 @@ pub fn p1Target(op: P2Op) P1Target {
         .http3_response_consume_body,
         .http3_client_send,
         => .noop,
-        // Poll + subscribe: no P1 facility (always-ready host bookkeeping).
+        // Poll + subscribe: no P1 facility.
         .poll_pollable_ready,
         .poll_pollable_block,
         .poll_poll,

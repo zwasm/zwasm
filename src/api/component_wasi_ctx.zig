@@ -283,6 +283,9 @@ pub const WasiP2Ctx = struct {
     /// carries no host handle (a guest only asks whether it exists), so the
     /// generic drop releases the slot and nothing else.
     pub const TERMINAL_RT: u32 = 18;
+    /// The pollable `input-stream.subscribe` mints for stdin: ready once a
+    /// byte is queued or stdin has ended (`wasi_fd.stdinReady`). Rep unused.
+    pub const STDIN_POLLABLE_RT: u32 = 19;
 
     /// Iteration state of one live directory-entry-stream: the directory's
     /// P1 fd + the P1 readdir cookie to resume after.

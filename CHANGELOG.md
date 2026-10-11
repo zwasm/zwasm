@@ -35,6 +35,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A component's stdin pollable waits for a byte** (#512). Since #508 a
+  component reads stdin on demand, but the pollable `input-stream.subscribe`
+  minted still answered ready at once, so a guest that polls before reading
+  spun until the first byte. It now waits the way a socket's does: `ready`,
+  `block` and `poll` answer from the host fd.
+
 - **A host function in an import slot binds only when its type matches the
   import's, on both engines** (#514). A `wasm_func_new` callback bound to a
   func import with no type compare, so a mistyped callback was called with the
