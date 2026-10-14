@@ -66,8 +66,6 @@ pub const Error = error{
     OutOfMemory,
 } || leb128.Error;
 
-pub const max_control_stack: usize = 1024;
-
 /// D-093 (d-1) — sentinel in `block_stack[]` for blocks opened
 /// while the lowerer is in dead-code mode. closeBlock detects
 /// this and skips `.end` emission + `out.blocks` mutation.
@@ -149,7 +147,7 @@ pub const Lowerer = struct {
     /// (SXTB vs SXTH). Empty → `extra = 0` (interp path ignores it).
     array_elem_valtypes: []const u8 = &.{},
 
-    block_stack: [max_control_stack]u32 = undefined,
+    block_stack: [zir.max_control_stack]u32 = undefined,
     block_stack_len: usize = 0,
 
     /// D-093 (d-1) — Wasm spec §3.4 polymorphic-stack tracking.
@@ -1109,7 +1107,7 @@ pub const Lowerer = struct {
         try self.lowerCatchVec();
         const catches_end: u32 = @intCast(self.catch_entries.items.len);
 
-        if (self.block_stack_len == max_control_stack) return Error.ControlStackOverflow;
+        if (self.block_stack_len == zir.max_control_stack) return Error.ControlStackOverflow;
         if (self.unreachable_at_depth != null) {
             // Dead-code try_table — the catch entries belong to no
             // BlockInfo we'll emit; truncate them back to avoid
@@ -1179,7 +1177,7 @@ pub const Lowerer = struct {
 
     fn openBlock(self: *Lowerer, kind: BlockKind, op: ZirOp) Error!void {
         const arity = try self.readBlockArity();
-        if (self.block_stack_len == max_control_stack) return Error.ControlStackOverflow;
+        if (self.block_stack_len == zir.max_control_stack) return Error.ControlStackOverflow;
 
         // D-093 (d-1): block opened inside the dead region —
         // bookkeep depth via the sentinel, skip BlockInfo /

@@ -1,4 +1,4 @@
-# 0165 — Validator/runtime control-stack depth cap: raise 1024 → 8192
+# 0165 — Validator/runtime control-stack depth cap: raise 1024 → 4096
 
 - **Status**: Accepted (2026-06-06; autonomous-with-ADR per ADR-0153 — rejecting
   valid real-toolchain wasm is a completeness miss, the あるべき論 is to accept it).
@@ -64,3 +64,9 @@ a 1 MB Windows stack.)
   (matching the runtime's hybrid-lazy model) so the cap can be removed entirely.
   Tracked as a follow-on under D-287's lineage; out of scope here (keeps this a
   bounded, host-stack-safe change).
+
+## Revision 2026-10-14 — the lowerer sources the cap
+
+The lowerer (`src/ir/lower.zig`) kept its own copy at 1024 and was not reached
+by the single edit above; it now sources this constant (#520). The title read
+8192 from the first commit (`3176f6b6b`), which chose 4096; it now says 4096.

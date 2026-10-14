@@ -235,7 +235,7 @@ fn nestedBlockBody(a: std.mem.Allocator, n: usize) std.mem.Allocator.Error![]u8 
 test "validate: deep control nesting within the raised cap validates (ADR-0165 / D-287)" {
     // 2000 nested blocks exceed the OLD 1024 cap (was ControlStackOverflow,
     // wrongly rejecting LLVM-lowered big C switches like shootout/switch.wasm,
-    // depth 2568) but are within the new 8192 cap.
+    // depth 2568) but are within the new 4096 cap.
     const a = testing.allocator;
     const body = try nestedBlockBody(a, 2000);
     defer a.free(body);
@@ -243,7 +243,7 @@ test "validate: deep control nesting within the raised cap validates (ADR-0165 /
 }
 
 test "validate: control nesting beyond the cap still overflows (ADR-0165 boundary)" {
-    // > 8192 → ControlStackOverflow (pathological depth, not real-toolchain output).
+    // > 4096 → ControlStackOverflow (pathological depth, not real-toolchain output).
     const a = testing.allocator;
     const body = try nestedBlockBody(a, 9000);
     defer a.free(body);

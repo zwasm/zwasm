@@ -35,6 +35,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A function nested deeper than 1024 blocks lowers on every engine** (#520).
+  The lowerer kept its own copy of the control-stack cap at 1024 while the
+  validator admits 4096 (ADR-0165), so esbuild (depth 3232) validated and then
+  failed to instantiate; the lowerer now sources the validator's constant.
+
 - **A component's stdin pollable waits for a byte** (#512). Since #508 a
   component reads stdin on demand, but the pollable `input-stream.subscribe`
   minted still answered ready at once, so a guest that polls before reading

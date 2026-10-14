@@ -1,6 +1,6 @@
 # 0217 — preview1 fd-readiness is answered from the Host's own IO model, not an OS event source
 
-- **Status**: Proposed (2026-08-25)
+- **Status**: Accepted (2026-08-26 — sign-off on PR #305)
 - **Date**: 2026-08-25
 - **Author**: jtakakura
 - **Tags**: wasi, preview1, poll, platform

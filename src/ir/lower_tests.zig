@@ -10,6 +10,7 @@ const std = @import("std");
 
 const lowerer = @import("lower.zig");
 const zir = @import("zir.zig");
+const validator = @import("../validate/validator.zig");
 
 const lowerFunctionBody = lowerer.lowerFunctionBody;
 const Error = lowerer.Error;
@@ -136,6 +137,44 @@ test "lower: nested block records BlockInfo with patched end_inst" {
     const close = f.instrs.items[2];
     try testing.expectEqual(ZirOp.end, close.op);
     try testing.expectEqual(@as(u32, 0), close.payload);
+}
+
+// Build a body of `n` nested void blocks: [block 0x40]×n + [end]×n + function-end.
+fn nestedBlockBody(a: std.mem.Allocator, n: usize) std.mem.Allocator.Error![]u8 {
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(a);
+    var i: usize = 0;
+    while (i < n) : (i += 1) try body.appendSlice(a, &[_]u8{ 0x02, 0x40 });
+    i = 0;
+    while (i < n) : (i += 1) try body.append(a, 0x0B);
+    try body.append(a, 0x0B); // function frame end
+    return body.toOwnedSlice(a);
+}
+
+test "lower: a function nested 3232 blocks deep lowers (#520, esbuild's deepest)" {
+    const a = testing.allocator;
+    const body = try nestedBlockBody(a, 3232);
+    defer a.free(body);
+    var f = newFunc(empty_sig);
+    defer f.deinit(a);
+    try lowerFunctionBody(a, body, &f, &.{}, &.{});
+}
+
+test "lower: at the nesting cap the lowerer admits what the validator admits (#520)" {
+    // The validator counts the function's own frame against the cap and the
+    // lowerer does not, so n == cap is the one depth only the lowerer admits.
+    const a = testing.allocator;
+    var n: usize = zir.max_control_stack - 4;
+    while (n <= zir.max_control_stack + 2) : (n += 1) {
+        const body = try nestedBlockBody(a, n);
+        defer a.free(body);
+        var f = newFunc(empty_sig);
+        defer f.deinit(a);
+        const lowered = lowerFunctionBody(a, body, &f, &.{}, &.{});
+        const validated = validator.validateFunction(empty_sig, &.{}, body, &.{}, &.{}, &.{}, 0, &.{}, 0);
+        if (n < zir.max_control_stack) try validated else try testing.expectError(error.ControlStackOverflow, validated);
+        if (n <= zir.max_control_stack) try lowered else try testing.expectError(error.ControlStackOverflow, lowered);
+    }
 }
 
 test "lower: structref blocktype (0x6B) lowers with arity 1 (10.G cycle 144)" {

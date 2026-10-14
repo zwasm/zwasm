@@ -22,9 +22,10 @@ const trace = @import("../diagnostic/trace.zig");
 
 /// Implementation cap on control-stack / block-nesting depth. The Wasm
 /// spec sets no limit; this is zwasm's structural ceiling, the single
-/// source of truth for BOTH the validator's `max_control_stack` (the
-/// real gate, `validator.zig`) AND the IR verifier's branch-target
-/// sanity ceiling (`verifier.zig`). They MUST stay equal — they drifted
+/// source of truth for the validator's `max_control_stack` (the real
+/// gate, `validator.zig`), the IR verifier's branch-target sanity ceiling
+/// (`verifier.zig`), AND the lowerer's `block_stack` (`lower.zig`). They
+/// MUST stay equal — they drifted
 /// (validator 1024 vs verifier 256), so a validator-accepted standard-Go
 /// function with depth in [256,1024) was wrongly rejected by the verifier
 /// (D-241, go_* realworld fixtures). Sourcing both here prevents recurrence.
