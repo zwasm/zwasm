@@ -836,6 +836,40 @@ test "zwasm facade T1.11: arity-mismatched host fn → error.SignatureMismatch" 
     try std.testing.expectError(error.SignatureMismatch, lk.instantiate(&mod, .{}));
 }
 
+test "zwasm facade: a host fn's error that is not a trap traps as HostTrap; a trap or ProcExit passes through (#519)" {
+    var eng = try Engine.init(std.testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&facade_host_poke_wasm);
+    defer mod.deinit();
+
+    const H = struct {
+        fn poke(caller: *Caller) anyerror!void {
+            return caller.data(anyerror).*;
+        }
+        fn pokeRaw(caller: *Caller, _: []const runtime.Value, _: []runtime.Value) anyerror!void {
+            return caller.data(anyerror).*;
+        }
+    };
+    const cases = [_]struct { returned: anyerror, invoked: anyerror }{
+        .{ .returned = error.NotATrap, .invoked = error.HostTrap },
+        .{ .returned = error.DivByZero, .invoked = error.DivByZero },
+        .{ .returned = error.ProcExit, .invoked = error.ProcExit },
+    };
+    // `defineFuncCtx` reaches `thunkFor`, `defineFuncRaw` reaches `rawThunk`.
+    for ([_]bool{ false, true }) |raw| for (cases) |c| {
+        var returned = c.returned;
+        var lk = Linker.init(&eng);
+        defer lk.deinit();
+        if (raw)
+            try lk.defineFuncRaw("env", "poke_42", &returned, &.{}, &.{}, H.pokeRaw)
+        else
+            try lk.defineFuncCtx("env", "poke_42", &returned, fn (*Caller) anyerror!void, H.poke);
+        var inst = try lk.instantiate(&mod, .{});
+        defer inst.deinit();
+        try std.testing.expectError(c.invoked, inst.invoke("go", &.{}, &.{}));
+    };
+}
+
 // T1.12 importer — imports env.shared (memory 1); writes 42 into memory[4].
 const facade_cross_mem_writer_wasm = [_]u8{
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,

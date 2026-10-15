@@ -66,11 +66,12 @@ pub const Trap = error{
     /// resource control); deterministic (decrements once per executed interp
     /// instruction). Spec reason: "all fuel consumed".
     OutOfFuel,
-    /// A host callback returned a trap, or the embedder binding could not
-    /// complete the call (issue #331). Host-originated: nothing in the guest
-    /// faulted, so this must not be conflated with `Unreachable`. Spec-external,
-    /// same class as `Interrupted` / `OutOfFuel`. Surfaces as `binding_error`
-    /// ("host invocation error") on the C ABI.
+    /// A host callback returned a trap or an error that is not one (#519), or
+    /// the embedder binding could not complete the call (issue #331).
+    /// Host-originated: nothing in the guest faulted, so this must not be
+    /// conflated with `Unreachable`. Spec-external, same class as `Interrupted`
+    /// / `OutOfFuel`. Surfaces as `binding_error` ("host invocation error") on
+    /// the C ABI.
     HostTrap,
 };
 

@@ -87,6 +87,8 @@ preopens need `.io`; stdio capture stays C-API-only). See `docs/examples/zig_dep
 A guest's `proc_exit` ends `invoke` with `error.ProcExit`, not a trap, and when
 its WASI came from `defineWasi`, `Instance.wasiExitCode()` then returns its code
 — whichever Linker's instance ran it; the next `invoke` clears it.
+A host fn that returns an error ends `invoke` with it when it is a `Trap` name
+or `ProcExit`, and with `error.HostTrap` otherwise.
 
 ## Errors
 

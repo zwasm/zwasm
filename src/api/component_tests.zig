@@ -1038,6 +1038,27 @@ test "D3-7: a WASI-P2 component drives wasi:io/poll (subscribe + poll + ready/bl
     try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
 }
 
+test "wasi:io/poll: a handle that is not a pollable traps in pollable.ready and in poll (#519)" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    for ([_][]const u8{
+        "test/component/wasi_p2_pollable_ready_not_pollable.wasm",
+        "test/component/wasi_p2_poll_not_pollable.wasm",
+    }) |path| {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, testing.allocator, .limited(1 << 20));
+        defer testing.allocator.free(bytes);
+
+        var eng = try Engine.init(testing.allocator, .{});
+        defer eng.deinit();
+        var host = try wasi_host.Host.init(testing.allocator);
+        defer host.deinit();
+        host.io = io;
+
+        try testing.expectError(error.HostTrap, runWasiP2Main(&eng, testing.allocator, bytes, &host, .{}));
+    }
+}
+
 test "E2: WASI-P2 cli/environment + terminal + check-write (a capture is not a terminal)" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

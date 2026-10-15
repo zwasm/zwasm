@@ -848,10 +848,9 @@ fn p2WaitableJoinInner(caller: *Caller, waitable: u32, set_handle: u32) WasiP2Er
 /// Map a WASI-P2 async-builtin error to the host-fn surface (D-445). A guest
 /// supplies the handle/ptr, so a bad handle, illegal drop/cancel sequencing,
 /// an exhausted table, or an out-of-bounds buffer is a GUEST fault → surface
-/// the canonical guest trap (`error.Unreachable`), which `mapDispatchErr`
-/// narrows cleanly. Without this those un-narrowed variants would hit
-/// `mapDispatchErr`'s `else => @panic` and abort the host on guest input.
-/// Genuine host failures (NoMemory, realloc, host I/O, OOM) propagate unchanged.
+/// the canonical guest trap (`error.Unreachable`). Without this they would
+/// reach the guest as `HostTrap` (`host_func_marshal.hostFnError`). Genuine
+/// host failures (NoMemory, realloc, host I/O, OOM) propagate unchanged.
 pub fn mapAsyncFault(e: WasiP2Error) WasiP2Error {
     return switch (e) {
         error.InvalidHandle,

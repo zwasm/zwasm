@@ -35,6 +35,16 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A host function's error that is not a trap traps as `HostTrap`, instead of
+  aborting the process** (#519). A Zig-facade host fn (`Linker.defineFunc`,
+  `defineFuncCtx`, `defineFuncRaw`) that returned a name outside the trap set —
+  an embedder's own error, or a preview2 trampoline's for a handle of the wrong
+  type or one that does not exist — reached the facade's error map, which has
+  no arm for it, and panicked. A trap name or `ProcExit` still passes through;
+  any other now ends the call with `HostTrap`, as a C callback's trap does.
+  `poll` given a handle that is not a pollable traps too, as `ready` and
+  `block` do, instead of counting it ready.
+
 - **A function nested deeper than 1024 blocks lowers on every engine** (#520).
   The lowerer kept its own copy of the control-stack cap at 1024 while the
   validator admits 4096 (ADR-0165), so esbuild (depth 3232) validated and then

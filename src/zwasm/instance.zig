@@ -662,6 +662,8 @@ fn jitTrapToError(code: u32) Instance.InvokeError {
 /// so the `else` guards "every error the loop or a host thunk can return is
 /// named here" by panicking rather than misfiling one. A missing name shows
 /// only in a test that reaches it (#490: a thunk's second spelling of ProcExit).
+/// An embedder's host fn cannot reach the `else`: `host_func_marshal.hostFnError`
+/// narrows its error at the thunk.
 fn mapDispatchErr(err: anyerror) Instance.InvokeError {
     return switch (err) {
         error.Unreachable => error.Unreachable,

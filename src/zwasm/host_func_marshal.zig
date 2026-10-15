@@ -72,7 +72,7 @@ pub fn thunkFor(comptime Sig: type) *const fn (*_runtime.Runtime, *anyopaque) an
             if (Ret == void) return;
             switch (@typeInfo(Ret)) {
                 .error_union => |eu| {
-                    const ok = ret catch |err| return err;
+                    const ok = ret catch |err| return hostFnError(err);
                     try pushResult(rt, eu.payload, ok);
                 },
                 else => try pushResult(rt, Ret, ret),
@@ -117,8 +117,24 @@ pub fn rawThunk(rt: *_runtime.Runtime, ctx: *anyopaque) anyerror!void {
         args_buf[i] = rt.popOperand();
     }
     var caller: Caller = .{ .rt = rt, .host_data = wrapper.host_data };
-    try wrapper.user_fn(&caller, args_buf[0..wrapper.n_params], results_buf[0..wrapper.n_results]);
+    wrapper.user_fn(&caller, args_buf[0..wrapper.n_params], results_buf[0..wrapper.n_results]) catch |err|
+        return hostFnError(err);
     for (results_buf[0..wrapper.n_results]) |rv| try rt.pushOperand(rv);
+}
+
+/// The names a host fn's error may keep: a guest trap, or a WASI exit's clean unwind.
+const HostFnError = _runtime.Trap || error{ProcExit};
+
+/// The error a host fn's failure unwinds the guest with. The user's error set is
+/// open, the dispatch loop's is closed (`instance.zig`'s `mapDispatchErr` panics
+/// on a name it does not know), so any name outside `HostFnError` becomes `HostTrap`
+/// here — what the C `hostFuncThunk` returns for a callback's trap.
+fn hostFnError(err: anyerror) HostFnError {
+    inline for (@typeInfo(HostFnError).error_set.?) |e| {
+        const named = @field(HostFnError, e.name);
+        if (err == named) return named;
+    }
+    return error.HostTrap;
 }
 
 fn pushResult(rt: *_runtime.Runtime, comptime Ret: type, ret: Ret) !void {

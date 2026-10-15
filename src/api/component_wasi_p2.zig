@@ -986,8 +986,7 @@ fn p2PollableBlock(caller: *Caller, self_handle: u32) WasiP2Error!void {
 /// `wasi:io/poll` `poll(in: list<borrow<pollable>>) -> list<u32>` (in_ptr,
 /// in_len, retptr): wait until at least one pollable is ready, then return the
 /// ready index set as a freshly `cabi_realloc`'d `list<u32>`, writing
-/// `(data_ptr, ready_n)` at `retptr`. Each handle must exist; one that is not
-/// a pollable counts as ready.
+/// `(data_ptr, ready_n)` at `retptr`. Each handle must be a pollable.
 fn p2Poll(caller: *Caller, in_ptr: u32, in_len: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
@@ -999,7 +998,7 @@ fn p2Poll(caller: *Caller, in_ptr: u32, in_len: u32, retptr: u32) WasiP2Error!vo
         var i: u32 = 0;
         while (i < in_len) : (i += 1) {
             const h = try ctx.resources.peek(try mem.read(u32, in_ptr + i * 4));
-            const is_ready = pollableReady(ctx, h) orelse true;
+            const is_ready = pollableReady(ctx, h) orelse return resource_table.Error.TypeMismatch;
             if (h.rt == WasiP2Ctx.STDIN_POLLABLE_RT) capped = false;
             if (is_ready) {
                 try mem.write(data_ptr + ready_n * 4, i);

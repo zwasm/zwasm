@@ -1601,13 +1601,13 @@ fn isFlat4Scalar(vt: ctypes.ValType) bool {
     };
 }
 
-/// The error set a boundary trampoline returns: the callee-invoke's full
-/// `InvokeError` (every guest `Trap` + `ProcExit`) plus the host-side
-/// out-of-memory of the snapshot copy. Every variant is one `mapDispatchErr`
-/// already narrows back to a `Trap` (or `ProcExit`), so a returned error becomes
-/// a guest trap — NOT a silent fallback. The marshalling-failure cases map onto
-/// the memory trap they are (`OutOfBoundsLoad`/`Store`), per the Canonical ABI +
-/// untrusted-component sandboxing: a bad `(ptr,len)` must trap.
+/// The error set a boundary trampoline returns: the callee-invoke's
+/// `InvokeError` plus the host-side out-of-memory of the snapshot copy.
+/// `rawThunk` passes a `Trap` or `ProcExit` through and turns the rest into
+/// `HostTrap`, so a returned error becomes a guest trap — NOT a silent
+/// fallback. The marshalling-failure cases map onto the memory trap they are
+/// (`OutOfBoundsLoad`/`Store`), per the Canonical ABI + untrusted-component
+/// sandboxing: a bad `(ptr,len)` must trap.
 const BoundaryError = Instance.InvokeError || error{OutOfMemory};
 
 /// D-305: ONE Value-slice host fn replaces the per-arity `boundaryTrampoline{,3,4}`.
