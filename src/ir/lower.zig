@@ -637,7 +637,7 @@ pub const Lowerer = struct {
         // stays positionally correct in `self.body`.
         if (self.unreachable_at_depth != null) return;
         try self.out.instrs.append(self.alloc, .{ .op = op, .payload = payload, .extra = extra });
-        try self.out.src_offsets.append(self.alloc, @intCast(self.op_start));
+        try self.out.src_offsets.append(self.alloc, self.out.src_base + @as(u32, @intCast(self.op_start)));
     }
 
     /// Wasm 2.0+ prefix-0xFC opcode group. Sub-opcode is uleb32.

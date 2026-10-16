@@ -26,6 +26,8 @@ pub const CodeEntry = struct {
     /// `end`). Borrowed from the input; the caller keeps the input
     /// alive for as long as `body` is referenced.
     body: []const u8,
+    /// Bytes of the local declarations, between the entry's size and `body`.
+    decls_len: u32,
 };
 
 pub const Codes = struct {
@@ -92,7 +94,7 @@ pub fn decodeCodes(parent_alloc: Allocator, body: []const u8) sections.Error!Cod
             }
         }
 
-        entry.* = .{ .locals = locals, .body = code[inner..] };
+        entry.* = .{ .locals = locals, .body = code[inner..], .decls_len = @intCast(inner) };
     }
 
     if (pos != body.len) return sections.Error.TrailingBytes;

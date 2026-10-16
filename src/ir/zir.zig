@@ -691,15 +691,20 @@ pub const ZirFunc = struct {
     sig: FuncType,
     locals: []const ValType,
     instrs: std.ArrayList(ZirInstr),
-    /// Offset of each `instrs` entry's opcode from the first byte of the body
-    /// handed to the lowerer; `body_offset` places it in the module.
-    /// `Lowerer.emit` appends both together, so the two stay parallel as
-    /// lowered. The hoist pass rewrites `instrs` without it, which only the
-    /// JIT's own copy of a function goes through.
+    /// Offset of each `instrs` entry's opcode from `func_start` — wasm.h's
+    /// `wasm_frame_func_offset`, which wasmtime also counts from the local
+    /// declarations. `Lowerer.emit` appends both together, so the two stay
+    /// parallel as lowered. The hoist pass rewrites `instrs` without it, which
+    /// only the JIT's own copy of a function goes through.
     src_offsets: std.ArrayList(u32) = .empty,
-    /// Module offset of that body's first opcode. Set by `instantiateRuntime`;
-    /// the JIT's own lowering leaves it 0.
-    body_offset: u32 = 0,
+    /// What the lowerer adds to an opcode's offset in the body it is handed
+    /// (the first opcode) to count it from `func_start`: the length of the
+    /// local declarations.
+    src_base: u32 = 0,
+    /// Module offset of the function: the first byte after the body's size,
+    /// where the local declarations begin. Set by `instantiateRuntime`; the
+    /// JIT's own lowering leaves it 0.
+    func_start: u32 = 0,
     blocks: std.ArrayList(BlockInfo),
     branch_targets: std.ArrayList(u32),
 
