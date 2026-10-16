@@ -437,12 +437,6 @@ fn callOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// `rt.module_types[type_idx]`. Encoding: `instr.payload` =
 /// type_idx, `instr.extra` = table_idx.
 ///
-/// The FuncEntity-pointer encoding makes cross-module dispatch
-/// addressable in 6.K.3: `fe.runtime` may differ from `rt`, in
-/// which case the callee body comes from the source runtime even
-/// though the caller frame stays on `rt`. (Cross-module memory /
-/// global access is 6.K.3's full wiring.)
-///
 /// Spec traps:
 ///   - selector >= table.len               → OutOfBoundsTableAccess
 ///   - table[selector] == null_ref         → UninitializedElement
@@ -498,26 +492,8 @@ fn callIndirectOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
         return Trap.IndirectCallTypeMismatch;
     }
 
-    // An imported func (host trampoline or cross-module guest) reached through a
-    // table slot dispatches via host_calls, not by executing its placeholder
-    // body (D-310). Mirrors callOp's host short-circuit; args sit on this rt's
-    // operand stack (the call_indirect runs here).
-    if (fe.func_idx < callee_rt.host_calls.len) {
-        if (callee_rt.host_calls[fe.func_idx]) |hc| {
-            try hc.fn_ptr(rt, hc.ctx);
-            return;
-        }
-    }
-
-    // D-325 — a funcref whose owning runtime differs from this one (a
-    // cross-instance guest func wired into a table, e.g. a wit-bindgen shim's
-    // `$imports` dispatch table) must run in ITS runtime's context, not ours.
-    // The interp DispatchTable (ZirOp→handler) is shared, so pass ours.
+    if (try routeForeignCallee(rt, callee_rt, fe.func_idx, callee)) return;
     const dispatch_tbl = rt.table orelse return Trap.Unreachable;
-    if (callee_rt != rt) {
-        try invokeCrossRuntime(rt, callee_rt, dispatch_tbl, callee);
-        return;
-    }
     try invoke(rt, dispatch_tbl, callee);
 }
 
@@ -559,25 +535,33 @@ fn callRefOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
         return Trap.IndirectCallTypeMismatch;
     }
 
-    // An imported func (host trampoline or cross-module guest) reached through a
-    // table slot dispatches via host_calls, not by executing its placeholder
-    // body (D-310). Mirrors callOp's host short-circuit; args sit on this rt's
-    // operand stack (the call_indirect runs here).
-    if (fe.func_idx < callee_rt.host_calls.len) {
-        if (callee_rt.host_calls[fe.func_idx]) |hc| {
+    if (try routeForeignCallee(rt, callee_rt, fe.func_idx, callee)) return;
+    const dispatch_tbl = rt.table orelse return Trap.Unreachable;
+    try invoke(rt, dispatch_tbl, callee);
+}
+
+/// The arms every `call_indirect` / `call_ref` form takes, tail or not, before
+/// its own dispatch; true when one of them ran the callee. An import slot
+/// (host trampoline or cross-module guest) dispatches via host_calls, not its
+/// placeholder body (D-310); the args sit on this rt's operand stack. A funcref
+/// owned by another runtime runs in ITS context — own globals / memory /
+/// tables — via `invokeCrossRuntime` (D-325). Either way the callee runs
+/// nested, so a tail form follows with `tailReturn`: the trampoline (D-187)
+/// swaps frames only within one runtime.
+fn routeForeignCallee(rt: *Runtime, callee_rt: *Runtime, func_idx: u32, callee: *const zir.ZirFunc) anyerror!bool {
+    if (func_idx < callee_rt.host_calls.len) {
+        if (callee_rt.host_calls[func_idx]) |hc| {
             try hc.fn_ptr(rt, hc.ctx);
-            return;
+            return true;
         }
     }
-
-    // D-325 — same cross-instance routing as call_indirect: a foreign-runtime
-    // funcref runs in ITS context (own globals/memory), not the caller's.
-    const dispatch_tbl = rt.table orelse return Trap.Unreachable;
     if (callee_rt != rt) {
+        // The interp DispatchTable (ZirOp→handler) is shared, so pass ours.
+        const dispatch_tbl = rt.table orelse return Trap.Unreachable;
         try invokeCrossRuntime(rt, callee_rt, dispatch_tbl, callee);
-        return;
+        return true;
     }
-    try invoke(rt, dispatch_tbl, callee);
+    return false;
 }
 
 /// Tail-call epilogue shared by the `return_call*` family. After
@@ -625,12 +609,8 @@ fn signalTailCall(rt: *Runtime, callee: *const zir.ZirFunc) void {
 
 /// Wasm spec 3.0 §3.3.10.5 (`return_call_ref typeidx`): tail-call
 /// variant of call_ref. Pops funcref + the typeidx-determined args,
-/// runs the same null + sig-mismatch checks, invokes the callee,
-/// then promotes the callee's results to the enclosing function's
-/// results via `tailReturn`. Not a true tail call (interp still
-/// stacks frames during `invoke()`); a stack-non-growing variant
-/// arrives with 10.TC (ADR-0113 §A regalloc terminator-class
-/// extension).
+/// runs the same null + sig-mismatch checks, then routes the callee
+/// as `callRefOp` does and tail-calls it.
 fn returnCallRefOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const ref_v = rt.popOperand();
@@ -644,17 +624,8 @@ fn returnCallRefOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     const expected = rt.module_types[instr.payload];
     if (!sigEq(callee.sig, expected)) return Trap.IndirectCallTypeMismatch;
 
-    // Same-module: route through `dispatch.run` trampoline (D-187).
-    // Cross-module (callee_rt != rt) keeps the recursive shape for
-    // now — cross-rt frame switching needs the rt swap that the
-    // trampoline doesn't yet model.
-    if (callee_rt == rt) {
-        signalTailCall(rt, callee);
-        return;
-    }
-    const dispatch_tbl = rt.table orelse return Trap.Unreachable;
-    try invoke(rt, dispatch_tbl, callee);
-    try tailReturn(rt);
+    if (try routeForeignCallee(rt, callee_rt, fe.func_idx, callee)) return tailReturn(rt);
+    signalTailCall(rt, callee);
 }
 
 /// Wasm spec 3.0 §3.3.10.3 (`return_call funcidx`): tail-call
@@ -709,13 +680,8 @@ fn returnCallIndirectOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     const expected = rt.module_types[instr.payload];
     if (!sigEq(callee.sig, expected)) return Trap.IndirectCallTypeMismatch;
 
-    if (callee_rt == rt) {
-        signalTailCall(rt, callee);
-        return;
-    }
-    const dispatch_tbl = rt.table orelse return Trap.Unreachable;
-    try invoke(rt, dispatch_tbl, callee);
-    try tailReturn(rt);
+    if (try routeForeignCallee(rt, callee_rt, fe.func_idx, callee)) return tailReturn(rt);
+    signalTailCall(rt, callee);
 }
 
 inline fn sigEq(a: zir.FuncType, b: zir.FuncType) bool {

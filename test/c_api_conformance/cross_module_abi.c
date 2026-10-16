@@ -25,6 +25,16 @@
  *                             tail form whose overflow args must be reserved
  *   deep go        1106001    #425 — 11 × i32 → three results, the deepest int
  *                             overflow here paired with a MEMORY-class return
+ *   import_indirect    111    #517 — `return_call_indirect` of the import
+ *                             through the importer's table: the exporter's
+ *                             global, not the importer's 222
+ *   import_ref         111    … `return_call_ref` of `ref.func` on the import
+ *   host_indirect      333    … a `wasm_func_new` host import in the table
+ *   host_ref           333    … `return_call_ref` of `ref.func` on it
+ *   foreign_indirect   111    … of a funcref the exporter returned, stored in
+ *                             the importer's table: owned by the other
+ *                             instance. interp only — the JIT reads 222 here,
+ *                             through call_indirect too (#536)
  *
  * Exits 0 on success.
  */
@@ -172,6 +182,54 @@ static const uint8_t kGlobImporterWasm[] = {
     0x75, 0x6d, 0x70, 0x07, 0x07, 0x01, 0x00, 0x04, 0x6d, 0x69, 0x6e, 0x65,
 };
 
+/* (module
+ *   (global $g i32 (i32.const 111))
+ *   (func $f (export "f") (result i32) global.get $g)
+ *   (func (export "get") (result funcref) ref.func $f)) */
+static const uint8_t kTailRouteExporterWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60,
+    0x00, 0x01, 0x70, 0x03, 0x03, 0x02, 0x00, 0x01, 0x06, 0x07, 0x01, 0x7f, 0x00, 0x41, 0xef, 0x00,
+    0x0b, 0x07, 0x0b, 0x02, 0x01, 0x66, 0x00, 0x00, 0x03, 0x67, 0x65, 0x74, 0x00, 0x01, 0x0a, 0x0b,
+    0x02, 0x04, 0x00, 0x23, 0x00, 0x0b, 0x04, 0x00, 0xd2, 0x00, 0x0b,
+};
+
+/* (module
+ *   (type $r (func (result i32)))
+ *   (import "e" "f" (func $af (type $r)))
+ *   (import "e" "get" (func $get (result funcref)))
+ *   (import "h" "h" (func $hf (type $r)))
+ *   (global $g i32 (i32.const 222))
+ *   (table $t 3 funcref)
+ *   (elem (table $t) (i32.const 0) func $af $hf)
+ *   (func (export "import_indirect") (result i32) (return_call_indirect $t (type $r) (i32.const 0)))
+ *   (func (export "import_ref") (result i32) (return_call_ref $r (ref.func $af)))
+ *   (func (export "host_indirect") (result i32) (return_call_indirect $t (type $r) (i32.const 1)))
+ *   (func (export "host_ref") (result i32) (return_call_ref $r (ref.func $hf)))
+ *   (func (export "foreign_indirect") (result i32)
+ *     (table.set $t (i32.const 2) (call $get))
+ *     (return_call_indirect $t (type $r) (i32.const 2)))) */
+static const uint8_t kTailRouteImporterWasm[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60,
+    0x00, 0x01, 0x70, 0x02, 0x15, 0x03, 0x01, 0x65, 0x01, 0x66, 0x00, 0x00, 0x01, 0x65, 0x03, 0x67,
+    0x65, 0x74, 0x00, 0x01, 0x01, 0x68, 0x01, 0x68, 0x00, 0x00, 0x03, 0x06, 0x05, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x03, 0x06, 0x07, 0x01, 0x7f, 0x00, 0x41, 0xde, 0x01,
+    0x0b, 0x07, 0x4e, 0x05, 0x0f, 0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x5f, 0x69, 0x6e, 0x64, 0x69,
+    0x72, 0x65, 0x63, 0x74, 0x00, 0x03, 0x0a, 0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x5f, 0x72, 0x65,
+    0x66, 0x00, 0x04, 0x0d, 0x68, 0x6f, 0x73, 0x74, 0x5f, 0x69, 0x6e, 0x64, 0x69, 0x72, 0x65, 0x63,
+    0x74, 0x00, 0x05, 0x08, 0x68, 0x6f, 0x73, 0x74, 0x5f, 0x72, 0x65, 0x66, 0x00, 0x06, 0x10, 0x66,
+    0x6f, 0x72, 0x65, 0x69, 0x67, 0x6e, 0x5f, 0x69, 0x6e, 0x64, 0x69, 0x72, 0x65, 0x63, 0x74, 0x00,
+    0x07, 0x09, 0x0a, 0x01, 0x02, 0x00, 0x41, 0x00, 0x0b, 0x00, 0x02, 0x00, 0x02, 0x0a, 0x2d, 0x05,
+    0x07, 0x00, 0x41, 0x00, 0x13, 0x00, 0x00, 0x0b, 0x06, 0x00, 0xd2, 0x00, 0x15, 0x00, 0x0b, 0x07,
+    0x00, 0x41, 0x01, 0x13, 0x00, 0x00, 0x0b, 0x06, 0x00, 0xd2, 0x02, 0x15, 0x00, 0x0b, 0x0d, 0x00,
+    0x41, 0x02, 0x10, 0x01, 0x26, 0x00, 0x41, 0x02, 0x13, 0x00, 0x00, 0x0b,
+};
+
+static wasm_trap_t* host_333(const wasm_val_vec_t* args, wasm_val_vec_t* results) {
+    (void) args;
+    results->data[0].kind = WASM_I32;
+    results->data[0].of.i32 = 333;
+    return NULL;
+}
 
 static const uint8_t kEngines[] = { ZWASM_ENGINE_INTERP, ZWASM_ENGINE_JIT, ZWASM_ENGINE_AUTO };
 
@@ -190,17 +248,19 @@ typedef struct {
 
 /* Instantiate `exporter` then `importer` (every import is satisfied from the
  * exporter's exports, in import order = export order for these fixtures,
- * except `indirect`, which takes exports 0 and 5), call each named export of
- * the importer and compare. */
+ * except `indirect`, which takes exports 0 and 5; a non-NULL `host` is a
+ * `() -> i32` import after them), call each named export of the importer and
+ * compare. */
 static int run_pair(uint8_t engine, const char* label,
                     const uint8_t* ewasm, size_t elen, const uint8_t* iwasm, size_t ilen,
-                    const size_t* export_pick, size_t n_imports,
+                    const size_t* export_pick, size_t n_imports, wasm_func_callback_t host,
                     const case_t* cases, size_t n_cases) {
     int rc = 1;
     const char* who = engine_name(engine);
     wasm_module_t* em = NULL; wasm_instance_t* ei = NULL; wasm_extern_vec_t ex = { 0, NULL };
     wasm_module_t* im = NULL; wasm_instance_t* ii = NULL; wasm_extern_vec_t ix = { 0, NULL };
     wasm_extern_t* picked[8];
+    wasm_func_t* host_fn = NULL;
     wasm_engine_t* eng = wasm_engine_new();
     wasm_store_t* store = eng ? wasm_store_new(eng) : NULL;
     if (!eng || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
@@ -221,11 +281,19 @@ static int run_pair(uint8_t engine, const char* label,
         }
         picked[k] = ex.data[export_pick[k]];
     }
+    size_t n_all = n_imports;
+    if (host) {
+        wasm_functype_t* ft = wasm_functype_new_0_1(wasm_valtype_new(WASM_I32));
+        host_fn = wasm_func_new(store, ft, host);
+        wasm_functype_delete(ft);
+        if (!host_fn) { fprintf(stderr, "[%s/%s] wasm_func_new failed\n", who, label); goto cleanup; }
+        picked[n_all++] = wasm_func_as_extern(host_fn);
+    }
 
     wasm_byte_vec_t ib = { ilen, (wasm_byte_t*) iwasm };
     im = wasm_module_new(store, &ib);
     if (!im) { fprintf(stderr, "[%s/%s] importer failed to parse\n", who, label); goto cleanup; }
-    wasm_extern_vec_t imports = { n_imports, picked };
+    wasm_extern_vec_t imports = { n_all, picked };
     wasm_trap_t* it = NULL;
     ii = zwasm_instance_new_ex(store, im, &imports, &it, engine);
     if (it) wasm_trap_delete(it);
@@ -257,6 +325,7 @@ static int run_pair(uint8_t engine, const char* label,
 cleanup:
     if (ix.data) wasm_extern_vec_delete(&ix);
     if (ii) wasm_instance_delete(ii);
+    if (host_fn) wasm_func_delete(host_fn);
     if (im) wasm_module_delete(im);
     if (ex.data) wasm_extern_vec_delete(&ex);
     if (ei) wasm_instance_delete(ei);
@@ -282,17 +351,25 @@ int main(void) {
     static const size_t deep_pick[] = { 0 };
     static const case_t tail_cases[] = { { "go", 210 } };
     static const size_t tail_pick[] = { 0 };
+    static const case_t route_cases[] = {
+        { "import_indirect", 111 }, { "import_ref", 111 },
+        { "host_indirect", 333 }, { "host_ref", 333 }, { "foreign_indirect", 111 },
+    };
+    static const size_t route_pick[] = { 0, 1 };
     for (size_t i = 0; i < sizeof(kEngines) / sizeof(kEngines[0]); i++) {
         if (run_pair(kEngines[i], "abi", kAbiExporterWasm, sizeof(kAbiExporterWasm),
-                     kAbiImporterWasm, sizeof(kAbiImporterWasm), abi_pick, 6, abi_cases, 6) != 0) return 1;
+                     kAbiImporterWasm, sizeof(kAbiImporterWasm), abi_pick, 6, NULL, abi_cases, 6) != 0) return 1;
         if (run_pair(kEngines[i], "indirect", kAbiExporterWasm, sizeof(kAbiExporterWasm),
-                     kIndirectImporterWasm, sizeof(kIndirectImporterWasm), indirect_pick, 2, indirect_cases, 3) != 0) return 1;
+                     kIndirectImporterWasm, sizeof(kIndirectImporterWasm), indirect_pick, 2, NULL, indirect_cases, 3) != 0) return 1;
         if (run_pair(kEngines[i], "globals", kGlobExporterWasm, sizeof(kGlobExporterWasm),
-                     kGlobImporterWasm, sizeof(kGlobImporterWasm), glob_pick, 1, glob_cases, 1) != 0) return 1;
+                     kGlobImporterWasm, sizeof(kGlobImporterWasm), glob_pick, 1, NULL, glob_cases, 1) != 0) return 1;
         if (run_pair(kEngines[i], "deep", kDeepExporterWasm, sizeof(kDeepExporterWasm),
-                     kDeepImporterWasm, sizeof(kDeepImporterWasm), deep_pick, 1, deep_cases, 1) != 0) return 1;
+                     kDeepImporterWasm, sizeof(kDeepImporterWasm), deep_pick, 1, NULL, deep_cases, 1) != 0) return 1;
         if (run_pair(kEngines[i], "tail", kTailExporterWasm, sizeof(kTailExporterWasm),
-                     kTailImporterWasm, sizeof(kTailImporterWasm), tail_pick, 1, tail_cases, 1) != 0) return 1;
+                     kTailImporterWasm, sizeof(kTailImporterWasm), tail_pick, 1, NULL, tail_cases, 1) != 0) return 1;
+        if (run_pair(kEngines[i], "tail-route", kTailRouteExporterWasm, sizeof(kTailRouteExporterWasm),
+                     kTailRouteImporterWasm, sizeof(kTailRouteImporterWasm), route_pick, 2, host_333, route_cases,
+                     kEngines[i] == ZWASM_ENGINE_INTERP ? 5 : 4) != 0) return 1;
     }
     return 0;
 }

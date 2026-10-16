@@ -35,6 +35,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **On the interpreter, `return_call_indirect` and `return_call_ref` route a
+  host or foreign callee like their non-tail forms** (#517). They ran another
+  instance's function on the caller's globals, memories and tables, and trapped
+  on a host import; they now take the same two arms `call_indirect` and
+  `call_ref` do.
+
 - **A host function's error that is not a trap traps as `HostTrap`, instead of
   aborting the process** (#519). A Zig-facade host fn (`Linker.defineFunc`,
   `defineFuncCtx`, `defineFuncRaw`) that returned a name outside the trap set —
