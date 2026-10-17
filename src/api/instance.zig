@@ -1992,7 +1992,11 @@ pub export fn wasm_instance_delete(i: ?*Instance) callconv(.c) void {
 /// `wasm_func_call`). Single-threaded for Phases 1-9 per the
 /// project's threading discipline; `std.atomic` once-init lands
 /// alongside the threads proposal post-v0.1.0.
-var g_dispatch_table_storage: dispatch_table_mod.DispatchTable = undefined;
+///
+/// `align(4096)`: the interpreter loads a handler from it on every
+/// instruction, and where it fell within a page moved the interpreter
+/// by 11% when unrelated code changed size (#541).
+var g_dispatch_table_storage: dispatch_table_mod.DispatchTable align(4096) = undefined;
 var g_dispatch_table_initialized: bool = false;
 
 pub fn dispatchTable() *const dispatch_table_mod.DispatchTable {
@@ -2017,6 +2021,10 @@ pub fn dispatchTable() *const dispatch_table_mod.DispatchTable {
         g_dispatch_table_initialized = true;
     }
     return &g_dispatch_table_storage;
+}
+
+test "g_dispatch_table_storage stays page-aligned (#541)" {
+    try testing.expectEqual(@as(?usize, 4096), @typeInfo(@TypeOf(&g_dispatch_table_storage)).pointer.alignment);
 }
 
 /// `zwasm_instance_get_func` — project-extension helper that

@@ -53,6 +53,38 @@ pub fn step(
     }
 }
 
+/// `run`'s per-instruction loop over one frame's `instrs`. The
+/// interpreter's speed moves by up to 13% with where this loop sits
+/// against a 64-byte boundary (#541, Zen 3). `noinline` keeps a change
+/// to `run` from moving it; `align(64)` keeps a change to code laid
+/// out before it from moving it.
+noinline fn runFrame(
+    rt: *Runtime,
+    table: *const DispatchTable,
+    f: *runtime.Frame,
+    instrs: []const ZirInstr,
+) align(64) anyerror!void {
+    while (f.pc < instrs.len and !f.done) {
+        // ADR-0179 #3a: throttled cooperative-interrupt poll so a tight
+        // `(loop (br 0))` with no calls is still interruptible. Zero cost
+        // when no flag is configured (one predictable optional-unwrap).
+        if (rt.interrupt) |flag| {
+            rt.interrupt_tick +%= 1;
+            if (rt.interrupt_tick & runtime.Runtime.INTERRUPT_CHECK_MASK == 0 and
+                flag.load(.monotonic) != 0) return Trap.Interrupted;
+        }
+        // ADR-0179 #3b: deterministic fuel — exact per-instruction decrement
+        // (no throttle, unlike the interrupt poll), trap at exhaustion.
+        if (rt.fuel) |*remaining| {
+            if (remaining.* == 0) return Trap.OutOfFuel;
+            remaining.* -= 1;
+        }
+        const cur = f.pc;
+        try step(rt, table, &instrs[cur]);
+        if (f.pc == cur) f.pc += 1;
+    }
+}
+
 /// Walk an instruction sequence linearly. The loop tracks `pc`
 /// on the **current frame** (`rt.currentFrame().pc`) so control-
 /// flow handlers (`br` / `br_if` / `br_table` / `return` / `if`
@@ -102,25 +134,7 @@ pub fn run(
         const f = rt.currentFrame();
         f.pc = 0;
         f.done = false;
-        while (f.pc < instrs.len and !f.done) {
-            // ADR-0179 #3a: throttled cooperative-interrupt poll so a tight
-            // `(loop (br 0))` with no calls is still interruptible. Zero cost
-            // when no flag is configured (one predictable optional-unwrap).
-            if (rt.interrupt) |flag| {
-                rt.interrupt_tick +%= 1;
-                if (rt.interrupt_tick & runtime.Runtime.INTERRUPT_CHECK_MASK == 0 and
-                    flag.load(.monotonic) != 0) return Trap.Interrupted;
-            }
-            // ADR-0179 #3b: deterministic fuel — exact per-instruction decrement
-            // (no throttle, unlike the interrupt poll), trap at exhaustion.
-            if (rt.fuel) |*remaining| {
-                if (remaining.* == 0) return Trap.OutOfFuel;
-                remaining.* -= 1;
-            }
-            const cur = f.pc;
-            try step(rt, table, &instrs[cur]);
-            if (f.pc == cur) f.pc += 1;
-        }
+        try runFrame(rt, table, f, instrs);
 
         const next_callee = rt.pending_tail_call orelse break;
         rt.pending_tail_call = null;
@@ -200,6 +214,10 @@ fn buildSmokeTable() DispatchTable {
     t.interp[@intFromEnum(ZirOp.nop)] = StubHandlers.nop;
     t.interp[@intFromEnum(ZirOp.@"i32.const")] = StubHandlers.pushI32Const;
     return t;
+}
+
+test "runFrame stays 64-byte aligned (#541)" {
+    try testing.expectEqual(@as(?usize, 64), @typeInfo(@TypeOf(&runFrame)).pointer.alignment);
 }
 
 test "step: unbound op slot returns Trap.Unreachable" {

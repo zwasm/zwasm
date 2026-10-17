@@ -35,6 +35,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **The interpreter's dispatch loop and handler table no longer move with
+  unrelated code** (#541). The interpreter's speed moved by up to 13% with where
+  `run`'s loop fell against a 64-byte boundary, and by 11% with where the
+  dispatch table fell within a page, both set by whatever else was in the
+  binary. The loop is now a `noinline` function aligned to 64 bytes and the
+  table is page-aligned; on x86_64-linux this measures about 1% faster.
+
 - **On the interpreter, `return_call_indirect` and `return_call_ref` route a
   host or foreign callee like their non-tail forms** (#517). They ran another
   instance's function on the caller's globals, memories and tables, and trapped
