@@ -269,6 +269,9 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   The Zig API reference says `InstantiateOpts.engine` is read by
   `Module.instantiate` only, so a `Linker` instance runs on the interpreter
   (#574).
+  The Zig API reference states which part of the package SemVer covers — the
+  facade — and that the internal namespaces the package root also exports
+  (`ir`, `runtime`, …) may change in any release.
 
 ## [2.7.0] - 2026-09-14
 
