@@ -65,6 +65,14 @@ fn rbpDispNegI32(spill_base_off: u32, spill_off: u32) Error!i32 {
     return -@as(i32, @intCast(abs));
 }
 
+/// The disp of a 16-byte spill cell. `spill_off` places the cell's upper
+/// edge, as it does an 8-byte cell's, and MOVUPS writes upward from the disp,
+/// so the cell starts 8 below an 8-byte one; `rbpDispNegI32` alone would
+/// spill 8 bytes into the cell above (or the saved RBP, at offset 0).
+pub fn v128SpillDisp(spill_base_off: u32, spill_off: u32) Error!i32 {
+    return rbpDispNegI32(spill_base_off, spill_off + 8);
+}
+
 /// Pick disp8 / disp32 form per offset range. Mirrors emit.zig's
 /// local-region auto-helpers (`rbpLoadR64`/`rbpStoreR64`/etc.)
 /// but kept in gpr.zig so spill helpers don't cross-import. Cost:
@@ -272,7 +280,7 @@ pub fn xmmLoadSpilledV128(
         .reg => |id| abi.fpSlotToReg(id) orelse Error.SlotOverflow,
         .spill => |off| blk: {
             const stage = abi.fp_spill_stage_xmms[stage_idx];
-            const disp = try rbpDispNegI32(spill_base_off, off);
+            const disp = try v128SpillDisp(spill_base_off, off);
             try writeBytes(allocator, buf, rbpLoadXmmV128Auto(stage, disp));
             break :blk stage;
         },
@@ -310,7 +318,7 @@ pub fn xmmStoreSpilledV128(
         .reg => {},
         .spill => |off| {
             const stage = abi.fp_spill_stage_xmms[stage_idx];
-            const disp = try rbpDispNegI32(spill_base_off, off);
+            const disp = try v128SpillDisp(spill_base_off, off);
             try writeBytes(allocator, buf, rbpStoreXmmV128Auto(disp, stage));
         },
     }
@@ -572,8 +580,8 @@ test "xmmStoreSpilled: spilled vreg emits MOVSD [rbp+disp], xmm14" {
 test "xmmLoadSpilledV128: spilled vreg emits MOVUPS xmm14, [rbp+disp]" {
     // ADR-0053 Part 2: v128 spill-aware load emits MOVUPS (16
     // bytes, 0F 10) — contrast with `xmmLoadSpilled` (MOVSD, F2 0F
-    // 10, 8 bytes). The disp here is small (-16) so we get the
-    // disp8 form.
+    // 10, 8 bytes). The 16-byte cell sits 8 below an 8-byte cell at
+    // the same offset (`v128SpillDisp`): -(16 + 0 + 8), disp8 form.
     const pool_len: u8 = abi.allocatable_xmms.len;
     const slots = [_]u16{pool_len};
     const alloc: regalloc.Allocation = .{
@@ -586,7 +594,7 @@ test "xmmLoadSpilledV128: spilled vreg emits MOVUPS xmm14, [rbp+disp]" {
     defer buf.deinit(testing.allocator);
     const r = try xmmLoadSpilledV128(testing.allocator, &buf, alloc, 16, 0, 0);
     try testing.expectEqual(Xmm.xmm14, r);
-    const expected = inst.encLoadXmmV128MemRBP(.xmm14, -16);
+    const expected = inst.encLoadXmmV128MemRBP(.xmm14, -24);
     try testing.expectEqual(@as(usize, expected.len), buf.items.len);
     try testing.expectEqualSlices(u8, expected.bytes[0..expected.len], buf.items);
 }
@@ -603,7 +611,7 @@ test "xmmStoreSpilledV128: spilled vreg emits MOVUPS [rbp+disp], xmm14" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try xmmStoreSpilledV128(testing.allocator, &buf, alloc, 16, 0, 0);
-    const expected = inst.encStoreXmmV128MemRBP(-16, .xmm14);
+    const expected = inst.encStoreXmmV128MemRBP(-24, .xmm14);
     try testing.expectEqual(@as(usize, expected.len), buf.items.len);
     try testing.expectEqualSlices(u8, expected.bytes[0..expected.len], buf.items);
 }

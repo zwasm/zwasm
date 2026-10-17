@@ -821,9 +821,7 @@ pub fn emitV128Bitselect(
     switch (alloc.slot(a_v, .fpr)) {
         .reg => |id| a_x = abi.fpSlotToReg(id) orelse return Error.SlotOverflow,
         .spill => |off| {
-            const abs_off = spill_base_off + off;
-            if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-            const disp: i32 = -@as(i32, @intCast(abs_off));
+            const disp = try gpr.v128SpillDisp(spill_base_off, off);
             try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(.xmm7, disp).slice());
             a_x = .xmm7;
         },
@@ -877,9 +875,7 @@ pub fn emitV128Bitselect(
     // Store if result is spilled.
     if (result_slot == .spill) {
         const off = result_slot.spill;
-        const abs_off = spill_base_off + off;
-        if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-        const disp: i32 = -@as(i32, @intCast(abs_off));
+        const disp = try gpr.v128SpillDisp(spill_base_off, off);
         try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(disp, .xmm7).slice());
     }
     try pushed_vregs.append(allocator, result_v);
