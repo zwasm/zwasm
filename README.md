@@ -9,7 +9,7 @@ A spec-compliant WebAssembly runtime written in Zig.
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 - **Full spec coverage** — WebAssembly 3.0 (all 9 proposals), spec testsuite
-  green on macOS aarch64, Linux x86_64 and Windows x86_64. CI runs both
+  green on macOS aarch64, Linux x86_64 and aarch64, and Windows x86_64. CI runs both
   engines; the JIT lane enumerates its known-wrong outcomes and gates on an
   exact match. WASI 0.1, 0.2 (Component Model, on by default) and 0.3
   (native async, opt-in).
@@ -69,13 +69,12 @@ zwasm is built and tested on these host targets:
 |----------|---------|-------------------------------------------------|
 | macOS    | aarch64 | primary development target                      |
 | Linux    | x86_64  | native, spec + full test gate                   |
-| Linux    | aarch64 | cross-built (not in the per-release test gate)  |
+| Linux    | aarch64 | native, spec + core test gate                   |
 | Windows  | x86_64  | native, MSVC ABI                                |
 
-Each release is verified on native macOS-aarch64, Linux-x86_64, and
-Windows-x86_64 hosts. Linux-aarch64 is cross-built but not covered by that
-per-release test gate. Windows ARM64 and other targets are out of scope for
-now (demand-driven).
+Each release is verified on native macOS-aarch64, Linux-x86_64,
+Linux-aarch64 and Windows-x86_64 hosts. Windows ARM64 and other targets are
+out of scope for now (demand-driven).
 
 ## Coverage
 

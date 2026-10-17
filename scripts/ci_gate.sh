@@ -10,17 +10,17 @@
 #     spec-manifest shape guard + ReleaseSafe-runner floor
 #   Core — Linux only: run-rust-host (D-254). Still core — it runs on every
 #     PR — but the runner's gnu-target rustc has to be ABI-compatible with
-#     zig's native libzwasm.a, and only that leg's is. Listed separately
-#     because "every OS" above is load-bearing: anything added here is
-#     verified on ONE leg.
+#     zig's native libzwasm.a, and only the Linux legs' are. Listed
+#     separately because "every OS" above is load-bearing: anything added
+#     here is verified on the Linux legs alone.
 #   Core — legs whose ci.yml matrix row says `releasesafe_unit: true`
 #     (Linux + Windows), read here as ZWASM_CI_RELEASESAFE_UNIT: the unit
 #     tests built ReleaseSafe (zig build test -Doptimize=ReleaseSafe, #347,
 #     #303). Every PR, but only on the legs with the wall-clock headroom for
 #     a second optimised build.
-#   ReleaseSafe JIT smoke: ZWASM_CI_EXTENDED (Unix legs) or
-#     ZWASM_CI_JIT_RELEASESAFE (the Windows leg; #303).
-#   Extended (ZWASM_CI_EXTENDED=1; Unix legs): lint + build-option DCE +
+#   ReleaseSafe JIT smoke: ZWASM_CI_EXTENDED (macOS, x86_64-linux) or
+#     ZWASM_CI_JIT_RELEASESAFE (Windows #303, aarch64-linux #545).
+#   Extended (ZWASM_CI_EXTENDED=1; macOS, x86_64-linux): lint + build-option DCE +
 #     ReleaseSafe JIT smoke (D-245) + AOT cross-compile portability +
 #     external system-linker consumer (test_extlink.sh) + zone_check +
 #     spill_aware_check (host-independent source checks, promoted to CI
@@ -65,10 +65,10 @@ zig build bench-latency-build
 # rust-host embedding consumer (D-254): the third independent embedding-ABI
 # consumer (docs/examples/rust_host/hello.rs links the same libzwasm.a the C
 # host uses) — exercise it so it can't rot silently. LINUX-only: the ubuntu
-# runner ships a gnu-target rustc that is ABI-compatible with zig's native
+# runners ship a gnu-target rustc that is ABI-compatible with zig's native
 # libzwasm.a, so the link is clean (the macOS SDK dance + the Windows rust ABI
 # question are out of scope here). Runs on EVERY PR (core), so a break shows on
-# the PR's Linux leg before merge, not post-merge. Skips gracefully where rustc
+# the PR's Linux legs before merge, not post-merge. Skips gracefully where rustc
 # is absent (e.g. a local gate host without the .#rust-host shell).
 if [ "$(uname -s)" = "Linux" ]; then
     if command -v rustc >/dev/null 2>&1; then
@@ -142,7 +142,7 @@ echo "[ci_gate] ReleaseSafe-runner floor (check_releasesafe_runners)"
 bash scripts/check_releasesafe_runners.sh
 
 # Also reachable through ZWASM_CI_JIT_RELEASESAFE, which `ci.yml` sets for the
-# Windows leg alone — see the matrix row there for why (#303).
+# Windows and aarch64-linux legs — see their matrix rows for why (#303, #545).
 if [ "${ZWASM_CI_EXTENDED:-0}" = "1" ] || [ "${ZWASM_CI_JIT_RELEASESAFE:-0}" = "1" ]; then
     echo "[ci_gate] --engine=jit ReleaseSafe smoke (D-245 GPR + #286 Win64 XMM)"
     bash scripts/check_jit_releasesafe.sh

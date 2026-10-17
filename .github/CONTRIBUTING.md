@@ -30,7 +30,7 @@ change lands the same way:
 1. Branch off `main` (maintainers use `develop/<slug>`; external contributors
    fork). Never commit straight to `main`.
 2. Open a pull request. Opening it runs **CI** — a 3-OS gate (macOS aarch64 +
-   Linux x86_64 + Windows x86_64) that runs the exact `scripts/ci_gate.sh` the
+   Linux x86_64 and aarch64 + Windows x86_64) that runs the exact `scripts/ci_gate.sh` the
    maintainer runs locally.
 3. The required **`ci-required`** check must be green before the PR can merge.
    Doc-only changes (Markdown, `docs/`, `.dev/`, `.claude/`, `LICENSE`) skip the

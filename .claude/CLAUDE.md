@@ -78,11 +78,12 @@ text or code identifiers.
   autonomous-with-ADR; surface only for bucket-2/3 genuine blocks.
 - **CI gate is authoritative (post-v2.0.0 maintenance; ADR-0076 D9)**: `main`
   is PR-only, and CI's `ci-required` runs `scripts/ci_gate.sh` on **all 3 OSes**
-  (aarch64-macos + x86_64-linux + x86_64-windows) for **every** PR. That IS the
+  (aarch64-macos + x86_64-linux + aarch64-linux + x86_64-windows) for **every**
+  PR. That IS the
   merge gate. A PR run gets the **core** gate — zig fmt + `test-all` +
   `bench-latency-build` (compile-only, ADR-0209) + the test-discovery guard,
-  plus `run-rust-host` on the Linux leg only and the unit tests built
-  ReleaseSafe on the Linux and Windows legs (#347, #303) — and, as a blocking
+  plus `run-rust-host` on the Linux legs only and the unit tests built
+  ReleaseSafe on the Linux and Windows legs (#347, #303, #545) — and, as a blocking
   step OUTSIDE `ci_gate.sh`,
   `test-wasi-p1-official` (ADR-0225; the only leg content the script does not
   define). The **extended** checks (lint /

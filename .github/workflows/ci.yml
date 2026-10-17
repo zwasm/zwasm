@@ -1,5 +1,6 @@
-# CI — the host-local gate on the 3 supported OSes, mirroring the local
-# 3-host gate (Mac aarch64 + Linux x86_64 + Windows x86_64). Each matrix leg
+# CI — the host-local gate on the 3 supported OSes, as four legs (Mac aarch64,
+# Linux x86_64 and aarch64, Windows x86_64); the local 3-host gate covers all
+# but Linux aarch64. Each matrix leg
 # runs `scripts/ci_gate.sh`, which is where nearly all of the blocking content
 # lives and is the single definition of it; the differential oracle is
 # wasmtime, and its install is required.
@@ -25,11 +26,11 @@
 # lands via a `develop/*` branch → PR → this gate must pass → merge. A push to
 # `main` is therefore a merged PR (its `push` run does the extended checks).
 #
-# Doc-only changes skip the heavy 3-host build/test: the `changes` job detects
+# Doc-only changes skip the heavy gate matrix: the `changes` job detects
 # whether any non-doc path changed and short-circuits `gate` when not. So the
 # expensive matrix never runs for a pure docs/comment PR — but `ci-required`
 # (the single required status check) still reports success, so the PR stays
-# mergeable without burning three runners. Keep the branch ruleset's required
+# mergeable without burning the runners. Keep the branch ruleset's required
 # check pointed at `ci-required`, NOT the individual `gate (...)` legs. On a
 # PR the decision is per push, riding on the previous head's success (#298):
 # the merge queue's run gates the merged tree in full regardless (ADR-0227
@@ -38,7 +39,8 @@
 # The cheap `doc-truth` job runs for EVERY PR, doc-only included — checks whose
 # subject is prose must not be skipped by the doc-only short-circuit.
 #
-# All three legs are blocking (ADR-0211 D3). The Windows leg was advisory
+# All four legs are blocking (ADR-0211 D3; Linux aarch64 since #545, after an
+# advisory phase that found #547). The Windows leg was advisory
 # 2026-07-01..2026-08-19, citing D-245 flakiness that had already been fixed
 # and delisted before the flag landed; measured 26/26 green before the flip.
 # If hosted-runner flakiness recurs, file a debt row with the measured
@@ -79,7 +81,7 @@ concurrency:
 
 jobs:
   # Detect whether any non-doc path changed. Doc-only PRs then skip the heavy
-  # 3-host `gate` matrix while `ci-required` still reports success, so the
+  # `gate` matrix while `ci-required` still reports success, so the
   # branch ruleset's required check stays satisfiable. Only SHAs (never a
   # branch name / title / body) reach the shell, so there is no injection seam.
   changes:
@@ -161,7 +163,7 @@ jobs:
           fi
           files="$(git diff --name-only "$range")"
           echo "changed files:"; printf '%s\n' "$files"
-          # Paths that do NOT need the 3-host build/test gate (docs / meta only).
+          # Paths that do NOT need the gate matrix (docs / meta only).
           # A list of exclusions, so a new build input is gated unless someone
           # lists its path; `check_gate_exclusions.sh` fails the gate when a
           # listed path is one the build reads.
@@ -178,9 +180,9 @@ jobs:
           # ERE cannot subtract, and the guard mirrors this carve-out.
           examples="$(printf '%s\n' "$files" | grep -E '^docs/examples/' | grep -vE '(^|/)[^/]*\.md$' || true)"
           if [ -n "${nondoc//[[:space:]]/}" ] || [ -n "${examples//[[:space:]]/}" ]; then
-            echo "code=true" >> "$GITHUB_OUTPUT"; echo "non-doc changes -> run 3-host gate"
+            echo "code=true" >> "$GITHUB_OUTPUT"; echo "non-doc changes -> run the gate matrix"
           else
-            echo "code=false" >> "$GITHUB_OUTPUT"; echo "doc-only -> skip 3-host gate"
+            echo "code=false" >> "$GITHUB_OUTPUT"; echo "doc-only -> skip the gate matrix"
           fi
 
   # Doc-truth checks that MUST also run for doc-only PRs — the `gate` matrix
@@ -224,7 +226,6 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      # `gate-arm64-linux` below copies this job's Unix steps (#545).
       matrix:
         include:
           - name: aarch64-macos
@@ -239,6 +240,15 @@ jobs:
             # this when its leg finishes far enough ahead of aarch64-macos
             # (the critical path) to absorb a second optimised build; the
             # numbers are on the block in ci_gate.sh.
+            releasesafe_unit: true
+          - name: aarch64-linux
+            runs-on: ubuntu-24.04-arm
+            zig-dir: zig-aarch64-linux-0.16.0
+            # #545 — both ReleaseSafe lanes, measured on run 39030377235: the
+            # unit lane adds 6.6 min to an 11-17 min leg (macOS: 22-31), and
+            # the JIT smoke 4.5 min to the push run, where macOS takes ~90.
+            # Not `extended`: those checks are host-independent.
+            jit_releasesafe: true
             releasesafe_unit: true
           - name: x86_64-windows
             runs-on: windows-2022
@@ -425,7 +435,7 @@ jobs:
       #
       # Deliberately a step in THIS job rather than a job of its own: a
       # separate job would repeat the Zig install and rebuild zwasm from a cold
-      # `.zig-cache` on all three runners (nothing caches `.zig-cache`), paying
+      # `.zig-cache` on every runner (nothing caches `.zig-cache`), paying
       # a second full build per PR to run two lanes over 72 small binaries.
       # Here it reuses what `ci_gate.sh` just built.
       #
@@ -436,128 +446,11 @@ jobs:
         shell: bash
         run: zig build test-wasi-p1-official
 
-  # A copy of `gate`'s Unix steps on aarch64-linux, outside `ci-required`
-  # (#545 phase 1): red here shows on the PR and stops nothing. Not a matrix
-  # row (`needs.gate.result` would make it blocking) and not `continue-on-error`
-  # (the test-wasi-p1-official block above says why). Not on the push to
-  # `main` either: a red job there fails the run, and `main_failure.yml` reports
-  # it as a failed merge (#312). Change `gate`, change this; it goes when the
-  # row joins the matrix (phase 3).
-  gate-arm64-linux:
-    name: "gate (aarch64-linux, advisory #545)"
-    needs: changes
-    if: needs.changes.outputs.code == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-
-      - name: Cache Zig package deps
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: tools/lint/zig-pkg
-          key: zig-pkg-aarch64-linux-${{ hashFiles('tools/lint/build.zig.zon') }}
-          restore-keys: |
-            zig-pkg-aarch64-linux-
-
-      - name: Cache Zig 0.16.0
-        id: cache-zig
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.local/zig-0.16.0
-          key: zig-0.16.0-aarch64-linux
-
-      - name: Install Zig 0.16.0 (Unix)
-        if: steps.cache-zig.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.local
-          curl -fsSL "https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz" -o /tmp/zig.tar.xz
-          tar -xJf /tmp/zig.tar.xz -C ~/.local
-          mv "$HOME/.local/zig-aarch64-linux-0.16.0" "$HOME/.local/zig-0.16.0"
-
-      - name: Add Zig to PATH (Unix)
-        shell: bash
-        run: echo "$HOME/.local/zig-0.16.0" >> "$GITHUB_PATH"
-
-      - name: Install wasmtime (reference oracle, required)
-        shell: bash
-        run: |
-          set -euo pipefail
-          source .github/versions.lock
-          v="v${WASMTIME_VERSION}"
-          arch="$(uname -m)"
-          case "$arch" in
-            aarch64|arm64) arch=aarch64 ;;
-          esac
-          case "${{ runner.os }}" in
-            Linux)   asset="wasmtime-${v}-${arch}-linux";   ext="tar.xz" ;;
-            macOS)   asset="wasmtime-${v}-${arch}-macos";   ext="tar.xz" ;;
-            Windows) asset="wasmtime-${v}-x86_64-windows"; ext="zip"    ;;
-          esac
-          url="https://github.com/bytecodealliance/wasmtime/releases/download/${v}/${asset}.${ext}"
-          mkdir -p "$HOME/.local/bin"
-          cd "$HOME/.local/bin"
-          if [ "$ext" = "zip" ]; then
-            curl -fsSL "$url" -o wasmtime.zip && unzip -j -o wasmtime.zip
-          else
-            curl -fsSL "$url" -o wasmtime.tar.xz && tar -xJf wasmtime.tar.xz --strip-components=1 "${asset}/wasmtime"
-          fi
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Install wasm-tools (build-time, required for any zig build)
-        shell: bash
-        run: |
-          set -euo pipefail
-          source .github/versions.lock
-          v="${WASM_TOOLS_VERSION}"
-          arch="$(uname -m)"
-          case "$arch" in
-            aarch64|arm64) arch=aarch64 ;;
-          esac
-          case "${{ runner.os }}" in
-            Linux)   asset="wasm-tools-${v}-${arch}-linux";   ext="tar.gz" ;;
-            macOS)   asset="wasm-tools-${v}-${arch}-macos";   ext="tar.gz" ;;
-            Windows) asset="wasm-tools-${v}-x86_64-windows"; ext="zip"    ;;
-          esac
-          url="https://github.com/bytecodealliance/wasm-tools/releases/download/v${v}/${asset}.${ext}"
-          mkdir -p "$HOME/.local/bin"
-          cd "$HOME/.local/bin"
-          if [ "$ext" = "zip" ]; then
-            curl -fsSL "$url" -o wt.zip && unzip -j -o wt.zip
-          else
-            curl -fsSL "$url" -o wt.tar.gz && tar -xzf wt.tar.gz --strip-components=1 "${asset}/wasm-tools"
-          fi
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Verify toolchain
-        shell: bash
-        run: |
-          zig version
-          wasm-tools --version
-          wasmtime --version
-
-      - name: ci_gate.sh
-        shell: bash
-        env:
-          ZWASM_CI_EXTENDED: '0'
-          ZWASM_CI_JIT_RELEASESAFE: '0'
-          ZWASM_CI_RELEASESAFE_UNIT: '0'
-        run: bash scripts/ci_gate.sh
-
-      - name: test-wasi-p1-official (D-582)
-        shell: bash
-        run: zig build test-wasi-p1-official
-
   # The SINGLE required status check (point the branch ruleset here, not at the
   # individual `gate (...)` legs). Passes when the change was doc-only (gate
-  # skipped by design) OR when the 3-host gate succeeded. `always()` so it also
-  # runs when `gate` was skipped. All three legs are blocking (ADR-0211 D3), so
-  # `needs.gate.result` is 'success' only when Mac + Linux + Windows all pass.
+  # skipped by design) OR when the gate matrix succeeded. `always()` so it also
+  # runs when `gate` was skipped. Every leg is blocking (ADR-0211 D3, #545), so
+  # `needs.gate.result` is 'success' only when all four pass.
   ci-required:
     name: ci-required
     needs: [changes, doc-truth, gate]
@@ -592,13 +485,13 @@ jobs:
             exit 1
           fi
           if [ "$CODE" != "true" ]; then
-            echo "doc-only change — 3-host gate intentionally skipped; PASS"
+            echo "doc-only change — gate matrix intentionally skipped; PASS"
             exit 0
           fi
           echo "gate result: $GATE_RESULT"
           if [ "$GATE_RESULT" = "success" ]; then
-            echo "3-host gate passed; PASS"
+            echo "gate matrix passed; PASS"
             exit 0
           fi
-          echo "::error::3-host gate did not pass (result=$GATE_RESULT)"
+          echo "::error::gate matrix did not pass (result=$GATE_RESULT)"
           exit 1
