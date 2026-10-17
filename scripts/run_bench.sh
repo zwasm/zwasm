@@ -2,9 +2,8 @@
 # scripts/run_bench.sh — interactive bench runner via hyperfine.
 #
 # Builds zwasm in ReleaseFast (fair vs the release-optimized comparators;
-# --safe / BENCH_SAFE=1 forces ReleaseSafe) and runs each fixture in
-# bench/runners/wasm/{shootout,tinygo,handwritten}/*.wasm + the
-# 5 cljw_*.wasm guests from test/realworld/wasm/ (per §9.6 / 6.G).
+# --safe / BENCH_SAFE=1 forces ReleaseSafe) and runs the BENCHES
+# inventory below (bench/runners/wasm/{shootout,tinygo}/).
 # Writes results to bench/results/recent.yaml (records the build mode).
 #
 # Usage:
@@ -260,12 +259,6 @@ BENCHES=(
     # `--invoke` measured `init` (setup) through the first-func-export
     # fallback #220 removed. It needs `--invoke run=N` on every runtime
     # (bench/runners/wasm/PROVENANCE.txt).
-    # ClojureWasm v1 (vendored at §9.6 / 6.G into test/realworld/wasm/)
-    "cljw/fib:test/realworld/wasm/cljw_fib.wasm"
-    "cljw/gcd:test/realworld/wasm/cljw_gcd.wasm"
-    "cljw/arith:test/realworld/wasm/cljw_arith.wasm"
-    "cljw/sieve:test/realworld/wasm/cljw_sieve.wasm"
-    "cljw/tak:test/realworld/wasm/cljw_tak.wasm"
 )
 
 # §11.3 — under `--simd`, replace the inventory with the SIMD per-op
@@ -319,8 +312,9 @@ date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # §11.3 / ADR-0163 A — runtime matrix. zwasm engine row(s) first (one per
 # --engines entry, else a single `zwasm`); the --compare comparators (wasmtime /
-# wazero / wasmer / wasmedge) follow. YAML entries gain a `runtime:` field iff
-# the matrix has > 1 entry, so historical single-runtime entries stay shape-compatible.
+# wazero / wasmer / wasmedge) follow. Every row records its `runtime:`, the
+# single default row as `zwasm`; history entries older than the field have none,
+# and record_bench_delta.sh reads those as `zwasm`.
 RUNTIMES=("${ZW_RUNTIMES[@]}")
 if [ ${#COMPARATORS[@]} -gt 0 ]; then
     RUNTIMES+=("${COMPARATORS[@]}")

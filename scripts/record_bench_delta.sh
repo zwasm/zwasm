@@ -30,6 +30,13 @@
 #     `mean_ms` (legacy entries before §9.6 / 6.E).
 #   - Fixtures present only in one side surface with `—` in the
 #     missing column + `new`/`removed` flag.
+#   - Rows pair by (name, runtime): `--engines=jit,aot` writes two
+#     rows per name. An entry without the field ran the default
+#     engine and pairs as `zwasm`, which is how run_bench.sh records
+#     that engine now. When the two files hold more than one runtime
+#     between them, the Fixture cell reads `name (runtime)`.
+#   - A `null` time (a failed run) flags `⚠ failed` / `recovered` /
+#     `failed` with no delta, also on a row only one side has.
 #
 # Zone-equivalent: scripts (host-only). yq-go (in flake.nix) is
 # the YAML parser; bc is the float arithmetic.
@@ -55,12 +62,12 @@ if [ ! -f "$after_yaml" ]; then
 fi
 
 # Pick the median_ms (or mean_ms fallback) for each fixture in
-# the FIRST entry of the YAML. Outputs lines `name<TAB>ms`.
+# the FIRST entry of the YAML. Outputs lines `name<TAB>runtime<TAB>ms`.
 extract_benches() {
     local f="$1"
     yq -r '
         .[0].benches[] |
-        [.name, (.median_ms // .mean_ms)] | @tsv
+        [.name, (.runtime // "zwasm"), (.median_ms // .mean_ms)] | @tsv
     ' "$f"
 }
 
@@ -96,7 +103,7 @@ printf '|---|---:|---:|---:|---:|:---|\n'
 
 # Build assoc-array equivalent via tmpfiles (bash 3 on macOS lacks
 # associative arrays in portable form across all flake.nix shell
-# variants). Each tmpfile maps name → ms.
+# variants). Each tmpfile maps (name, runtime) → ms.
 tmp_before=$(mktemp)
 tmp_after=$(mktemp)
 trap 'rm -f "$tmp_before" "$tmp_after"' EXIT
@@ -104,20 +111,37 @@ trap 'rm -f "$tmp_before" "$tmp_after"' EXIT
 extract_benches "$before_yaml" > "$tmp_before"
 extract_benches "$after_yaml" > "$tmp_after"
 
-# Walk the union of fixture names in stable (after-then-before-only) order.
-all_names=$( { cut -f1 "$tmp_after"; cut -f1 "$tmp_before"; } | awk '!seen[$0]++')
+n_runtimes=$( { cut -f2 "$tmp_after"; cut -f2 "$tmp_before"; } | sort -u | wc -l | tr -d ' ')
 
-while IFS= read -r name; do
+# Walk the union of (name, runtime) keys in stable (after-then-before-only) order.
+all_keys=$( { cut -f1,2 "$tmp_after"; cut -f1,2 "$tmp_before"; } | awk '!seen[$0]++')
+
+while IFS=$'\t' read -r name rt; do
     [ -z "$name" ] && continue
-    before_ms=$(awk -F'\t' -v n="$name" '$1 == n { print $2; exit }' "$tmp_before")
-    after_ms=$(awk -F'\t' -v n="$name" '$1 == n { print $2; exit }' "$tmp_after")
+    before_ms=$(awk -F'\t' -v n="$name" -v r="$rt" '$1 == n && $2 == r { print $3; exit }' "$tmp_before")
+    after_ms=$(awk -F'\t' -v n="$name" -v r="$rt" '$1 == n && $2 == r { print $3; exit }' "$tmp_after")
+    label="$name"
+    if [ "$n_runtimes" -gt 1 ]; then
+        label="$name ($rt)"
+    fi
+
+    # run_bench.sh writes `null` when hyperfine or `zwasm compile` failed;
+    # read as a number, a null after-time is a −100 % "improvement". Checked
+    # before new/removed so a failed run on a one-sided row still flags.
+    if [ "$before_ms" = null ] || [ "$after_ms" = null ]; then
+        flag="failed"
+        if [ "$after_ms" = null ] && [ "$before_ms" != null ]; then flag="⚠ failed"; fi
+        if [ "$before_ms" = null ] && [ -n "$after_ms" ] && [ "$after_ms" != null ]; then flag="recovered"; fi
+        printf '| %s | %s | %s | — | — | %s |\n' "$label" "${before_ms:-—}" "${after_ms:-—}" "$flag"
+        continue
+    fi
 
     if [ -z "$before_ms" ] && [ -n "$after_ms" ]; then
-        printf '| %s | — | %s | — | — | new |\n' "$name" "$after_ms"
+        printf '| %s | — | %s | — | — | new |\n' "$label" "$after_ms"
         continue
     fi
     if [ -n "$before_ms" ] && [ -z "$after_ms" ]; then
-        printf '| %s | %s | — | — | — | removed |\n' "$name" "$before_ms"
+        printf '| %s | %s | — | — | — | removed |\n' "$label" "$before_ms"
         continue
     fi
 
@@ -137,5 +161,5 @@ while IFS= read -r name; do
         else print ""
     }')
 
-    printf '| %s | %s | %s | %s | %s%% | %s |\n' "$name" "$before_ms" "$after_ms" "$delta" "$pct" "$flag"
-done <<< "$all_names"
+    printf '| %s | %s | %s | %s | %s%% | %s |\n' "$label" "$before_ms" "$after_ms" "$delta" "$pct" "$flag"
+done <<< "$all_keys"

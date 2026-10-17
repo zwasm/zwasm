@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Manual bench recorder — the §12.4 deliberate-recording entry point. Thin
 # wrapper over scripts/run_bench.sh, which is the real hyperfine engine
-# (builds zwasm ReleaseFast + runs bench/runners/*.wasm + the cljw_* guests,
+# (builds zwasm ReleaseFast + runs its bench/runners/ inventory,
 # writing bench/results/recent.yaml).
 #
 # Without --phase-record: overwrites recent.yaml (gitignored, per-commit).
