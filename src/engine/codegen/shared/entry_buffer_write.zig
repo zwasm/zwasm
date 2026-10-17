@@ -40,7 +40,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const jit_abi = @import("jit_abi.zig");
-const stack_limit_mod = @import("../../../platform/stack_limit.zig");
 const entry = @import("entry.zig");
 
 pub const JitRuntime = jit_abi.JitRuntime;
@@ -71,9 +70,9 @@ pub const BufferWriteFn = *const fn (
 /// and the buffer contents are undefined.
 ///
 /// Mirrors `entry.invokeAndCheck`'s pre/post discipline:
-///   - Initialise `stack_limit` (ADR-0105 D1) so the prologue
-///     probe activates.
-///   - Clear `trap_flag` before the call.
+///   - Run the entry preamble (#302): arm the fault handler, publish
+///     `stack_limit` and clear `trap_flag` (ADR-0202 D4 + ADR-0105 D1
+///     + ADR-0017).
 ///   - Check `trap_flag` after the call; `Error.Trap` on non-0.
 ///   - The ErrCode return is a redundant trap signal — if either
 ///     ErrCode != 0 OR trap_flag != 0 the call is treated as trap.
@@ -83,9 +82,7 @@ pub fn invokeBufferWrite(
     args: [*]const u64,
     results: [*]u64,
 ) Error!void {
-    rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
-    rt.trap_flag = 0;
-    rt.trap_kind = 0;
+    entry.beginJitEntry(rt);
     // D-311 / D-245: route through the non-inline cohort-clobber trampoline so
     // the host's callee-saved registers (RBX/R12-R15 · X19-X28) are saved &
     // restored around the JIT call. The native_emit'd body MOV-installs that

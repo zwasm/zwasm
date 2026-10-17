@@ -49,6 +49,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **An out-of-bounds access in an embedder's first multi-result call traps
+  instead of killing the process** (#302). The JIT entry that multi-result
+  exports, and argument lists with no dedicated helper, go through never
+  armed the fault handler, so when it made a process's first JIT call, an
+  access the guard page catches (ADR-0202 D4) died by SIGSEGV. The CLI
+  installs a handler at startup and was not affected.
+
 - **A funcref the host reads back calls its own instance's function** (#566).
   Read from another instance's table or global, returned by its function or
   handed to a host callback, `wasm_ref_as_func` resolved the funcref against

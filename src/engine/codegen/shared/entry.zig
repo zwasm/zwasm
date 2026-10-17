@@ -282,6 +282,20 @@ pub const Error = error{
     Trap,
 };
 
+/// The pre-call preamble every JIT entry point runs (#302): arm the fault
+/// handler, publish the stack limit, clear the trap latch.
+///
+/// - ADR-0202 D4: an elided bounds check faults into the guard page, so a
+///   handler must be armed before the first JIT instruction.
+/// - ADR-0105 D1: `stack_limit` 0 (the field default) disables the prologue probe.
+/// - ADR-0017: `trap_flag` / `trap_kind` describe this call only.
+pub inline fn beginJitEntry(rt: *JitRuntime) void {
+    signal.ensureInstalled();
+    rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
+    rt.trap_flag = 0;
+    rt.trap_kind = 0;
+}
+
 /// Body shared by the ~97 Class A / Class C entry helpers.
 /// `R` is the return type; `f` is the typed function pointer
 /// produced by `module.entry(func_idx, FnPtr)`; `args` is a
@@ -296,16 +310,7 @@ inline fn invokeAndCheck(
     f: anytype,
     args: anytype,
 ) Error!R {
-    // ADR-0202 D4 — guard-page bounds elision converts an oob access into a
-    // hardware fault the production handler redirects to the oob stub. Any
-    // JIT execution must therefore have a fault handler armed; this is the
-    // single chokepoint (idempotent, skips when the CLI/embedding/spec-runner
-    // already installed one). Cheap atomic fast path after the once.
-    signal.ensureInstalled();
-    // ADR-0105 D1 — populate stack_limit per call for the prologue probe.
-    rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
-    rt.trap_flag = 0;
-    rt.trap_kind = 0;
+    beginJitEntry(rt);
     stack_limit_mod.diagOnceWithRt(rt, jit_abi.stack_limit_off, rt.stack_limit);
     // D-245: route through the non-inline clobber-trampoline
     // so the host's callee-saved cohort is preserved across the JIT call.
@@ -326,10 +331,7 @@ inline fn invokeAndCheckVoid(
     f: anytype,
     args: anytype,
 ) Error!void {
-    signal.ensureInstalled(); // ADR-0202 D4 — see invokeAndCheck
-    rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
-    rt.trap_flag = 0;
-    rt.trap_kind = 0;
+    beginJitEntry(rt);
     stack_limit_mod.diagOnceWithRt(rt, jit_abi.stack_limit_off, rt.stack_limit);
     if (comptime builtin.target.cpu.arch == .aarch64 and args.len == 0) {
         // D-245: the JIT prologue MOV-installs the pinned cohort (X19 +
@@ -1442,8 +1444,7 @@ pub fn callI32f64NoArgs(
     func_idx: u32,
     rt: *JitRuntime,
 ) Error!FuncRet_i32f64 {
-    rt.trap_flag = 0;
-    rt.trap_kind = 0;
+    beginJitEntry(rt);
     if (comptime builtin.target.cpu.arch == .aarch64) {
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
@@ -1565,8 +1566,7 @@ pub fn callF64i32NoArgs(
     func_idx: u32,
     rt: *JitRuntime,
 ) Error!FuncRet_f64i32 {
-    rt.trap_flag = 0;
-    rt.trap_kind = 0;
+    beginJitEntry(rt);
     if (comptime builtin.target.cpu.arch == .aarch64) {
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
@@ -1693,8 +1693,7 @@ pub fn callF64f32NoArgs(
     func_idx: u32,
     rt: *JitRuntime,
 ) Error!FuncRet_f64f32 {
-    rt.trap_flag = 0;
-    rt.trap_kind = 0;
+    beginJitEntry(rt);
     if (comptime builtin.target.cpu.arch == .aarch64) {
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
