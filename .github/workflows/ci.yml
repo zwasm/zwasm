@@ -224,6 +224,7 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      # `gate-arm64-linux` below copies this job's Unix steps (#545).
       matrix:
         include:
           - name: aarch64-macos
@@ -325,9 +326,13 @@ jobs:
           set -euo pipefail
           source .github/versions.lock
           v="v${WASMTIME_VERSION}"
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64) arch=aarch64 ;;
+          esac
           case "${{ runner.os }}" in
-            Linux)   asset="wasmtime-${v}-x86_64-linux";   ext="tar.xz" ;;
-            macOS)   asset="wasmtime-${v}-aarch64-macos";  ext="tar.xz" ;;
+            Linux)   asset="wasmtime-${v}-${arch}-linux";   ext="tar.xz" ;;
+            macOS)   asset="wasmtime-${v}-${arch}-macos";   ext="tar.xz" ;;
             Windows) asset="wasmtime-${v}-x86_64-windows"; ext="zip"    ;;
           esac
           url="https://github.com/bytecodealliance/wasmtime/releases/download/${v}/${asset}.${ext}"
@@ -350,9 +355,13 @@ jobs:
           set -euo pipefail
           source .github/versions.lock
           v="${WASM_TOOLS_VERSION}"
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64) arch=aarch64 ;;
+          esac
           case "${{ runner.os }}" in
-            Linux)   asset="wasm-tools-${v}-x86_64-linux";   ext="tar.gz" ;;
-            macOS)   asset="wasm-tools-${v}-aarch64-macos";  ext="tar.gz" ;;
+            Linux)   asset="wasm-tools-${v}-${arch}-linux";   ext="tar.gz" ;;
+            macOS)   asset="wasm-tools-${v}-${arch}-macos";   ext="tar.gz" ;;
             Windows) asset="wasm-tools-${v}-x86_64-windows"; ext="zip"    ;;
           esac
           url="https://github.com/bytecodealliance/wasm-tools/releases/download/v${v}/${asset}.${ext}"
@@ -423,6 +432,123 @@ jobs:
       # Time-boxed in the ADR-0174 sense, not indefinite: when D-583 goes green
       # on all three OSes the step moves into `test-all` and this block is
       # deleted. That row's DISCHARGE clause lists the edits.
+      - name: test-wasi-p1-official (D-582)
+        shell: bash
+        run: zig build test-wasi-p1-official
+
+  # A copy of `gate`'s Unix steps on aarch64-linux, outside `ci-required`
+  # (#545 phase 1): red here shows on the PR and stops nothing. Not a matrix
+  # row (`needs.gate.result` would make it blocking) and not `continue-on-error`
+  # (the test-wasi-p1-official block above says why). Not on the push to
+  # `main` either: a red job there fails the run, and `main_failure.yml` reports
+  # it as a failed merge (#312). Change `gate`, change this; it goes when the
+  # row joins the matrix (phase 3).
+  gate-arm64-linux:
+    name: "gate (aarch64-linux, advisory #545)"
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Cache Zig package deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: tools/lint/zig-pkg
+          key: zig-pkg-aarch64-linux-${{ hashFiles('tools/lint/build.zig.zon') }}
+          restore-keys: |
+            zig-pkg-aarch64-linux-
+
+      - name: Cache Zig 0.16.0
+        id: cache-zig
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/zig-0.16.0
+          key: zig-0.16.0-aarch64-linux
+
+      - name: Install Zig 0.16.0 (Unix)
+        if: steps.cache-zig.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.local
+          curl -fsSL "https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz" -o /tmp/zig.tar.xz
+          tar -xJf /tmp/zig.tar.xz -C ~/.local
+          mv "$HOME/.local/zig-aarch64-linux-0.16.0" "$HOME/.local/zig-0.16.0"
+
+      - name: Add Zig to PATH (Unix)
+        shell: bash
+        run: echo "$HOME/.local/zig-0.16.0" >> "$GITHUB_PATH"
+
+      - name: Install wasmtime (reference oracle, required)
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/versions.lock
+          v="v${WASMTIME_VERSION}"
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64) arch=aarch64 ;;
+          esac
+          case "${{ runner.os }}" in
+            Linux)   asset="wasmtime-${v}-${arch}-linux";   ext="tar.xz" ;;
+            macOS)   asset="wasmtime-${v}-${arch}-macos";   ext="tar.xz" ;;
+            Windows) asset="wasmtime-${v}-x86_64-windows"; ext="zip"    ;;
+          esac
+          url="https://github.com/bytecodealliance/wasmtime/releases/download/${v}/${asset}.${ext}"
+          mkdir -p "$HOME/.local/bin"
+          cd "$HOME/.local/bin"
+          if [ "$ext" = "zip" ]; then
+            curl -fsSL "$url" -o wasmtime.zip && unzip -j -o wasmtime.zip
+          else
+            curl -fsSL "$url" -o wasmtime.tar.xz && tar -xJf wasmtime.tar.xz --strip-components=1 "${asset}/wasmtime"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install wasm-tools (build-time, required for any zig build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/versions.lock
+          v="${WASM_TOOLS_VERSION}"
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64) arch=aarch64 ;;
+          esac
+          case "${{ runner.os }}" in
+            Linux)   asset="wasm-tools-${v}-${arch}-linux";   ext="tar.gz" ;;
+            macOS)   asset="wasm-tools-${v}-${arch}-macos";   ext="tar.gz" ;;
+            Windows) asset="wasm-tools-${v}-x86_64-windows"; ext="zip"    ;;
+          esac
+          url="https://github.com/bytecodealliance/wasm-tools/releases/download/v${v}/${asset}.${ext}"
+          mkdir -p "$HOME/.local/bin"
+          cd "$HOME/.local/bin"
+          if [ "$ext" = "zip" ]; then
+            curl -fsSL "$url" -o wt.zip && unzip -j -o wt.zip
+          else
+            curl -fsSL "$url" -o wt.tar.gz && tar -xzf wt.tar.gz --strip-components=1 "${asset}/wasm-tools"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          zig version
+          wasm-tools --version
+          wasmtime --version
+
+      - name: ci_gate.sh
+        shell: bash
+        env:
+          ZWASM_CI_EXTENDED: '0'
+          ZWASM_CI_JIT_RELEASESAFE: '0'
+          ZWASM_CI_RELEASESAFE_UNIT: '0'
+        run: bash scripts/ci_gate.sh
+
       - name: test-wasi-p1-official (D-582)
         shell: bash
         run: zig build test-wasi-p1-official
