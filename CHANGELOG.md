@@ -195,6 +195,9 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   cross-module func imports have no AUTO fallback, that an unrecognized
   `engine_kind` is AUTO, which function entries the JIT polls, and that the C
   API and a core-module CLI run start unmetered (#458, #459, #466, #228).
+  The Zig API reference states which part of the package SemVer covers — the
+  facade — and that the internal namespaces the package root also exports
+  (`ir`, `runtime`, …) may change in any release.
 
 ## [2.7.0] - 2026-09-14
 
