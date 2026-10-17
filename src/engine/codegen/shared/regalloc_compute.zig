@@ -39,20 +39,29 @@ pub const max_slots: u16 = 65535;
 const max_reg_slots_gpr_default: u16 = 8;
 
 /// Build a u16 bitmask of forbidden slot ids for a vreg by
-/// union-ing the reservation tables of every op strictly inside
-/// the vreg's live range (`def_pc < pc < last_use_pc`).
-fn forbiddenMaskForVreg(
+/// union-ing both reservation sets of every op strictly inside
+/// the vreg's live range (`def_pc < pc < last_use_pc`), plus the
+/// `operand` set of the op that last uses it.
+pub fn forbiddenMaskForVreg(
     instrs: []const zir.ZirInstr,
     r: LiveRange,
     fence: ScratchReservationFn,
 ) u16 {
     var mask: u16 = 0;
     var pc: u32 = r.def_pc + 1;
-    while (pc < r.last_use_pc) : (pc += 1) {
+    while (pc <= r.last_use_pc) : (pc += 1) {
         if (pc >= instrs.len) break;
-        for (fence(instrs[pc].op)) |sid| {
-            if (sid < 16) mask |= @as(u16, 1) << @intCast(sid);
-        }
+        const res = fence(instrs[pc].op);
+        if (pc < r.last_use_pc) mask |= maskOf(res.scratch);
+        mask |= maskOf(res.operand);
+    }
+    return mask;
+}
+
+fn maskOf(sids: []const u16) u16 {
+    var mask: u16 = 0;
+    for (sids) |sid| {
+        if (sid < 16) mask |= @as(u16, 1) << @intCast(sid);
     }
     return mask;
 }
@@ -201,6 +210,9 @@ pub fn computeWith(
             // array.new_elem: CALL into jitGcArrayNewElem; same strict
             // shape as array.new_data (offset + size consumed pre-CALL).
             .@"array.new_elem" => false,
+            // array.init_data / array.init_elem: CALL into jitGcArrayInit*;
+            // all four operands consumed into args before the CALL (strict).
+            .@"array.init_data", .@"array.init_elem" => false,
             // ref.test / ref.test_null: CALL into jitGcRefTest; the ref
             // operand is consumed into an arg reg before the CALL (strict).
             .@"ref.test", .@"ref.test_null" => false,
@@ -461,9 +473,9 @@ fn freshFunc() ZirFunc {
 /// Local stub fence-table fn for tests. Reserves slots {0..4} for
 /// `.@"table.fill"`. Mirrors the production reservation set per
 /// the live-scratch census.
-fn testFenceTableFill(op: zir.ZirOp) []const u16 {
+fn testFenceTableFill(op: zir.ZirOp) regalloc.Reservation {
     const reservation = [_]u16{ 0, 1, 2, 3, 4 };
-    return if (op == .@"table.fill") &reservation else &.{};
+    return if (op == .@"table.fill") .{ .scratch = &reservation } else .{};
 }
 
 test "compute: empty liveness yields empty allocation" {
@@ -881,6 +893,47 @@ test "fence: boundary PC (vreg ending AT reserving op) is safe on slot 0" {
     defer regalloc.deinit(testing.allocator, alloc);
     try testing.expectEqual(@as(u16, 0), alloc.slots[0]);
     try regalloc.verify(&f, alloc);
+}
+
+/// `testFenceTableFill`'s scratch plus an operand set {0, 1}: a handler that
+/// writes slots 0 and 1 before reading its last operand.
+fn testFenceOperand(op: zir.ZirOp) regalloc.Reservation {
+    const scratch = [_]u16{ 2, 3 };
+    const operand = [_]u16{ 0, 1 };
+    return if (op == .@"table.fill") .{ .scratch = &scratch, .operand = &operand } else .{};
+}
+
+test "fence: an operand set reaches the vreg the op last uses, a scratch set does not" {
+    var f = freshFunc();
+    defer f.deinit(testing.allocator);
+    try f.instrs.append(testing.allocator, .{ .op = .nop });
+    try f.instrs.append(testing.allocator, .{ .op = .nop });
+    try f.instrs.append(testing.allocator, .{ .op = .@"table.fill" });
+    const ranges = [_]LiveRange{
+        .{ .def_pc = 0, .last_use_pc = 2 },
+    };
+    f.liveness = .{ .ranges = &ranges };
+    const alloc = try computeWith(testing.allocator, &f, max_reg_slots_gpr_default, testFenceOperand, max_reg_slots_gpr_default);
+    defer regalloc.deinit(testing.allocator, alloc);
+    try testing.expectEqual(@as(u16, 2), alloc.slots[0]);
+    try regalloc.verifyWith(&f, alloc, testFenceOperand);
+    const broken: Allocation = .{ .slots = &.{0}, .n_slots = 1 };
+    try testing.expectError(regalloc.VerifyError.OpScratchOverlap, regalloc.verifyWith(&f, broken, testFenceOperand));
+}
+
+test "fence: a vreg crossing the op avoids both sets" {
+    var f = freshFunc();
+    defer f.deinit(testing.allocator);
+    try f.instrs.append(testing.allocator, .{ .op = .nop });
+    try f.instrs.append(testing.allocator, .{ .op = .@"table.fill" });
+    try f.instrs.append(testing.allocator, .{ .op = .nop });
+    const ranges = [_]LiveRange{
+        .{ .def_pc = 0, .last_use_pc = 2 },
+    };
+    f.liveness = .{ .ranges = &ranges };
+    const alloc = try computeWith(testing.allocator, &f, max_reg_slots_gpr_default, testFenceOperand, max_reg_slots_gpr_default);
+    defer regalloc.deinit(testing.allocator, alloc);
+    try testing.expectEqual(@as(u16, 4), alloc.slots[0]);
 }
 
 test "D-489: call-spanning spill + normal-path spill never share a slot" {

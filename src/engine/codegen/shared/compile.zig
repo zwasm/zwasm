@@ -47,14 +47,9 @@ const emit = switch (builtin.target.cpu.arch) {
 };
 
 /// ADR-0077 — per-arch op-internal scratch reservation lookup.
-/// arm64 supplies the 5-D-133-handler reservation set via
-/// `arm64/abi.zig::opScratchReservation`. x86_64 has no current
-/// hardcoded op-internal scratch (per ADR-0077 §Consequences);
-/// future SIMD work that introduces such patterns will add the
-/// mirror table and switch this arm.
 const scratch_reservations: ?regalloc.ScratchReservationFn = switch (builtin.target.cpu.arch) {
     .aarch64 => &@import("../arm64/abi.zig").opScratchReservation,
-    .x86_64 => null,
+    .x86_64 => &@import("../x86_64/abi.zig").opScratchReservation,
     else => @compileError("unsupported host arch"),
 };
 
@@ -267,10 +262,6 @@ pub fn compileOne(
         ),
         else => @compileError("unsupported host arch"),
     };
-    // ADR-0077 fence supplier — arm64 supplies the 5-D-133-handler
-    // reservation; x86_64 stays null (no current hardcoded
-    // op-internal scratch). Comptime-resolved per
-    // `scratch_reservations` const above.
     // ADR-0194 — the spill-frame origin = the per-arch GPR pool size
     // (the lowest slot id any class can spill at). Threaded into
     // `computeWith` so `spill_offsets` is sized+indexed from the SAME origin

@@ -392,6 +392,94 @@ comptime {
 }
 
 // ============================================================
+// ADR-0077 op-internal register reservations
+// ============================================================
+
+const zir = @import("../../../ir/zir.zig");
+const regalloc = @import("../shared/regalloc.zig");
+const jit_abi = @import("../shared/jit_abi.zig");
+
+const zir_op_count = @typeInfo(zir.ZirOp).@"enum".fields.len;
+
+/// What an op's handler writes outside the value it defines, stated as
+/// registers. The slot ids the regalloc fences follow from the pool, so a
+/// register that is not in it fences nothing.
+const OpRegs = struct {
+    /// Scratch with no call around it: a vreg live across the op loses it.
+    scratch: []const Gpr = &.{},
+    /// Written before the handler has read every operand.
+    operand: []const Gpr = &.{},
+};
+
+/// The call family (`call`, `call_indirect`, `call_ref`, `return_call*`)
+/// moves its arguments in parallel (`gpr.ParallelMove`) and reserves nothing.
+const op_regs: [zir_op_count]OpRegs = blk: {
+    @setEvalBranchQuota(100_000);
+    var t = [_]OpRegs{.{}} ** zir_op_count;
+    t[@intFromEnum(zir.ZirOp.@"memory.init")] = .{ .scratch = &.{ .rdi, .r8, .r9 } };
+    t[@intFromEnum(zir.ZirOp.@"table.set")] = .{ .scratch = &.{.r9} };
+    for ([_]zir.ZirOp{ .@"table.fill", .@"table.copy", .@"table.init" }) |op| {
+        t[@intFromEnum(op)] = .{ .scratch = &.{ .rsi, .rdi, .r8, .r9 }, .operand = &.{.r8} };
+    }
+    // Callouts that route their operands into the argument registers one at a
+    // time, so an early argument can land on a later operand.
+    for ([_]zir.ZirOp{
+        .@"array.copy", .@"array.fill",     .@"array.init_data", .@"array.init_elem",
+        .@"array.new",  .@"array.new_data", .@"array.new_elem",  .@"table.grow",
+    }) |op| {
+        t[@intFromEnum(op)] = .{ .operand = &current.arg_gprs };
+    }
+    for (0..zir_op_count) |i| {
+        const op: zir.ZirOp = @enumFromInt(i);
+        if (jit_abi.isAtomicRmw(op) or jit_abi.isAtomicCmpxchg(op) or
+            jit_abi.isAtomicNotify(op) or jit_abi.isAtomicWait(op))
+        {
+            t[i] = .{ .operand = &current.arg_gprs };
+        }
+    }
+    break :blk t;
+};
+
+fn poolSlots(comptime regs: []const Gpr) []const u16 {
+    comptime {
+        var ids: [regs.len]u16 = undefined;
+        var n: usize = 0;
+        for (regs) |r| {
+            for (allocatable_gprs, 0..) |p, i| {
+                if (p == r) {
+                    ids[n] = i;
+                    n += 1;
+                }
+            }
+        }
+        const out = ids[0..n].*;
+        return &out;
+    }
+}
+
+fn slotTable(comptime field: []const u8) [zir_op_count][]const u16 {
+    @setEvalBranchQuota(100_000);
+    var t: [zir_op_count][]const u16 = undefined;
+    for (op_regs, 0..) |e, i| t[i] = poolSlots(@field(e, field));
+    return t;
+}
+
+const op_scratch_slots = slotTable("scratch");
+const op_operand_slots = slotTable("operand");
+
+comptime {
+    @setEvalBranchQuota(100_000);
+    regalloc.validateRegallocOpScratchReservation(op_scratch_slots, allocatable_gprs.len);
+    regalloc.validateRegallocOpScratchReservation(op_operand_slots, allocatable_gprs.len);
+}
+
+/// `shared/regalloc.zig::ScratchReservationFn` for x86_64.
+pub fn opScratchReservation(op: zir.ZirOp) regalloc.Reservation {
+    const i = @intFromEnum(op);
+    return .{ .scratch = op_scratch_slots[i], .operand = op_operand_slots[i] };
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
@@ -602,5 +690,18 @@ test "current.entry_arg0_gpr and runtime_ptr_save_gpr match the active Cc" {
             try testing.expectEqual(Gpr.rcx, current.entry_arg0_gpr);
             try testing.expectEqual(Gpr.r15, current.runtime_ptr_save_gpr);
         },
+    }
+}
+
+test "poolSlots: a register maps to its pool slot, one outside the pool to nothing" {
+    try testing.expectEqualSlices(u16, &.{ 0, 2 }, comptime poolSlots(&.{ .rbx, .rax, .r13 }));
+    try testing.expectEqual(@as(usize, 0), comptime poolSlots(&.{ .r10, .r11, .r15 }).len);
+}
+
+test "opScratchReservation: every fenced slot holds a register its handler writes" {
+    for (op_regs, 0..) |e, i| {
+        const res = opScratchReservation(@enumFromInt(i));
+        for (res.scratch) |sid| try testing.expect(std.mem.findScalar(Gpr, e.scratch, allocatable_gprs[sid]) != null);
+        for (res.operand) |sid| try testing.expect(std.mem.findScalar(Gpr, e.operand, allocatable_gprs[sid]) != null);
     }
 }

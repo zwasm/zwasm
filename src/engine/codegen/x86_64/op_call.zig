@@ -521,8 +521,8 @@ pub fn emitCallIndirect(
         const ag = abi.current.arg_gprs; // SysV: rdi,rsi,rdx,rcx · Win64: rcx,rdx,r8,r9
         const idx_r0 = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, idx_vreg, 0);
         // args: ag[0]=rt, ag[1]=table_idx, ag[2]=idx, ag[3]=expected_raw.
-        // idx_r0 ∉ arg_gprs (it is callee-saved pool or a stage reg), so the
-        // arg-reg writes can't clobber it.
+        // idx is spilled here (inclusive crossing), so idx_r0 is the stage
+        // reg and the arg-reg writes can't clobber it.
         if (idx_r0 != ag[2]) try buf.appendSlice(allocator, inst.encMovRR(if (ci_idx64) .q else .d, ag[2], idx_r0).slice());
         try buf.appendSlice(allocator, inst.encMovRR(.q, ag[0], abi.runtime_ptr_save_gpr).slice());
         try buf.appendSlice(allocator, inst.encMovImm32W(ag[1], table_idx).slice());
@@ -555,6 +555,7 @@ pub fn emitCallIndirect(
         }
     }
 
+    const idx_carried = try carryPastMarshal(allocator, buf, alloc, idx_vreg);
     try marshalCallArgs(allocator, buf, alloc, pushed_vregs, spill_base_off, callee_sig);
 
     // D-097 d-18: load idx AFTER marshalCallArgs. The marshalling
@@ -565,7 +566,7 @@ pub fn emitCallIndirect(
     // call_indirect idx. Surfaced when ADR-0060 d-16 force-spilled
     // a call-crossing if-result fed into call_indirect's idx slot
     // (`if.wast:as-call_indirect-{first,mid,last}` × 3).
-    const idx_r = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, idx_vreg, 0);
+    const idx_r = idx_carried orelse try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, idx_vreg, 0);
 
     const expected_typeidx: u32 = canonical_type.canonicalTypeidx(module_types, type_idx);
 
@@ -790,11 +791,12 @@ pub fn emitCallRef(
     if (pushed_vregs.items.len < 1) return Error.AllocationMissing;
     const funcref_vreg = pushed_vregs.pop().?;
 
+    const funcref_carried = try carryPastMarshal(allocator, buf, alloc, funcref_vreg);
     try marshalCallArgs(allocator, buf, alloc, pushed_vregs, spill_base_off, callee_sig);
 
     // Load funcref pointer (mirror emitCallIndirect's idx load: AFTER
     // marshalCallArgs so its R10 staging doesn't clobber the load).
-    const funcref_r = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, funcref_vreg, 0);
+    const funcref_r = funcref_carried orelse try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, funcref_vreg, 0);
 
     // Null check: OR funcref_r, funcref_r (sets ZF iff null, value
     // unchanged) ; JZ trap. D-293 slice-4b — a null call_ref is null_reference
@@ -830,6 +832,23 @@ pub fn emitCallRef(
     try captureCallResult(allocator, buf, alloc, pushed_vregs, next_vreg, spill_base_off, callee_sig, memory_class_return, return_buffer_off);
 }
 
+/// An operand read after `marshalCallArgs` (call_indirect's index,
+/// call_ref's funcref). One in an argument register would be
+/// overwritten by the marshal, so it moves to R11 first: the marshal
+/// stages only through R10 and parks only in RAX. Null means read it
+/// in place once the marshal is done.
+pub fn carryPastMarshal(allocator: Allocator, buf: *std.ArrayList(u8), alloc: regalloc.Allocation, vreg: u32) Error!?abi.Gpr {
+    const r = switch (alloc.slot(vreg, .gpr)) {
+        .reg => |id| abi.slotToReg(id) orelse return Error.SlotOverflow,
+        .spill => return null,
+    };
+    if (std.mem.findScalar(abi.Gpr, &abi.current.arg_gprs, r) == null) return null;
+    try buf.appendSlice(allocator, inst.encMovRR(.q, carry_gpr, r).slice());
+    return carry_gpr;
+}
+
+const carry_gpr: abi.Gpr = abi.spill_stage_gprs[1];
+
 /// Marshal call arguments per SysV x86_64 §3.2.3 / Microsoft x64
 /// §"Argument Passing": pop N arg vregs in REVERSE (top-of-stack =
 /// rightmost arg), then emit MOV from each arg's home register
@@ -847,12 +866,11 @@ pub fn emitCallRef(
 ///     slot K = `shared_slot - 4` where shared_slot tracks the
 ///     int/fp shared counter and 4 is the per-Cc reg pool size.
 ///
-/// **No source-clobber risk by construction**: the regalloc pool
-/// (RBX, R12-R14 ± RDI/RSI on Win64) is disjoint from the per-Cc
-/// arg regs, so naive sequential MOV per arg is correct without
-/// parallel-move analysis. Spilled args stage through R10/R11
-/// (GPR) or XMM14/15 (FP) via the spill-aware helpers — disjoint
-/// from arg regs and from each other across stages.
+/// An argument may sit in another argument's register, so the
+/// register-bound GPR arguments go out as one `gpr.ParallelMove`
+/// after every memory and XMM destination. Spilled args stage
+/// through R10 (GPR) or XMM14 (FP); the XMM pool and the XMM
+/// argument registers are disjoint.
 ///
 /// **Scope**: ≤ 128 args (effectively unlimited). Reftype params
 /// (funcref / externref) ride the i64 8-byte gpr-class path per
@@ -919,6 +937,9 @@ pub fn marshalCallArgs(
         win64V128ScratchBase(callee_sig)
     else
         0;
+    // Register-bound GPR arguments wait until every source has been read:
+    // memory and XMM destinations go out in order, these as one parallel move.
+    var moves: gpr.ParallelMove = .{};
     var k: u32 = 0;
     while (k < n_args) : (k += 1) {
         const src_vreg = arg_vregs[k];
@@ -935,11 +956,7 @@ pub fn marshalCallArgs(
                     try buf.appendSlice(allocator, inst.encStoreR32MemRSPDisp32(src, disp).slice());
                     nsaa_idx += 1;
                 } else {
-                    const dst = abi.current.arg_gprs[gpr_arg_slot];
-                    const src = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
-                    if (src != dst) {
-                        try buf.appendSlice(allocator, inst.encMovRR(.d, dst, src).slice());
-                    }
+                    try moves.addVreg(alloc, abi.current.arg_gprs[gpr_arg_slot], src_vreg, .d);
                 }
                 gpr_arg_slot += 1;
                 if (abi.current_cc == .win64) fp_arg_slot += 1;
@@ -952,11 +969,7 @@ pub fn marshalCallArgs(
                     try buf.appendSlice(allocator, inst.encStoreR64MemRSPDisp32(src, disp).slice());
                     nsaa_idx += 1;
                 } else {
-                    const dst = abi.current.arg_gprs[gpr_arg_slot];
-                    const src = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
-                    if (src != dst) {
-                        try buf.appendSlice(allocator, inst.encMovRR(.q, dst, src).slice());
-                    }
+                    try moves.addVreg(alloc, abi.current.arg_gprs[gpr_arg_slot], src_vreg, .q);
                 }
                 gpr_arg_slot += 1;
                 if (abi.current_cc == .win64) fp_arg_slot += 1;
@@ -1012,8 +1025,7 @@ pub fn marshalCallArgs(
                     // Pass the scratch address in the int-arg-reg slot,
                     // or store the pointer onto the stack overflow.
                     if (gpr_arg_slot < abi.current.arg_gprs.len) {
-                        const ptr_reg = abi.current.arg_gprs[gpr_arg_slot];
-                        try buf.appendSlice(allocator, inst.encLeaR64BaseRspDisp32(ptr_reg, scratch_disp).slice());
+                        moves.add(abi.current.arg_gprs[gpr_arg_slot], .{ .lea_rsp = scratch_disp }, .q);
                     } else {
                         // Stack overflow: caller writes the 8-byte
                         // pointer into the int-arg shared slot.
@@ -1049,6 +1061,7 @@ pub fn marshalCallArgs(
             },
         }
     }
+    try moves.emit(allocator, buf, alloc, spill_base_off);
 }
 
 /// Compute the [RSP + disp] offset for an overflowed arg per

@@ -307,10 +307,10 @@ comptime {
 /// `shared/regalloc.zig::ScratchReservationFn` compatible accessor.
 /// Pass `&opScratchReservation` as the 4th argument of
 /// `computeWith` to enable the arm64 fence.
-pub fn opScratchReservation(op: zir.ZirOp) []const u16 {
+pub fn opScratchReservation(op: zir.ZirOp) regalloc.Reservation {
     const idx = @intFromEnum(op);
-    if (idx >= zir_op_count) return &.{};
-    return op_scratch_reservation_table[idx];
+    if (idx >= zir_op_count) return .{};
+    return .{ .scratch = op_scratch_reservation_table[idx] };
 }
 
 /// Is `xn` caller-saved per AAPCS64? Used by emit to decide
@@ -454,26 +454,26 @@ test "fp_spill_stage_vregs is exactly V29, V30 (2 regs for binary FP-op spill st
 
 test "opScratchReservation: table.fill reserves slots {0..4} (= X9..X13)" {
     const r = opScratchReservation(.@"table.fill");
-    try testing.expectEqualSlices(u16, &[_]u16{ 0, 1, 2, 3, 4 }, r);
+    try testing.expectEqualSlices(u16, &[_]u16{ 0, 1, 2, 3, 4 }, r.scratch);
 }
 
 test "opScratchReservation: 4 bulk handlers all reserve the same set" {
     const expected = [_]u16{ 0, 1, 2, 3, 4 };
-    try testing.expectEqualSlices(u16, &expected, opScratchReservation(.@"table.fill"));
-    try testing.expectEqualSlices(u16, &expected, opScratchReservation(.@"table.copy"));
-    try testing.expectEqualSlices(u16, &expected, opScratchReservation(.@"table.init"));
-    try testing.expectEqualSlices(u16, &expected, opScratchReservation(.@"memory.init"));
+    try testing.expectEqualSlices(u16, &expected, opScratchReservation(.@"table.fill").scratch);
+    try testing.expectEqualSlices(u16, &expected, opScratchReservation(.@"table.copy").scratch);
+    try testing.expectEqualSlices(u16, &expected, opScratchReservation(.@"table.init").scratch);
+    try testing.expectEqualSlices(u16, &expected, opScratchReservation(.@"memory.init").scratch);
 }
 
 test "opScratchReservation: non-bulk ops have empty reservation" {
-    try testing.expectEqual(@as(usize, 0), opScratchReservation(.nop).len);
-    try testing.expectEqual(@as(usize, 0), opScratchReservation(.@"i32.add").len);
-    try testing.expectEqual(@as(usize, 0), opScratchReservation(.@"i32.const").len);
+    try testing.expectEqual(@as(usize, 0), opScratchReservation(.nop).scratch.len);
+    try testing.expectEqual(@as(usize, 0), opScratchReservation(.@"i32.add").scratch.len);
+    try testing.expectEqual(@as(usize, 0), opScratchReservation(.@"i32.const").scratch.len);
     // table.set / table.get / table.size / table.grow are NOT in
     // the bulk cohort — d-64 / d-66 already discharged them via
     // load-then-overwrite. Empty reservation here is intentional.
-    try testing.expectEqual(@as(usize, 0), opScratchReservation(.@"table.set").len);
-    try testing.expectEqual(@as(usize, 0), opScratchReservation(.@"table.get").len);
+    try testing.expectEqual(@as(usize, 0), opScratchReservation(.@"table.set").scratch.len);
+    try testing.expectEqual(@as(usize, 0), opScratchReservation(.@"table.get").scratch.len);
 }
 
 test "opScratchReservation: all reserved slot ids are in allocatable range" {

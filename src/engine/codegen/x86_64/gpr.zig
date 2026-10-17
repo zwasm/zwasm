@@ -337,6 +337,88 @@ pub fn xmmStoreSpilled(
     }
 }
 
+/// A set of writes into fixed registers that must all read their sources
+/// before any of them lands: a call's argument marshal, where an operand may
+/// sit in the register another argument goes to (#503). `emit` orders the
+/// moves so no register is overwritten while a pending move still reads it;
+/// a cycle is broken through RAX, which is in no pool and no argument set.
+/// With no conflict the moves come out in queue order.
+pub const ParallelMove = struct {
+    pub const Src = union(enum) {
+        reg: Gpr,
+        /// Loaded through stage 0 (R10), which no queued move reads.
+        spilled: u32,
+        /// `LEA dst, [RSP + disp]` — the Win64 v128 hidden pointer.
+        lea_rsp: i32,
+    };
+    const Move = struct { dst: Gpr, src: Src, width: inst.Width };
+    const cap = 8;
+    const park: Gpr = .rax;
+
+    moves: [cap]Move = undefined,
+    len: u8 = 0,
+
+    /// Queue `dst ← vreg`, from its register or its spill slot.
+    pub fn addVreg(self: *ParallelMove, alloc: regalloc.Allocation, dst: Gpr, vreg: u32, width: inst.Width) Error!void {
+        const src: Src = switch (alloc.slot(vreg, .gpr)) {
+            .reg => |id| .{ .reg = abi.slotToReg(id) orelse return Error.SlotOverflow },
+            .spill => .{ .spilled = vreg },
+        };
+        self.add(dst, src, width);
+    }
+
+    /// Each destination is written once per set.
+    pub fn add(self: *ParallelMove, dst: Gpr, src: Src, width: inst.Width) void {
+        std.debug.assert(dst != park);
+        if (src == .reg and src.reg == dst) return;
+        std.debug.assert(self.len < cap);
+        self.moves[self.len] = .{ .dst = dst, .src = src, .width = width };
+        self.len += 1;
+    }
+
+    fn readByOther(self: *const ParallelMove, r: Gpr, skip: usize) bool {
+        for (self.moves[0..self.len], 0..) |m, i| {
+            if (i != skip and m.src == .reg and m.src.reg == r) return true;
+        }
+        return false;
+    }
+
+    pub fn emit(
+        self: *ParallelMove,
+        allocator: Allocator,
+        buf: *std.ArrayList(u8),
+        alloc: regalloc.Allocation,
+        spill_base_off: u32,
+    ) Error!void {
+        while (self.len > 0) {
+            const ready: usize = for (self.moves[0..self.len], 0..) |m, i| {
+                if (!self.readByOther(m.dst, i)) break i;
+            } else blk: {
+                // Every pending destination is still read, so the register
+                // sources form a cycle. Park the first destination's value
+                // and point its readers at the copy; that move is then free.
+                const d = self.moves[0].dst;
+                try writeBytes(allocator, buf, inst.encMovRR(.q, park, d));
+                for (self.moves[0..self.len]) |*m| {
+                    if (m.src == .reg and m.src.reg == d) m.src = .{ .reg = park };
+                }
+                break :blk 0;
+            };
+            const m = self.moves[ready];
+            switch (m.src) {
+                .reg => |r| try writeBytes(allocator, buf, inst.encMovRR(m.width, m.dst, r)),
+                .spilled => |v| {
+                    const r = try gprLoadSpilled(allocator, buf, alloc, spill_base_off, v, 0);
+                    try writeBytes(allocator, buf, inst.encMovRR(m.width, m.dst, r));
+                },
+                .lea_rsp => |disp| try writeBytes(allocator, buf, inst.encLeaR64BaseRspDisp32(m.dst, disp)),
+            }
+            std.mem.copyForwards(Move, self.moves[ready .. self.len - 1], self.moves[ready + 1 .. self.len]);
+            self.len -= 1;
+        }
+    }
+};
+
 // ============================================================
 // Tests
 // ============================================================
@@ -559,4 +641,75 @@ test "xmmLoadSpilledV128: in-reg vreg returns home XMM without emitting bytes" {
     const r = try xmmLoadSpilledV128(testing.allocator, &buf, alloc, 0, 0, 0);
     try testing.expectEqual(abi.allocatable_xmms[0], r);
     try testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+/// Seed RSI=1, RDI=2, R8=3, R9=4, run `pm`, then return the destinations
+/// packed one byte each, `dsts[0]` highest. Executes the bytes, so x86_64 only.
+fn runParallelMove(pm: *ParallelMove, dsts: []const Gpr) !u64 {
+    const jit_mem = @import("../../../platform/jit_mem.zig");
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const a = testing.allocator;
+    // RSI/RDI are callee-saved on Win64.
+    try writeBytes(a, &buf, inst.encPushR(.rsi));
+    try writeBytes(a, &buf, inst.encPushR(.rdi));
+    for ([_]Gpr{ .rsi, .rdi, .r8, .r9 }, 1..) |r, v| try writeBytes(a, &buf, inst.encMovImm64Q(r, v));
+    try pm.emit(a, &buf, .{ .slots = &.{}, .n_slots = 0 }, 0);
+    try writeBytes(a, &buf, inst.encMovRR(.q, .rax, dsts[0]));
+    for (dsts[1..]) |d| {
+        try writeBytes(a, &buf, inst.encShlRImm8(.q, .rax, 8));
+        try writeBytes(a, &buf, inst.encAddRR(.q, .rax, d));
+    }
+    try writeBytes(a, &buf, inst.encPopR(.rdi));
+    try writeBytes(a, &buf, inst.encPopR(.rsi));
+    try writeBytes(a, &buf, inst.encRet());
+
+    const block = try jit_mem.alloc(buf.items.len);
+    defer jit_mem.free(block);
+    @memcpy(block.bytes[0..buf.items.len], buf.items);
+    try jit_mem.setExecutable(block);
+    return block.asFnPtr(*const fn () callconv(.c) u64)();
+}
+
+test "ParallelMove: a source in a later destination is read before it is overwritten" {
+    // SIBLING-AT: src/engine/codegen/arm64/op_call.zig (X0-X7 are outside the arm64 pool; no conflict to order)
+    if (comptime @import("builtin").cpu.arch != .x86_64) return;
+    // Queue order puts each write ahead of the move that still reads it.
+    var pm: ParallelMove = .{};
+    pm.add(.rsi, .{ .reg = .r9 }, .q);
+    pm.add(.r8, .{ .reg = .rsi }, .q);
+    pm.add(.r9, .{ .reg = .rdi }, .q);
+    try testing.expectEqual(@as(u64, 0x04_01_02), try runParallelMove(&pm, &.{ .rsi, .r8, .r9 }));
+}
+
+test "ParallelMove: a two-register swap goes through RAX" {
+    // SIBLING-AT: src/engine/codegen/arm64/op_call.zig (X0-X7 are outside the arm64 pool; no conflict to order)
+    if (comptime @import("builtin").cpu.arch != .x86_64) return;
+    var pm: ParallelMove = .{};
+    pm.add(.rsi, .{ .reg = .rdi }, .q);
+    pm.add(.rdi, .{ .reg = .rsi }, .q);
+    try testing.expectEqual(@as(u64, 0x02_01), try runParallelMove(&pm, &.{ .rsi, .rdi }));
+}
+
+test "ParallelMove: a three-register rotate" {
+    // SIBLING-AT: src/engine/codegen/arm64/op_call.zig (X0-X7 are outside the arm64 pool; no conflict to order)
+    if (comptime @import("builtin").cpu.arch != .x86_64) return;
+    var pm: ParallelMove = .{};
+    pm.add(.rsi, .{ .reg = .rdi }, .d);
+    pm.add(.rdi, .{ .reg = .r8 }, .d);
+    pm.add(.r8, .{ .reg = .rsi }, .d);
+    try testing.expectEqual(@as(u64, 0x02_03_01), try runParallelMove(&pm, &.{ .rsi, .rdi, .r8 }));
+}
+
+test "ParallelMove: with no conflict the moves keep queue order" {
+    var pm: ParallelMove = .{};
+    pm.add(.rsi, .{ .reg = .rbx }, .d);
+    pm.add(.rdx, .{ .reg = .r12 }, .q);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try pm.emit(testing.allocator, &buf, .{ .slots = &.{}, .n_slots = 0 }, 0);
+    const a = inst.encMovRR(.d, .rsi, .rbx);
+    const b = inst.encMovRR(.q, .rdx, .r12);
+    try testing.expectEqualSlices(u8, a.slice(), buf.items[0..a.len]);
+    try testing.expectEqualSlices(u8, b.slice(), buf.items[a.len..]);
 }

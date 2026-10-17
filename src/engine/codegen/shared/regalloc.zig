@@ -76,7 +76,15 @@ pub const VerifyError = error{
 /// per-arch comptime `validate_op_scratch_reservation_table`
 /// enforces this at build time; runtime
 /// `slotForbidden` defensively ignores out-of-range ids.
-pub const ScratchReservationFn = *const fn (op: zir.ZirOp) []const u16;
+pub const ScratchReservationFn = *const fn (op: zir.ZirOp) Reservation;
+
+pub const Reservation = struct {
+    /// Slots the handler clobbers: no vreg live across the op may hold one.
+    scratch: []const u16 = &.{},
+    /// Slots the handler writes before it has read every operand: the op's
+    /// own operands (last use at its pc) may not hold one either.
+    operand: []const u16 = &.{},
+};
 
 // forbiddenMaskForVreg + slotForbidden + validateRegallocOpScratchReservation
 // + max_slots extracted to `regalloc_compute.zig` per ADR-0098.
@@ -289,11 +297,10 @@ pub fn verify(func: *const ZirFunc, alloc: Allocation) VerifyError!void {
 
 /// `verify` + ADR-0077 op-scratch-overlap post-condition.
 ///
-/// When `scratch_reservations` is non-null, additionally scans
-/// every live vreg's strict-interior PC range and emits
-/// `OpScratchOverlap` if the vreg's assigned slot id falls in
-/// the op's reservation set. PC shape mirrors `computeWith`'s
-/// fence (`def_pc < pc < last_use_pc`), so verification fires
+/// When `scratch_reservations` is non-null, additionally emits
+/// `OpScratchOverlap` if a live vreg's assigned slot id falls in
+/// a reservation its range meets. The mask is the one
+/// `computeWith` builds, so verification fires
 /// iff the walker should have skipped the slot id but didn't —
 /// the canonical regression check for a buggy fence
 /// integration. Spill slots (id ≥ `force_spill_threshold`,
@@ -322,14 +329,9 @@ pub fn verifyWith(
         const force_spill_threshold: u16 = alloc.max_reg_slots_gpr;
         for (live.ranges, 0..) |r, vreg| {
             const sid = alloc.slots[vreg];
-            if (sid >= force_spill_threshold) continue;
-            var pc: u32 = r.def_pc + 1;
-            while (pc < r.last_use_pc) : (pc += 1) {
-                if (pc >= func.instrs.items.len) break;
-                for (fence(func.instrs.items[pc].op)) |reserved_sid| {
-                    if (sid == reserved_sid) return VerifyError.OpScratchOverlap;
-                }
-            }
+            if (sid >= force_spill_threshold or sid >= 16) continue;
+            const mask = compute_mod.forbiddenMaskForVreg(func.instrs.items, r, fence);
+            if (mask & (@as(u16, 1) << @intCast(sid)) != 0) return VerifyError.OpScratchOverlap;
         }
     }
 }
@@ -379,9 +381,9 @@ fn freshFunc() ZirFunc {
 /// `.@"table.fill"` (mirrors the production reservation set per
 /// the live-scratch census). Kept duplicated rather than
 /// pub-ifying the regalloc.zig test helper.
-fn testFenceTableFill(op: zir.ZirOp) []const u16 {
+fn testFenceTableFill(op: zir.ZirOp) Reservation {
     const reservation = [_]u16{ 0, 1, 2, 3, 4 };
-    return if (op == .@"table.fill") &reservation else &.{};
+    return if (op == .@"table.fill") .{ .scratch = &reservation } else .{};
 }
 
 test "verify: rejects allocation with slot index >= n_slots" {
