@@ -7,7 +7,7 @@ owned by [`.dev/ROADMAP.md`](../.dev/ROADMAP.md)).
 
 **The short version: you need Zig 0.16.0 and `wasm-tools`.** The authoritative
 test gate is GitHub CI, which runs the 3-OS matrix on every pull request
-(all three legs blocking) — you do not need multiple machines, SSH hosts,
+(every leg blocking) — you do not need multiple machines, SSH hosts,
 Nix, or any maintainer-specific setup to contribute.
 
 ## Quick start
@@ -94,11 +94,12 @@ D-583 discharges, the step joins `test-all` and this paragraph goes away
 
 `main` is protected: every change lands via a branch → pull request → the
 required **`ci-required`** status check. CI runs
-[`scripts/ci_gate.sh`](../scripts/ci_gate.sh) on **all three supported OSes** —
-macOS aarch64, Linux x86_64, Windows x86_64. Your PR gets the *core* gate: fmt
+[`scripts/ci_gate.sh`](../scripts/ci_gate.sh) on **all three supported OSes**, as
+four legs — macOS aarch64, Linux x86_64 and aarch64, Windows x86_64. Your PR
+gets the *core* gate: fmt
 + `test-all` + the rust-host consumer + the test-discovery guard + the
 ReleaseSafe-runner floor guard (ADR-0177) + the unit tests built
-ReleaseSafe (Linux and Windows legs; the mode every release binary is built
+ReleaseSafe (x86_64 Linux and Windows legs; the mode every release binary is built
 in) — plus
 `test-wasi-p1-official`, which blocks from a step of its own rather than from
 inside the script (ADR-0225). The extended
@@ -107,7 +108,7 @@ static/build checks (lint, the build-option DCE matrix, AOT cross-compile,
 cold-cache builds and would dominate every PR's wall-clock. A failure of that
 `main` run is reported as a comment on the open `ci:main-failure` issue, since
 the run's actor is the merge queue's bot and GitHub notifies nobody (#312).
-All three legs are blocking (ADR-0211 D3). There is no additional hidden gate
+All four legs are blocking (ADR-0211 D3, #545). There is no additional hidden gate
 beyond CI.
 
 A green `zig build test` / `test-all` on a single OS is **not** sufficient
