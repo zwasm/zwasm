@@ -17,7 +17,7 @@ const Allocator = std.mem.Allocator;
 const _api_instance = @import("../api/instance.zig");
 const _runtime_value = @import("../runtime/value.zig");
 const _runtime_trap = @import("../runtime/trap.zig");
-const _dispatch = @import("../interp/dispatch.zig");
+const _trap_trace = @import("../interp/trap_trace.zig");
 const _zir = @import("../ir/zir.zig");
 const _runner = @import("../engine/runner.zig"); // ADR-0200 JIT engine (Zone 2)
 const _trap_surface = @import("../api/trap_surface.zig"); // JIT trap_kind → TrapKind
@@ -391,7 +391,7 @@ pub const Instance = struct {
                         rt0.operand_len = op_base;
                         return mapDispatchErr(e);
                     };
-                    hc.fn_ptr(rt0, hc.ctx) catch |err| {
+                    _trap_trace.enter(rt0, .{ .host = hc }, null) catch |err| {
                         rt0.operand_len = op_base;
                         return mapDispatchErr(err);
                     };
@@ -436,7 +436,7 @@ pub const Instance = struct {
             .func = zfunc,
         });
 
-        _dispatch.run(rt, _api_instance.dispatchTable(), zfunc.instrs.items) catch |err| {
+        _trap_trace.enter(rt, .{ .body = .{ .table = _api_instance.dispatchTable(), .instrs = zfunc.instrs.items } }, null) catch |err| {
             _ = rt.popFrame();
             rt.operand_len = op_base;
             return mapDispatchErr(err);

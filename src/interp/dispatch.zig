@@ -23,6 +23,7 @@ const std = @import("std");
 pub const zir = @import("../ir/zir.zig");
 const dispatch_table = @import("../ir/dispatch_table.zig");
 const runtime = @import("../runtime/runtime.zig");
+const trap_trace = @import("trap_trace.zig");
 
 const ZirInstr = zir.ZirInstr;
 const ZirOp = zir.ZirOp;
@@ -104,6 +105,7 @@ pub fn run(
     rt.table = table;
     defer rt.table = saved_table;
 
+    const entry_depth = rt.frame_len;
     const ephemeral = rt.frame_len == 0;
     if (ephemeral) {
         const empty_sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
@@ -128,6 +130,14 @@ pub fn run(
     // the caller's own defer-free retains ownership.
     var prev_trampoline_locals: ?[]runtime.Value = null;
     defer if (prev_trampoline_locals) |l| rt.alloc.free(l);
+
+    // ADR-0232 D2: the frame this call owns joins the trap trace as an error
+    // leaves. Declared after the defer above so it runs first, while a tail
+    // callee's locals are still allocated. At another depth the frame is not
+    // this call's (one `run` pushed for itself, or a tail switch that failed
+    // after popping). An exception may yet be caught, so it records nothing.
+    errdefer |err| if (err != error.UncaughtException and entry_depth > 0 and rt.frame_len == entry_depth)
+        trap_trace.record(rt.currentFrame());
 
     var instrs = initial_instrs;
     while (true) {
@@ -158,7 +168,7 @@ pub fn run(
             i -= 1;
             if (rt.operand_len == 0) {
                 rt.alloc.free(new_locals);
-                return Trap.StackOverflow;
+                return error.StackOverflow;
             }
             new_locals[i] = rt.popOperand();
         }
@@ -173,7 +183,7 @@ pub fn run(
             .func = next_callee,
         }) catch |e| {
             rt.alloc.free(new_locals);
-            return e;
+            return @as(anyerror!void, e);
         };
 
         // Free PREVIOUS iteration's trampoline alloc — that

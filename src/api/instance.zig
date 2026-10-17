@@ -35,7 +35,7 @@ const wasi = @import("wasi.zig");
 const trap_surface = @import("trap_surface.zig");
 const hooks = @import("../runtime/hooks.zig");
 const vec = @import("vec.zig");
-const dispatch = @import("../interp/dispatch.zig");
+const trap_trace = @import("../interp/trap_trace.zig");
 const interp_mvp = @import("../interp/mvp.zig");
 const runner = @import("../engine/runner.zig"); // ADR-0200 JIT engine (Zone 2)
 const build_options = @import("build_options");
@@ -1861,9 +1861,11 @@ fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytyp
             // Start sig is ()->() (validated), so no operand transfer.
             if (sfx < inst_rt.host_calls.len) {
                 if (inst_rt.host_calls[sfx]) |hc| {
-                    hc.fn_ptr(inst_rt, hc.ctx) catch |err| {
+                    var trace: trap_trace.Trace = .{};
+                    trap_trace.enter(inst_rt, .{ .host = hc }, &trace) catch |err| {
                         if (storeAllocator(store)) |sa| {
                             reportInstantiateTrap(sa, store, inst_id, mapInterpTrap(err), trap_out);
+                            if (trap_out) |to| trap_surface.attachTrace(sa, to.*, &trace);
                         }
                         failBuiltInstance(alloc, store, inst, inst_rt);
                         return null;
@@ -1890,7 +1892,8 @@ fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytyp
                 failBuiltInstance(alloc, store, inst, inst_rt);
                 return null;
             };
-            dispatch.run(inst_rt, dispatchTable(), zfunc.instrs.items) catch |err| {
+            var trace: trap_trace.Trace = .{};
+            trap_trace.enter(inst_rt, .{ .body = .{ .table = dispatchTable(), .instrs = zfunc.instrs.items } }, &trace) catch |err| {
                 // Start trapped → instantiation fails. The instance
                 // committed state (data writes, cross-module refs), so
                 // park-as-zombie rather than free (mirrors the build path).
@@ -1899,6 +1902,7 @@ fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytyp
                 // outlives the parked instance; caller frees via wasm_trap_delete.
                 if (storeAllocator(store)) |sa| {
                     reportInstantiateTrap(sa, store, inst_id, mapInterpTrap(err), trap_out);
+                    if (trap_out) |to| trap_surface.attachTrace(sa, to.*, &trace);
                 }
                 failBuiltInstance(alloc, store, inst, inst_rt);
                 return null;
@@ -2912,10 +2916,13 @@ pub export fn wasm_func_call(
         .func = zfunc,
     }) catch |err| return allocTrap(alloc, store, inst.id, mapInterpTrap(err));
 
-    dispatch.run(rt, dispatchTable(), zfunc.instrs.items) catch |err| {
+    var trace: trap_trace.Trace = .{};
+    trap_trace.enter(rt, .{ .body = .{ .table = dispatchTable(), .instrs = zfunc.instrs.items } }, &trace) catch |err| {
         _ = rt.popFrame();
         rt.operand_len = op_base;
-        return allocTrap(alloc, store, inst.id, mapInterpTrap(err));
+        const t = allocTrap(alloc, store, inst.id, mapInterpTrap(err));
+        trap_surface.attachTrace(alloc, t, &trace);
+        return t;
     };
     _ = rt.popFrame();
 

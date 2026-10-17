@@ -22,6 +22,7 @@ const wasm_c_api = @import("wasm.zig");
 const handles = @import("handles.zig"); // for `Ref` (wasm_trap_as_ref view); pointer-only cycle
 const hooks = @import("../runtime/hooks.zig");
 const runtime_engine = @import("../runtime/engine.zig");
+const trap_trace = @import("../interp/trap_trace.zig");
 
 const testing = std.testing;
 
@@ -101,6 +102,10 @@ pub const Trap = extern struct {
     /// Cached borrowed `wasm_ref_t` view (`wasm_trap_as_ref`, ADR-0158;
     /// payload = `@intFromPtr(self)`; freed in `wasm_trap_delete`).
     ref_view: ?*handles.Ref = null,
+    /// Where it happened, innermost first (ADR-0232); empty off the
+    /// interpreter. Store-allocated, freed in `wasm_trap_delete`.
+    trace_ptr: ?[*]trap_trace.Frame = null,
+    trace_len: usize = 0,
 };
 
 // ============================================================
@@ -317,7 +322,19 @@ pub export fn wasm_trap_delete(t: ?*Trap) callconv(.c) void {
     const alloc = wasm_c_api.storeAllocator(store) orelse return;
     if (handle.ref_view) |rv| alloc.destroy(rv); // object-identity as_ref view (ADR-0158)
     if (handle.message_ptr) |p| alloc.free(p[0..handle.message_len]);
+    if (handle.trace_ptr) |p| alloc.free(p[0..handle.trace_len]);
     alloc.destroy(handle);
+}
+
+/// Give an engine-built trap the trace the interpreter recorded for it. Out of
+/// memory leaves the trap without one, as on the JIT: a trap is never refused
+/// for want of its trace.
+pub fn attachTrace(alloc: std.mem.Allocator, t: ?*Trap, trace: *const trap_trace.Trace) void {
+    const handle = t orelse return;
+    if (trace.len == 0) return;
+    const frames = alloc.dupe(trap_trace.Frame, trace.slice()) catch return;
+    handle.trace_ptr = frames.ptr;
+    handle.trace_len = frames.len;
 }
 
 /// `wasm_trap_message(*Trap, *out ByteVec)` — populate `out`
@@ -349,14 +366,12 @@ pub export fn wasm_trap_message(t: ?*const Trap, out: ?*wasm_c_api.ByteVec) call
 // ============================================================
 // Frames + trap stack introspection (§13.2)
 //
-// zwasm's Trap is a single-flag signal (TrapKind; the per-trap-kind +
-// PC widening is ADR-0022 / D-022, deferred) — it does NOT capture a
-// call-stack. So `wasm_trap_origin` honestly returns null and
-// `wasm_trap_trace` an empty vec (the upstream contract permits a trap
-// with no origin/trace). The `wasm_frame_*` surface + `frame_vec` are
-// implemented for ABI completeness (a frame, if ever produced, exposes
-// its fields); `instance` is held as an opaque ptr to avoid an
-// instance.zig import cycle (instance.zig imports this file for Trap).
+// A trap raised on the interpreter carries the frames it unwound
+// (ADR-0232); one raised on the JIT carries none, so its origin is null
+// and its trace empty (the upstream contract permits a frame-less trap).
+// `instance` is held as an opaque ptr to avoid an instance.zig import
+// cycle (instance.zig imports this file for Trap); the engine never sets
+// it, because an instance can be freed while its runtime lives on.
 // ============================================================
 
 pub const Frame = extern struct {
@@ -455,17 +470,36 @@ pub export fn wasm_frame_vec_delete(v: ?*FrameVec) callconv(.c) void {
     handle.* = .{ .size = 0, .data = null };
 }
 
-/// `wasm_trap_origin` — zwasm captures no stack frame for a trap → null
-/// (spec permits a frame-less trap). Widening is ADR-0022 / D-022.
-pub export fn wasm_trap_origin(t: ?*const Trap) callconv(.c) ?*Frame {
-    _ = t;
-    return null;
+fn newFrame(f: trap_trace.Frame) ?*Frame {
+    const nf = std.heap.c_allocator.create(Frame) catch return null;
+    nf.* = .{ .func_index = f.func_idx, .func_offset = f.func_offset, .module_offset = f.module_offset };
+    return nf;
 }
 
-/// `wasm_trap_trace` — empty trace (no captured stack; see above).
+/// `wasm_trap_origin` — the innermost frame the trap unwound; null when it
+/// carries none (a JIT trap, an escaped exception, one the embedder made).
+pub export fn wasm_trap_origin(t: ?*const Trap) callconv(.c) ?*Frame {
+    const handle = t orelse return null;
+    const frames = handle.trace_ptr orelse return null;
+    return newFrame(frames[0]);
+}
+
+/// `wasm_trap_trace` — every frame the trap unwound, innermost first, or an
+/// empty vector when one cannot be built: never a vector with NULL holes.
 pub export fn wasm_trap_trace(t: ?*const Trap, out: ?*FrameVec) callconv(.c) void {
-    _ = t;
-    (out orelse return).* = .{ .size = 0, .data = null };
+    const o = out orelse return;
+    o.* = .{ .size = 0, .data = null };
+    const handle = t orelse return;
+    const frames = handle.trace_ptr orelse return;
+    const buf = std.heap.c_allocator.alloc(?*Frame, handle.trace_len) catch return;
+    for (frames[0..handle.trace_len], buf, 0..) |f, *slot, i| {
+        slot.* = newFrame(f) orelse {
+            for (buf[0..i]) |made| wasm_frame_delete(made);
+            std.heap.c_allocator.free(buf);
+            return;
+        };
+    }
+    o.* = .{ .size = buf.len, .data = buf.ptr };
 }
 
 // ============================================================

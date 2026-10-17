@@ -19,6 +19,7 @@ const testing = std.testing;
 const handles = @import("handles.zig");
 const instance = @import("instance.zig");
 const trap_surface = @import("trap_surface.zig");
+const trap_trace = @import("../interp/trap_trace.zig");
 const extern_new = @import("extern_new.zig");
 const types = @import("types.zig"); // test-only: build types for as_ref round-trips
 const vec = @import("vec.zig"); // test-only: ByteVec/ExternVec for the extern/module round-trip
@@ -338,6 +339,14 @@ pub export fn wasm_trap_copy(t: ?*const trap_surface.Trap) callconv(.c) ?*trap_s
         };
         @memcpy(dup, p[0..src.message_len]);
         c.message_ptr = dup.ptr;
+    }
+    if (src.trace_ptr) |p| {
+        const dup = alloc.dupe(trap_trace.Frame, p[0..src.trace_len]) catch {
+            if (c.message_ptr) |m| alloc.free(m[0..c.message_len]);
+            alloc.destroy(c);
+            return null;
+        };
+        c.trace_ptr = dup.ptr;
     }
     return c;
 }

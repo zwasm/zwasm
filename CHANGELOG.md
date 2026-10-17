@@ -20,6 +20,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Added
 
+- **`wasm_trap_origin` and `wasm_trap_trace` name where an interpreter trap
+  happened** (#498). The origin is the frame that trapped and the trace every
+  frame the trap unwound, innermost first, across instances, each with its
+  function index and its offsets in the module and the function. Both were
+  empty on every trap; they stay empty on the JIT and for an exception no
+  frame caught.
+
 - **`Instance.wasiExitCode`** — the Zig facade's counterpart to
   `zwasm_store_wasi_exit_code` (#490). After an `invoke` that a preview1
   `proc_exit` ended with `error.ProcExit`, it returns the guest's code; like the

@@ -41,7 +41,10 @@ Full coverage of the wasm-c-api families:
   `wasm_module_exports` lists a tag export the same way (#478); a tag has no
   `wasm_extern_t`, so `wasm_instance_exports` omits it (#479).
 - **Values + vectors**: `wasm_val_*`, `wasm_*_vec_new`/`_copy`/`_delete`.
-- **Traps + frames**: `wasm_trap_*`, `wasm_frame_*`.
+- **Traps + frames**: `wasm_trap_*`, `wasm_frame_*`. `wasm_trap_origin` /
+  `wasm_trap_trace` name the frames an interpreter trap unwound (function
+  index, module and function offsets; no instance); a JIT trap has none
+  (`zwasm.h`, ADR-0232).
 - **Refs + sharing**: `wasm_ref_*` (`_same`/`_as_*`/`_copy`), host_info
   accessors, `wasm_module_serialize`/`_deserialize`/`_share`/`_obtain`.
 

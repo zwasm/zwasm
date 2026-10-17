@@ -235,6 +235,15 @@ WASM_API_EXTERN int32_t zwasm_trap_kind(const wasm_trap_t*);
  * the vector reads as a C string and the text is size - 1 bytes. Symmetrically
  * wasm_trap_new takes a host message with or without the NUL inside size. */
 
+/* Where it happened: on an interpreter-backed instance, wasm.h's
+ * wasm_trap_origin is the frame that trapped and wasm_trap_trace every frame
+ * the trap unwound, innermost first, across instances (at most 64). A frame
+ * has its function index and its offsets in the module and in the function;
+ * wasm_frame_instance is NULL. The trace is empty, and the origin NULL, for a
+ * trap on a JIT-backed instance, for an exception no frame caught, and for a
+ * trap the embedder made. A trap a host function returns starts a new trace
+ * at the call that reached the host. */
+
 /* ── Instance helpers ────────────────────────────────────────────────── */
 
 /* Resolve an instance + defined-function index into a fresh, owned func
