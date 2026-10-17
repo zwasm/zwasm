@@ -7,10 +7,11 @@
 //! - macOS aarch64 (hardened runtime): MAP_JIT + per-thread W^X
 //!   toggle (`pthread_jit_write_protect_np`) + I-cache
 //!   invalidation.
-//! - Linux x86_64 (D-045 chunk 10): plain `mmap` with
-//!   PROT_READ|WRITE|EXEC (Linux doesn't enforce W^X on user
-//!   mmap unless SELinux/etc explicitly does). setExecutable /
-//!   setWritable are no-ops since the page is always RWX.
+//! - Linux x86_64 and aarch64 (D-045 chunk 10, #547): plain `mmap`
+//!   with PROT_READ|WRITE|EXEC (Linux doesn't enforce W^X on user
+//!   mmap unless SELinux/etc explicitly does). setWritable is a
+//!   no-op since the page is always RWX; setExecutable is one too
+//!   on x86_64, and on aarch64 it syncs the I-cache.
 //! - Windows x86_64 (D-045 chunk 12): `NtAllocateVirtualMemory`
 //!   with PAGE_EXECUTE_READWRITE (mirror of the Linux-RWX
 //!   shape; CFG / ACG aren't enforced for processes that don't
@@ -32,9 +33,11 @@ pub const Error = error{
     NotImplemented,
 };
 
-/// Allocation-rounding granularity. macOS aarch64 = 16K; Linux
-/// x86_64 = 4K (mmap will round up itself, but we pre-round so
-/// the JitBlock's `bytes.len` matches the actual mapping).
+/// Allocation-rounding granularity. macOS aarch64 = 16K; Linux = 4K
+/// (mmap will round up itself, but we pre-round so the JitBlock's
+/// `bytes.len` matches the actual mapping — except on a 16K/64K-page
+/// aarch64 kernel, where the mapping is longer and its tail unused;
+/// munmap rounds the length up the same way).
 const page_size: usize = if (builtin.os.tag == .macos and builtin.cpu.arch == .aarch64)
     16 * 1024
 else
@@ -47,6 +50,9 @@ else
 /// exec), giving the x86_64 codegen a local correctness loop (D-265 Phase IV).
 const macos_jit: bool = builtin.os.tag == .macos and
     (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64);
+
+const linux_rwx: bool = builtin.os.tag == .linux and
+    (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64);
 
 /// A page-aligned RWX region holding JIT-emitted bytes. Lifetime
 /// owned by the caller; pair `alloc` with `free`.
@@ -79,8 +85,8 @@ pub fn alloc(size: usize) Error!JitBlock {
         return .{ .bytes = aligned[0..rounded] };
     }
 
-    if (builtin.os.tag == .linux and builtin.cpu.arch == .x86_64) {
-        // D-045 chunk 10: Linux x86_64 mmap-RWX.
+    if (linux_rwx) {
+        // D-045 chunk 10: Linux mmap-RWX.
         const prot: std.posix.PROT = .{ .READ = true, .WRITE = true, .EXEC = true };
         const flags: std.posix.MAP = .{ .TYPE = .PRIVATE, .ANONYMOUS = true };
         const result = std.posix.mmap(null, rounded, prot, flags, -1, 0) catch return Error.AllocationFailed;
@@ -131,7 +137,7 @@ pub fn free(block: JitBlock) void {
         std.posix.munmap(block.bytes);
         return;
     }
-    if (builtin.os.tag == .linux and builtin.cpu.arch == .x86_64) {
+    if (linux_rwx) {
         std.posix.munmap(block.bytes);
         return;
     }
@@ -165,10 +171,10 @@ pub fn setExecutable(block: JitBlock) Error!void {
         sys_icache_invalidate(@ptrCast(block.bytes.ptr), block.bytes.len);
         return;
     }
-    if (builtin.os.tag == .linux and builtin.cpu.arch == .x86_64) {
-        // No-op: page is RWX from alloc; x86_64 has no I-cache
-        // coherency concern (D-cache writes are visible to I-cache
-        // implicitly per Intel SDM Vol 3 §11.6).
+    if (linux_rwx) {
+        // The page is RWX from alloc. x86_64 keeps the I-cache coherent
+        // with D-cache writes (Intel SDM Vol 3 §11.6); aarch64 does not.
+        if (builtin.cpu.arch == .aarch64) syncInstructionCache(block.bytes);
         return;
     }
     if (builtin.os.tag == .windows and builtin.cpu.arch == .x86_64) {
@@ -189,13 +195,50 @@ pub fn setWritable(block: JitBlock) Error!void {
         pthread_jit_write_protect_np(0); // 0 = disable W^X (RW)
         return;
     }
-    if (builtin.os.tag == .linux and builtin.cpu.arch == .x86_64) {
+    if (linux_rwx) {
         return;
     }
     if (builtin.os.tag == .windows and builtin.cpu.arch == .x86_64) {
         return;
     }
     return Error.NotImplemented;
+}
+
+/// Make bytes written through the D-side visible to instruction fetch
+/// (Arm ARM B2.4.4): clean D to the point of unification, invalidate I,
+/// then `isb`. CTR_EL0.IDC (bit 28) / DIC (bit 29) say the hardware
+/// already does a step, and the line sizes come from CTR_EL0 too. This
+/// is the sequence compiler-rt's `__clear_cache` runs; it is not linked
+/// here because ADR-0070 has no `__clear_cache` site.
+fn syncInstructionCache(bytes: []const u8) void {
+    const start = @intFromPtr(bytes.ptr);
+    const end = start + bytes.len;
+    const ctr = asm volatile ("mrs %[ctr], ctr_el0"
+        : [ctr] "=r" (-> u64),
+    );
+    if ((ctr >> 28) & 1 == 0) {
+        const line = @as(usize, 4) << @intCast((ctr >> 16) & 0xf);
+        var addr = start & ~(line - 1);
+        while (addr < end) : (addr += line) {
+            asm volatile ("dc cvau, %[addr]"
+                :
+                : [addr] "r" (addr),
+                : .{ .memory = true });
+        }
+    }
+    asm volatile ("dsb ish" ::: .{ .memory = true });
+    if ((ctr >> 29) & 1 == 0) {
+        const line = @as(usize, 4) << @intCast(ctr & 0xf);
+        var addr = start & ~(line - 1);
+        while (addr < end) : (addr += line) {
+            asm volatile ("ic ivau, %[addr]"
+                :
+                : [addr] "r" (addr),
+                : .{ .memory = true });
+        }
+        asm volatile ("dsb ish" ::: .{ .memory = true });
+    }
+    asm volatile ("isb" ::: .{ .memory = true });
 }
 
 const testing = std.testing;
@@ -233,6 +276,32 @@ test "JitBlock: emit native const-42 fn + execute, returns 42" {
     const Fn = *const fn () callconv(.c) u32;
     const f = block.asFnPtr(Fn);
     try testing.expectEqual(@as(u32, 42), f());
+}
+
+test "JitBlock: bytes rewritten after a publish execute on the next publish (#547)" {
+    // A stale I-cache line would still return 42 on aarch64-linux, where
+    // setExecutable is the only thing that syncs it.
+    if (builtin.os.tag == .windows) return skip.phaseEnd(.win64);
+    var block = try alloc(page_size);
+    defer free(block);
+    const Fn = *const fn () callconv(.c) u32;
+    for ([_]u16{ 42, 7 }) |value| {
+        try setWritable(block);
+        switch (builtin.cpu.arch) {
+            .aarch64 => {
+                const inst = @import("../engine/codegen/arm64/inst.zig");
+                std.mem.writeInt(u32, block.bytes[0..4], inst.encMovzImm16(0, value), .little);
+                std.mem.writeInt(u32, block.bytes[4..8], inst.encRet(30), .little);
+            },
+            .x86_64 => {
+                const code = [_]u8{ 0xB8, @intCast(value), 0x00, 0x00, 0x00, 0xC3 };
+                @memcpy(block.bytes[0..code.len], &code);
+            },
+            else => @compileError("unsupported arch for JIT exec test"),
+        }
+        try setExecutable(block);
+        try testing.expectEqual(@as(u32, value), block.asFnPtr(Fn)());
+    }
 }
 
 test "JitBlock: alloc(0) returns AllocationFailed" {

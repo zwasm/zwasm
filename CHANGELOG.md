@@ -35,6 +35,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **The JIT runs on aarch64-linux** (#547). The executable-memory layer had no
+  branch for it, so every JIT compile there returned `NotImplemented`: the
+  default engine fell back to the interpreter, and `--engine jit` and a JIT
+  instance from the C API failed. It now maps code read-write-execute as on
+  x86_64-linux, and syncs the instruction cache on every publish, which aarch64
+  does not do on its own.
+
 - **The interpreter's dispatch loop and handler table no longer move with
   unrelated code** (#541). The interpreter's speed moved by up to 13% with where
   `run`'s loop fell against a 64-byte boundary, and by 11% with where the
