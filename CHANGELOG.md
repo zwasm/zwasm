@@ -52,6 +52,10 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   8 bytes into the slot above: a scalar spilled just before a v128 value read
   back the v128's upper lanes.
 
+- **A v128 `select` whose result spills returns the selected value**
+  (#560). The x86_64 handler staged the spilled result through the
+  register it also used as scratch, so the result was 0.
+
 - **The JIT runs on aarch64-linux** (#547). The executable-memory layer had no
   branch for it, so every JIT compile there returned `NotImplemented`: the
   default engine fell back to the interpreter, and `--engine jit` and a JIT
