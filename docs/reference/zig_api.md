@@ -19,6 +19,16 @@ exe.root_module.addImport("zwasm", zw.module("zwasm"));
 `@import("zwasm")` then exposes everything below. zwasm links libc (its
 Engine carries a C allocator path).
 
+SemVer (see the [CHANGELOG](../../CHANGELOG.md)) covers the facade:
+`Engine`, `Module`, `Instance`, `Linker` and the other types this page lists,
+with the types, error sets, and options reached through them. The root also
+exports `support`, `platform`, `ir`, `parse`, `validate`, `runtime`,
+`diagnostic`, `feature`, `interp`, `instruction`, `engine`, `wasi`, `api`, and
+`cli`. Those namespaces exist so the library's own files can import across
+zones (ADR-0024 D-3), and any release may change or remove what is in them
+without notice. If you depend on one of them, open an issue naming what the
+facade is missing.
+
 ## Types
 
 All values are `union(enum)` / `struct` re-exported from
