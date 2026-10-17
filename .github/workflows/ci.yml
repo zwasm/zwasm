@@ -244,8 +244,12 @@ jobs:
           - name: aarch64-linux
             runs-on: ubuntu-24.04-arm
             zig-dir: zig-aarch64-linux-0.16.0
-            # #545 — core only: neither ReleaseSafe lane has run on this host
-            # yet, and a row takes one under #347's headroom rule above.
+            # #545 — both ReleaseSafe lanes, measured on run 39030377235: the
+            # unit lane adds 6.6 min to an 11-17 min leg (macOS: 22-31), and
+            # the JIT smoke 4.5 min to the push run, where macOS takes ~90.
+            # Not `extended`: those checks are host-independent.
+            jit_releasesafe: true
+            releasesafe_unit: true
           - name: x86_64-windows
             runs-on: windows-2022
             zig-dir: zig-x86_64-windows-0.16.0

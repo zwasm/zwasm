@@ -99,7 +99,7 @@ four legs — macOS aarch64, Linux x86_64 and aarch64, Windows x86_64. Your PR
 gets the *core* gate: fmt
 + `test-all` + the rust-host consumer + the test-discovery guard + the
 ReleaseSafe-runner floor guard (ADR-0177) + the unit tests built
-ReleaseSafe (x86_64 Linux and Windows legs; the mode every release binary is built
+ReleaseSafe (Linux and Windows legs; the mode every release binary is built
 in) — plus
 `test-wasi-p1-official`, which blocks from a step of its own rather than from
 inside the script (ADR-0225). The extended

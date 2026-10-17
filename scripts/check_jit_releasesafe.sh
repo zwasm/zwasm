@@ -11,8 +11,9 @@
 # SIMD, so this forces the JIT execute path). A non-zero exit = the
 # callee-saved-clobber SEGV regressed. Cheap to read, ~minutes to build.
 #
-# Where this runs: `ci_gate.sh` invokes it for ZWASM_CI_EXTENDED (the Unix
-# legs) and for ZWASM_CI_JIT_RELEASESAFE (the Windows leg, #303). Both fire on
+# Where this runs: `ci_gate.sh` invokes it for ZWASM_CI_EXTENDED (macOS,
+# x86_64-linux) and for ZWASM_CI_JIT_RELEASESAFE (Windows #303, aarch64-linux
+# #545). Both fire on
 # the push to `main` and NOT on a pull request. A regression in
 # this class therefore reaches `main` before any lane reports it — the same
 # shape of gap that let the original defect ship. The cost is the reason: this

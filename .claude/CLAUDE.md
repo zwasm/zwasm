@@ -83,7 +83,7 @@ text or code identifiers.
   merge gate. A PR run gets the **core** gate — zig fmt + `test-all` +
   `bench-latency-build` (compile-only, ADR-0209) + the test-discovery guard,
   plus `run-rust-host` on the Linux legs only and the unit tests built
-  ReleaseSafe on the x86_64-linux and Windows legs (#347, #303) — and, as a blocking
+  ReleaseSafe on the Linux and Windows legs (#347, #303, #545) — and, as a blocking
   step OUTSIDE `ci_gate.sh`,
   `test-wasi-p1-official` (ADR-0225; the only leg content the script does not
   define). The **extended** checks (lint /

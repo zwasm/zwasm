@@ -14,13 +14,13 @@
 #     separately because "every OS" above is load-bearing: anything added
 #     here is verified on the Linux legs alone.
 #   Core — legs whose ci.yml matrix row says `releasesafe_unit: true`
-#     (x86_64 Linux + Windows), read here as ZWASM_CI_RELEASESAFE_UNIT: the unit
+#     (Linux + Windows), read here as ZWASM_CI_RELEASESAFE_UNIT: the unit
 #     tests built ReleaseSafe (zig build test -Doptimize=ReleaseSafe, #347,
 #     #303). Every PR, but only on the legs with the wall-clock headroom for
 #     a second optimised build.
-#   ReleaseSafe JIT smoke: ZWASM_CI_EXTENDED (Unix legs) or
-#     ZWASM_CI_JIT_RELEASESAFE (the Windows leg; #303).
-#   Extended (ZWASM_CI_EXTENDED=1; Unix legs): lint + build-option DCE +
+#   ReleaseSafe JIT smoke: ZWASM_CI_EXTENDED (macOS, x86_64-linux) or
+#     ZWASM_CI_JIT_RELEASESAFE (Windows #303, aarch64-linux #545).
+#   Extended (ZWASM_CI_EXTENDED=1; macOS, x86_64-linux): lint + build-option DCE +
 #     ReleaseSafe JIT smoke (D-245) + AOT cross-compile portability +
 #     external system-linker consumer (test_extlink.sh) + zone_check +
 #     spill_aware_check (host-independent source checks, promoted to CI
@@ -142,7 +142,7 @@ echo "[ci_gate] ReleaseSafe-runner floor (check_releasesafe_runners)"
 bash scripts/check_releasesafe_runners.sh
 
 # Also reachable through ZWASM_CI_JIT_RELEASESAFE, which `ci.yml` sets for the
-# Windows leg alone — see the matrix row there for why (#303).
+# Windows and aarch64-linux legs — see their matrix rows for why (#303, #545).
 if [ "${ZWASM_CI_EXTENDED:-0}" = "1" ] || [ "${ZWASM_CI_JIT_RELEASESAFE:-0}" = "1" ]; then
     echo "[ci_gate] --engine=jit ReleaseSafe smoke (D-245 GPR + #286 Win64 XMM)"
     bash scripts/check_jit_releasesafe.sh
