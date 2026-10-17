@@ -1691,6 +1691,28 @@ pub fn build(b: *std.Build) void {
     const test_signal_install_step = b.step("test-signal-install-order", "Regression-run the fault-handler install/publish ordering (issue #320; skips on Windows)");
     test_signal_install_step.dependOn(&run_signal_install.step);
 
+    // Issue #302 — regression-run the first-JIT-entry preamble: whichever
+    // entry point a process reaches first must arm the fault handler, publish
+    // `stack_limit` and clear the trap latch, the three mixed multi-result
+    // inline-asm thunks and the buffer-write path included. Same
+    // standalone-exe reason as #320 above (the install flag is process-global
+    // and sticky), plus the parent must not execute JIT code before forking.
+    // Self-skips on Windows (fork).
+    const first_entry_arm_runner_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/runners/first_entry_arm_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    first_entry_arm_runner_mod.addImport("zwasm", zwasm_lib_mod);
+    const first_entry_arm_runner_exe = b.addExecutable(.{
+        .name = "zwasm-first-entry-arm",
+        .root_module = first_entry_arm_runner_mod,
+    });
+    const run_first_entry_arm = b.addRunArtifact(first_entry_arm_runner_exe);
+    run_first_entry_arm.addArg(b.pathFromRoot("test/runners/fixtures/first_entry_arm"));
+    const test_first_entry_arm_step = b.step("test-first-entry-arm", "Regression-run the first-JIT-entry preamble (issue #302; skips on Windows)");
+    test_first_entry_arm_step.dependOn(&run_first_entry_arm.step);
+
     // `zig build test-all` — aggregate all enabled test layers.
     // Phase 0: only `test`. Phase 1+ adds spec / e2e / realworld /
     // c_api / fuzz steps as they land. Each layer registers itself
@@ -1699,6 +1721,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_internal_fault.step); // ADR-0166 B-core
     test_all_step.dependOn(&run_oob_trap.step); // ADR-0202 D4/D5 (D-507) guard-page elision
     test_all_step.dependOn(&run_signal_install.step); // issue #320 install/publish ordering
+    test_all_step.dependOn(&run_first_entry_arm.step); // issue #302 first-JIT-entry preamble
     test_all_step.dependOn(&run_core_tests.step);
     test_all_step.dependOn(&run_cli_tests.step);
     test_all_step.dependOn(&run_spec_smoke.step);

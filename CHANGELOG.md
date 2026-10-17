@@ -42,6 +42,17 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **Whichever entry point a process reaches first arms the fault handler and
+  the stack probe** (#302). The three mixed multi-result inline-asm thunks and
+  the buffer-write path (the multi-result `invoke`) cleared `trap_flag` and
+  called the JIT without the two things `invokeAndCheck` does:
+  `signal.ensureInstalled()` and publishing `rt.stack_limit`. With guard-page
+  bounds elision (ADR-0202 D4), an out-of-bounds access in that first call was
+  a hardware fault with no handler armed, so the process died by SIGSEGV
+  instead of trapping; and `stack_limit = 0` — the field's default — disables
+  the prologue's stack probe entirely. Every entry point now runs the same
+  `entry.beginJitEntry` preamble: handler, limit, and the trap latch.
+
 - **The JIT runs on aarch64-linux** (#547). The executable-memory layer had no
   branch for it, so every JIT compile there returned `NotImplemented`: the
   default engine fell back to the interpreter, and `--engine jit` and a JIT

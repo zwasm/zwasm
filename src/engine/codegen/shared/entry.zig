@@ -282,6 +282,34 @@ pub const Error = error{
     Trap,
 };
 
+/// The pre-call preamble every JIT entry point owes, whichever entry it is
+/// (#302): arm the fault handler, publish the stack limit, and clear the trap
+/// latch a previous call may have left set.
+///
+/// - ADR-0202 D4 — guard-page bounds elision turns an oob access into a
+///   hardware fault the production handler redirects to the oob stub, so a
+///   handler must be armed before the first JIT instruction. Idempotent, and
+///   cheap (one atomic load) once the CLI / embedding / spec runner has
+///   installed one.
+/// - ADR-0105 D1 — the prologue probe compares SP against `rt.stack_limit`,
+///   and 0 (the field default) disables the probe entirely, so the limit is
+///   published per entry.
+/// - ADR-0017 — `trap_flag` / `trap_kind` describe THIS call; zero them before
+///   it, or a previous call's trap is re-read as this one's.
+///
+/// `invokeAndCheck` and `invokeAndCheckVoid` were the only callers of the
+/// first two; the three mixed multi-result inline-asm thunks and
+/// `entry_buffer_write.invokeBufferWrite` bypassed them, so a process whose
+/// first JIT call took one of those paths ran unprotected JIT code. They call
+/// this now, and the next entry point inherits the list instead of
+/// re-deriving it.
+pub inline fn beginJitEntry(rt: *JitRuntime) void {
+    signal.ensureInstalled();
+    rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
+    rt.trap_flag = 0;
+    rt.trap_kind = 0;
+}
+
 /// Body shared by the ~97 Class A / Class C entry helpers.
 /// `R` is the return type; `f` is the typed function pointer
 /// produced by `module.entry(func_idx, FnPtr)`; `args` is a
@@ -296,16 +324,7 @@ inline fn invokeAndCheck(
     f: anytype,
     args: anytype,
 ) Error!R {
-    // ADR-0202 D4 — guard-page bounds elision converts an oob access into a
-    // hardware fault the production handler redirects to the oob stub. Any
-    // JIT execution must therefore have a fault handler armed; this is the
-    // single chokepoint (idempotent, skips when the CLI/embedding/spec-runner
-    // already installed one). Cheap atomic fast path after the once.
-    signal.ensureInstalled();
-    // ADR-0105 D1 — populate stack_limit per call for the prologue probe.
-    rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
-    rt.trap_flag = 0;
-    rt.trap_kind = 0;
+    beginJitEntry(rt); // ADR-0202 D4 + ADR-0105 D1 + ADR-0017
     stack_limit_mod.diagOnceWithRt(rt, jit_abi.stack_limit_off, rt.stack_limit);
     // D-245: route through the non-inline clobber-trampoline
     // so the host's callee-saved cohort is preserved across the JIT call.
@@ -326,10 +345,7 @@ inline fn invokeAndCheckVoid(
     f: anytype,
     args: anytype,
 ) Error!void {
-    signal.ensureInstalled(); // ADR-0202 D4 — see invokeAndCheck
-    rt.stack_limit = stack_limit_mod.computeStackLimit(stack_limit_mod.STACK_GUARD_HEADROOM);
-    rt.trap_flag = 0;
-    rt.trap_kind = 0;
+    beginJitEntry(rt);
     stack_limit_mod.diagOnceWithRt(rt, jit_abi.stack_limit_off, rt.stack_limit);
     if (comptime builtin.target.cpu.arch == .aarch64 and args.len == 0) {
         // D-245: the JIT prologue MOV-installs the pinned cohort (X19 +
@@ -1442,8 +1458,7 @@ pub fn callI32f64NoArgs(
     func_idx: u32,
     rt: *JitRuntime,
 ) Error!FuncRet_i32f64 {
-    rt.trap_flag = 0;
-    rt.trap_kind = 0;
+    beginJitEntry(rt); // #302 — these thunks bypass invokeAndCheck
     if (comptime builtin.target.cpu.arch == .aarch64) {
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
@@ -1565,8 +1580,7 @@ pub fn callF64i32NoArgs(
     func_idx: u32,
     rt: *JitRuntime,
 ) Error!FuncRet_f64i32 {
-    rt.trap_flag = 0;
-    rt.trap_kind = 0;
+    beginJitEntry(rt); // #302 — these thunks bypass invokeAndCheck
     if (comptime builtin.target.cpu.arch == .aarch64) {
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
@@ -1693,8 +1707,7 @@ pub fn callF64f32NoArgs(
     func_idx: u32,
     rt: *JitRuntime,
 ) Error!FuncRet_f64f32 {
-    rt.trap_flag = 0;
-    rt.trap_kind = 0;
+    beginJitEntry(rt); // #302 — these thunks bypass invokeAndCheck
     if (comptime builtin.target.cpu.arch == .aarch64) {
         const Fn = *const fn (rt: *const JitRuntime) callconv(.c) void;
         const f = module.entry(func_idx, Fn);
