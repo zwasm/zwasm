@@ -75,9 +75,9 @@ pub fn emitLocalGet(
             try gpr.xmmStoreSpilled(allocator, buf, alloc, spill_base_off, vreg, 0);
         },
         .v128 => {
-            const dst_x = try gpr.xmmDefSpilled(alloc, vreg, 0);
+            const dst_x = try gpr.xmmDefSpilledV128(alloc, vreg, 0);
             try buf.appendSlice(allocator, rbpLoadXmmV128(dst_x, disp).slice());
-            try gpr.xmmStoreSpilled(allocator, buf, alloc, spill_base_off, vreg, 0);
+            try gpr.xmmStoreSpilledV128(allocator, buf, alloc, spill_base_off, vreg, 0);
         },
     }
     try pushed_vregs.append(allocator, vreg);
@@ -118,7 +118,7 @@ pub fn emitLocalSet(
             try buf.appendSlice(allocator, rbpStoreXmmF64(disp, src_x).slice());
         },
         .v128 => {
-            const src_x = try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, src_v, 0);
+            const src_x = try gpr.xmmLoadSpilledV128(allocator, buf, alloc, spill_base_off, src_v, 0);
             try buf.appendSlice(allocator, rbpStoreXmmV128(disp, src_x).slice());
         },
     }
@@ -159,7 +159,7 @@ pub fn emitLocalTee(
             try buf.appendSlice(allocator, rbpStoreXmmF64(disp, src_x).slice());
         },
         .v128 => {
-            const src_x = try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, src_v, 0);
+            const src_x = try gpr.xmmLoadSpilledV128(allocator, buf, alloc, spill_base_off, src_v, 0);
             try buf.appendSlice(allocator, rbpStoreXmmV128(disp, src_x).slice());
         },
     }

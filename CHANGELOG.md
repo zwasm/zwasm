@@ -42,6 +42,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A spilled v128 value moves to and from a local whole** (#558).
+  On x86_64, `local.get`, `local.set` and `local.tee` of a v128 local moved 8 of
+  its 16 bytes through a spilled vreg, so with more than six v128 values live,
+  lanes 2 and 3 came back as garbage or 0.
+
 - **The JIT runs on aarch64-linux** (#547). The executable-memory layer had no
   branch for it, so every JIT compile there returned `NotImplemented`: the
   default engine fell back to the interpreter, and `--engine jit` and a JIT
