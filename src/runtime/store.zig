@@ -187,12 +187,16 @@ pub const Store = struct {
     }
 };
 
-/// One parked instance. Keeps the runtime + arena alive until
+/// One parked instance. Keeps the runtime, arena and instance alive until
 /// `wasm_store_delete` walks the list. Per ADR-0014 §2.1 /
 /// 6.K.2 sub-change 4.
 pub const Zombie = struct {
     runtime: *Runtime,
     arena: *std.heap.ArenaAllocator,
+    /// The `api/` `Instance`, erased for the Zone-1 reason `jit_zombies` is.
+    /// Kept too because `runtime.instance` and the `Ref`s a host call is
+    /// handed point at it (#539).
+    instance: *anyopaque,
 };
 
 const testing = std.testing;

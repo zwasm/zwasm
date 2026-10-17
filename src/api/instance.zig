@@ -268,24 +268,15 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
     const alloc = engineAllocator(engine);
     // D-174: cascade-cleanup any c_api Instance handles still
     // registered as live at store-teardown time. Each handle's
-    // runtime + arena get parked as zombies (reaped in the next
-    // loop), and the Instance struct itself is freed. After the
+    // runtime, arena and Instance struct get parked as zombies
+    // (reaped in the next loop). After the
     // cascade, `inst.store` pointers in any caller-held handle
     // are stale, but the handles themselves are freed — calling
     // wasm_instance_delete on them post-cascade is UB by C-API
     // contract (use-after-free of caller-owned handle pointer).
     for (handle.live_instances.items) |inst_opaque| {
         const inst: *Instance = @ptrCast(@alignCast(inst_opaque));
-        if (inst.runtime) |rt| {
-            if (inst.arena) |arena| {
-                // EXEMPT-FALLBACK: D-174 — parkAsZombie OOM at store-teardown accepts arena leak over UAF.
-                parkAsZombie(alloc, handle, rt, arena) catch {};
-                inst.arena = null;
-            } else {
-                rt.deinit();
-                alloc.destroy(rt);
-            }
-        }
+        const parked = if (inst.runtime) |rt| parkOrFreeInterp(alloc, handle, inst, rt) else false;
         // #360 — a JIT-backed instance still live here has its JitInstance
         // parked for the reap below. Before this it was dropped on the floor
         // (the cascade only ever looked at `inst.runtime`), leaking the code
@@ -297,11 +288,11 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
         }
         inst.funcs_storage = &.{};
         inst.func_ptrs_storage = &.{};
-        alloc.destroy(inst);
+        if (!parked) alloc.destroy(inst);
     }
     handle.live_instances.deinit(alloc);
-    // Reap zombies first: each one's runtime + arena outlived the
-    // instance handle so cross-module funcrefs into it stayed
+    // Reap zombies first: each one's runtime, arena and instance
+    // outlived the C handle so cross-module funcrefs into it stayed
     // valid; with the store going away, no foreign reference
     // remains, so they can be freed.
     for (handle.zombies.items) |z| {
@@ -309,6 +300,7 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
         z.arena.deinit();
         alloc.destroy(z.arena);
         alloc.destroy(z.runtime);
+        alloc.destroy(@as(*Instance, @ptrCast(@alignCast(z.instance))));
     }
     handle.zombies.deinit(alloc);
     // #360 — and the JIT-backed zombies: an importer's bridge thunk pointed at
@@ -380,25 +372,27 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
     alloc.destroy(handle);
 }
 
-/// Park a runtime + arena pair on the store's zombie list. Used
-/// by `wasm_instance_new`'s catch path (failed instantiation
-/// retains its state per Wasm 2.0 partial-init semantics) and
-/// by `wasm_instance_delete` (cross-module funcrefs into the
-/// instance's funcs stay valid until store teardown). Per
+/// Retire an interpreter instance's state. With an arena, the runtime, the
+/// arena and the instance itself park on the store's zombie list until
+/// `wasm_store_delete`: cross-module funcrefs point into the arena (a failed
+/// instantiation keeps its partial writes, Wasm 2.0), and `runtime.instance`
+/// and the `Ref`s a host call is handed point at the instance (#539). Without
+/// an arena the runtime is freed. Returns whether the instance now belongs to
+/// the zombie list; the caller frees it only when this is false. Per
 /// ADR-0014 §2.1 / 6.K.2 sub-change 4.
-fn parkAsZombie(
-    store_alloc: std.mem.Allocator,
-    store: *Store,
-    rt: *runtime.Runtime,
-    arena: *std.heap.ArenaAllocator,
-) std.mem.Allocator.Error!void {
-    try store.zombies.append(store_alloc, .{
-        .runtime = rt,
-        .arena = arena,
-    });
+fn parkOrFreeInterp(alloc: std.mem.Allocator, store: *Store, inst: *Instance, rt: *runtime.Runtime) bool {
+    const arena = inst.arena orelse {
+        rt.deinit();
+        alloc.destroy(rt);
+        return false;
+    };
+    inst.arena = null;
+    // EXEMPT-FALLBACK: ADR-0014 — a zombie-list OOM leaks the instance, runtime and arena rather than leave cross-module references dangling.
+    store.zombies.append(alloc, .{ .runtime = rt, .arena = arena, .instance = inst }) catch {};
+    return true;
 }
 
-/// #360 — the JIT counterpart of `parkAsZombie`. A cross-module func import
+/// #360 — the JIT counterpart of `parkOrFreeInterp`. A cross-module func import
 /// bakes the exporter's `&owned.rt` and entry address into the importer's
 /// bridge thunk (D-225), so the exporter's `JitInstance` must outlive every
 /// importer. Parking defers the free to `wasm_store_delete`, by when nothing
@@ -475,7 +469,7 @@ pub export fn zwasm_store_set_wasi(s: ?*Store, h: ?*wasi_host.Host) callconv(.c)
             // so each capture funds exactly the one retirement it can cause
             // (ADR-0224). Kept fallible rather than assuming the capacity so a
             // violated reservation degrades instead of panicking in a library.
-            // EXEMPT-FALLBACK: ADR-0014 — an append OOM accepts the leak over the UAF, mirroring parkAsZombie.
+            // EXEMPT-FALLBACK: ADR-0014 — an append OOM accepts the leak over the UAF, mirroring parkOrFreeInterp.
             store.retired_wasi_hosts.append(std.heap.c_allocator, old_opaque) catch {};
         } else {
             const old: *wasi_host.Host = @ptrCast(@alignCast(old_opaque));
@@ -932,7 +926,7 @@ fn buildBindings(
                 //
                 // Retention: naming the definer is the dependency the
                 // re-exporter's own binding already carries, and
-                // `parkAsZombie` above is what meets it — an interp runtime is
+                // `parkOrFreeInterp` above is what meets it — an interp runtime is
                 // never freed before its store. `cross_module_reexport.c`
                 // deletes A and B before calling C.
                 var target_rt = source_rt;
@@ -1629,21 +1623,14 @@ const BuildBindingsCApi = struct {
 
 /// Tear down a fully-built instance whose post-build finalize failed
 /// (instantiateRuntime trap OR start-function trap). Parks the committed
-/// runtime/arena as a zombie when an arena exists (cross-module refs may
-/// point into it — destroying would UAF; ADR-0014 §2.1), else frees.
+/// runtime, arena and instance as a zombie when an arena exists
+/// (`parkOrFreeInterp`), else frees.
 fn failBuiltInstance(alloc: std.mem.Allocator, store: *Store, inst: *Instance, inst_rt: *runtime.Runtime) void {
-    if (inst.arena) |arena2| {
-        // EXEMPT-FALLBACK: ADR-0014 — parkAsZombie OOM accepts arena leak over UAF of cross-module references.
-        parkAsZombie(alloc, store, inst_rt, arena2) catch {};
-        inst.arena = null;
-    } else {
-        inst_rt.deinit();
-        alloc.destroy(inst_rt);
-    }
+    const parked = parkOrFreeInterp(alloc, store, inst, inst_rt);
     inst.funcs_storage = &.{};
     inst.func_ptrs_storage = &.{};
     removeFromLiveInstances(store, inst);
-    alloc.destroy(inst);
+    if (!parked) alloc.destroy(inst);
 }
 
 /// Wasm §5.5.13 — scan section headers for the start section (id 8) and
@@ -1800,17 +1787,10 @@ fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytyp
         if (err == error.CrossStoreImport) {
             crossStoreTrap(alloc, store, trap_out);
         }
-        if (inst.arena) |a2| {
-            // EXEMPT-FALLBACK: ADR-0014 — parkAsZombie OOM accepts arena leak over UAF of cross-module references.
-            parkAsZombie(alloc, store, inst_rt, a2) catch {};
-            inst.arena = null;
-        } else {
-            inst_rt.deinit();
-            alloc.destroy(inst_rt);
-        }
+        const parked = parkOrFreeInterp(alloc, store, inst, inst_rt);
         inst.funcs_storage = &.{};
         inst.func_ptrs_storage = &.{};
-        alloc.destroy(inst);
+        if (!parked) alloc.destroy(inst);
         return null;
     };
 
@@ -1930,8 +1910,8 @@ fn removeFromLiveInstances(store: *Store, inst: *Instance) void {
 
 /// `wasm_instance_delete(*Instance)` — release the C-side
 /// `wasm_instance_t` handle. Per ADR-0014 §2.1 / 6.K.2 sub-
-/// change 4 the underlying runtime + arena park as a zombie on
-/// the store: cross-module funcrefs into this instance's funcs
+/// change 4 the underlying runtime, arena and instance struct park
+/// as a zombie on the store: cross-module funcrefs into this instance's funcs
 /// from sibling instances stay valid until `wasm_store_delete`
 /// reaps the zombie. Mirrors wasmtime's instance-Arc lifetime
 /// (`store.rs:146`) and wazero's `involvingModuleInstances`
@@ -1965,24 +1945,12 @@ pub export fn wasm_instance_delete(i: ?*Instance) callconv(.c) void {
         }
         handle.exports_storage = &.{};
     }
-    if (handle.runtime) |rt| {
-        if (handle.arena) |arena| {
-            // Park instead of free. If parkAsZombie OOMs we accept
-            // the arena leak (process exit cleans it up) rather
-            // than UAF the cross-module references.
-            // EXEMPT-FALLBACK: ADR-0014 — parkAsZombie OOM accepts arena leak over UAF of cross-module references.
-            parkAsZombie(alloc, store, rt, arena) catch {};
-            handle.arena = null;
-        } else {
-            // Pre-arena state (couldn't happen on the success
-            // path but defensive): free the runtime directly.
-            rt.deinit();
-            alloc.destroy(rt);
-        }
-    }
+    const parked = if (handle.runtime) |rt| parkOrFreeInterp(alloc, store, handle, rt) else false;
+    // Emptied even when parked, so a funcref into a deleted instance is not
+    // found, though an import of it still runs (#555).
     handle.funcs_storage = &.{};
     handle.func_ptrs_storage = &.{};
-    alloc.destroy(handle);
+    if (!parked) alloc.destroy(handle);
 }
 
 // ============================================================
@@ -4869,7 +4837,7 @@ const v128_cross_inst_importer_wasm = [_]u8{
 // on a 1-entry table. Wasm 2.0 §4.5.4 says active element bounds
 // are checked at instantiation; OOB raises a trap caught by the
 // wasm_instance_new wrapper → arena parks on store.zombies.
-// Used by gap A3 to exercise the parkAsZombie catch-path.
+// Used by gap A3 to exercise the parkOrFreeInterp catch-path.
 const trapping_oob_elem_wasm = [_]u8{
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
     0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type: () -> ()
@@ -5248,7 +5216,7 @@ test "wasm 2.0 c_api zombie partial-init: OOB element segment parks arena; store
     // Simpler form of the audit's full partial-init scenario: an
     // active element segment with OOB offset traps at instantiation
     // (Wasm 2.0 §4.5.4 — active elem bounds are runtime-checked).
-    // The trap must trigger the parkAsZombie catch path in
+    // The trap must trigger the parkOrFreeInterp catch path in
     // wasm_instance_new — without this the arena leaks AND any
     // cross-module funcrefs into the failed instance UAF.
     // wasm_store_delete then cleanly reaps the zombie (no second
@@ -5258,7 +5226,7 @@ test "wasm 2.0 c_api zombie partial-init: OOB element segment parks arena; store
     // cross-module table imports) requires hand-rolling a more
     // intricate Wasm module with table imports + multiple element
     // segments; deferred to v0.1.0 RC (D-075). This chunk covers
-    // the structural plumbing — the parkAsZombie path itself —
+    // the structural plumbing — the parkOrFreeInterp path itself —
     // which is the load-bearing invariant.
     const e = wasm_engine_new() orelse return error.EngineAllocFailed;
     defer wasm_engine_delete(e);
@@ -5279,7 +5247,7 @@ test "wasm 2.0 c_api zombie partial-init: OOB element segment parks arena; store
     try testing.expect(inst == null);
 
     // Zombie list grew by exactly one entry. Without the catch-path
-    // parkAsZombie this would be 0 (arena freed prematurely) or the
+    // parkOrFreeInterp this would be 0 (arena freed prematurely) or the
     // test would crash on UAF later.
     try testing.expectEqual(@as(usize, 1), s.zombies.items.len);
 
@@ -5287,6 +5255,139 @@ test "wasm 2.0 c_api zombie partial-init: OOB element segment parks arena; store
     // removed by removeFromLiveInstances inside the catch path
     // (D-174 fix) before being destroyed.
     try testing.expectEqual(@as(usize, 0), s.live_instances.items.len);
+}
+
+// #539 — a deleted instance's runtime lives on as a zombie and still points at
+// the instance. `DebugAllocator` keeps a freed slot's bytes until the slot is
+// reused, so a read through a dangling pointer finds the old values; this one
+// fills each block it frees, so the read finds garbage instead.
+const ScribbleAllocator = struct {
+    var anchor: u8 = 0;
+    const vtable: std.mem.Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
+    fn alloc(_: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+        return testing.allocator.rawAlloc(len, a, ra);
+    }
+    fn resize(_: *anyopaque, m: []u8, a: std.mem.Alignment, n: usize, ra: usize) bool {
+        return testing.allocator.rawResize(m, a, n, ra);
+    }
+    fn remap(_: *anyopaque, m: []u8, a: std.mem.Alignment, n: usize, ra: usize) ?[*]u8 {
+        return testing.allocator.rawRemap(m, a, n, ra);
+    }
+    fn free(_: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
+        @memset(m, 0xaa);
+        testing.allocator.rawFree(m, a, ra);
+    }
+};
+
+fn testingAllocEngine() !*Engine {
+    const e = wasm_engine_new() orelse return error.EngineAllocFailed;
+    e.alloc_ptr = &ScribbleAllocator.anchor;
+    e.alloc_vtable = @ptrCast(&ScribbleAllocator.vtable);
+    return e;
+}
+
+fn deleteTestingAllocEngine(e: *Engine) void {
+    // `wasm_engine_new` made the engine and its `Io.Threaded` with c_allocator.
+    e.alloc_ptr = std.heap.c_allocator.ptr;
+    e.alloc_vtable = @ptrCast(std.heap.c_allocator.vtable);
+    wasm_engine_delete(e);
+}
+
+/// Instantiates `a` (with `a_imports`), then `b` importing a's first export,
+/// deletes `a`, and returns `b` with `a`'s id. `a`'s exports are released
+/// before the delete, so only `b`'s binding still reaches it.
+fn zombieImporter(s: *Store, m_a: *Module, m_b: *Module, a_imports: ?*const anyopaque) !struct { b: *Instance, a_id: u64 } {
+    const inst_a = instanceNewWithEngine(s, m_a, a_imports, null, .interp) orelse return error.InstanceAAllocFailed;
+    const a_id = inst_a.id;
+    const inst_b = blk: {
+        var exports_a: ExternVec = .{ .size = 0, .data = null };
+        wasm_instance_exports(inst_a, &exports_a);
+        defer wasm_extern_vec_delete(&exports_a);
+        var imports_arr: [1]?*Extern = .{exports_a.data.?[0]};
+        var imports_vec: ExternVec = .{ .size = imports_arr.len, .data = &imports_arr };
+        break :blk instanceNewWithEngine(s, m_b, @ptrCast(&imports_vec), null, .interp) orelse return error.InstanceBAllocFailed;
+    };
+    wasm_instance_delete(inst_a);
+    return .{ .b = inst_b, .a_id = a_id };
+}
+
+fn callFirstExport(inst: *Instance, results: []Val) ?*Trap {
+    var exports: ExternVec = .{ .size = 0, .data = null };
+    wasm_instance_exports(inst, &exports);
+    defer wasm_extern_vec_delete(&exports);
+    const f = wasm_extern_as_func(exports.data.?[0]) orelse return null;
+    var rv: ValVec = .{ .size = results.len, .data = if (results.len > 0) results.ptr else null };
+    const av: ValVec = .{ .size = 0, .data = null };
+    return wasm_func_call(f, &av, &rv);
+}
+
+test "#539: memory.grow in a deleted instance, reached through its importer, reports that instance" {
+    const zwasm_ext = @import("zwasm_ext.zig");
+    const e = try testingAllocEngine();
+    defer deleteTestingAllocEngine(e);
+    const Seen = struct {
+        var id: u64 = 0;
+        fn hook(_: ?*anyopaque, instance_id: u64, _: u32, _: u64, _: u64) callconv(.c) void {
+            id = instance_id;
+        }
+    };
+    Seen.id = 0;
+    zwasm_ext.zwasm_engine_set_memory_growth_hook(e, Seen.hook, null);
+    const s = wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_store_delete(s);
+
+    // (module (memory 1) (func (export "grow") (result i32) (memory.grow (i32.const 1))))
+    var a = [_]u8{ 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x08, 0x01, 0x04, 0x67, 0x72, 0x6f, 0x77, 0x00, 0x00, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x01, 0x40, 0x00, 0x0b };
+    // (module (import "a" "grow" (func (result i32))) (func (export "call") (result i32) call 0))
+    var b = [_]u8{ 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x0a, 0x01, 0x01, 0x61, 0x04, 0x67, 0x72, 0x6f, 0x77, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x63, 0x61, 0x6c, 0x6c, 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b };
+    const m_a = wasm_module_new(s, &.{ .size = a.len, .data = &a }) orelse return error.ModuleAAllocFailed;
+    defer wasm_module_delete(m_a);
+    const m_b = wasm_module_new(s, &.{ .size = b.len, .data = &b }) orelse return error.ModuleBAllocFailed;
+    defer wasm_module_delete(m_b);
+
+    const z = try zombieImporter(s, m_a, m_b, null);
+    defer wasm_instance_delete(z.b);
+    var res: [1]Val = undefined;
+    try testing.expect(callFirstExport(z.b, &res) == null);
+    try testing.expectEqual(@as(i32, 1), res[0].of.i32);
+    try testing.expectEqual(z.a_id, Seen.id);
+}
+
+test "#539: a host call from a deleted instance, reached through its importer, still reaches the host" {
+    const types = @import("types.zig");
+    const extern_new = @import("extern_new.zig");
+    const e = try testingAllocEngine();
+    defer deleteTestingAllocEngine(e);
+    const s = wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer wasm_store_delete(s);
+    const Host = struct {
+        var calls: u32 = 0;
+        fn cb(_: ?*const ValVec, _: ?*ValVec) callconv(.c) ?*Trap {
+            calls += 1;
+            return null;
+        }
+    };
+    Host.calls = 0;
+    const ft = types.wasm_functype_new(null, null) orelse return error.FuncTypeAllocFailed;
+    defer types.wasm_functype_delete(ft);
+    const host = extern_new.wasm_func_new(s, ft, Host.cb) orelse return error.HostFuncAllocFailed;
+    defer wasm_func_delete(host);
+
+    // (module (import "h" "h" (func)) (func (export "f") call 0))
+    var a = [_]u8{ 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x02, 0x07, 0x01, 0x01, 0x68, 0x01, 0x68, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b };
+    // (module (import "a" "f" (func)) (func (export "call") call 0))
+    var b = [_]u8{ 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x02, 0x07, 0x01, 0x01, 0x61, 0x01, 0x66, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x63, 0x61, 0x6c, 0x6c, 0x00, 0x01, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b };
+    const m_a = wasm_module_new(s, &.{ .size = a.len, .data = &a }) orelse return error.ModuleAAllocFailed;
+    defer wasm_module_delete(m_a);
+    const m_b = wasm_module_new(s, &.{ .size = b.len, .data = &b }) orelse return error.ModuleBAllocFailed;
+    defer wasm_module_delete(m_b);
+
+    var a_imports_arr: [1]?*Extern = .{extern_new.wasm_func_as_extern(host)};
+    var a_imports: ExternVec = .{ .size = a_imports_arr.len, .data = &a_imports_arr };
+    const z = try zombieImporter(s, m_a, m_b, @ptrCast(&a_imports));
+    defer wasm_instance_delete(z.b);
+    try testing.expect(callFirstExport(z.b, &.{}) == null);
+    try testing.expectEqual(@as(u32, 1), Host.calls);
 }
 
 test "wasm 2.0 c_api cross-module Store binding: wasm_store_delete cascades over live instance" {

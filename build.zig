@@ -1502,6 +1502,7 @@ pub fn build(b: *std.Build) void {
         .{ .src = "test/c_api_conformance/trap_unsupported_shape.c", .name = "trap_unsupported_shape" }, // #431 a call shape the engine cannot marshal is UNSUPPORTED, not BINDING_ERROR
         .{ .src = "test/c_api_conformance/trap_message_nul.c", .name = "trap_message_nul" }, // #441 a trap message is NUL-terminated and its size counts the NUL
         .{ .src = "test/c_api_conformance/trap_origin.c", .name = "trap_origin" }, // #498 an interpreter trap carries its origin and trace; the JIT's carries none
+        .{ .src = "test/c_api_conformance/zombie_instance.c", .name = "zombie_instance" }, // #539 a deleted instance's function, reached through a funcref, is not found
         .{ .src = "test/c_api_conformance/cross_store_import.c", .name = "cross_store_import" }, // #436 an import extern from another store is refused with a BINDING_ERROR trap
         .{ .src = "test/c_api_conformance/host_func_outlives_handle.c", .name = "host_func_outlives_handle" }, // #439 a host callback's payload outlives its handle; the store reaps it exactly once
         .{ .src = "test/c_api_conformance/host_entity_outlives_handle.c", .name = "host_entity_outlives_handle" }, // #446 a standalone global / memory / table's backing outlives its handle; the store frees it

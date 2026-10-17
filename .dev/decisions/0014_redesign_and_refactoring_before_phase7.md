@@ -801,6 +801,7 @@ A → `no_copy_from_v1.md` cross-instance check; family B →
 | 2026-05-04 | `73766b8`    | 6.K.3 spike → zombie-instance contract (6.K.2 sub-change 4); §3.γ spike review; 6.K.6 expanded. |
 | 2026-05-04 | `e4e7493`    | §3.γ "Author candor" + §6.K.3 "How this contract was discovered" added per debt D-004 + lessons. |
 | 2026-05-11 | `e85bd561` | **Path drift note** (per 2026-05-11 ADR audit, SUMMARY §3.3 / batch_B). The "Files touched" subsections cite pre-ADR-0023 paths (`src/interp/mod.zig`, `src/c_api/instance.zig`, `src/frontend/sections.zig`, `src/interp/ext_2_0/`). ADR-0023 §7 relocated to `src/runtime/runtime.zig`, `src/api/instance.zig`, `src/parse/sections.zig`, `src/instruction/wasm_2_0/`. Original paths kept as the retrospective design snapshot; current paths follow the relocation. |
+| 2026-10-17 | `<backfill>` | #539: a zombie also keeps the `Instance` struct, which §2.1 item 4 said "is freed normally": `Runtime.instance` and the `Ref`s a host call is handed point at it, so freeing it left both dangling. `wasm_store_delete` reaps it with the runtime and arena. |
 
 (SHAs backfilled at the next phase boundary per
 `.dev/decisions/README.md` "Revision history" rules; verified by
