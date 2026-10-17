@@ -29,7 +29,10 @@ const Allocator = std.mem.Allocator;
 const Engine = @import("../zwasm/engine.zig").Engine;
 const Module = @import("../zwasm/module.zig").Module;
 const Instance = @import("../zwasm/instance.zig").Instance;
-const Linker = @import("../zwasm/linker.zig").Linker;
+const linker_mod = @import("../zwasm/linker.zig");
+const Linker = linker_mod.Linker;
+const defineMapped = linker_mod.defineFuncCtxMapped;
+const defineRawMapped = linker_mod.defineFuncRawMapped;
 const Value = @import("../zwasm.zig").Value;
 const zir_mod = @import("../ir/zir.zig");
 const build_options = @import("build_options");
@@ -62,7 +65,7 @@ const descriptorFilestat = ctx_mod.descriptorFilestat;
 const pathFilestat = ctx_mod.pathFilestat;
 const decodeIpSocketAddress = ctx_mod.decodeIpSocketAddress;
 const writeIpSocketAddressResult = ctx_mod.writeIpSocketAddressResult;
-const mapAsyncFault = ctx_mod.mapAsyncFault;
+const mapGuestFault = ctx_mod.mapGuestFault;
 const p2StdoutWriteViaStream = ctx_mod.p2StdoutWriteViaStream;
 const p2StderrWriteViaStream = ctx_mod.p2StderrWriteViaStream;
 const p2StdinReadViaStream = ctx_mod.p2StdinReadViaStream;
@@ -243,7 +246,7 @@ fn inStreamReadImpl(caller: *Caller, self_handle: u32, len: u64, retptr: u32, bl
     // `blocking-read` waits for the first byte or the close.
     const ready = blocking or wasi_fd.stdinReady(ctx.host);
     const data_ptr: u32 = if (n == 0 or !ready) 0 else try ctx.reallocGuest(n, 1);
-    const got: u32 = if (n == 0 or !ready) 0 else @intCast(try ctx_mod.readStdinP2(ctx.host, mem.sliceAt(data_ptr, n) catch return WasiP2Error.OutOfBounds));
+    const got: u32 = if (n == 0 or !ready) 0 else @intCast(try ctx_mod.readStdinP2(ctx.host, try mem.sliceAt(data_ptr, n)));
     if (got == 0 and n != 0 and ready) {
         try mem.write(retptr, @as(u8, 1)); // err disc
         try mem.write(retptr + 4, @as(u8, 1)); // stream-error::closed (variant case 1)
@@ -276,7 +279,7 @@ fn sockStreamRead(ctx: *WasiP2Ctx, mem: Memory, rep: u32, len: u64, retptr: u32,
         }
     }
     const data_ptr: u32 = if (n == 0) 0 else try ctx.reallocGuest(n, 1);
-    const dest = mem.sliceAt(data_ptr, n) catch return WasiP2Error.OutOfBounds;
+    const dest = try mem.sliceAt(data_ptr, n);
     const got = sock.recv(io, dest) catch {
         try mem.write(retptr, @as(u8, 1)); // stream-error::closed (typed arm)
         try mem.write(retptr + 4, @as(u8, 1));
@@ -302,7 +305,7 @@ fn p2RandomGetBytes(caller: *Caller, len: u64, retptr: u32) WasiP2Error!void {
     const n: u32 = @intCast(@min(len, std.math.maxInt(u32)));
     const data_ptr: u32 = if (n == 0) 0 else try ctx.reallocGuest(n, 1);
     if (n != 0) {
-        const dest = mem.sliceAt(data_ptr, n) catch return WasiP2Error.OutOfBounds;
+        const dest = try mem.sliceAt(data_ptr, n);
         if (wasi_clocks.randomFill(ctx.host, dest) != .success)
             return WasiP2Error.NoHostIo; // precondition: the component-run path plants host.io
     }
@@ -317,7 +320,7 @@ fn p2RandomGetBytes(caller: *Caller, len: u64, retptr: u32) WasiP2Error!void {
 pub fn p2OutStreamWrite(caller: *Caller, self_handle: u32, ptr: u32, len: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
-    const bytes = mem.sliceAt(ptr, len) catch return WasiP2Error.OutOfBounds;
+    const bytes = try mem.sliceAt(ptr, len);
     const h = try ctx.resources.peek(self_handle);
     if (h.rt == WasiP2Ctx.SOCK_OUTPUT_STREAM_RT) {
         // Socket-backed stream (ADR-0180): send on the connected socket; any
@@ -353,7 +356,7 @@ pub fn p2DescriptorWrite(caller: *Caller, self_handle: u32, buf_ptr: u32, buf_le
     const ctx = caller.data(WasiP2Ctx);
     const fd: wasi_p1.Fd = @intCast(try ctx.resources.rep(WasiP2Ctx.DESCRIPTOR_RT, self_handle));
     const mem = try ctxMemory(caller);
-    const bytes = mem.sliceAt(buf_ptr, buf_len) catch return WasiP2Error.OutOfBounds;
+    const bytes = try mem.sliceAt(buf_ptr, buf_len);
     const errno = wasi_fd.pwriteSlice(ctx.host, fd, bytes, offset);
     if (errno != .success) {
         try writeP1Err(mem, retptr, 8, errno); // result align 8
@@ -560,7 +563,7 @@ pub fn p2GetDirectories(caller: *Caller, retptr: u32) WasiP2Error!void {
         const handle = try ctx.resources.new(WasiP2Ctx.DESCRIPTOR_RT, wfd);
         const path_len: u32 = @intCast(p.guest_path.len);
         const str_ptr = try ctx.reallocGuest(path_len, 1);
-        @memcpy(mem.sliceAt(str_ptr, path_len) catch return WasiP2Error.OutOfBounds, p.guest_path);
+        @memcpy(try mem.sliceAt(str_ptr, path_len), p.guest_path);
         const tup = list_ptr + @as(u32, @intCast(i)) * 12;
         try mem.write(tup, handle);
         try mem.write(tup + 4, str_ptr);
@@ -831,16 +834,16 @@ fn p2DirEntryStreamReadEntry(caller: *Caller, self_handle: u32, retptr: u32) Was
         const d_next = try mem.read(u64, buf_ptr);
         const d_namlen = try mem.read(u32, buf_ptr + 16);
         const d_type = try mem.read(u8, buf_ptr + 20);
-        if (used < 24 + d_namlen) return WasiP2Error.OutOfBounds; // truncated name (> 4 KiB path)
+        if (used < 24 + d_namlen) return WasiP2Error.ReadFailed; // the name outgrew the 4 KiB scratch
         state.cookie = d_next;
-        const name = mem.sliceAt(buf_ptr + 24, d_namlen) catch return WasiP2Error.OutOfBounds;
+        const name = try mem.sliceAt(buf_ptr + 24, d_namlen);
         // P1 synthesizes "." / ".."; the P2 stream excludes them.
         if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
         const name_ptr = if (d_namlen == 0) 0 else try ctx.reallocGuest(d_namlen, 1);
         if (d_namlen != 0) {
-            const dest = mem.sliceAt(name_ptr, d_namlen) catch return WasiP2Error.OutOfBounds;
+            const dest = try mem.sliceAt(name_ptr, d_namlen);
             // Re-slice the source: reallocGuest may have moved/grown memory.
-            const src = mem.sliceAt(buf_ptr + 24, d_namlen) catch return WasiP2Error.OutOfBounds;
+            const src = try mem.sliceAt(buf_ptr + 24, d_namlen);
             @memcpy(dest, src);
         }
         try mem.write(retptr, @as(u8, 0)); // result disc: ok
@@ -1030,7 +1033,7 @@ fn allocGuestString(ctx: *WasiP2Ctx, mem: Memory, s: []const u8) WasiP2Error!str
     const n: u32 = @intCast(s.len);
     const ptr: u32 = if (n == 0) 0 else try ctx.reallocGuest(n, 1);
     if (n != 0) {
-        const dest = mem.sliceAt(ptr, n) catch return WasiP2Error.OutOfBounds;
+        const dest = try mem.sliceAt(ptr, n);
         @memcpy(dest, s);
     }
     return .{ .ptr = ptr, .len = n };
@@ -1415,67 +1418,67 @@ fn p2SockStubSubscribe(caller: *Caller, _: u32) WasiP2Error!u32 {
 /// chosen by the classified `op`, not by the name.
 fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: adapter.P2Op, ctx: *WasiP2Ctx) !void {
     switch (op) {
-        .cli_get_stdout => try lk.defineFuncCtx(module, name, ctx, fn (*Caller) WasiP2Error!u32, p2GetStdout),
-        .cli_get_stderr => try lk.defineFuncCtx(module, name, ctx, fn (*Caller) WasiP2Error!u32, p2GetStderr),
-        .cli_stdout_write_via_stream => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2StdoutWriteViaStream),
-        .cli_stderr_write_via_stream => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2StderrWriteViaStream),
-        .cli_stdin_read_via_stream => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2StdinReadViaStream),
-        .out_stream_write, .out_stream_blocking_write_and_flush => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2OutStreamWrite),
+        .cli_get_stdout => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2GetStdout, mapGuestFault),
+        .cli_get_stderr => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2GetStderr, mapGuestFault),
+        .cli_stdout_write_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2StdoutWriteViaStream, mapGuestFault),
+        .cli_stderr_write_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2StderrWriteViaStream, mapGuestFault),
+        .cli_stdin_read_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2StdinReadViaStream, mapGuestFault),
+        .out_stream_write, .out_stream_blocking_write_and_flush => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2OutStreamWrite, mapGuestFault),
         // Any classified `canon resource.drop` (classifyCoreExport returns
         // out_stream_drop for all) routes to the generic drop — correct for both
         // output-stream and descriptor handles (both rep = a P1 fd).
-        .out_stream_drop, .fs_descriptor_drop, .in_stream_drop => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ResourceDrop),
-        .cli_get_stdin => try lk.defineFuncCtx(module, name, ctx, fn (*Caller) WasiP2Error!u32, p2GetStdin),
-        .in_stream_read => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2InStreamRead),
-        .in_stream_blocking_read => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2InStreamBlockingRead),
-        .fs_descriptor_write => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u64, u32) WasiP2Error!void, p2DescriptorWrite),
-        .fs_get_directories => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetDirectories),
-        .fs_descriptor_open_at => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorOpenAt),
-        .cli_exit => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2Exit),
-        .cli_exit_with_code => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ExitWithCode),
+        .out_stream_drop, .fs_descriptor_drop, .in_stream_drop => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ResourceDrop, mapGuestFault),
+        .cli_get_stdin => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2GetStdin, mapGuestFault),
+        .in_stream_read => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2InStreamRead, mapGuestFault),
+        .in_stream_blocking_read => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2InStreamBlockingRead, mapGuestFault),
+        .fs_descriptor_write => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u64, u32) WasiP2Error!void, p2DescriptorWrite, mapGuestFault),
+        .fs_get_directories => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetDirectories, mapGuestFault),
+        .fs_descriptor_open_at => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorOpenAt, mapGuestFault),
+        .cli_exit => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2Exit, mapGuestFault),
+        .cli_exit_with_code => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ExitWithCode, mapGuestFault),
         // The async wait funcs under a SYNC lower: the call blocks in the host.
-        .clocks_wait_until => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, i64) WasiP2Error!void, p2WaitUntilSync),
-        .clocks_wait_for => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, i64) WasiP2Error!void, p2WaitForSync),
-        .clocks_monotonic_now => try lk.defineFuncCtx(module, name, ctx, fn (*Caller) WasiP2Error!i64, p2MonotonicNow),
-        .clocks_wall_now => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2WallNow),
-        .clocks_system_now => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2SystemNow),
-        .clocks_system_get_resolution => try lk.defineFuncCtx(module, name, ctx, fn (*Caller) WasiP2Error!i64, p2SystemGetResolution),
-        .clocks_monotonic_get_resolution => try lk.defineFuncCtx(module, name, ctx, fn (*Caller) WasiP2Error!i64, p2MonotonicGetResolution),
+        .clocks_wait_until => try defineMapped(lk, module, name, ctx, fn (*Caller, i64) WasiP2Error!void, p2WaitUntilSync, mapGuestFault),
+        .clocks_wait_for => try defineMapped(lk, module, name, ctx, fn (*Caller, i64) WasiP2Error!void, p2WaitForSync, mapGuestFault),
+        .clocks_monotonic_now => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!i64, p2MonotonicNow, mapGuestFault),
+        .clocks_wall_now => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2WallNow, mapGuestFault),
+        .clocks_system_now => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2SystemNow, mapGuestFault),
+        .clocks_system_get_resolution => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!i64, p2SystemGetResolution, mapGuestFault),
+        .clocks_monotonic_get_resolution => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!i64, p2MonotonicGetResolution, mapGuestFault),
         // insecure shares the secure handler: identical signature, and the host's
         // secure fill over-satisfies the insecure contract (no separate RNG state).
-        .random_get_bytes, .random_insecure_get_bytes => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u64, u32) WasiP2Error!void, p2RandomGetBytes),
-        .out_stream_blocking_flush => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2OutStreamFlush),
-        .fs_descriptor_read => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u64, u64, u32) WasiP2Error!void, p2DescriptorRead),
-        .fs_descriptor_sync => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorSync),
-        .fs_descriptor_stat => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorStat),
-        .fs_descriptor_get_type => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorGetType),
-        .poll_pollable_ready => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2PollableReady),
-        .poll_pollable_block => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2PollableBlock),
-        .poll_poll => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, p2Poll),
-        .in_stream_subscribe, .out_stream_subscribe => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2Subscribe),
-        .clocks_subscribe_instant, .clocks_subscribe_duration => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u64) WasiP2Error!u32, p2SubscribeClock),
-        .cli_get_environment => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetEnvironment),
-        .cli_get_arguments => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetArguments),
-        .cli_initial_cwd => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ReturnNone),
-        .cli_get_terminal_stdin => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetTerminal(.stdin)),
-        .cli_get_terminal_stdout => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetTerminal(.stdout)),
-        .cli_get_terminal_stderr => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetTerminal(.stderr)),
-        .out_stream_check_write => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2CheckWrite),
-        .random_get_u64, .random_insecure_get_u64 => try lk.defineFuncCtx(module, name, ctx, fn (*Caller) WasiP2Error!i64, p2RandomGetU64),
-        .random_insecure_seed => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2RandomInsecureSeed),
-        .fs_descriptor_stat_at => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorStatAt),
-        .fs_descriptor_create_directory_at => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorCreateDirectoryAt),
-        .fs_descriptor_remove_directory_at => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorRemoveDirectoryAt),
-        .fs_descriptor_unlink_file_at => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorUnlinkFileAt),
-        .fs_descriptor_rename_at => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorRenameAt),
-        .fs_descriptor_link_at => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorLinkAt),
-        .fs_descriptor_symlink_at => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorSymlinkAt),
-        .fs_descriptor_sync_data => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorSyncData),
-        .fs_descriptor_readlink_at => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorReadlinkAt),
-        .fs_descriptor_read_directory => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorReadDirectory),
-        .fs_dir_entry_stream_read => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DirEntryStreamReadEntry),
-        .fs_dir_entry_stream_drop => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ResourceDrop),
-        .io_resource_drop => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ResourceDrop),
+        .random_get_bytes, .random_insecure_get_bytes => try defineMapped(lk, module, name, ctx, fn (*Caller, u64, u32) WasiP2Error!void, p2RandomGetBytes, mapGuestFault),
+        .out_stream_blocking_flush => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2OutStreamFlush, mapGuestFault),
+        .fs_descriptor_read => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u64, u32) WasiP2Error!void, p2DescriptorRead, mapGuestFault),
+        .fs_descriptor_sync => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorSync, mapGuestFault),
+        .fs_descriptor_stat => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorStat, mapGuestFault),
+        .fs_descriptor_get_type => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorGetType, mapGuestFault),
+        .poll_pollable_ready => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2PollableReady, mapGuestFault),
+        .poll_pollable_block => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2PollableBlock, mapGuestFault),
+        .poll_poll => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, p2Poll, mapGuestFault),
+        .in_stream_subscribe, .out_stream_subscribe => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2Subscribe, mapGuestFault),
+        .clocks_subscribe_instant, .clocks_subscribe_duration => try defineMapped(lk, module, name, ctx, fn (*Caller, u64) WasiP2Error!u32, p2SubscribeClock, mapGuestFault),
+        .cli_get_environment => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetEnvironment, mapGuestFault),
+        .cli_get_arguments => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetArguments, mapGuestFault),
+        .cli_initial_cwd => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ReturnNone, mapGuestFault),
+        .cli_get_terminal_stdin => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetTerminal(.stdin), mapGuestFault),
+        .cli_get_terminal_stdout => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetTerminal(.stdout), mapGuestFault),
+        .cli_get_terminal_stderr => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetTerminal(.stderr), mapGuestFault),
+        .out_stream_check_write => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2CheckWrite, mapGuestFault),
+        .random_get_u64, .random_insecure_get_u64 => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!i64, p2RandomGetU64, mapGuestFault),
+        .random_insecure_seed => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2RandomInsecureSeed, mapGuestFault),
+        .fs_descriptor_stat_at => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorStatAt, mapGuestFault),
+        .fs_descriptor_create_directory_at => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorCreateDirectoryAt, mapGuestFault),
+        .fs_descriptor_remove_directory_at => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorRemoveDirectoryAt, mapGuestFault),
+        .fs_descriptor_unlink_file_at => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorUnlinkFileAt, mapGuestFault),
+        .fs_descriptor_rename_at => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorRenameAt, mapGuestFault),
+        .fs_descriptor_link_at => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorLinkAt, mapGuestFault),
+        .fs_descriptor_symlink_at => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorSymlinkAt, mapGuestFault),
+        .fs_descriptor_sync_data => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorSyncData, mapGuestFault),
+        .fs_descriptor_readlink_at => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorReadlinkAt, mapGuestFault),
+        .fs_descriptor_read_directory => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorReadDirectory, mapGuestFault),
+        .fs_dir_entry_stream_read => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DirEntryStreamReadEntry, mapGuestFault),
+        .fs_dir_entry_stream_drop => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ResourceDrop, mapGuestFault),
+        .io_resource_drop => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ResourceDrop, mapGuestFault),
         // The wasi:{filesystem,sockets,http}@0.3.0 arms live with the P3 host
         // layer (ADR-0207 registerP3Arms); listing the tags here keeps the
         // switch compile-time exhaustive — a new P3 op fails HERE, loudly.
@@ -1483,39 +1486,39 @@ fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: a
             if (try p3h.registerP3Arms(lk, module, name, op, ctx)) return;
             return error.UnsupportedWasiImport;
         },
-        .fs_stub_via_stream_offset => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2FsStubViaStreamOffset),
-        .fs_stub_via_stream => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2FsStubViaStream),
-        .fs_stub_get_flags => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2FsStubGetFlags),
-        .fs_descriptor_metadata_hash => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorMetadataHash),
-        .fs_descriptor_metadata_hash_at => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorMetadataHashAt),
-        .sock_instance_network => try lk.defineFuncCtx(module, name, ctx, fn (*Caller) WasiP2Error!u32, p2InstanceNetwork),
-        .sock_create_tcp => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2CreateTcpSocket),
-        .sock_tcp_start_bind => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2TcpStartBind),
-        .sock_tcp_finish_bind => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpFinishBind),
-        .sock_tcp_start_connect => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2TcpStartConnect),
-        .sock_tcp_finish_connect => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpFinishConnect),
-        .sock_tcp_subscribe => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2TcpSubscribe),
-        .sock_tcp_shutdown => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, p2TcpShutdown),
-        .sock_tcp_is_listening => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2TcpIsListening),
-        .sock_tcp_start_listen => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpStartListen),
-        .sock_tcp_finish_listen => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpFinishListen),
-        .sock_tcp_accept => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpAccept),
-        .sock_tcp_local_address => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpLocalAddress),
-        .sock_tcp_remote_address => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpRemoteAddress),
-        .sock_tcp_set_backlog => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2TcpSetListenBacklog),
-        .sock_tcp_drop => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ResourceDrop),
-        .sock_stub_unit2 => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2SockStubUnit2),
-        .sock_stub_unit3i => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, p2SockStubUnit3i),
-        .sock_stub_unit3l => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2SockStubUnit3l),
-        .sock_stub_unit15 => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2SockStubUnit15),
-        .sock_stub_val1 => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2SockStubVal1),
-        .sock_stub_val4 => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2SockStubVal4),
-        .sock_stub_val8 => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2SockStubVal8),
-        .sock_stub_val15_4 => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2SockStubVal15_4),
-        .sock_stub_resolve => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2SockStubResolve),
-        .sock_stub_recv => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2SockStubRecv),
-        .sock_stub_send => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2SockStubSend),
-        .sock_stub_subscribe => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2SockStubSubscribe),
+        .fs_stub_via_stream_offset => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2FsStubViaStreamOffset, mapGuestFault),
+        .fs_stub_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2FsStubViaStream, mapGuestFault),
+        .fs_stub_get_flags => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2FsStubGetFlags, mapGuestFault),
+        .fs_descriptor_metadata_hash => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorMetadataHash, mapGuestFault),
+        .fs_descriptor_metadata_hash_at => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorMetadataHashAt, mapGuestFault),
+        .sock_instance_network => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2InstanceNetwork, mapGuestFault),
+        .sock_create_tcp => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2CreateTcpSocket, mapGuestFault),
+        .sock_tcp_start_bind => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2TcpStartBind, mapGuestFault),
+        .sock_tcp_finish_bind => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpFinishBind, mapGuestFault),
+        .sock_tcp_start_connect => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2TcpStartConnect, mapGuestFault),
+        .sock_tcp_finish_connect => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpFinishConnect, mapGuestFault),
+        .sock_tcp_subscribe => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2TcpSubscribe, mapGuestFault),
+        .sock_tcp_shutdown => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, p2TcpShutdown, mapGuestFault),
+        .sock_tcp_is_listening => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2TcpIsListening, mapGuestFault),
+        .sock_tcp_start_listen => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpStartListen, mapGuestFault),
+        .sock_tcp_finish_listen => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpFinishListen, mapGuestFault),
+        .sock_tcp_accept => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpAccept, mapGuestFault),
+        .sock_tcp_local_address => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpLocalAddress, mapGuestFault),
+        .sock_tcp_remote_address => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2TcpRemoteAddress, mapGuestFault),
+        .sock_tcp_set_backlog => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2TcpSetListenBacklog, mapGuestFault),
+        .sock_tcp_drop => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ResourceDrop, mapGuestFault),
+        .sock_stub_unit2 => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2SockStubUnit2, mapGuestFault),
+        .sock_stub_unit3i => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, p2SockStubUnit3i, mapGuestFault),
+        .sock_stub_unit3l => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2SockStubUnit3l, mapGuestFault),
+        .sock_stub_unit15 => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2SockStubUnit15, mapGuestFault),
+        .sock_stub_val1 => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2SockStubVal1, mapGuestFault),
+        .sock_stub_val4 => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2SockStubVal4, mapGuestFault),
+        .sock_stub_val8 => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2SockStubVal8, mapGuestFault),
+        .sock_stub_val15_4 => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, p2SockStubVal15_4, mapGuestFault),
+        .sock_stub_resolve => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2SockStubResolve, mapGuestFault),
+        .sock_stub_recv => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2SockStubRecv, mapGuestFault),
+        .sock_stub_send => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, p2SockStubSend, mapGuestFault),
+        .sock_stub_subscribe => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2SockStubSubscribe, mapGuestFault),
     }
 }
 
@@ -1727,18 +1730,18 @@ fn defineSynth(lk: *Linker, ns: []const u8, e: SynthExport, ctx: *WasiP2Ctx) !vo
             rbc.* = .{ .ctx = ctx, .type_index = rb.type_index };
             try ctx.rb_ctxs.append(ctx.alloc, rbc);
             switch (rb.kind) {
-                .new => try lk.defineFuncCtx(ns, e.name, @ptrCast(rbc), fn (*Caller, u32) WasiP2Error!u32, p2GuestResourceNew),
-                .drop => try lk.defineFuncCtx(ns, e.name, @ptrCast(rbc), fn (*Caller, u32) WasiP2Error!void, p2GuestResourceDrop),
-                .rep => try lk.defineFuncCtx(ns, e.name, @ptrCast(rbc), fn (*Caller, u32) WasiP2Error!u32, p2GuestResourceRep),
+                .new => try defineMapped(lk, ns, e.name, @ptrCast(rbc), fn (*Caller, u32) WasiP2Error!u32, p2GuestResourceNew, mapGuestFault),
+                .drop => try defineMapped(lk, ns, e.name, @ptrCast(rbc), fn (*Caller, u32) WasiP2Error!void, p2GuestResourceDrop, mapGuestFault),
+                .rep => try defineMapped(lk, ns, e.name, @ptrCast(rbc), fn (*Caller, u32) WasiP2Error!u32, p2GuestResourceRep, mapGuestFault),
             }
         },
-        .task_return_builtin => try lk.defineFuncCtx(ns, e.name, ctx, fn (*Caller, i32) WasiP2Error!void, p2TaskReturn),
-        .task_return_raw => |params| try lk.defineFuncRaw(ns, e.name, @ptrCast(ctx), params, &.{}, p2TaskReturnRaw),
+        .task_return_builtin => try defineMapped(lk, ns, e.name, ctx, fn (*Caller, i32) WasiP2Error!void, p2TaskReturn, mapGuestFault),
+        .task_return_raw => |params| try defineRawMapped(lk, ns, e.name, @ptrCast(ctx), params, &.{}, p2TaskReturnRaw, mapGuestFault),
         .waitable_set_builtin => |op| switch (op) {
-            .new => try lk.defineFuncCtx(ns, e.name, ctx, fn (*Caller) WasiP2Error!u32, p2WaitableSetNew),
-            .join => try lk.defineFuncCtx(ns, e.name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2WaitableJoin),
-            .poll => try lk.defineFuncCtx(ns, e.name, ctx, fn (*Caller, u32, u32) WasiP2Error!u32, p2WaitableSetPoll),
-            .drop => try lk.defineFuncCtx(ns, e.name, ctx, fn (*Caller, u32) WasiP2Error!void, p2WaitableSetDrop),
+            .new => try defineMapped(lk, ns, e.name, ctx, fn (*Caller) WasiP2Error!u32, p2WaitableSetNew, mapGuestFault),
+            .join => try defineMapped(lk, ns, e.name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2WaitableJoin, mapGuestFault),
+            .poll => try defineMapped(lk, ns, e.name, ctx, fn (*Caller, u32, u32) WasiP2Error!u32, p2WaitableSetPoll, mapGuestFault),
+            .drop => try defineMapped(lk, ns, e.name, ctx, fn (*Caller, u32) WasiP2Error!void, p2WaitableSetDrop, mapGuestFault),
             .wait => unreachable, // synthDef rejects it
         },
         .host_op_async => |op| try p3h.defineAsyncLoweredOp(lk, ns, e.name, op, ctx),
@@ -1750,23 +1753,23 @@ fn defineSynth(lk: *Linker, ns: []const u8, e: SynthExport, ctx: *WasiP2Ctx) !vo
             try ctx.cb_ctxs.append(ctx.alloc, cbc);
             if (cb.is_set) {
                 if (cb.slot.is_i64) {
-                    try lk.defineFuncCtx(ns, e.name, @ptrCast(cbc), fn (*Caller, i64) WasiP2Error!void, p2ContextSet64);
+                    try defineMapped(lk, ns, e.name, @ptrCast(cbc), fn (*Caller, i64) WasiP2Error!void, p2ContextSet64, mapGuestFault);
                 } else {
-                    try lk.defineFuncCtx(ns, e.name, @ptrCast(cbc), fn (*Caller, u32) WasiP2Error!void, p2ContextSet32);
+                    try defineMapped(lk, ns, e.name, @ptrCast(cbc), fn (*Caller, u32) WasiP2Error!void, p2ContextSet32, mapGuestFault);
                 }
             } else {
                 if (cb.slot.is_i64) {
-                    try lk.defineFuncCtx(ns, e.name, @ptrCast(cbc), fn (*Caller) WasiP2Error!i64, p2ContextGet64);
+                    try defineMapped(lk, ns, e.name, @ptrCast(cbc), fn (*Caller) WasiP2Error!i64, p2ContextGet64, mapGuestFault);
                 } else {
-                    try lk.defineFuncCtx(ns, e.name, @ptrCast(cbc), fn (*Caller) WasiP2Error!u32, p2ContextGet32);
+                    try defineMapped(lk, ns, e.name, @ptrCast(cbc), fn (*Caller) WasiP2Error!u32, p2ContextGet32, mapGuestFault);
                 }
             }
         },
         .async_support_builtin => |op| switch (op) {
-            .task_cancel => try lk.defineFuncCtx(ns, e.name, ctx, fn (*Caller) WasiP2Error!void, p2TaskCancel),
-            .subtask_cancel => try lk.defineFuncCtx(ns, e.name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2SubtaskCancel),
-            .subtask_drop => try lk.defineFuncCtx(ns, e.name, ctx, fn (*Caller, u32) WasiP2Error!void, p2SubtaskDrop),
-            .thread_yield => try lk.defineFuncCtx(ns, e.name, ctx, fn (*Caller) WasiP2Error!u32, p2ThreadYield),
+            .task_cancel => try defineMapped(lk, ns, e.name, ctx, fn (*Caller) WasiP2Error!void, p2TaskCancel, mapGuestFault),
+            .subtask_cancel => try defineMapped(lk, ns, e.name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2SubtaskCancel, mapGuestFault),
+            .subtask_drop => try defineMapped(lk, ns, e.name, ctx, fn (*Caller, u32) WasiP2Error!void, p2SubtaskDrop, mapGuestFault),
+            .thread_yield => try defineMapped(lk, ns, e.name, ctx, fn (*Caller) WasiP2Error!u32, p2ThreadYield, mapGuestFault),
         },
         .async_builtin => |ab| {
             const abc = try ctx.alloc.create(AsyncBuiltinCtx);
@@ -1774,14 +1777,14 @@ fn defineSynth(lk: *Linker, ns: []const u8, e: SynthExport, ctx: *WasiP2Ctx) !vo
             abc.* = .{ .ctx = ctx, .type_index = ab.type_index, .elem_size = ab.elem_size };
             try ctx.ab_ctxs.append(ctx.alloc, abc);
             switch (ab.op) {
-                .stream_new => try lk.defineFuncCtx(ns, e.name, @ptrCast(abc), fn (*Caller) WasiP2Error!u64, p2StreamNew),
-                .future_new => try lk.defineFuncCtx(ns, e.name, @ptrCast(abc), fn (*Caller) WasiP2Error!u64, p2FutureNew),
-                .stream_drop_readable, .stream_drop_writable, .future_drop_readable, .future_drop_writable => try lk.defineFuncCtx(ns, e.name, @ptrCast(abc), fn (*Caller, u32) WasiP2Error!void, p2StreamFutureDrop),
-                .stream_read, .stream_write => try lk.defineFuncCtx(ns, e.name, @ptrCast(abc), fn (*Caller, u32, u32, u32) WasiP2Error!u32, p2StreamFutureCopy),
+                .stream_new => try defineMapped(lk, ns, e.name, @ptrCast(abc), fn (*Caller) WasiP2Error!u64, p2StreamNew, mapGuestFault),
+                .future_new => try defineMapped(lk, ns, e.name, @ptrCast(abc), fn (*Caller) WasiP2Error!u64, p2FutureNew, mapGuestFault),
+                .stream_drop_readable, .stream_drop_writable, .future_drop_readable, .future_drop_writable => try defineMapped(lk, ns, e.name, @ptrCast(abc), fn (*Caller, u32) WasiP2Error!void, p2StreamFutureDrop, mapGuestFault),
+                .stream_read, .stream_write => try defineMapped(lk, ns, e.name, @ptrCast(abc), fn (*Caller, u32, u32, u32) WasiP2Error!u32, p2StreamFutureCopy, mapGuestFault),
                 // future.{read,write} core ABI is (handle, ptr) — no count (a
                 // future carries exactly one value; CanonicalABI `future_copy`).
-                .future_read, .future_write => try lk.defineFuncCtx(ns, e.name, @ptrCast(abc), fn (*Caller, u32, u32) WasiP2Error!u32, p2FutureCopy),
-                .stream_cancel_read, .stream_cancel_write, .future_cancel_read, .future_cancel_write => try lk.defineFuncCtx(ns, e.name, @ptrCast(abc), fn (*Caller, u32) WasiP2Error!u32, p2StreamFutureCancel),
+                .future_read, .future_write => try defineMapped(lk, ns, e.name, @ptrCast(abc), fn (*Caller, u32, u32) WasiP2Error!u32, p2FutureCopy, mapGuestFault),
+                .stream_cancel_read, .stream_cancel_write, .future_cancel_read, .future_cancel_write => try defineMapped(lk, ns, e.name, @ptrCast(abc), fn (*Caller, u32) WasiP2Error!u32, p2StreamFutureCancel, mapGuestFault),
             }
         },
         .guest_func => |g| try lk.defineCrossModuleFunc(ns, e.name, g.inst, g.name),

@@ -430,8 +430,8 @@ test "D-335 / D-445: stream.read with a never-minted handle traps (not host pani
     var host = try wasi_host.Host.init(testing.allocator);
     defer host.deinit();
 
-    // A guest-supplied bad handle is a guest fault: `mapAsyncFault` surfaces it
-    // as `Unreachable`, not `HostTrap` (D-445).
+    // A guest-supplied bad handle is a guest fault: `mapGuestFault` names it
+    // `Unreachable`, not `HostTrap` (D-445, #535).
     var built = try wasi_p2.buildWasiP2Component(&eng, testing.allocator, bytes, &host, .{});
     defer built.deinit();
     try testing.expectError(error.Unreachable, driveAsyncMain(&built));

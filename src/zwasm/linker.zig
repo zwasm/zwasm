@@ -280,7 +280,7 @@ pub const Linker = struct {
         comptime Sig: type,
         user_fn: *const Sig,
     ) !void {
-        return self.defineFuncImpl(module, name, null, Sig, user_fn);
+        return self.defineFuncImpl(module, name, null, Sig, user_fn, null);
     }
 
     /// Like `defineFunc`, but threads an opaque host context that the host
@@ -297,7 +297,7 @@ pub const Linker = struct {
         comptime Sig: type,
         user_fn: *const Sig,
     ) !void {
-        return self.defineFuncImpl(module, name, host_data, Sig, user_fn);
+        return self.defineFuncImpl(module, name, host_data, Sig, user_fn, null);
     }
 
     fn defineFuncImpl(
@@ -307,6 +307,7 @@ pub const Linker = struct {
         host_data: ?*anyopaque,
         comptime Sig: type,
         user_fn: *const Sig,
+        err_map: ?_marshal.HostErrorMap,
     ) !void {
         const fn_info = @typeInfo(Sig).@"fn";
         if (fn_info.params.len == 0 or (fn_info.params[0].type orelse return error.SignatureMismatch) != *Caller) {
@@ -315,7 +316,7 @@ pub const Linker = struct {
         const Ctx = _marshal.HostFnCtx(Sig);
         const ctx_ptr = try self.engine.alloc.create(Ctx);
         errdefer self.engine.alloc.destroy(ctx_ptr);
-        ctx_ptr.* = .{ .user_fn = user_fn, .host_data = host_data };
+        ctx_ptr.* = .{ .user_fn = user_fn, .host_data = host_data, .err_map = err_map };
         try self.ctx_storage.append(self.engine.alloc, .{
             .ptr = ctx_ptr,
             .destroy_fn = destroyForCtx(Ctx),
@@ -351,11 +352,25 @@ pub const Linker = struct {
         results: []const _zir.ValType,
         user_fn: _marshal.RawHostFn,
     ) !void {
+        return self.defineFuncRawImpl(module, name, host_data, params, results, user_fn, null);
+    }
+
+    fn defineFuncRawImpl(
+        self: *Linker,
+        module: []const u8,
+        name: []const u8,
+        host_data: ?*anyopaque,
+        params: []const _zir.ValType,
+        results: []const _zir.ValType,
+        user_fn: _marshal.RawHostFn,
+        err_map: ?_marshal.HostErrorMap,
+    ) !void {
         const ctx_ptr = try self.engine.alloc.create(_marshal.RawHostFnCtx);
         errdefer self.engine.alloc.destroy(ctx_ptr);
         ctx_ptr.* = .{
             .user_fn = user_fn,
             .host_data = host_data,
+            .err_map = err_map,
             .n_params = params.len,
             .n_results = results.len,
         };
@@ -824,6 +839,38 @@ pub const Linker = struct {
         return null;
     }
 };
+
+/// `Linker.defineFuncCtx` with an error map that runs on the host fn's error
+/// before `hostFnError` names it (`host_func_marshal.HostErrorMap`). Not a
+/// `Linker` method: the facade's host fns keep their own errors (#519); the
+/// component host registers every trampoline through here, so the one rule in
+/// `component_wasi_ctx.mapGuestFault` names a guest fault whichever trampoline
+/// caught it (#535).
+pub fn defineFuncCtxMapped(
+    lk: *Linker,
+    module: []const u8,
+    name: []const u8,
+    host_data: *anyopaque,
+    comptime Sig: type,
+    user_fn: *const Sig,
+    err_map: _marshal.HostErrorMap,
+) !void {
+    return lk.defineFuncImpl(module, name, host_data, Sig, user_fn, err_map);
+}
+
+/// `Linker.defineFuncRaw` with an error map; see `defineFuncCtxMapped`.
+pub fn defineFuncRawMapped(
+    lk: *Linker,
+    module: []const u8,
+    name: []const u8,
+    host_data: ?*anyopaque,
+    params: []const _zir.ValType,
+    results: []const _zir.ValType,
+    user_fn: _marshal.RawHostFn,
+    err_map: _marshal.HostErrorMap,
+) !void {
+    return lk.defineFuncRawImpl(module, name, host_data, params, results, user_fn, err_map);
+}
 
 fn sigEqual(a: []const _zir.ValType, b: []const _zir.ValType) bool {
     if (a.len != b.len) return false;

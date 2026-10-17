@@ -17,7 +17,9 @@ const p3http = @import("../wasi/p3_http.zig");
 const adapter = @import("../wasi/adapter.zig");
 const async_mod = @import("../feature/component/async.zig");
 const Caller = @import("../zwasm/caller.zig").Caller;
-const Linker = @import("../zwasm/linker.zig").Linker;
+const linker_mod = @import("../zwasm/linker.zig");
+const Linker = linker_mod.Linker;
+const defineMapped = linker_mod.defineFuncCtxMapped;
 const Engine = @import("../zwasm/engine.zig").Engine;
 
 const ctx_mod = @import("component_wasi_ctx.zig");
@@ -34,7 +36,7 @@ const descriptorFilestat = ctx_mod.descriptorFilestat;
 const pathFilestat = ctx_mod.pathFilestat;
 const decodeIpSocketAddress = ctx_mod.decodeIpSocketAddress;
 const writeIpSocketAddressResult = ctx_mod.writeIpSocketAddressResult;
-const mapAsyncFault = ctx_mod.mapAsyncFault;
+const mapGuestFault = ctx_mod.mapGuestFault;
 const SUBTASK_RETURNED = ctx_mod.SUBTASK_RETURNED;
 const p2WaitUntil = ctx_mod.p2WaitUntil;
 const p2WaitFor = ctx_mod.p2WaitFor;
@@ -530,7 +532,7 @@ fn fs3ReadViaStream(caller: *Caller, self_handle: u32, offset_raw: i64, retptr: 
 fn fs3WriteViaStream(caller: *Caller, self_handle: u32, data_handle: u32, offset_raw: i64) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const fd = try fs3Fd(ctx, self_handle);
-    return fs3RegisterFileSink(ctx, fd, data_handle, @bitCast(offset_raw)) catch |e| mapAsyncFault(e);
+    return fs3RegisterFileSink(ctx, fd, data_handle, @bitCast(offset_raw));
 }
 
 /// `append-via-stream` (self, data) → future handle: the sink position starts
@@ -543,7 +545,7 @@ fn fs3AppendViaStream(caller: *Caller, self_handle: u32, data_handle: u32) WasiP
         .ok => |fs| fs.size,
         .err => 0,
     };
-    return fs3RegisterFileSink(ctx, fd, data_handle, size) catch |e| mapAsyncFault(e);
+    return fs3RegisterFileSink(ctx, fd, data_handle, size);
 }
 
 fn fs3RegisterFileSink(ctx: *WasiP2Ctx, fd: wasi_p1.Fd, data_handle: u32, pos: u64) WasiP2Error!u32 {
@@ -574,7 +576,7 @@ fn fs3DrainParkedWrite(ctx: *WasiP2Ctx, shared_id: u32) WasiP2Error!void {
     const pw = ctx.pending_writes.get(pending.waitable) orelse return;
     const role = ctx.host_file_streams.getPtr(shared_id) orelse return;
     const mem = try ctx.memory();
-    const bytes = mem.sliceAt(pw.ptr, pw.count * pw.elem_size) catch return WasiP2Error.OutOfBounds;
+    const bytes = try mem.sliceAt(pw.ptr, pw.count * pw.elem_size);
     const errno = wasi_fd.pwriteSlice(ctx.host, role.fd, bytes, role.pos);
     const writer = try ctx.streams.get(pending.waitable);
     if (errno != .success) {
@@ -686,7 +688,7 @@ pub fn defineAsyncLoweredOp(lk: *Linker, ns: []const u8, name: []const u8, op: a
         .{ adapter.P2Op.http3_client_send, fn (*Caller, u32, u32) WasiP2Error!u32, http3ClientSend },
     };
     inline for (binds) |b| {
-        if (op == b[0]) return lk.defineFuncCtx(ns, name, ctx, b[1], b[2]);
+        if (op == b[0]) return defineMapped(lk, ns, name, ctx, b[1], b[2], mapGuestFault);
     }
     return error.UnsupportedWasiImport;
 }
@@ -730,15 +732,15 @@ fn fs3DirStreamRead(ctx: *WasiP2Ctx, state_index: u32, end: *async_mod.StreamFut
         const d_next = try mem.read(u64, buf_ptr);
         const d_namlen = try mem.read(u32, buf_ptr + 16);
         const d_type = try mem.read(u8, buf_ptr + 20);
-        if (used < 24 + d_namlen) return WasiP2Error.OutOfBounds; // > 4 KiB name
+        if (used < 24 + d_namlen) return WasiP2Error.ReadFailed; // the name outgrew the 4 KiB scratch
         state.cookie = d_next;
-        const name = mem.sliceAt(buf_ptr + 24, d_namlen) catch return WasiP2Error.OutOfBounds;
+        const name = try mem.sliceAt(buf_ptr + 24, d_namlen);
         if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
         const name_ptr = if (d_namlen == 0) 0 else try ctx.reallocGuest(d_namlen, 1);
         if (d_namlen != 0) {
-            const dest = mem.sliceAt(name_ptr, d_namlen) catch return WasiP2Error.OutOfBounds;
+            const dest = try mem.sliceAt(name_ptr, d_namlen);
             // Re-slice the source: reallocGuest may have moved/grown memory.
-            const src = mem.sliceAt(buf_ptr + 24, d_namlen) catch return WasiP2Error.OutOfBounds;
+            const src = try mem.sliceAt(buf_ptr + 24, d_namlen);
             @memcpy(dest, src);
         }
         const rec = ptr + filled * 24;
@@ -1016,12 +1018,12 @@ fn sock3ResolveSendFuture(ctx: *WasiP2Ctx, fut_handle: u32, outcome: ?u8) WasiP2
     const end = ctx.streams.get(fut_handle) catch return;
     const mem = try ctx.memory();
     if (outcome) |code| {
-        const buf = mem.sliceAt(pr.ptr, 9) catch return WasiP2Error.OutOfBounds;
+        const buf = try mem.sliceAt(pr.ptr, 9);
         buf[0] = 1;
         buf[4] = code;
         buf[8] = 0;
     } else {
-        const buf = mem.sliceAt(pr.ptr, 1) catch return WasiP2Error.OutOfBounds;
+        const buf = try mem.sliceAt(pr.ptr, 1);
         buf[0] = 0;
     }
     end.state = .done;
@@ -1058,7 +1060,7 @@ fn sock3DrainParkedTcpWrite(ctx: *WasiP2Ctx, shared_id: u32) WasiP2Error!void {
     const pw = ctx.pending_writes.get(pending.waitable) orelse return;
     const role = ctx.host_tcp_tx.get(shared_id) orelse return;
     const mem = try ctx.memory();
-    const bytes = mem.sliceAt(pw.ptr, pw.count * pw.elem_size) catch return WasiP2Error.OutOfBounds;
+    const bytes = try mem.sliceAt(pw.ptr, pw.count * pw.elem_size);
     const sock = try ctxTcpSocket(ctx, role.rep);
     const io = try ctxIo(ctx);
     var off: usize = 0;
@@ -1377,7 +1379,7 @@ fn sock3UdpSend(caller: *Caller, argsptr: u32, retptr: u32) WasiP2Error!u32 {
             return SUBTASK_RETURNED;
         };
     }
-    const bytes = mem.sliceAt(data_ptr, data_len) catch return WasiP2Error.OutOfBounds;
+    const bytes = try mem.sliceAt(data_ptr, data_len);
     sock.sendTo(try ctxIo(ctx), dest, bytes) catch |e| {
         try writeSock3UnitResult(mem, retptr, e);
         return SUBTASK_RETURNED;
@@ -1424,7 +1426,7 @@ fn sock3UdpReceiveComplete(ctx: *WasiP2Ctx, rep: u32, retptr: u32) WasiP2Error!v
     const mem = try ctx.memory();
     const sock = try ctxUdpSocket(ctx, rep);
     const buf_ptr = try ctx.reallocGuest(65536, 1);
-    const buf = mem.sliceAt(buf_ptr, 65536) catch return WasiP2Error.OutOfBounds;
+    const buf = try mem.sliceAt(buf_ptr, 65536);
     const r = sock.receiveFrom(try ctxIo(ctx), buf) catch |e| {
         return writeSock3Err(mem, retptr, 4, e);
     };
@@ -1499,8 +1501,8 @@ fn http3FieldsFromList(caller: *Caller, entries_ptr: u32, entries_len: u32, retp
     var i: u32 = 0;
     while (i < entries_len) : (i += 1) {
         const rec = entries_ptr + i * 16;
-        const name = mem.sliceAt(try mem.read(u32, rec), try mem.read(u32, rec + 4)) catch return WasiP2Error.OutOfBounds;
-        const value = mem.sliceAt(try mem.read(u32, rec + 8), try mem.read(u32, rec + 12)) catch return WasiP2Error.OutOfBounds;
+        const name = try mem.sliceAt(try mem.read(u32, rec), try mem.read(u32, rec + 4));
+        const value = try mem.sliceAt(try mem.read(u32, rec + 8), try mem.read(u32, rec + 12));
         if (dbg.on("async.host")) std.debug.print("[host] fields.from-list [{d}] name='{s}' value='{s}'\n", .{ i, name, value });
         fields.appendChecked(ctx.alloc, name, value) catch |e| {
             fields.deinit(ctx.alloc);
@@ -1525,7 +1527,7 @@ fn http3FieldsFromList(caller: *Caller, entries_ptr: u32, entries_len: u32, retp
 fn http3AllocBlob(ctx: *WasiP2Ctx, mem: Memory, bytes: []const u8) WasiP2Error!u32 {
     if (bytes.len == 0) return 4;
     const p = try ctx.reallocGuest(@intCast(bytes.len), 1);
-    const dest = mem.sliceAt(p, @intCast(bytes.len)) catch return WasiP2Error.OutOfBounds;
+    const dest = try mem.sliceAt(p, @intCast(bytes.len));
     @memcpy(dest, bytes);
     return p;
 }
@@ -1548,7 +1550,7 @@ fn http3FieldsGet(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, retp
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
     const fields = try http3FieldsSelf(ctx, self);
-    const name = mem.sliceAt(name_ptr, name_len) catch return WasiP2Error.OutOfBounds;
+    const name = try mem.sliceAt(name_ptr, name_len);
     var values: std.ArrayList([]const u8) = .empty;
     defer values.deinit(ctx.alloc);
     fields.get(&values, ctx.alloc, name) catch return WasiP2Error.OutOfMemory;
@@ -1559,7 +1561,7 @@ fn http3FieldsHas(caller: *Caller, self: u32, name_ptr: u32, name_len: u32) Wasi
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
     const fields = try http3FieldsSelf(ctx, self);
-    const name = mem.sliceAt(name_ptr, name_len) catch return WasiP2Error.OutOfBounds;
+    const name = try mem.sliceAt(name_ptr, name_len);
     return @intFromBool(fields.has(name));
 }
 
@@ -1567,13 +1569,13 @@ fn http3FieldsSet(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, valu
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
     const fields = try http3FieldsSelf(ctx, self);
-    const name = mem.sliceAt(name_ptr, name_len) catch return WasiP2Error.OutOfBounds;
+    const name = try mem.sliceAt(name_ptr, name_len);
     var values: std.ArrayList([]const u8) = .empty;
     defer values.deinit(ctx.alloc);
     var i: u32 = 0;
     while (i < values_len) : (i += 1) {
         const rec = values_ptr + i * 8;
-        const v = mem.sliceAt(try mem.read(u32, rec), try mem.read(u32, rec + 4)) catch return WasiP2Error.OutOfBounds;
+        const v = try mem.sliceAt(try mem.read(u32, rec), try mem.read(u32, rec + 4));
         values.append(ctx.alloc, v) catch return WasiP2Error.OutOfMemory;
     }
     fields.set(ctx.alloc, name, values.items) catch |e| return writeHeaderErrResult(mem, retptr, e);
@@ -1584,7 +1586,7 @@ fn http3FieldsDelete(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, r
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
     const fields = try http3FieldsSelf(ctx, self);
-    const name = mem.sliceAt(name_ptr, name_len) catch return WasiP2Error.OutOfBounds;
+    const name = try mem.sliceAt(name_ptr, name_len);
     fields.delete(ctx.alloc, name) catch |e| return writeHeaderErrResult(mem, retptr, e);
     try writeHeaderErrResult(mem, retptr, null);
 }
@@ -1593,7 +1595,7 @@ fn http3FieldsGetAndDelete(caller: *Caller, self: u32, name_ptr: u32, name_len: 
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
     const fields = try http3FieldsSelf(ctx, self);
-    const name = mem.sliceAt(name_ptr, name_len) catch return WasiP2Error.OutOfBounds;
+    const name = try mem.sliceAt(name_ptr, name_len);
     var out: std.ArrayList([]u8) = .empty;
     defer {
         for (out.items) |v| ctx.alloc.free(v);
@@ -1612,8 +1614,8 @@ fn http3FieldsAppend(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, v
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
     const fields = try http3FieldsSelf(ctx, self);
-    const name = mem.sliceAt(name_ptr, name_len) catch return WasiP2Error.OutOfBounds;
-    const value = mem.sliceAt(value_ptr, value_len) catch return WasiP2Error.OutOfBounds;
+    const name = try mem.sliceAt(name_ptr, name_len);
+    const value = try mem.sliceAt(value_ptr, value_len);
     fields.append(ctx.alloc, name, value) catch |e| return writeHeaderErrResult(mem, retptr, e);
     try writeHeaderErrResult(mem, retptr, null);
 }
@@ -1748,7 +1750,7 @@ fn http3RequestSetMethod(caller: *Caller, self: u32, disc: u32, ptr: u32, len: u
         };
         return 0;
     }
-    const name = mem.sliceAt(ptr, len) catch return WasiP2Error.OutOfBounds;
+    const name = try mem.sliceAt(ptr, len);
     if (!p3http.validMethod(name)) return 1;
     // other("GET") etc. normalizes to the enum case (wasi-http#194).
     inline for (p3http.Method.known_names) |k| {
@@ -1797,7 +1799,7 @@ fn http3RequestSetPwq(caller: *Caller, self: u32, disc: u32, ptr: u32, len: u32)
         try http3SetOptString(ctx, &req.path_with_query, null);
         return 0;
     }
-    const s = mem.sliceAt(ptr, len) catch return WasiP2Error.OutOfBounds;
+    const s = try mem.sliceAt(ptr, len);
     if (!p3http.validPathWithQuery(s)) return 1;
     // The corpus pins "" → "/" (an empty path serializes as "/").
     try http3SetOptString(ctx, &req.path_with_query, if (s.len == 0) "/" else s);
@@ -1839,7 +1841,7 @@ fn http3RequestSetScheme(caller: *Caller, self: u32, opt_disc: u32, scheme_disc:
         0 => next = .http,
         1 => next = .https,
         else => {
-            const s = mem.sliceAt(ptr, len) catch return WasiP2Error.OutOfBounds;
+            const s = try mem.sliceAt(ptr, len);
             if (!p3http.validScheme(s)) return 1;
             // other("http"/"https") normalizes to the enum case (#194).
             if (std.mem.eql(u8, s, "http")) {
@@ -1871,7 +1873,7 @@ fn http3RequestSetAuthority(caller: *Caller, self: u32, disc: u32, ptr: u32, len
         try http3SetOptString(ctx, &req.authority, null);
         return 0;
     }
-    const s = mem.sliceAt(ptr, len) catch return WasiP2Error.OutOfBounds;
+    const s = try mem.sliceAt(ptr, len);
     if (!p3http.validAuthority(s)) return 1;
     try http3SetOptString(ctx, &req.authority, s);
     return 0;
@@ -2247,7 +2249,7 @@ pub fn http3RegisterCaptureSink(ctx: *WasiP2Ctx, shared_id: u32, cap: *std.Array
     if (pending.side != .writable) return;
     const pw = ctx.pending_writes.get(pending.waitable) orelse return;
     const mem = try ctx.memory();
-    const bytes = mem.sliceAt(pw.ptr, pw.count * pw.elem_size) catch return WasiP2Error.OutOfBounds;
+    const bytes = try mem.sliceAt(pw.ptr, pw.count * pw.elem_size);
     cap.appendSlice(ctx.alloc, bytes) catch return WasiP2Error.OutOfMemory;
     const writer = try ctx.streams.get(pending.waitable);
     writer.state = .idle;
@@ -2343,7 +2345,7 @@ fn sock3UdpSndbufSet(caller: *Caller, self: u32, value_raw: i64, retptr: u32) Wa
 fn sock3ResolveAddresses(caller: *Caller, name_ptr: u32, name_len: u32, retptr: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
-    const name = mem.sliceAt(name_ptr, name_len) catch return WasiP2Error.OutOfBounds;
+    const name = try mem.sliceAt(name_ptr, name_len);
     var addrs: [32]std.Io.net.IpAddress = undefined;
     const n = p2sock.resolveAddresses(try ctxIo(ctx), name, &addrs) catch |e| {
         // ip-name-lookup has its OWN error-code variant (ordinals per its
@@ -2391,89 +2393,89 @@ fn sock3ResolveAddresses(caller: *Caller, name_ptr: u32, name_len: u32, retptr: 
 pub fn registerP3Arms(lk: *Linker, module: []const u8, name: []const u8, op: adapter.P2Op, ctx: *WasiP2Ctx) !bool {
     switch (op) {
         // wasi:sockets@0.3.0 plain funcs (sync-lowered by wit-bindgen).
-        .sock3_tcp_create => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpCreate),
-        .sock3_tcp_bind => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, sock3TcpBind),
-        .sock3_tcp_listen => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpListen),
-        .sock3_tcp_send => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!u32, sock3TcpSend),
-        .sock3_tcp_receive => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpReceive),
-        .sock3_tcp_local_addr => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpLocalAddress),
-        .sock3_tcp_remote_addr => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpRemoteAddress),
-        .sock3_tcp_is_listening => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, sock3TcpIsListening),
-        .sock3_tcp_family => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, sock3TcpFamily),
-        .sock3_tcp_set_backlog => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, sock3TcpSetBacklog),
-        .sock3_tcp_ka_enabled_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpKaEnabledGet),
-        .sock3_tcp_ka_enabled_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, sock3TcpKaEnabledSet),
-        .sock3_tcp_ka_idle_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpKaIdleGet),
-        .sock3_tcp_ka_idle_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, sock3TcpKaIdleSet),
-        .sock3_tcp_ka_interval_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpKaIntervalGet),
-        .sock3_tcp_ka_interval_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, sock3TcpKaIntervalSet),
-        .sock3_tcp_ka_count_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpKaCountGet),
-        .sock3_tcp_ka_count_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, sock3TcpKaCountSet),
-        .sock3_tcp_hop_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpHopGet),
-        .sock3_tcp_hop_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, sock3TcpHopSet),
-        .sock3_tcp_rcvbuf_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpRcvbufGet),
-        .sock3_tcp_rcvbuf_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, sock3TcpRcvbufSet),
-        .sock3_tcp_sndbuf_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpSndbufGet),
-        .sock3_tcp_sndbuf_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, sock3TcpSndbufSet),
-        .sock3_udp_create => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpCreate),
-        .sock3_udp_bind => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, sock3UdpBind),
-        .sock3_udp_connect => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, sock3UdpConnect),
-        .sock3_udp_disconnect => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpDisconnect),
-        .sock3_udp_local_addr => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpLocalAddress),
-        .sock3_udp_remote_addr => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpRemoteAddress),
-        .sock3_udp_family => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, sock3UdpFamily),
-        .sock3_udp_hop_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpHopGet),
-        .sock3_udp_hop_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, sock3UdpHopSet),
-        .sock3_udp_rcvbuf_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpRcvbufGet),
-        .sock3_udp_rcvbuf_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, sock3UdpRcvbufSet),
-        .sock3_udp_sndbuf_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpSndbufGet),
-        .sock3_udp_sndbuf_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, sock3UdpSndbufSet),
+        .sock3_tcp_create => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpCreate, mapGuestFault),
+        .sock3_tcp_bind => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, sock3TcpBind, mapGuestFault),
+        .sock3_tcp_listen => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpListen, mapGuestFault),
+        .sock3_tcp_send => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!u32, sock3TcpSend, mapGuestFault),
+        .sock3_tcp_receive => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpReceive, mapGuestFault),
+        .sock3_tcp_local_addr => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpLocalAddress, mapGuestFault),
+        .sock3_tcp_remote_addr => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpRemoteAddress, mapGuestFault),
+        .sock3_tcp_is_listening => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, sock3TcpIsListening, mapGuestFault),
+        .sock3_tcp_family => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, sock3TcpFamily, mapGuestFault),
+        .sock3_tcp_set_backlog => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, sock3TcpSetBacklog, mapGuestFault),
+        .sock3_tcp_ka_enabled_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpKaEnabledGet, mapGuestFault),
+        .sock3_tcp_ka_enabled_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, sock3TcpKaEnabledSet, mapGuestFault),
+        .sock3_tcp_ka_idle_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpKaIdleGet, mapGuestFault),
+        .sock3_tcp_ka_idle_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, sock3TcpKaIdleSet, mapGuestFault),
+        .sock3_tcp_ka_interval_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpKaIntervalGet, mapGuestFault),
+        .sock3_tcp_ka_interval_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, sock3TcpKaIntervalSet, mapGuestFault),
+        .sock3_tcp_ka_count_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpKaCountGet, mapGuestFault),
+        .sock3_tcp_ka_count_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, sock3TcpKaCountSet, mapGuestFault),
+        .sock3_tcp_hop_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpHopGet, mapGuestFault),
+        .sock3_tcp_hop_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, sock3TcpHopSet, mapGuestFault),
+        .sock3_tcp_rcvbuf_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpRcvbufGet, mapGuestFault),
+        .sock3_tcp_rcvbuf_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, sock3TcpRcvbufSet, mapGuestFault),
+        .sock3_tcp_sndbuf_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3TcpSndbufGet, mapGuestFault),
+        .sock3_tcp_sndbuf_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, sock3TcpSndbufSet, mapGuestFault),
+        .sock3_udp_create => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpCreate, mapGuestFault),
+        .sock3_udp_bind => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, sock3UdpBind, mapGuestFault),
+        .sock3_udp_connect => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, sock3UdpConnect, mapGuestFault),
+        .sock3_udp_disconnect => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpDisconnect, mapGuestFault),
+        .sock3_udp_local_addr => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpLocalAddress, mapGuestFault),
+        .sock3_udp_remote_addr => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpRemoteAddress, mapGuestFault),
+        .sock3_udp_family => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, sock3UdpFamily, mapGuestFault),
+        .sock3_udp_hop_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpHopGet, mapGuestFault),
+        .sock3_udp_hop_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, sock3UdpHopSet, mapGuestFault),
+        .sock3_udp_rcvbuf_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpRcvbufGet, mapGuestFault),
+        .sock3_udp_rcvbuf_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, sock3UdpRcvbufSet, mapGuestFault),
+        .sock3_udp_sndbuf_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, sock3UdpSndbufGet, mapGuestFault),
+        .sock3_udp_sndbuf_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, sock3UdpSndbufSet, mapGuestFault),
         // The async-func sockets surface (connect / udp send / udp receive /
         // resolve-addresses) arrives ASYNC-lowered — sync lowers unreached.
         .sock3_tcp_connect, .sock3_udp_send, .sock3_udp_receive, .sock3_resolve_addresses => return error.UnsupportedWasiImport,
         // wasi:http/types@0.3.0 `fields` (sync plain funcs; ADR-0205 phase D).
-        .http3_fields_new => try lk.defineFuncCtx(module, name, ctx, fn (*Caller) WasiP2Error!u32, http3FieldsNew),
-        .http3_fields_from_list => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, http3FieldsFromList),
-        .http3_fields_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, http3FieldsGet),
-        .http3_fields_has => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!u32, http3FieldsHas),
-        .http3_fields_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32) WasiP2Error!void, http3FieldsSet),
-        .http3_fields_delete => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, http3FieldsDelete),
-        .http3_fields_get_and_delete => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, http3FieldsGetAndDelete),
-        .http3_fields_append => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32) WasiP2Error!void, http3FieldsAppend),
-        .http3_fields_copy_all => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3FieldsCopyAll),
-        .http3_fields_clone => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, http3FieldsClone),
-        .http3_request_new => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, http3RequestNew),
-        .http3_request_get_method => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3RequestGetMethod),
-        .http3_request_set_method => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, http3RequestSetMethod),
-        .http3_request_get_pwq => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3RequestGetPwq),
-        .http3_request_set_pwq => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, http3RequestSetPwq),
-        .http3_request_get_scheme => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3RequestGetScheme),
-        .http3_request_set_scheme => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!u32, http3RequestSetScheme),
-        .http3_request_get_authority => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3RequestGetAuthority),
-        .http3_request_set_authority => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, http3RequestSetAuthority),
-        .http3_request_get_options => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3RequestGetOptions),
-        .http3_request_get_headers => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, http3RequestGetHeaders),
-        .http3_response_new => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!void, http3ResponseNew),
-        .http3_response_get_status => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, http3ResponseGetStatus),
-        .http3_response_set_status => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!u32, http3ResponseSetStatus),
-        .http3_response_get_headers => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, http3ResponseGetHeaders),
-        .http3_reqopts_new => try lk.defineFuncCtx(module, name, ctx, fn (*Caller) WasiP2Error!u32, http3ReqoptsNew),
-        .http3_reqopts_connect_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3ReqoptsConnectGet),
-        .http3_reqopts_connect_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, i64, u32) WasiP2Error!void, http3ReqoptsConnectSet),
-        .http3_reqopts_first_byte_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3ReqoptsFirstByteGet),
-        .http3_reqopts_first_byte_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, i64, u32) WasiP2Error!void, http3ReqoptsFirstByteSet),
-        .http3_reqopts_between_bytes_get => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3ReqoptsBetweenBytesGet),
-        .http3_reqopts_between_bytes_set => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, i64, u32) WasiP2Error!void, http3ReqoptsBetweenBytesSet),
-        .http3_reqopts_clone => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, http3ReqoptsClone),
-        .http3_request_consume_body => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, http3RequestConsumeBody),
-        .http3_response_consume_body => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, http3ResponseConsumeBody),
+        .http3_fields_new => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, http3FieldsNew, mapGuestFault),
+        .http3_fields_from_list => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, http3FieldsFromList, mapGuestFault),
+        .http3_fields_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, http3FieldsGet, mapGuestFault),
+        .http3_fields_has => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!u32, http3FieldsHas, mapGuestFault),
+        .http3_fields_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32) WasiP2Error!void, http3FieldsSet, mapGuestFault),
+        .http3_fields_delete => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, http3FieldsDelete, mapGuestFault),
+        .http3_fields_get_and_delete => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!void, http3FieldsGetAndDelete, mapGuestFault),
+        .http3_fields_append => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32) WasiP2Error!void, http3FieldsAppend, mapGuestFault),
+        .http3_fields_copy_all => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3FieldsCopyAll, mapGuestFault),
+        .http3_fields_clone => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, http3FieldsClone, mapGuestFault),
+        .http3_request_new => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32, u32, u32) WasiP2Error!void, http3RequestNew, mapGuestFault),
+        .http3_request_get_method => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3RequestGetMethod, mapGuestFault),
+        .http3_request_set_method => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, http3RequestSetMethod, mapGuestFault),
+        .http3_request_get_pwq => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3RequestGetPwq, mapGuestFault),
+        .http3_request_set_pwq => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, http3RequestSetPwq, mapGuestFault),
+        .http3_request_get_scheme => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3RequestGetScheme, mapGuestFault),
+        .http3_request_set_scheme => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!u32, http3RequestSetScheme, mapGuestFault),
+        .http3_request_get_authority => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3RequestGetAuthority, mapGuestFault),
+        .http3_request_set_authority => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32) WasiP2Error!u32, http3RequestSetAuthority, mapGuestFault),
+        .http3_request_get_options => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3RequestGetOptions, mapGuestFault),
+        .http3_request_get_headers => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, http3RequestGetHeaders, mapGuestFault),
+        .http3_response_new => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!void, http3ResponseNew, mapGuestFault),
+        .http3_response_get_status => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, http3ResponseGetStatus, mapGuestFault),
+        .http3_response_set_status => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!u32, http3ResponseSetStatus, mapGuestFault),
+        .http3_response_get_headers => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, http3ResponseGetHeaders, mapGuestFault),
+        .http3_reqopts_new => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, http3ReqoptsNew, mapGuestFault),
+        .http3_reqopts_connect_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3ReqoptsConnectGet, mapGuestFault),
+        .http3_reqopts_connect_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64, u32) WasiP2Error!void, http3ReqoptsConnectSet, mapGuestFault),
+        .http3_reqopts_first_byte_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3ReqoptsFirstByteGet, mapGuestFault),
+        .http3_reqopts_first_byte_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64, u32) WasiP2Error!void, http3ReqoptsFirstByteSet, mapGuestFault),
+        .http3_reqopts_between_bytes_get => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, http3ReqoptsBetweenBytesGet, mapGuestFault),
+        .http3_reqopts_between_bytes_set => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64, u32) WasiP2Error!void, http3ReqoptsBetweenBytesSet, mapGuestFault),
+        .http3_reqopts_clone => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, http3ReqoptsClone, mapGuestFault),
+        .http3_request_consume_body => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, http3RequestConsumeBody, mapGuestFault),
+        .http3_response_consume_body => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, http3ResponseConsumeBody, mapGuestFault),
         // client.send arrives ASYNC-lowered; a sync lower is unreached.
         .http3_client_send => return error.UnsupportedWasiImport,
         // wasi:filesystem@0.3.0 plain funcs (sync-lowered by wit-bindgen).
-        .fs3_read_via_stream => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, fs3ReadViaStream),
-        .fs3_write_via_stream => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, fs3WriteViaStream),
-        .fs3_append_via_stream => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!u32, fs3AppendViaStream),
-        .fs3_read_directory => try lk.defineFuncCtx(module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, fs3ReadDirectory),
+        .fs3_read_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, i64, u32) WasiP2Error!void, fs3ReadViaStream, mapGuestFault),
+        .fs3_write_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, i64) WasiP2Error!u32, fs3WriteViaStream, mapGuestFault),
+        .fs3_append_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!u32, fs3AppendViaStream, mapGuestFault),
+        .fs3_read_directory => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, fs3ReadDirectory, mapGuestFault),
         // The fs3 async-func surface arrives ASYNC-lowered (defineAsyncLoweredOp);
         // a sync lower of it is unreached by the conformance corpus — fail loudly.
         .fs3_stat, .fs3_stat_at, .fs3_get_type, .fs3_get_flags, .fs3_set_times, .fs3_set_times_at, .fs3_set_size, .fs3_advise, .fs3_sync, .fs3_sync_data, .fs3_open_at, .fs3_create_directory_at, .fs3_remove_directory_at, .fs3_unlink_file_at, .fs3_readlink_at, .fs3_rename_at, .fs3_symlink_at, .fs3_link_at, .fs3_is_same_object, .fs3_metadata_hash, .fs3_metadata_hash_at => return error.UnsupportedWasiImport,

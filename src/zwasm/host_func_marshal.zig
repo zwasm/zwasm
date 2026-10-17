@@ -36,8 +36,13 @@ pub fn HostFnCtx(comptime Sig: type) type {
         /// Opaque host context surfaced to the user fn via `Caller.data`
         /// (set by `Linker.defineFuncCtx`; null for `defineFunc`).
         host_data: ?*anyopaque = null,
+        err_map: ?HostErrorMap = null,
     };
 }
+
+/// Renames the user fn's error before `hostFnError` sees it; null for a facade
+/// host fn. Set through `linker.defineFuncCtxMapped` / `defineFuncRawMapped`.
+pub const HostErrorMap = *const fn (anyerror) anyerror;
 
 /// Comptime-emitted thunk for a given host-fn signature. Returns
 /// the function pointer compatible with `runtime.HostCall.fn_ptr`.
@@ -72,7 +77,7 @@ pub fn thunkFor(comptime Sig: type) *const fn (*_runtime.Runtime, *anyopaque) an
             if (Ret == void) return;
             switch (@typeInfo(Ret)) {
                 .error_union => |eu| {
-                    const ok = ret catch |err| return hostFnError(err);
+                    const ok = ret catch |err| return hostFnError(if (wrapper.err_map) |m| m(err) else err);
                     try pushResult(rt, eu.payload, ok);
                 },
                 else => try pushResult(rt, Ret, ret),
@@ -94,6 +99,7 @@ pub const RawHostFn = *const fn (caller: *Caller, args: []const RuntimeValue, re
 pub const RawHostFnCtx = struct {
     user_fn: RawHostFn,
     host_data: ?*anyopaque = null,
+    err_map: ?HostErrorMap = null,
     n_params: usize,
     n_results: usize,
 };
@@ -118,7 +124,7 @@ pub fn rawThunk(rt: *_runtime.Runtime, ctx: *anyopaque) anyerror!void {
     }
     var caller: Caller = .{ .rt = rt, .host_data = wrapper.host_data };
     wrapper.user_fn(&caller, args_buf[0..wrapper.n_params], results_buf[0..wrapper.n_results]) catch |err|
-        return hostFnError(err);
+        return hostFnError(if (wrapper.err_map) |m| m(err) else err);
     for (results_buf[0..wrapper.n_results]) |rv| try rt.pushOperand(rv);
 }
 

@@ -40,6 +40,9 @@ const Engine = @import("../zwasm/engine.zig").Engine;
 const Module = @import("../zwasm/module.zig").Module;
 const Instance = @import("../zwasm/instance.zig").Instance;
 const linker_mod = @import("../zwasm/linker.zig");
+const defineMapped = linker_mod.defineFuncCtxMapped;
+const defineRawMapped = linker_mod.defineFuncRawMapped;
+const mapGuestFault = @import("component_wasi_ctx.zig").mapGuestFault;
 const Linker = linker_mod.Linker;
 const Caller = @import("../zwasm/caller.zig").Caller;
 const Memory = @import("../zwasm/memory.zig").Memory;
@@ -676,7 +679,7 @@ fn pourSyntheticExport(
         .task_return => |tr| {
             if (tr.result == null or !isFlat4Scalar(tr.result.?)) return GraphError.UnsupportedBoundaryType;
             const as = try graph.asyncState();
-            try lk.defineFuncCtx(ns, ex.name, @ptrCast(as), TaskReturnSig, graphTaskReturn);
+            try defineMapped(lk, ns, ex.name, @ptrCast(as), TaskReturnSig, graphTaskReturn, mapGuestFault);
             return;
         },
         // A child's own `canon {future,stream}.*` builtin (ADR-0195 d-b-2 /
@@ -701,8 +704,8 @@ fn pourSyntheticExport(
             wctx.* = .{ .as = as, .elem_size = 0, .child_idx = child.idx };
             try graph.future_ctxs.append(graph.alloc, wctx);
             switch (ws.op) {
-                .new => try lk.defineFuncCtx(ns, ex.name, @ptrCast(wctx), fn (*Caller) BoundaryError!u32, graphWaitableSetNew),
-                .join => try lk.defineFuncCtx(ns, ex.name, @ptrCast(wctx), fn (*Caller, u32, u32) BoundaryError!void, graphWaitableJoin),
+                .new => try defineMapped(lk, ns, ex.name, @ptrCast(wctx), fn (*Caller) BoundaryError!u32, graphWaitableSetNew, mapGuestFault),
+                .join => try defineMapped(lk, ns, ex.name, @ptrCast(wctx), fn (*Caller, u32, u32) BoundaryError!void, graphWaitableJoin, mapGuestFault),
                 .wait, .poll, .drop => return GraphError.UnsupportedBoundaryType,
             }
             return;
@@ -796,9 +799,9 @@ fn installBoundaryTrampoline(
         };
         try graph.boundaries.append(graph.alloc, bctx);
         if (param_is_string) {
-            try lk.defineFuncCtx(ns, core_export_name, @ptrCast(bctx), StrRetStrSig, strRetStrTrampoline);
+            try defineMapped(lk, ns, core_export_name, @ptrCast(bctx), StrRetStrSig, strRetStrTrampoline, mapGuestFault);
         } else {
-            try lk.defineFuncCtx(ns, core_export_name, @ptrCast(bctx), RetPtrSig, retPtrTrampoline);
+            try defineMapped(lk, ns, core_export_name, @ptrCast(bctx), RetPtrSig, retPtrTrampoline, mapGuestFault);
         }
         return;
     }
@@ -823,7 +826,7 @@ fn installBoundaryTrampoline(
             .result_blob_size = blob.size,
         };
         try graph.boundaries.append(graph.alloc, bctx);
-        try lk.defineFuncCtx(ns, core_export_name, @ptrCast(bctx), RetPtrSig, recordRetTrampoline);
+        try defineMapped(lk, ns, core_export_name, @ptrCast(bctx), RetPtrSig, recordRetTrampoline, mapGuestFault);
         return;
     }
 
@@ -845,7 +848,7 @@ fn installBoundaryTrampoline(
             .result_record_marshal = true,
         };
         try graph.boundaries.append(graph.alloc, bctx);
-        try lk.defineFuncCtx(ns, core_export_name, @ptrCast(bctx), RetPtrSig, recordPtrRetTrampoline);
+        try defineMapped(lk, ns, core_export_name, @ptrCast(bctx), RetPtrSig, recordPtrRetTrampoline, mapGuestFault);
         return;
     }
 
@@ -894,13 +897,15 @@ fn installBoundaryTrampoline(
     // string/list path); the result is a single flat-4 word. `boundaryFlatShape`
     // bounded the word count to `marshal.raw_max_words`.
     const n_words = shape.words;
-    try lk.defineFuncRaw(
+    try defineRawMapped(
+        lk,
         ns,
         core_export_name,
         @ptrCast(bctx),
         boundary_core_i32[0..n_words],
         boundary_core_i32[0..1],
         boundaryTrampolineRaw,
+        mapGuestFault,
     );
 }
 
@@ -989,11 +994,11 @@ fn installAsyncBoundary(
     try graph.boundaries.append(graph.alloc, bctx);
 
     if (has_result) {
-        try lk.defineFuncCtx(ns, core_export_name, @ptrCast(bctx), AsyncBoundaryRetSig, asyncBoundaryRetTrampoline);
+        try defineMapped(lk, ns, core_export_name, @ptrCast(bctx), AsyncBoundaryRetSig, asyncBoundaryRetTrampoline, mapGuestFault);
     } else if (has_param) {
-        try lk.defineFuncCtx(ns, core_export_name, @ptrCast(bctx), AsyncBoundaryParamSig, asyncBoundaryParamTrampoline);
+        try defineMapped(lk, ns, core_export_name, @ptrCast(bctx), AsyncBoundaryParamSig, asyncBoundaryParamTrampoline, mapGuestFault);
     } else {
-        try lk.defineFuncCtx(ns, core_export_name, @ptrCast(bctx), AsyncBoundarySig, asyncBoundaryTrampoline);
+        try defineMapped(lk, ns, core_export_name, @ptrCast(bctx), AsyncBoundarySig, asyncBoundaryTrampoline, mapGuestFault);
     }
 }
 
@@ -1132,7 +1137,7 @@ fn graphTaskReturn(caller: *Caller, value: i32) BoundaryError!void {
 /// the graph scheduler's `pollSet` then resolves it across the boundary.
 fn graphWaitableSetNew(caller: *Caller) BoundaryError!u32 {
     const as = caller.data(GraphFutureCtx).as;
-    return as.sets.add(async_mod.WaitableSet.init(as.alloc)) catch |e| return mapGraphAsyncFault(e);
+    return as.sets.add(async_mod.WaitableSet.init(as.alloc));
 }
 
 /// `canon waitable.join` at the graph boundary (ADR-0195 d-c-2): add a waitable
@@ -1141,8 +1146,8 @@ fn graphWaitableSetNew(caller: *Caller) BoundaryError!u32 {
 fn graphWaitableJoin(caller: *Caller, waitable: u32, set_handle: u32) BoundaryError!void {
     const ctx = caller.data(GraphFutureCtx);
     try checkOwner(ctx, waitable); // a child may only join an end it owns (ADR-0197)
-    const set = ctx.as.sets.get(set_handle) catch |e| return mapGraphAsyncFault(e);
-    set.join(waitable) catch |e| return mapGraphAsyncFault(e);
+    const set = try ctx.as.sets.get(set_handle);
+    try set.join(waitable);
 }
 
 /// The host context a graph `canon future.*` builtin binds to (ADR-0195 d-b-2):
@@ -1166,24 +1171,13 @@ fn recordOwnerPair(ctx: *GraphFutureCtx, pair: async_mod.EndPair) BoundaryError!
     ctx.as.owners.put(ctx.as.alloc, pair.writable, ctx.child_idx) catch return error.OutOfMemory;
 }
 
-/// Map a graph async-builtin fault to the host-fn surface: a guest supplies the
-/// handle/ptr, so a bad handle / illegal sequencing / exhausted table is a GUEST
-/// fault → the canonical guest trap (`error.Unreachable`), which `mapDispatchErr`
-/// narrows cleanly. Genuine host OOM propagates. (Mirrors `component_wasi_p2.mapAsyncFault`.)
-fn mapGraphAsyncFault(e: async_mod.Error) BoundaryError {
-    return switch (e) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.Unreachable,
-    };
-}
-
 /// `canon future.new` at the graph boundary: mint a readable+writable end pair
 /// into the GRAPH-shared table over the GRAPH-shared rendezvous; return the
 /// spec's packed `ri | (wi << 32)`. Both ends (hence the handle that later
 /// crosses to the peer child) live in the one shared table.
 fn graphFutureNew(caller: *Caller) BoundaryError!u64 {
     const ctx = caller.data(GraphFutureCtx);
-    const pair = async_mod.newFuturePair(&ctx.as.streams, &ctx.as.shared, null) catch |e| return mapGraphAsyncFault(e);
+    const pair = try async_mod.newFuturePair(&ctx.as.streams, &ctx.as.shared, null);
     try recordOwnerPair(ctx, pair);
     return @as(u64, pair.readable) | (@as(u64, pair.writable) << 32);
 }
@@ -1195,8 +1189,8 @@ fn graphFutureNew(caller: *Caller) BoundaryError!u64 {
 fn graphFutureWrite(caller: *Caller, handle: u32, ptr: u32) BoundaryError!u32 {
     const ctx = caller.data(GraphFutureCtx);
     try checkOwner(ctx, handle);
-    const end = ctx.as.streams.get(handle) catch |e| return mapGraphAsyncFault(e);
-    const sh = ctx.as.shared.get(end.shared) catch |e| return mapGraphAsyncFault(e);
+    const end = try ctx.as.streams.get(handle);
+    const sh = try ctx.as.shared.get(end.shared);
     const fut = switch (sh.*) {
         .future => |*f| f,
         // future.* on a non-future handle = guest fault (subtask never linked).
@@ -1208,7 +1202,7 @@ fn graphFutureWrite(caller: *Caller, handle: u32, ptr: u32) BoundaryError!u32 {
     const src = mem.sliceAt(ptr, ctx.elem_size) catch return error.OutOfBoundsLoad;
     @memcpy(fut.value[0..ctx.elem_size], src);
     fut.value_len = ctx.elem_size;
-    const step = end.copy(fut, &ctx.as.streams, handle, 1) catch |e| return mapGraphAsyncFault(e);
+    const step = try end.copy(fut, &ctx.as.streams, handle, 1);
     return step.code().encode();
 }
 
@@ -1218,13 +1212,13 @@ fn graphFutureWrite(caller: *Caller, handle: u32, ptr: u32) BoundaryError!u32 {
 fn graphFutureRead(caller: *Caller, handle: u32, ptr: u32) BoundaryError!u32 {
     const ctx = caller.data(GraphFutureCtx);
     try checkOwner(ctx, handle);
-    const end = ctx.as.streams.get(handle) catch |e| return mapGraphAsyncFault(e);
-    const sh = ctx.as.shared.get(end.shared) catch |e| return mapGraphAsyncFault(e);
+    const end = try ctx.as.streams.get(handle);
+    const sh = try ctx.as.shared.get(end.shared);
     const fut = switch (sh.*) {
         .future => |*f| f,
         .stream, .subtask => return error.Unreachable,
     };
-    const step = end.copy(fut, &ctx.as.streams, handle, 1) catch |e| return mapGraphAsyncFault(e);
+    const step = try end.copy(fut, &ctx.as.streams, handle, 1);
     if (step.caller == .completed) {
         if (fut.value_len < ctx.elem_size) return error.Unreachable; // reader before any writer = guest fault
         const mem = caller.memory() orelse return error.OutOfBoundsStore;
@@ -1243,7 +1237,7 @@ fn graphFutureDrop(caller: *Caller, handle: u32) BoundaryError!void {
     try checkOwner(ctx, handle);
     // dropEndGuarded enforces the future-writable-before-write trap + marks the
     // rendezvous DROPPED for the surviving peer (shared with the WASI-P2 path).
-    async_mod.dropEndGuarded(&ctx.as.streams, &ctx.as.shared, handle) catch |e| return mapGraphAsyncFault(e);
+    try async_mod.dropEndGuarded(&ctx.as.streams, &ctx.as.shared, handle);
     _ = ctx.as.owners.remove(handle); // the end no longer exists; free its ledger entry
 }
 
@@ -1252,7 +1246,7 @@ fn graphFutureDrop(caller: *Caller, handle: u32) BoundaryError!void {
 /// return the spec's packed `ri | (wi << 32)`. Symmetric to `graphFutureNew`.
 fn graphStreamNew(caller: *Caller) BoundaryError!u64 {
     const ctx = caller.data(GraphFutureCtx);
-    const pair = async_mod.newStreamPair(&ctx.as.streams, &ctx.as.shared, null) catch |e| return mapGraphAsyncFault(e);
+    const pair = try async_mod.newStreamPair(&ctx.as.streams, &ctx.as.shared, null);
     try recordOwnerPair(ctx, pair);
     return @as(u64, pair.readable) | (@as(u64, pair.writable) << 32);
 }
@@ -1265,8 +1259,8 @@ fn graphStreamNew(caller: *Caller) BoundaryError!u64 {
 fn graphStreamWrite(caller: *Caller, handle: u32, ptr: u32, count: u32) BoundaryError!u32 {
     const ctx = caller.data(GraphFutureCtx);
     try checkOwner(ctx, handle);
-    const end = ctx.as.streams.get(handle) catch |e| return mapGraphAsyncFault(e);
-    const sh = ctx.as.shared.get(end.shared) catch |e| return mapGraphAsyncFault(e);
+    const end = try ctx.as.streams.get(handle);
+    const sh = try ctx.as.shared.get(end.shared);
     const st = switch (sh.*) {
         .stream => |*s| s,
         // stream.* on a non-stream handle = guest fault (subtask never linked).
@@ -1280,7 +1274,7 @@ fn graphStreamWrite(caller: *Caller, handle: u32, ptr: u32, count: u32) Boundary
     const src = mem.sliceAt(ptr, @intCast(nbytes)) catch return error.OutOfBoundsLoad;
     @memcpy(st.buf[0..@intCast(nbytes)], src);
     st.buf_len = @intCast(nbytes);
-    const step = end.copy(st, &ctx.as.streams, handle, count) catch |e| return mapGraphAsyncFault(e);
+    const step = try end.copy(st, &ctx.as.streams, handle, count);
     // ADR-0195 d-c-2 (the BLOCKING path): if this write resolved a PARKED reader
     // (the reader blocked before any writer arrived), deliver the deposited bytes
     // into that reader's recorded memory now — its `pending_event` is already set
@@ -1310,13 +1304,13 @@ fn graphStreamWrite(caller: *Caller, handle: u32, ptr: u32, count: u32) Boundary
 fn graphStreamRead(caller: *Caller, handle: u32, ptr: u32, count: u32) BoundaryError!u32 {
     const ctx = caller.data(GraphFutureCtx);
     try checkOwner(ctx, handle);
-    const end = ctx.as.streams.get(handle) catch |e| return mapGraphAsyncFault(e);
-    const sh = ctx.as.shared.get(end.shared) catch |e| return mapGraphAsyncFault(e);
+    const end = try ctx.as.streams.get(handle);
+    const sh = try ctx.as.shared.get(end.shared);
     const st = switch (sh.*) {
         .stream => |*s| s,
         .future, .subtask => return error.Unreachable,
     };
-    const step = end.copy(st, &ctx.as.streams, handle, count) catch |e| return mapGraphAsyncFault(e);
+    const step = try end.copy(st, &ctx.as.streams, handle, count);
     if (step.caller == .completed) {
         const n = step.caller.completed;
         const nbytes = @as(u64, n) * @as(u64, ctx.elem_size);
@@ -1380,16 +1374,16 @@ fn installGraphFutureBuiltin(
     fctx.* = .{ .as = as, .elem_size = elem_size, .child_idx = child.idx };
     try graph.future_ctxs.append(graph.alloc, fctx);
     switch (op) {
-        .future_new => try lk.defineFuncCtx(ns, core_export_name, @ptrCast(fctx), fn (*Caller) BoundaryError!u64, graphFutureNew),
-        .future_write => try lk.defineFuncCtx(ns, core_export_name, @ptrCast(fctx), fn (*Caller, u32, u32) BoundaryError!u32, graphFutureWrite),
-        .future_read => try lk.defineFuncCtx(ns, core_export_name, @ptrCast(fctx), fn (*Caller, u32, u32) BoundaryError!u32, graphFutureRead),
-        .future_drop_readable, .future_drop_writable => try lk.defineFuncCtx(ns, core_export_name, @ptrCast(fctx), fn (*Caller, u32) BoundaryError!void, graphFutureDrop),
+        .future_new => try defineMapped(lk, ns, core_export_name, @ptrCast(fctx), fn (*Caller) BoundaryError!u64, graphFutureNew, mapGuestFault),
+        .future_write => try defineMapped(lk, ns, core_export_name, @ptrCast(fctx), fn (*Caller, u32, u32) BoundaryError!u32, graphFutureWrite, mapGuestFault),
+        .future_read => try defineMapped(lk, ns, core_export_name, @ptrCast(fctx), fn (*Caller, u32, u32) BoundaryError!u32, graphFutureRead, mapGuestFault),
+        .future_drop_readable, .future_drop_writable => try defineMapped(lk, ns, core_export_name, @ptrCast(fctx), fn (*Caller, u32) BoundaryError!void, graphFutureDrop, mapGuestFault),
         // stream.{new,read,write,drop-*} (ADR-0195 d-c-1, synchronous multi-element
         // rendezvous). `dropEnd` is kind-agnostic so the future drop fn is reused.
-        .stream_new => try lk.defineFuncCtx(ns, core_export_name, @ptrCast(fctx), fn (*Caller) BoundaryError!u64, graphStreamNew),
-        .stream_write => try lk.defineFuncCtx(ns, core_export_name, @ptrCast(fctx), fn (*Caller, u32, u32, u32) BoundaryError!u32, graphStreamWrite),
-        .stream_read => try lk.defineFuncCtx(ns, core_export_name, @ptrCast(fctx), fn (*Caller, u32, u32, u32) BoundaryError!u32, graphStreamRead),
-        .stream_drop_readable, .stream_drop_writable => try lk.defineFuncCtx(ns, core_export_name, @ptrCast(fctx), fn (*Caller, u32) BoundaryError!void, graphFutureDrop),
+        .stream_new => try defineMapped(lk, ns, core_export_name, @ptrCast(fctx), fn (*Caller) BoundaryError!u64, graphStreamNew, mapGuestFault),
+        .stream_write => try defineMapped(lk, ns, core_export_name, @ptrCast(fctx), fn (*Caller, u32, u32, u32) BoundaryError!u32, graphStreamWrite, mapGuestFault),
+        .stream_read => try defineMapped(lk, ns, core_export_name, @ptrCast(fctx), fn (*Caller, u32, u32, u32) BoundaryError!u32, graphStreamRead, mapGuestFault),
+        .stream_drop_readable, .stream_drop_writable => try defineMapped(lk, ns, core_export_name, @ptrCast(fctx), fn (*Caller, u32) BoundaryError!void, graphFutureDrop, mapGuestFault),
         // stream/future cancel-{read,write}: the blocking-copy cancellation path
         // (d-c-2). Typed deferral — fail loudly.
         .stream_cancel_read,
@@ -1602,13 +1596,13 @@ fn isFlat4Scalar(vt: ctypes.ValType) bool {
 }
 
 /// The error set a boundary trampoline returns: the callee-invoke's
-/// `InvokeError` plus the host-side out-of-memory of the snapshot copy.
-/// `rawThunk` passes a `Trap` or `ProcExit` through and turns the rest into
-/// `HostTrap`, so a returned error becomes a guest trap — NOT a silent
+/// `InvokeError`, the host-side out-of-memory of the snapshot copy, and the
+/// shared async tables' names. The thunk names them by `mapGuestFault` and
+/// then `hostFnError`, so a returned error becomes a guest trap — NOT a silent
 /// fallback. The marshalling-failure cases map onto the memory trap they are
 /// (`OutOfBoundsLoad`/`Store`), per the Canonical ABI + untrusted-component
 /// sandboxing: a bad `(ptr,len)` must trap.
-const BoundaryError = Instance.InvokeError || error{OutOfMemory};
+const BoundaryError = Instance.InvokeError || error{OutOfMemory} || async_mod.Error;
 
 /// D-305: ONE Value-slice host fn replaces the per-arity `boundaryTrampoline{,3,4}`.
 /// `defineFuncRaw` pops the flattened core words into `args` (all-i32) and hands

@@ -852,6 +852,9 @@ test "zwasm facade: a host fn's error that is not a trap traps as HostTrap; a tr
     };
     const cases = [_]struct { returned: anyerror, invoked: anyerror }{
         .{ .returned = error.NotATrap, .invoked = error.HostTrap },
+        // A facade host fn is registered without `mapGuestFault`: a name the
+        // component host would call a guest fault stays the embedder's own (#535).
+        .{ .returned = error.TypeMismatch, .invoked = error.HostTrap },
         .{ .returned = error.DivByZero, .invoked = error.DivByZero },
         .{ .returned = error.ProcExit, .invoked = error.ProcExit },
     };

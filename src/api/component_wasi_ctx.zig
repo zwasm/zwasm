@@ -465,7 +465,7 @@ pub const WasiP2Ctx = struct {
                 end.setPendingEvent(.{ .code = .stream_read, .index = h, .payload = (async_mod.ReturnCode{ .completed = @intCast(filled) }).encode() });
             } else if (self.host_tcp_rx.get(end.shared) != null) {
                 const sock = self.tcpSocketRep(pr.rep) orelse continue;
-                const buf = mem.sliceAt(pr.ptr, pr.cap * pr.elem_size) catch return WasiP2Error.OutOfBounds;
+                const buf = try mem.sliceAt(pr.ptr, pr.cap * pr.elem_size);
                 const n = sock.recv(io, buf) catch 0;
                 if (n == 0) {
                     // Ready-then-zero = peer FIN → the stream closes.
@@ -534,7 +534,7 @@ pub const WasiP2Ctx = struct {
             if (self.host_sources.get(end.shared) == null) continue;
             const mem = try self.memory();
             // D-335: cap is in ELEMENTS; slice cap*elem_size bytes, COMPLETE in elements.
-            const buf = mem.sliceAt(pr.ptr, pr.cap * pr.elem_size) catch return WasiP2Error.OutOfBounds;
+            const buf = try mem.sliceAt(pr.ptr, pr.cap * pr.elem_size);
             const n: u32 = @intCast(try readStdinP2(self.host, buf));
             end.state = .done;
             end.setPendingEvent(.{ .code = .stream_read, .index = m, .payload = (async_mod.ReturnCode{ .completed = @intCast(n / pr.elem_size) }).encode() });
@@ -554,7 +554,7 @@ pub fn ctxMemory(caller: *Caller) WasiP2Error!Memory {
     return caller.memory() orelse return WasiP2Error.NoMemory;
 }
 
-pub const WasiP2Error = error{ NoMemory, OutOfBounds, WriteFailed, ReadFailed, NoRealloc, ReallocFailed, ProcExit, OutOfMemory, NoHostIo, Unreachable, UnsupportedAsyncBuiltin } ||
+pub const WasiP2Error = error{ NoMemory, WriteFailed, ReadFailed, NoRealloc, ReallocFailed, ProcExit, OutOfMemory, NoHostIo, Unreachable, UnsupportedAsyncBuiltin } ||
     resource_table.Error || Memory.Error || async_mod.Error;
 
 pub const Memory = @import("../zwasm/memory.zig").Memory;
@@ -611,7 +611,7 @@ pub fn descriptorFilestat(ctx: *WasiP2Ctx, mem: Memory, fd: wasi_p1.Fd) WasiP2Er
     const scratch = try ctx.reallocGuest(@sizeOf(wasi_p1.Filestat), 8);
     const errno = wasi_fd.fdFilestatGet(ctx.host, mem.slice(), fd, scratch);
     if (errno != .success) return .{ .err = errno };
-    const bytes = mem.sliceAt(scratch, @sizeOf(wasi_p1.Filestat)) catch return WasiP2Error.OutOfBounds;
+    const bytes = try mem.sliceAt(scratch, @sizeOf(wasi_p1.Filestat));
     return .{ .ok = std.mem.bytesToValue(wasi_p1.Filestat, bytes) };
 }
 
@@ -621,7 +621,7 @@ pub fn pathFilestat(ctx: *WasiP2Ctx, mem: Memory, dirfd: wasi_p1.Fd, lookupflags
     const scratch = try ctx.reallocGuest(@sizeOf(wasi_p1.Filestat), 8);
     const errno = wasi_path.pathFilestatGet(ctx.host, mem.slice(), dirfd, lookupflags, path_ptr, path_len, scratch);
     if (errno != .success) return .{ .err = errno };
-    const bytes = mem.sliceAt(scratch, @sizeOf(wasi_p1.Filestat)) catch return WasiP2Error.OutOfBounds;
+    const bytes = try mem.sliceAt(scratch, @sizeOf(wasi_p1.Filestat));
     return .{ .ok = std.mem.bytesToValue(wasi_p1.Filestat, bytes) };
 }
 
@@ -835,9 +835,6 @@ pub fn p2WaitableSetNew(caller: *Caller) WasiP2Error!u32 {
 /// core args are `(waitable, set)` — set 0 = LEAVE the current set; a join
 /// always moves (a waitable belongs to at most one set).
 pub fn p2WaitableJoin(caller: *Caller, waitable: u32, set_handle: u32) WasiP2Error!void {
-    return p2WaitableJoinInner(caller, waitable, set_handle) catch |e| mapAsyncFault(e);
-}
-fn p2WaitableJoinInner(caller: *Caller, waitable: u32, set_handle: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     ctx.sets.unjoin(waitable);
     if (set_handle == 0) return;
@@ -845,25 +842,23 @@ fn p2WaitableJoinInner(caller: *Caller, waitable: u32, set_handle: u32) WasiP2Er
     try set.join(waitable);
 }
 
-/// Map a WASI-P2 async-builtin error to the host-fn surface (D-445). A guest
-/// supplies the handle/ptr, so a bad handle, illegal drop/cancel sequencing,
-/// an exhausted table, or an out-of-bounds buffer is a GUEST fault → surface
-/// the canonical guest trap (`error.Unreachable`). Without this they would
-/// reach the guest as `HostTrap` (`host_func_marshal.hostFnError`). Genuine
-/// host failures (NoMemory, realloc, host I/O, OOM) propagate unchanged.
-pub fn mapAsyncFault(e: WasiP2Error) WasiP2Error {
-    return switch (e) {
-        error.InvalidHandle,
-        error.TableFull,
-        error.CopyInProgress,
-        error.NotCopying,
-        error.InvalidCallbackCode,
-        error.FutureDropBeforeWrite,
-        error.CopyNotIdle,
-        error.OutOfBounds,
-        => error.Unreachable,
-        else => |other| other,
-    };
+/// The one rule that names a component host trampoline's error (#535), run by
+/// the thunk before `hostFnError` for every registration made through
+/// `linker.defineFuncCtxMapped` / `defineFuncRawMapped`. A name the handle
+/// tables return is the guest's fault — a handle that does not exist or has the
+/// wrong type, a drop or cancel out of order, a table minted past its cap — and
+/// traps as `Unreachable` (D-445's spelling). Every other name passes: a memory
+/// accessor's `OutOfBoundsLoad` / `Store` is the trap the access is, and a
+/// host-side failure (`NoMemory`, `ReallocFailed`, `NoHostIo`, …) stays outside
+/// the trap set, so `hostFnError` names it `HostTrap`. `OutOfMemory` sits in
+/// both tables' sets but is already a trap name.
+pub fn mapGuestFault(e: anyerror) anyerror {
+    if (e == error.OutOfMemory) return e;
+    const TableError = resource_table.Error || async_mod.Error;
+    inline for (@typeInfo(TableError).error_set.?) |f| {
+        if (e == @field(TableError, f.name)) return error.Unreachable;
+    }
+    return e;
 }
 
 /// Packed return of an async-lowered import call (`CanonicalABI.md`
@@ -878,7 +873,7 @@ pub const SUBTASK_RETURNED: u32 = @intFromEnum(async_mod.SubtaskState.returned);
 /// SUBTASK event through the set the guest joins it into.
 pub fn p2WaitUntil(caller: *Caller, when_raw: i64) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
-    return p2WaitDeadlineAsync(ctx, @bitCast(when_raw)) catch |e| mapAsyncFault(e);
+    return p2WaitDeadlineAsync(ctx, @bitCast(when_raw));
 }
 
 /// `wait-for: async func(how-long: duration)` — the relative-form sibling.
@@ -886,7 +881,7 @@ pub fn p2WaitFor(caller: *Caller, dur_raw: i64) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const now = try ctx.monotonicNowNs();
     const dur: u64 = @bitCast(dur_raw);
-    return p2WaitDeadlineAsync(ctx, now +| dur) catch |e| mapAsyncFault(e);
+    return p2WaitDeadlineAsync(ctx, now +| dur);
 }
 
 fn p2WaitDeadlineAsync(ctx: *WasiP2Ctx, deadline_ns: u64) WasiP2Error!u32 {
@@ -932,9 +927,6 @@ fn p2WaitDeadlineSync(ctx: *WasiP2Ctx, deadline_ns: u64) WasiP2Error!void {
 /// returns NONE (0). Writes target the canon-lower-bound memory (`ctxMemory`),
 /// matching every other retptr-writing trampoline here.
 pub fn p2WaitableSetPoll(caller: *Caller, set_handle: u32, ptr: u32) WasiP2Error!u32 {
-    return p2WaitableSetPollInner(caller, set_handle, ptr) catch |e| mapAsyncFault(e);
-}
-fn p2WaitableSetPollInner(caller: *Caller, set_handle: u32, ptr: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const set = try ctx.sets.get(set_handle);
     try ctx.deliverParkedReads(set);
@@ -951,16 +943,13 @@ fn p2WaitableSetPollInner(caller: *Caller, set_handle: u32, ptr: u32) WasiP2Erro
 /// member list). Members themselves stay live (they just leave the set).
 pub fn p2WaitableSetDrop(caller: *Caller, set_handle: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
-    ctx.sets.remove(set_handle) catch |e| return mapAsyncFault(e);
+    try ctx.sets.remove(set_handle);
 }
 
 /// `canon subtask.drop` — release a resolved subtask handle. Dropping an
 /// UNRESOLVED subtask is a guest fault per spec (`Subtask.drop` traps before
 /// `on_resolve` delivered), surfaced as the canonical guest trap.
 pub fn p2SubtaskDrop(caller: *Caller, handle: u32) WasiP2Error!void {
-    return p2SubtaskDropInner(caller, handle) catch |e| mapAsyncFault(e);
-}
-fn p2SubtaskDropInner(caller: *Caller, handle: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const end = try ctx.streams.get(handle);
     if (end.kind != .subtask) return WasiP2Error.InvalidHandle;
@@ -1026,11 +1015,11 @@ pub fn p2ContextSet64(caller: *Caller, v: i64) WasiP2Error!void {
 /// The future-copy trampoline: same rendezvous step, but the core ABI carries
 /// no count (a future moves exactly one value).
 pub fn p2FutureCopy(caller: *Caller, handle: u32, ptr: u32) WasiP2Error!u32 {
-    return p2StreamFutureCopyInner(caller, handle, ptr, 1) catch |e| mapAsyncFault(e);
+    return p2StreamFutureCopyInner(caller, handle, ptr, 1);
 }
 
 pub fn p2StreamFutureCopy(caller: *Caller, handle: u32, ptr: u32, count: u32) WasiP2Error!u32 {
-    const r = p2StreamFutureCopyInner(caller, handle, ptr, count) catch |e| return mapAsyncFault(e);
+    const r = try p2StreamFutureCopyInner(caller, handle, ptr, count);
     if (dbg.on("async.host")) std.debug.print("[host] copy -> 0x{x}\n", .{r});
     return r;
 }
@@ -1048,7 +1037,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
     // payload offset is 8: `error-code` carries u64 cases (align 8).
     if (abc.ctx.host_trailer_ok_futures.contains(handle)) {
         const mem = try abc.ctx.memory();
-        const buf = mem.sliceAt(ptr, 9) catch return WasiP2Error.OutOfBounds;
+        const buf = try mem.sliceAt(ptr, 9);
         buf[0] = 0;
         buf[8] = 0;
         _ = abc.ctx.host_trailer_ok_futures.remove(handle);
@@ -1059,12 +1048,12 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
         if (outcome) |code| {
             // result<_, error-code> err: disc@0, error-code variant @4
             // (disc u8 @4, `other`'s option<string> @8 → none).
-            const buf = mem.sliceAt(ptr, 9) catch return WasiP2Error.OutOfBounds;
+            const buf = try mem.sliceAt(ptr, 9);
             buf[0] = 1;
             buf[4] = code;
             buf[8] = 0;
         } else {
-            const buf = mem.sliceAt(ptr, 1) catch return WasiP2Error.OutOfBounds;
+            const buf = try mem.sliceAt(ptr, 1);
             buf[0] = 0; // ok
         }
         // Future events never pack a count (CanonicalABI `future_event`:
@@ -1081,13 +1070,13 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
         // preads at u64::MAX and expects error-code::invalid).
         const pos_invalid = role.pos > std.math.maxInt(i64);
         if (end.side == .writable) {
-            const bytes = mem.sliceAt(ptr, count * abc.elem_size) catch return WasiP2Error.OutOfBounds;
+            const bytes = try mem.sliceAt(ptr, count * abc.elem_size);
             const errno: wasi_p1.Errno = if (pos_invalid) .inval else wasi_fd.pwriteSlice(abc.ctx.host, role.fd, bytes, role.pos);
             if (errno != .success) return abc.ctx.p3().fail_file_stream(abc.ctx, end, role, errno);
             role.pos += bytes.len;
             return (async_mod.ReturnCode{ .completed = @intCast(count) }).encode();
         }
-        const buf = mem.sliceAt(ptr, count * abc.elem_size) catch return WasiP2Error.OutOfBounds;
+        const buf = try mem.sliceAt(ptr, count * abc.elem_size);
         var n: usize = 0;
         const errno: wasi_p1.Errno = if (pos_invalid) .inval else wasi_fd.preadSlice(abc.ctx.host, role.fd, buf, role.pos, &n);
         if (errno != .success) return abc.ctx.p3().fail_file_stream(abc.ctx, end, role, errno);
@@ -1147,7 +1136,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
             return (async_mod.ReturnCode{ .blocked = {} }).encode();
         }
         _ = abc.ctx.blocked_socket_reads.remove(handle);
-        const buf = mem.sliceAt(ptr, count * abc.elem_size) catch return WasiP2Error.OutOfBounds;
+        const buf = try mem.sliceAt(ptr, count * abc.elem_size);
         const n = sock.recv(io, buf) catch 0;
         if (n == 0) {
             // Ready-then-zero = peer FIN → close the stream.
@@ -1175,7 +1164,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
             return (async_mod.ReturnCode{ .dropped = 0 }).encode();
         }
         const n = @min(remaining, count * abc.elem_size);
-        const buf = mem.sliceAt(ptr, @intCast(n)) catch return WasiP2Error.OutOfBounds;
+        const buf = try mem.sliceAt(ptr, @intCast(n));
         @memcpy(buf, body.data[body.pos..][0..n]);
         body.pos += n;
         return (async_mod.ReturnCode{ .completed = @intCast(n / abc.elem_size) }).encode();
@@ -1185,7 +1174,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
     if (abc.ctx.host_capture_sinks.get(end.shared)) |cap| {
         if (end.side != .writable) return WasiP2Error.InvalidHandle;
         const mem = try abc.ctx.memory();
-        const bytes = mem.sliceAt(ptr, count * abc.elem_size) catch return WasiP2Error.OutOfBounds;
+        const bytes = try mem.sliceAt(ptr, count * abc.elem_size);
         cap.appendSlice(abc.ctx.alloc, bytes) catch return WasiP2Error.OutOfMemory;
         return (async_mod.ReturnCode{ .completed = @intCast(count) }).encode();
     }
@@ -1195,7 +1184,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
         if (end.side != .writable) return WasiP2Error.InvalidHandle;
         const mem = try abc.ctx.memory();
         const io = try ctxIo(abc.ctx);
-        const bytes = mem.sliceAt(ptr, count * abc.elem_size) catch return WasiP2Error.OutOfBounds;
+        const bytes = try mem.sliceAt(ptr, count * abc.elem_size);
         const sock = try ctxTcpSocket(abc.ctx, role.rep);
         var off: usize = 0;
         while (off < bytes.len) {
@@ -1223,7 +1212,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
         if (abc.ctx.host_sinks.get(end.shared)) |fd| {
             const mem = try abc.ctx.memory();
             // D-335: `count` is in ELEMENTS; the byte span is count * elem_size.
-            const bytes = mem.sliceAt(ptr, count * abc.elem_size) catch return WasiP2Error.OutOfBounds;
+            const bytes = try mem.sliceAt(ptr, count * abc.elem_size);
             if (wasi_fd.writeSlice(abc.ctx.host, fd, bytes) != .success) return WasiP2Error.WriteFailed;
             return (async_mod.ReturnCode{ .completed = @intCast(count) }).encode();
         }
@@ -1244,7 +1233,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
             const mem = try abc.ctx.memory();
             // D-335: `count` is in ELEMENTS; slice count*elem_size bytes, and
             // COMPLETE in elements (n bytes read / elem_size).
-            const buf = mem.sliceAt(ptr, count * abc.elem_size) catch return WasiP2Error.OutOfBounds;
+            const buf = try mem.sliceAt(ptr, count * abc.elem_size);
             const n: u32 = @intCast(try readStdinP2(abc.ctx.host, buf));
             return (async_mod.ReturnCode{ .completed = @intCast(n / abc.elem_size) }).encode();
         }
@@ -1270,9 +1259,9 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
             break :blk (async_mod.ReturnCode{ .blocked = {} }).encode();
         },
         .dropped => (async_mod.ReturnCode{ .dropped = 0 }).encode(),
-        // n==0 moves no bytes; n>0 needs marshalling at `ptr` (Unit E) and is
-        // unreachable in the single-task model (no concurrent peer with data).
-        .completed => |n| if (n == 0) (async_mod.ReturnCode{ .completed = 0 }).encode() else error.OutOfBounds,
+        // n==0 moves no bytes; n>0 needs marshalling at `ptr` (Unit E), which
+        // the host does not implement: a host limitation, not a guest fault.
+        .completed => |n| if (n == 0) (async_mod.ReturnCode{ .completed = 0 }).encode() else error.UnsupportedAsyncBuiltin,
     };
 }
 
@@ -1282,9 +1271,6 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
 /// and return the packed `ReturnCode.cancelled` (count of elements transferred
 /// before cancel — 0 for a still-blocked copy).
 pub fn p2StreamFutureCancel(caller: *Caller, handle: u32) WasiP2Error!u32 {
-    return p2StreamFutureCancelInner(caller, handle) catch |e| mapAsyncFault(e);
-}
-fn p2StreamFutureCancelInner(caller: *Caller, handle: u32) WasiP2Error!u32 {
     const abc = caller.data(AsyncBuiltinCtx);
     const end = try abc.ctx.streams.get(handle);
     const sh = try abc.ctx.shared.get(end.shared);
@@ -1301,9 +1287,6 @@ fn p2StreamFutureCancelInner(caller: *Caller, handle: u32) WasiP2Error!u32 {
 /// DROPPED — traps if a copy is mid-flight) then release the end + its shared ref
 /// (freed when the second end drops).
 pub fn p2StreamFutureDrop(caller: *Caller, handle: u32) WasiP2Error!void {
-    return p2StreamFutureDropInner(caller, handle) catch |e| mapAsyncFault(e);
-}
-fn p2StreamFutureDropInner(caller: *Caller, handle: u32) WasiP2Error!void {
     const abc = caller.data(AsyncBuiltinCtx);
     const ctx = abc.ctx;
     // Handle + shared slot ids are free-list-reused: scrub the host-role side
@@ -1360,7 +1343,7 @@ fn p2StreamFutureDropInner(caller: *Caller, handle: u32) WasiP2Error!void {
         // Stale handle: dropEndGuarded below surfaces the guest fault.
     }
     // Shared drop contract: future-writable-before-write traps
-    // (FutureDropBeforeWrite, mapAsyncFault → guest trap) + marks the rendezvous
+    // (FutureDropBeforeWrite, a guest fault by `mapGuestFault`) + marks the rendezvous
     // DROPPED for the surviving peer (same helper the graph path uses).
     try async_mod.dropEndGuarded(&ctx.streams, &ctx.shared, handle);
 }

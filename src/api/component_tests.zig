@@ -1038,7 +1038,7 @@ test "D3-7: a WASI-P2 component drives wasi:io/poll (subscribe + poll + ready/bl
     try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
 }
 
-test "wasi:io/poll: a handle that is not a pollable traps in pollable.ready and in poll (#519)" {
+test "wasi:io/poll: a handle that is not a pollable traps as Unreachable in pollable.ready and in poll (#519, #535)" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1055,8 +1055,24 @@ test "wasi:io/poll: a handle that is not a pollable traps in pollable.ready and 
         defer host.deinit();
         host.io = io;
 
-        try testing.expectError(error.HostTrap, runWasiP2Main(&eng, testing.allocator, bytes, &host, .{}));
+        try testing.expectError(error.Unreachable, runWasiP2Main(&eng, testing.allocator, bytes, &host, .{}));
     }
+}
+
+test "wasi:io/streams: blocking-write-and-flush with contents past the end of memory traps as the memory trap (#535)" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/wasi_p2_write_oob.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    try testing.expectError(error.OutOfBoundsLoad, runWasiP2Main(&eng, testing.allocator, bytes, &host, .{}));
 }
 
 test "E2: WASI-P2 cli/environment + terminal + check-write (a capture is not a terminal)" {

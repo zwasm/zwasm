@@ -41,15 +41,26 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   on a host import; they now take the same two arms `call_indirect` and
   `call_ref` do.
 
+- **A component guest's bad handle traps as `Unreachable` and its bad pointer
+  as the memory trap, whichever trampoline caught it** (#535). The name was
+  chosen per call site: the async builtins mapped a handle that does not exist,
+  or a drop or cancel out of order, to `Unreachable` and an out-of-bounds buffer
+  with them, while the synchronous preview2 and preview3 trampolines let both
+  fall to `HostTrap`, whose contract is that nothing in the guest faulted. One
+  rule now runs at the trampoline boundary for every component host function:
+  a name the handle tables return is a guest fault and traps as `Unreachable`;
+  a buffer past the end of memory keeps the accessor's `OutOfBoundsLoad` or
+  `OutOfBoundsStore`; a host-side failure stays `HostTrap`. A host function an
+  embedder registers on the facade is not mapped.
+
 - **A host function's error that is not a trap traps as `HostTrap`, instead of
   aborting the process** (#519). A Zig-facade host fn (`Linker.defineFunc`,
   `defineFuncCtx`, `defineFuncRaw`) that returned a name outside the trap set —
-  an embedder's own error, or a preview2 trampoline's for a handle of the wrong
-  type or one that does not exist — reached the facade's error map, which has
-  no arm for it, and panicked. A trap name or `ProcExit` still passes through;
-  any other now ends the call with `HostTrap`, as a C callback's trap does.
-  `poll` given a handle that is not a pollable traps too, as `ready` and
-  `block` do, instead of counting it ready.
+  an embedder's own error — reached the facade's error map, which has no arm
+  for it, and panicked. A trap name or `ProcExit` still passes through; any
+  other now ends the call with `HostTrap`, as a C callback's trap does. `poll`
+  given a handle that is not a pollable traps too, as `ready` and `block` do,
+  instead of counting it ready.
 
 - **A function nested deeper than 1024 blocks lowers on every engine** (#520).
   The lowerer kept its own copy of the control-stack cap at 1024 while the
