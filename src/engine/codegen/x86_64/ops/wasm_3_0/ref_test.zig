@@ -7,8 +7,8 @@
 //! `ref.test` / `ref.test_null` share this handler — the null-handling bit
 //! is folded into arg2 (`ht | (nullbit << 30)`) from `ins.op`, so emit is
 //! straight-line. ht is the D-453 encoded u32 (ins.payload); the ref is the
-//! popped operand (RSI, 64-bit). SysV arg regs ∉ regalloc pool → no
-//! parallel-move.
+//! popped operand (RSI, 64-bit), read before any argument register is
+//! written.
 //!
 //! Lowering: MOV RSI, ref ; MOV RDI, R15 (rt) ; MOV EDX = ht|nullbit ;
 //! MOVABS R10 = &jitGcRefTest ; CALL R10 → EAX = 0/1 ; capture EAX.

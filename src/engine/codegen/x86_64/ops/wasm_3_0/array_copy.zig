@@ -6,9 +6,9 @@
 //! trap branch on a 0 result. No result push (5 → 0).
 //!
 //! The typeidx immediates are dropped (uniform 8-byte slots, ADR-0116 §3a)
-//! → exactly 6 args, no 7th-on-stack. SysV arg regs RDI/RSI/RDX/RCX/R8/R9
-//! are NOT in the regalloc allocatable pool (callee-saved only), so the
-//! marshal has no parallel-move hazard.
+//! → exactly 6 args, no 7th-on-stack. The operand fence (`abi.op_regs`,
+//! ADR-0077) keeps the operands out of the argument registers the marshal
+//! writes in order.
 //!
 //! Lowering: MOV RDI, R15 (rt); MOV ESI = dst_ref; MOV EDX = dst_off; MOV
 //! ECX = src_ref; MOV R8D = src_off; MOV R9D = len; MOVABS R10 =

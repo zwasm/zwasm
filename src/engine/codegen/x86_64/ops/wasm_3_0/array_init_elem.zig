@@ -7,8 +7,8 @@
 //! result. No result push (4 → 0).
 //!
 //! Identical marshal to array.init_data (esz=8 uniform per ADR-0116 §3a, so no
-//! typeidx is needed); only the trampoline target differs. SysV arg regs ∉
-//! regalloc pool → no parallel-move hazard.
+//! typeidx is needed); only the trampoline target differs. The operand fence
+//! (`abi.op_regs`, ADR-0077) keeps the operands out of the argument registers.
 //!
 //! Lowering: MOV RDI, R15 (rt); MOV ESI, segidx; MOV EDX = ref; MOV ECX =
 //! dst_off; MOV R8D = src_off; MOV R9D = len; MOVABS R10 = &jitGcArrayInitElem;
@@ -42,7 +42,7 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // segidx immediate below) — all i32 (.d). SysV: arg_gprs[2..6] =
     // RDX/RCX/R8/R9 (all regs). Win64: arg_gprs[2..4] = R8/R9 →
     // src_off (arg 4) + len (arg 5) spill to [RSP+0x20]/[RSP+0x28]
-    // (D-248). stage R10/R11 + arg regs ∉ pool → no source clobbered.
+    // (D-248). Operands are fenced off the arg regs (`abi.op_regs`).
     const xref = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, ref_vreg, 0);
     // D-470 — inline null-ref check (→ null_reference, kind 10) before the call;
     // the residual result==0 is then only the segment/array OOB (oob_memory).

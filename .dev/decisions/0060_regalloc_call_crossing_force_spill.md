@@ -204,3 +204,10 @@ A-3".
 |------------|--------------|-----------------------------------------|
 | 2026-05-14 | `5ccae2cd` | Initial accepted version (d-16).        |
 | 2026-05-31 | `fb73a87b` | Amendment — alloc-op operand force-spill (10.G GC-on-JIT). Inclusive upper-bound `cp <= last_use_pc` for `struct.new` (post-CALL operand reads); `struct.new_default` stays strict. |
+
+## Revision 2026-10-17 — x86_64 threshold
+
+The threshold is `max(gpr pool, fp pool)` (`compile.zig`): 8 on both arches
+since #503 (x86_64: eight GPRs, six XMMs). The pool lists under Context are
+as of the decision. A last use at the call stays safe on x86_64 because the
+marshal is a parallel move: the pool now holds argument registers.

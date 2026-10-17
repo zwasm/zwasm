@@ -12,6 +12,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Changed
 
+- **The x86_64 JIT allocates eight general-purpose registers** (#503). The pool
+  was the four callee-saved registers; RSI, RDI, R8 and R9 join it, since every
+  value live across a call already goes to a slot (ADR-0060), call arguments now
+  move in parallel, and the handlers that write argument registers are fenced
+  (ADR-0077). The bench's shootout fixtures run 23–25% faster on the JIT and AOT
+  (geomean), and a 200k-row sqlite insert + index 8.5% faster.
+
 - **`zwasm --version` names the build mode** (#307). The line gains a `mode:`
   field carrying the optimize mode the binary was built at
   (`zwasm v2.7.0 (wasm: v3_0, wasi: p2, engine: both, mode: ReleaseSafe)`), so

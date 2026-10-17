@@ -9,7 +9,7 @@
 //! The branch body is the shared `op_control.branchOnReg` (Cycle A
 //! `7a44f910`), reached via the `branchOnRegCtx` adapter. branchOnReg's first
 //! emitted instruction in every case is `TEST cond_r, cond_r`, so RAX (the
-//! cast bool; ∉ regalloc pool {RBX,R12,R13,R14}) survives the merge MOVs.
+//! cast bool; outside the regalloc pool) survives the merge MOVs.
 //!
 //! D-453 ZirInstr: `payload = labelidx | (ht2_encoded << 32)`, `extra =
 //! flags`. `ht2 = payload >> 32` (full TARGET heap-type — idx ≥ 64

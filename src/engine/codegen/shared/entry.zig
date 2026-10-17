@@ -363,7 +363,7 @@ inline fn invokeAndCheckVoid(
               [rt_arg] "{x10}" (rt),
             : aarch64_blr_clobbers);
     } else if (comptime builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag != .windows and args.len == 0) {
-        // D-245 (x86_64 SysV): the JIT's pool is RBX/R12-R14 and R15 is reserved
+        // D-245 (x86_64 SysV): the JIT's pool holds RBX/R12-R14 and R15 is reserved
         // for the runtime pointer the prologue installs. The epilogue restores
         // none of them, so a plain `@call` lets ReleaseSafe's host lose its live
         // values there → SEGV. Save/restore them around the
@@ -1733,7 +1733,7 @@ pub fn callF64f32NoArgs(
         const f = module.entry(func_idx, Fn);
         var r0_raw: f64 = undefined;
         var r1_raw: f32 = undefined;
-        // Same cohort save as the sibling SysV thunks: pool RBX/R12-R14 plus the
+        // Same cohort save as the sibling SysV thunks: the pool's RBX/R12-R14 plus the
         // reserved runtime-pointer R15, none of them restored by the epilogue.
         asm volatile (
             \\ pushq %%rbx
@@ -3450,12 +3450,11 @@ test "both Win64 host→JIT seams clobber the non-volatile XMMs (#286)" {
     }
 }
 
-test "jit_cohort_clobbers covers every GPR the x86_64 regalloc pool may hand out (#287)" {
+test "jit_cohort_clobbers covers every pool GPR the active convention makes callee-saved (#287)" {
     // SIBLING-AT: src/engine/codegen/shared/entry.zig (jit_cohort_clobbers aarch64 arm — X19-X28 is the whole callee-saved pool by construction)
     if (comptime builtin.target.cpu.arch != .x86_64) return;
     const abi = @import("../x86_64/abi.zig");
-    const pool = if (builtin.os.tag == .windows) abi.win64.allocatable_gprs else abi.allocatable_gprs;
-    inline for (pool) |g| {
-        try std.testing.expect(@field(jit_cohort_clobbers, @tagName(g)));
+    inline for (abi.allocatable_gprs) |g| {
+        if (comptime std.mem.findScalar(abi.Gpr, &abi.current.callee_saved_gprs, g) != null) try std.testing.expect(@field(jit_cohort_clobbers, @tagName(g)));
     }
 }

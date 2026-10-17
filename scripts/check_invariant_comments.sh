@@ -5,8 +5,14 @@
 # asserted "X10/X11/X12 are private scratch" while those slots were
 # simultaneously in `abi.allocatable_caller_saved_scratch_gprs`.
 #
-# Scope (arm64 only for now; x86_64 caller_saved pool is currently
-# empty per abi.zig):
+# Scope:
+#   - x86_64: hardcoded `.rbx` / `.r12` / `.r13` / `.r14` in a handler
+#     (`op_*.zig`, `ops/wasm_3_0/*.zig`). These are the pool's
+#     callee-saved head, where register-homed locals live for the whole
+#     function; no op may fence them (`abi.zig` comptime check), so a
+#     handler that wrote one would clobber a home. The argument registers
+#     the pool also holds are written by design and backed by
+#     `abi.op_regs` + its per-op tests, not by this lint.
 #   - For each per-arch arm64 op_*.zig source under
 #     `src/engine/codegen/arm64/`, find hardcoded register numerals N
 #     in `encLdr*(N, ...)` / `encStr*(N, ...)` / etc. where N is a
@@ -24,8 +30,6 @@
 #   bash scripts/check_invariant_comments.sh --strict # exit 1 if any
 #
 # Future extensions (cf. substrate audit Q5):
-#   - x86_64 mirror once that abi's allocatable_caller_saved_scratch_gprs
-#     is populated.
 #   - Lint forbidden-phrase patterns ("for now we share X", "the same
 #     field is reused") per single_slot_dual_meaning.md.
 #   - Detect "/// X is reserved private scratch" comment + grep the
@@ -84,6 +88,31 @@ for f in $files; do
   # encAddReg, encCmpRegX, encCmpImmW, ...
   matches=$(grep -nE 'inst\.enc[A-Z][a-zA-Z]*\(\s*('"$pool_re"')\s*,' "$f" \
             || true)
+  if [ -n "$matches" ]; then
+    count=$(echo "$matches" | wc -l | tr -d ' ')
+    echo ""
+    echo "  $f: $count site(s)"
+    echo "$matches" | sed 's/^/    /'
+    total=$((total + count))
+  fi
+done
+
+# x86_64: the home registers, read from abi.zig's callee-saved head. Argument
+# registers written in a handler are guarded by abi.op_regs and its tests.
+x86_abi=src/engine/codegen/x86_64/abi.zig
+home_line=$(grep -E 'pub const allocatable_callee_saved_gprs\s*=' "$x86_abi")
+home_re=$(echo "$home_line" | sed -E 's/.*\{([^}]*)\}.*/\1/' | tr ',' '\n' \
+  | sed -E 's/[[:space:].]//g' | grep -E '^r[0-9a-z]+$' | paste -sd'|' -)
+if [ -z "$home_re" ]; then
+  echo "ERROR: cannot parse allocatable_callee_saved_gprs in $x86_abi" >&2
+  exit 2
+fi
+echo ""
+echo "x86_64 home registers = { ${home_re//|/ } }; hardcoded in a handler:"
+x86_files=$(find src/engine/codegen/x86_64 \( -name 'op_*.zig' -o -path '*/ops/wasm_3_0/*.zig' \) \
+  -type f ! -name '*_test.zig' 2>/dev/null)
+for f in $x86_files; do
+  matches=$(grep -nE '\.('"$home_re"')\b' "$f" | grep -vE '^[0-9]+:\s*//' || true)
   if [ -n "$matches" ]; then
     count=$(echo "$matches" | wc -l | tr -d ' ')
     echo ""

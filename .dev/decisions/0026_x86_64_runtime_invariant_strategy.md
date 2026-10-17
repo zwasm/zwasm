@@ -255,3 +255,14 @@ over hot-path code-density wins.
 | 2026-05-06 | `f55ddb99` | First non-memory consumer landed: ADR-0027 globals access. `global.get` / `global.set` (i32) emit `MOV RAX, [R15 + globals_base_off=48]; MOV r/m32, [RAX + idx*8]` — exactly the reload-from-runtime-ptr pattern this ADR predicted. Validates that the abstraction generalises beyond memory ops. R15 single-reservation invariant unchanged. |
 | 2026-05-18 | `53df1740` | **Amendment (superseded by Convention Swap below)**: MEMORY-class return originally specified R11 as the hidden indirect-result-pointer for `sig.results.len > 2` returns on SysV. Replaced 2026-05-18 by the Convention Swap. |
 | 2026-05-18 | `0cba220b` | **Amendment — Convention Swap (D-140 close)**: x86_64 SysV MEMORY-class returns now follow standard SysV §3.2.3 — `RDI = &buffer`, `RSI = rt`, user int args from RDX (slot 2). The earlier R11-internal convention bridged Zig→JIT through inline-asm thunks for every Class C signature; that bridge becomes prohibitively complex at 17+ args (D-140 large-sig fixture). Aligning with the platform ABI lets entry helpers stay native `callconv(.c)`. **Impact**: `emit.zig` prologue captures RDI to the indirect-result frame slot and uses RSI as the rt source for R15. `op_call.zig::emitCall`/`emitCallIndirect` emit `LEA RDI, [RSP+buffer_off]` (replacing the previous LEA R11) and `MOV RSI, R15` (replacing MOV RDI, R15) when calling a MEMORY-class callee. `marshalCallArgs` starts `gpr_arg_slot` at 2 for MEMORY-class callees (RDX onward), shrinking the user-int reg pool to 4 (RDX/RCX/R8/R9). `marshalReturnRegs` MEMORY-class branch still reads the frame slot into RAX and writes via `[RAX + i*8]` (slot offset unchanged; only the prologue source changes from R11 to RDI). Non-MEMORY-class returns are unaffected. **Win64 MEMORY-class** remains deferred (§9.13-0). **References**: ADR-0017 2026-05-18 amend (arm64 X8 mirror, untouched), ADR-0069 §Phase 3 (D-140 close), lesson `2026-05-18-apple-arm64-natural-packing.md` (orthogonal arm64 ABI gap surfaced during D-140 close). |
+
+## Revision 2026-10-17 — eight allocatable GPRs
+
+The pool is RBX, R12, R13, R14, RSI, RDI, R8, R9 under both conventions (the
+six-slot table above, with R10/R11, has been stale since D-045 13b made them
+the spill stage). The callee-saved four come first, and only they hold
+register-homed locals (ADR-0155), which stay in their register across a
+runtime callout. Argument registers can be in the pool because a value live
+across a call goes to a slot (ADR-0060), the call family moves its arguments
+in parallel, and the other handlers that write them are fenced (ADR-0077,
+operand set). The unwired Win64 table that added only RDI and RSI is gone.

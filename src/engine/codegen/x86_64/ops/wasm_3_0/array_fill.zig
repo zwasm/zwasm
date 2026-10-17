@@ -6,10 +6,10 @@
 //! a 0 result. No result push (4 → 0).
 //!
 //! All four operands consumed into arg regs BEFORE the CALL (strict
-//! `is_call`). SysV arg regs RDI/RSI/RDX/RCX/R8/R9 are NOT in the regalloc
-//! allocatable pool ({RBX,R12,R13,R14}), so marshalling each operand
+//! `is_call`). The operand fence (`abi.op_regs`, ADR-0077) keeps the
+//! operands out of the argument registers, so marshalling each one
 //! (gprLoadSpilled stage R10/R11 → MOV arg) cannot clobber another
-//! operand's source — no parallel-move hazard.
+//! operand's source.
 //!
 //! Lowering: MOV RDI, R15 (rt); MOV ESI, typeidx; MOV EDX = ref; MOV ECX =
 //! idx; MOV R8 = value; MOV R9 = count; MOVABS R10 = &jitGcArrayFill; CALL
@@ -45,7 +45,7 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // (all regs). Win64: arg_gprs[2..4] = R8/R9 → value (arg 4) +
     // count (arg 5) spill to [RSP+0x20]/[RSP+0x28] (D-248). `value`
     // is 64-bit (.q); the rest i32 (.d). gprLoadSpilled stage =
-    // R10/R11 (∉ pool); arg regs ∉ pool → no source clobbered.
+    // R10/R11; operands are fenced off the arg regs (`abi.op_regs`).
     const xref = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, ref_vreg, 0);
     try gc_marshal.routeArg(ctx, 2, xref, .d);
     const xidx = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, idx_vreg, 0);

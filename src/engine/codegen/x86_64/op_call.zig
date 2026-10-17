@@ -72,9 +72,9 @@ const SpillDir = enum { spill, reload };
 
 /// ADR-0155 stage 4 (D-265 Phase IV) — spill / reload every register-resident
 /// homed local around a CALL/CALL-indirect/CALL-ref. Mirror of
-/// `arm64/op_call.zig:homedCallerSavedSpillReload`, BUT the x86_64 pool has NO
-/// callee-saved-survives-a-call exemption: although `abi.allocatable_gprs`
-/// (RBX/R12-R14) ARE C-ABI callee-saved, a JIT *callee* (itself a JIT function)
+/// `arm64/op_call.zig:homedCallerSavedSpillReload`, BUT x86_64 homes get NO
+/// callee-saved-survives-a-call exemption: although they sit only in RBX/R12-R14
+/// (C-ABI callee-saved; D-268), a JIT *callee* (itself a JIT function)
 /// does NOT push/restore the callee-saved GPRs it clobbers as temporaries — the
 /// un-homed model keeps every cross-call-live value in a STACK SLOT, never a
 /// register, so the JIT prologue only saves RBP/R15. A homed local is the first
@@ -128,7 +128,7 @@ pub fn reloadHomedCallerSaved(ctx: *ctx_mod.EmitCtx) Error!void {
 /// (heterogeneous — call uses func_sigs+num_imports;
 /// call_indirect uses module_types+oobtable_fixups+ins.extra).
 pub fn emitCallCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!void {
-    // ADR-0155 stage 4 — spill register-resident homes before the CALL (the
+    // ADR-0155 stage 4 — spill register-resident homes before the CALL (a JIT
     // callee clobbers RBX/R12-R14), reload after (the result is already
     // captured into a non-home vreg by `emitCall`).
     try spillHomedCallerSaved(ctx);
@@ -509,10 +509,9 @@ pub fn emitCallIndirect(
 
     // D-235: subtyping modules check bounds + subtype via the
     // `jitCallIndirectResolve` trampoline BEFORE marshalling (the inline
-    // D-111 CMP is finality/subtype-blind). The C-ABI trampoline preserves
-    // callee-saved regs; the x86_64 regalloc pool is ALL callee-saved
-    // ({RBX,R12-R14}) + force-spilled operands (regalloc inclusive crossing
-    // for subtyping call_indirect), so idx survives the call and the inline
+    // D-111 CMP is finality/subtype-blind). The operands are force-spilled
+    // (regalloc inclusive crossing for subtyping call_indirect), so idx
+    // survives the trampoline's call and the inline
     // funcptr load below re-derives it. The trampoline's funcptr return is
     // used only for the trap test here (re-derived inline); the inline
     // bounds + sig blocks are gated off below.

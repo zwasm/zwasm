@@ -314,7 +314,7 @@ pub fn emitTableSet(
     // r11 destroys the refs base → the store targets `[val_addr + idx*8]`
     // (a wasm-trap / bad address), only when the value is non-null/spilled.
     // Mirrors arm64's X16/X17 snapshot. idx → EDX; val → R9 (full 64-bit;
-    // R9 is not allocatable, not a spill stage, untouched by the descriptor
+    // R9 is fenced for this op (`abi.op_regs`), not a spill stage, untouched by the descriptor
     // loads and the funcptr/typeidx mirror below).
     const idx_r = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, idx_v, 0);
     try buf.appendSlice(allocator, inst.encMovRR(if (idx64) .q else .d, .rdx, idx_r).slice());
@@ -486,11 +486,9 @@ pub fn emitTableFill(
     const val_v = pushed_vregs.pop().?;
     const dst_v = pushed_vregs.pop().?;
 
-    // Step A: capture operands into private holders. The x86_64
-    // allocatable pool {RBX, R12, R13, R14} is disjoint from the
-    // {RAX, RCX, RDX, R8, R9, R10, R11} scratch we use here, so
-    // this snapshot pass is technically unnecessary for safety;
-    // doing it explicitly mirrors the arm64 path's invariant.
+    // Step A: capture operands into private holders. R8 is written
+    // before n is read; the operand fence (`abi.op_regs`) keeps n
+    // out of R8.
     const dst_r = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, dst_v, 0);
     try buf.appendSlice(allocator, inst.encMovRR(if (idx64) .q else .d, .rdx, dst_r).slice());
     const val_r = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, val_v, 1);
@@ -634,7 +632,7 @@ pub fn emitTableCopy(
 
     // Step C1: bounds dst_idx + n vs tables[x].len.
     // R11 = dst_refs ; R9 = dst_len (u64, D-475) ; bounds via RDI
-    // scratch (not in the regalloc pool — caller-side scratch).
+    // scratch (fenced for this op, `abi.op_regs`).
     try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.r11, .rax, dst_tbl_disp).slice());
     try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.r9, .rax, dst_tbl_disp + @as(i32, @intCast(jit_abi.tableslice_len_off))).slice());
     try buf.appendSlice(allocator, inst.encMovRR(.q, .rdi, .rdx).slice());
@@ -865,11 +863,9 @@ pub fn emitTableInit(
     try buf.appendSlice(allocator, inst.encMovR32FromMemDisp32(.rsi, .rax, elem_disp + 8).slice());
 
     // Step B3: dropped-flag override. MOV RAX = elem_dropped_ptr;
-    // MOVZX RDI = byte [RAX + elemidx]; XOR R12, R12; TEST RDI, RDI;
-    // CMOVNE RSI, R12 (RSI ← 0 if dropped).
-    // Use R12 (allocatable callee-saved) — but it's in the regalloc
-    // pool. Instead reuse RDI for zero source after consuming.
-    // Cleaner: XOR EAX, EAX (zero); CMOVNE RSI, RAX.
+    // MOVZX RDI = byte [RAX + elemidx]; XOR EAX, EAX; TEST RDI, RDI;
+    // CMOVNE RSI, RAX (RSI ← 0 if dropped). RDI is fenced for this op
+    // (`abi.op_regs`).
     try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.rax, abi.runtime_ptr_save_gpr, jit_abi.elem_dropped_ptr_off).slice());
     try buf.appendSlice(allocator, inst.encAddR64Imm32(.rax, @intCast(elemidx)).slice());
     try buf.appendSlice(allocator, inst.encXorRR(.d, .rdi, .rdi).slice());

@@ -26,8 +26,9 @@
 //! ## Stage gates (conservative; widened in later ADR-0155 stages)
 //!
 //! - **aarch64 + x86_64** (stage 4 added x86_64) — K=0 on every other arch.
-//!   The per-arch `max_homed` keeps `temp_reserve` GPRs for temporaries (x86_64
-//!   has only 4 allocatable GPRs vs arm64's 8 → cap 2 vs 6).
+//!   The per-arch `max_homed` keeps `temp_reserve` GPRs for temporaries and,
+//!   on x86_64, the homes inside the callee-saved head of the pool (cap 4 vs
+//!   arm64's 6).
 //! - **no GC/memory TRAMPOLINE op** (stage 2b) — `memory.grow`, `struct.new*`,
 //!   `array.*`, `ref.test*`, `ref.cast*`, `br_on_cast*` route through a Zig
 //!   trampoline whose caller-saved clobber the call-site spill/reload does not
@@ -65,30 +66,26 @@ const max_homed_global: u32 = 6;
 /// every temporary spills → PERF REGRESSION). ADR-0155 stage 4.
 const temp_reserve: u32 = 2;
 
-/// Count of GPR slots the shared regalloc may actually assign on this build's
-/// target. MUST mirror the per-arch `abi.slotToReg` pool (Zone 2) — but Zone 1
-/// (`src/ir/`) cannot import the Zone-2 abi tables (upward import, §A1), so the
-/// pool sizes are re-derived from `builtin.target` here. Cross-checked against
-/// `arm64/abi.zig` (X9..X13 + X20..X22 = 8) and `x86_64/abi.zig`'s top-level
-/// `allocatable_gprs` (RBX/R12/R13/R14 = 4). Note: x86_64 `slotToReg` consumes
-/// the SysV-sized 4-reg pool even on Win64 builds (the Win64 6-reg pool is
-/// defined but not yet wired into `slotToReg`), so x86_64 is 4 for BOTH ABIs —
-/// the min-of-both safe choice, and the actual cap.
-const n_allocatable_gpr: u32 = switch (builtin.target.cpu.arch) {
+/// GPRs the shared regalloc may assign on this build's target, and how many
+/// of them, from slot 0, a home may occupy. Zone 1 cannot import the Zone-2
+/// abi tables, so `x86_64/abi.zig` checks both against its pool at comptime.
+/// A home keeps its register for the whole function and is saved only around
+/// the call family, so on x86_64 it may sit only in the callee-saved head
+/// (RBX, R12-R14) that a C callee preserves (D-268).
+pub const n_allocatable_gpr: u32 = switch (builtin.target.cpu.arch) {
+    .aarch64 => 8,
+    .x86_64 => 8,
+    else => 0,
+};
+pub const n_home_gpr: u32 = switch (builtin.target.cpu.arch) {
     .aarch64 => 8,
     .x86_64 => 4,
     else => 0,
 };
 
-/// Per-arch cap on homed locals (stage 1 + stage 4). Bounded by the low GPR
-/// register slots we are willing to pin function-wide, keeping at least
-/// `temp_reserve` registers for temporaries (v1 has the same trade — the first
-/// locals win registers, the rest + temporaries overflow). Resolved values:
-/// arm64 (8 GPRs) → 6, x86_64 (4 GPRs, both ABIs) → 2.
-pub const max_homed: u32 = @min(
-    max_homed_global,
-    n_allocatable_gpr -| temp_reserve,
-);
+/// Per-arch cap on homed locals, keeping `temp_reserve` registers for
+/// temporaries: arm64 → 6, x86_64 → 4.
+pub const max_homed: u32 = @min(max_homed_global, n_home_gpr, n_allocatable_gpr -| temp_reserve);
 
 /// A resolved homing plan for one function. `count` pseudo-vregs are homed; the
 /// homed local's absolute wasm local index is `local_idx[r]` for rank
@@ -207,7 +204,7 @@ const testing = std.testing;
 
 /// True on the arches that have a register-resident emit path (aarch64 +
 /// x86_64). Drives the arch-conditional test expectations: where homing is
-/// active the asserted counts are capped by `max_homed` (6 / 4 / 2 per arch).
+/// active the asserted counts are capped by `max_homed`.
 const homing_active: bool =
     builtin.target.cpu.arch == .aarch64 or builtin.target.cpu.arch == .x86_64;
 
@@ -223,7 +220,7 @@ test "plan: homes scalar GPR locals where active, gated off elsewhere" {
     try f.instrs.append(testing.allocator, .{ .op = .end });
     const p = plan(&f);
     if (homing_active) {
-        // 3 i32 locals, all homeable — capped by max_homed (x86_64 = 2).
+        // 3 i32 locals, all homeable — within max_homed on both arches.
         const want: u32 = @min(@as(u32, 3), max_homed);
         try testing.expectEqual(want, p.count);
         try testing.expectEqual(@as(?u32, 0), p.rankOf(0));
