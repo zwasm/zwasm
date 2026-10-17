@@ -24,7 +24,7 @@ test "emitV128Not: 3-instr unary synthesis (MOVAPS + PCMPEQB + PXOR)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -51,7 +51,7 @@ test "emitV128And: dispatches to PAND via emitV128IntBinop" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -77,7 +77,7 @@ test "emitV128Andnot: PANDN via MOVAPS dst,rhs + PANDN dst,lhs" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -104,7 +104,7 @@ test "emitV128Bitselect: 5-instr PAND/PANDN/POR chain" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 4,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 

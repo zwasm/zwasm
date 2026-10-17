@@ -16,8 +16,7 @@
 //! 1.0 spec §4.4.7 (memory.{load,store}): trap iff
 //! `eff_addr + access_size > mem_limit`.
 //!
-//! RAX/RCX/RDX are pool-excluded scratches per `abi.zig`
-//! (allocatable_caller_saved_scratch_gprs = R10+R11 only). The
+//! RAX/RCX/RDX are outside the regalloc pool (`abi.zig`). The
 //! op never coexists with i32 shift handlers within a single ZIR
 //! instruction window, so RCX usage as bounds-check scratch is
 //! safe (shifts also touch RCX as CL but only within their own
@@ -1078,9 +1077,8 @@ pub fn emitMemoryInit(
 /// arg1 = ea (addr + offset), arg2 = operand (full 64-bit; the helper
 /// truncates to width), arg3 = opcode. Returns the OLD value in RAX;
 /// on unaligned/oob the helper sets trap_flag (epilogue raises). The
-/// marshal is conflict-free: the regalloc pool can't overlap arg_gprs
-/// (SysV §3.2.3 / Win64 invariant, compile-asserted in abi.zig), so the
-/// operand/addr vregs never collide with the arg regs. R11 (caller-
+/// marshal writes the argument registers in order; the operand fence
+/// (`abi.op_regs`, ADR-0077) keeps the operand/addr vregs out of them. R11 (caller-
 /// saved, non-arg both ABIs) stages the offset. vm_base/mem_limit are
 /// re-read from [R15+off] on every memory op, so no post-call reload.
 pub fn emitAtomicRmw(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!void {

@@ -45,8 +45,8 @@ const ZirFunc = zir.ZirFunc;
 
 /// ADR-0155 stage 4 (D-265 Phase IV) — restore the callee-saved register-homed
 /// locals' incoming (caller) values from their frame save slots, immediately
-/// before the function's `POP R15? ; POP RBP ; RET` epilogue. The x86_64
-/// regalloc pool is ALL callee-saved (RBX/R12-R14), so a homed local occupies a
+/// before the function's `POP R15? ; POP RBP ; RET` epilogue. x86_64 homes
+/// sit only in RBX/R12-R14 (D-268), so a homed local occupies a
 /// register the ABI requires this function to preserve for its caller; the
 /// prologue snapshotted each home's incoming value and this restores it on every
 /// return path (normal returns AND trap-stub returns — the host's RBX/R12-R14
@@ -413,8 +413,8 @@ pub fn emitLoop(
 /// calls. `usage.usesRuntimePtr` forces R15 setup for any loop-containing
 /// fn, so `[R15 + interrupt_ptr_off]` is always readable here.
 ///
-/// Scratch = R11 at every site: never allocatable (`abi.allocatable_gprs`
-/// is callee-saved-only), never a live branch operand (br_if's spilled
+/// Scratch = R11 at every site: never allocatable (it is a spill stage),
+/// never a live branch operand (br_if's spilled
 /// cond stages into R10 = `spill_stage_gprs[0]`; br_on_cast's cond is
 /// RAX; br_table's index is an allocated reg or R10), and the merge MOVs
 /// preceding the poll are complete by the time it runs. CLOBBERS FLAGS —

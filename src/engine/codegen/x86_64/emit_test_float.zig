@@ -1531,9 +1531,8 @@ test "compile: call N — 6 i32 args, SysV: 6th arg overflows to caller stack [R
         .{ .def_pc = 5, .last_use_pc = 6 },
     } };
 
-    // 6 vregs need 6 slots — pin max_reg_slots_gpr = 4 to match
-    // x86_64's actual pool (RBX, R12, R13, R14 per chunk 13b
-    // shrink). Slots 0..3 land on registers; slots 4 + 5 spill.
+    // 6 vregs need 6 slots — a GPR boundary of 4 (below the pool's
+    // 8) puts slots 0..3 on registers and spills slots 4 + 5.
     // The marshal site stages spilled args through R10 (stage 0)
     // via `gprLoadSpilled` then writes them to the outgoing region.
     const slots = [_]u16{ 0, 1, 2, 3, 4, 5 };

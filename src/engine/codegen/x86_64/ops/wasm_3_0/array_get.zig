@@ -8,7 +8,7 @@
 //!
 //! Registers: ref → stage-0 (R10), index → stage-1 (R11). The object base
 //! needs a 3rd reg while both ref and index are live → RAX (caller-saved,
-//! NOT in the regalloc pool {RBX,R12,R13,R14} nor rt R15). R10 is reused
+//! outside the regalloc pool, not rt R15). R10 is reused
 //! for the length after ref is consumed into the base. Intel SDM Vol.2
 //! (TEST 0x85, MOV 0x8B, ADD 0x01/0x81, CMP 0x39, JE/JAE 0x0F 0x84/0x83).
 

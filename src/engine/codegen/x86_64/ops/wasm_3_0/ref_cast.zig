@@ -6,7 +6,7 @@
 //! result + capture the 64-bit ref. 1 → 1.
 //!
 //! ht is an immediate (ins.payload byte); the ref is the popped operand
-//! (RSI, 64-bit). SysV arg regs ∉ regalloc pool → no parallel-move. `0` is
+//! (RSI, 64-bit), read before any argument register is written. `0` is
 //! an unambiguous trap sentinel (a successful non-null cast returns a
 //! non-zero ref), so `TEST RAX,RAX` (64-bit — a funcref ptr fills all 64
 //! bits) + JE → trap stub is exact.

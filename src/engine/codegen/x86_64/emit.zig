@@ -249,8 +249,8 @@ pub fn compile(
     const buffer_write: bool = alloc.result_abi == .buffer_write;
     const indirect_result_slot_bytes: u32 = if (return_is_memory_class or buffer_write) 8 else 0;
     // ADR-0155 stage 4 (D-265 Phase IV) — register-homed-local callee-saved
-    // save area. The x86_64 regalloc pool (`abi.allocatable_gprs`) is ALL
-    // callee-saved (RBX/R12/R13/R14) — unlike arm64, whose first homed slots are
+    // save area. x86_64 homes sit only in the callee-saved head of the pool
+    // (RBX/R12/R13/R14; D-268) — unlike arm64, whose first homed slots are
     // caller-saved scratch (X9..X13). A homed local therefore lives in a
     // callee-saved GPR the SysV/Win64 ABI requires this function to preserve for
     // its CALLER (the entry trampoline + any same-module caller, neither of which

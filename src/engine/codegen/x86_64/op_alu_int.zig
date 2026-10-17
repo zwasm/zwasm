@@ -12,7 +12,7 @@
 //!
 //! Handlers use spill-aware `gpr.gprLoadSpilled` /
 //! `gprDefSpilled` / `gprStoreSpilled` so vregs spilled past the
-//! 4-reg pool boundary stage through R10/R11 transparently. Each
+//! pool boundary stage through R10/R11 transparently. Each
 //! handler threads a `spill_base_off: u32` parameter.
 //!
 //! Handlers in this module:

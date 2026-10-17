@@ -79,3 +79,14 @@ Concretely:
 
 - One coherent spill-frame origin; x86_64 high-FP-pressure JIT no longer panics; D-460 v128-GC x86_64 unblocked.
 - `computeWith` signature changes (~3 call sites + tests). Small, mechanical, within single-pass.
+
+## Revision 2026-10-17 — the origin is the smaller of the two thresholds
+
+The Decision read the origin off the GPR pool because that pool was the
+smaller one. It was, on both arches, until #503 gave x86_64 eight GPRs
+against six XMMs; an FP vreg in slot 6 or 7 would then have resolved to a
+negative offset. The origin is now `min(max_reg_slots_gpr, max_reg_slots_fp)`,
+derived where it is used rather than stored, and `computeWith` takes both
+thresholds so the Allocation carries them from build time (the FP post-patch
+in `compile.zig` is gone). arm64 and the four-GPR x86_64 resolve to the
+origins they had.

@@ -23,7 +23,7 @@ test "emitF32x4Eq: direct CMPPS imm=0x00 (no swap)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -49,7 +49,7 @@ test "emitF32x4Gt: swap path — MOVAPS dst, rhs + CMPPS dst, lhs, imm=0x01 (LT)
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -76,7 +76,7 @@ test "emitF64x2Lt: direct CMPPD imm=0x01 (no swap)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -102,7 +102,7 @@ test "emitF64x2Ge: swap + CMPPD imm=0x02 (LE)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -129,7 +129,7 @@ test "emitF32x4Add: dispatches via emitV128IntBinop with encAddps (no 66 prefix)
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -155,7 +155,7 @@ test "emitF64x2Mul: dispatches via emitV128IntBinop with encMulpd (66 prefix)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -181,7 +181,7 @@ test "emitF32x4Sqrt: unary path — single SQRTPS dst, src (no MOVAPS)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -205,7 +205,7 @@ test "emitF64x2Sqrt: unary path — single SQRTPD dst, src" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -229,7 +229,7 @@ test "emitF32x4Min: 10-instruction NaN-correction synthesis" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -275,7 +275,7 @@ test "emitF32x4Max: 13-instruction NaN-correction synthesis" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -327,7 +327,7 @@ test "emitF64x2Min: PD encoders + PSRLQ shift=13 (10 instr)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -363,7 +363,7 @@ test "emitF64x2Splat: PSHUFD dst, src, 0x44 — broadcast low qword" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -384,7 +384,7 @@ test "emitF64x2ExtractLane: lane 1 → PSHUFD imm 0xEE (select high qword)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -405,7 +405,7 @@ test "emitF64x2ReplaceLane: lane 0 → MOVAPS + MOVSD (preserves high qword)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -431,7 +431,7 @@ test "emitF64x2ReplaceLane: lane 1 → MOVAPS + MOVLHPS (writes value to dst's h
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -462,7 +462,7 @@ test "emitF64x2ReplaceLane: dst aliases value — stash value to XMM7 (D-078 (a)
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -491,7 +491,7 @@ test "emitF32x4ReplaceLane: dst aliases value — stash value to XMM7" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -518,7 +518,7 @@ test "emitF32x4Splat: PSHUFD dst, src, 0x00" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -539,7 +539,7 @@ test "emitF32x4ExtractLane: lane 2 → PSHUFD dst, src, 0xAA" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -563,7 +563,7 @@ test "emitF32x4ReplaceLane: lane 1 → MOVAPS + INSERTPS imm 0x10" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -589,7 +589,7 @@ test "emitF32x4Abs: PCMPEQB + PSLLD-31 + (MOVAPS dst,src) + PANDN + MOVAPS" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -618,7 +618,7 @@ test "emitF64x2Abs: PCMPEQB + PSLLQ-63 (qword sign-mask) for f64x2" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -646,7 +646,7 @@ test "emitF32x4Neg: PCMPEQB + PSLLD-31 + MOVAPS dst,src + PXOR dst, mask (4 inst
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -673,7 +673,7 @@ test "emitF64x2Neg: PCMPEQB + PSLLQ-63 + MOVAPS + PXOR" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -700,7 +700,7 @@ test "emitF32x4Ceil: ROUNDPS dst, src, imm=0x0A (suppress-precision | ceil)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -724,7 +724,7 @@ test "emitF32x4Floor / Trunc / Nearest: ROUNDPS imm bits 09 / 0B / 08" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -754,7 +754,7 @@ test "emitF32x4ConvertI32x4U: 11-instr split-and-recombine recipe" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -791,7 +791,7 @@ test "emitI32x4TruncSatF32x4S: 9-instr NaN-mask + XOR-fix recipe" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -824,7 +824,7 @@ test "emitF32x4Pmin: MOVAPS dst,rhs + MINPS dst,lhs (operand swap)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -851,7 +851,7 @@ test "emitF64x2Pmax: MOVAPS dst,rhs + MAXPD dst,lhs (operand swap)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -877,7 +877,7 @@ test "emitI32x4TruncSatF32x4U: 14-instr two-path inline-magic recipe" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -917,7 +917,7 @@ test "emitF64x2 Ceil/Floor/Trunc/Nearest: ROUNDPD imm bits 0A/09/0B/08" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 

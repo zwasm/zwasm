@@ -25,7 +25,7 @@ test "emitI32x4Add: three fresh XMM slots — MOVAPS xmm10, xmm8 + PADDD xmm10, 
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -65,7 +65,7 @@ test "emitI32x4Add: dst aliases lhs slot — MOVAPS elided, only PADDD emitted" 
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -90,7 +90,7 @@ test "emitI8x16Sub: dispatches to encPsubB — opcode 0xF8 reaches the buffer" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -132,7 +132,7 @@ test "emitI8x16Popcnt: dst aliases src — stash src to XMM7 before const loads 
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -160,7 +160,7 @@ test "emitI8x16Popcnt: dst != src — no alias stash emitted (control)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -192,7 +192,7 @@ test "emitI64x2Mul: emits the 11-instruction PMULUDQ synthesis sequence" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -233,7 +233,7 @@ test "emitI64x2Mul: dst aliases lhs — final MOVAPS elided" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -282,7 +282,7 @@ test "emitI64x2Mul: dst aliases rhs — stash rhs to XMM7 (D-071 part a)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -326,7 +326,7 @@ test "emitI32x4Mul: dispatches to encPmullD — opcode 0x40 with 0x38 escape rea
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -356,7 +356,7 @@ test "emitI16x8Mul: dispatches to encPmullW — opcode 0xD5 (SSE2 path)" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -378,7 +378,7 @@ test "emitI64x2Add: dispatches to encPaddQ — opcode 0xD4 reaches the buffer" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 2,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -404,7 +404,7 @@ test "emitI32x4Add: spilled rhs loads via MOVUPS stage XMM14 (ADR-0053 Part 3)" 
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 7,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -441,7 +441,7 @@ test "emitI16x8Q15mulrSatS: PMULHRSW + saturate a==b==0x8000 overflow lanes to 0
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 
@@ -475,7 +475,7 @@ test "emitI32x4DotI16x8S: PMADDWD dst, src" {
     const alloc: regalloc.Allocation = .{
         .slots = &slot_ids,
         .n_slots = 3,
-        .max_reg_slots_gpr = 4,
+        .max_reg_slots_gpr = abi.allocatable_gprs.len,
         .max_reg_slots_fp = 6,
     };
 

@@ -337,6 +337,7 @@ pub fn emitIndirectReturnCall(
     if (ctx.pushed_vregs.items.len < 1) return ctx_mod.Error.AllocationMissing;
     const idx_vreg = ctx.pushed_vregs.pop().?;
 
+    const idx_carried = try op_call.carryPastMarshal(ctx.allocator, ctx.buf, ctx.alloc, idx_vreg);
     try op_call.marshalCallArgs(
         ctx.allocator,
         ctx.buf,
@@ -352,7 +353,7 @@ pub fn emitIndirectReturnCall(
     // D-475: an i64 table pops a 64-bit index — the bounds CMPs below
     // widen to .q per the table's idx_type.
     const ci_idx64 = ctx.func.tableIdxType(table_idx) == .i64;
-    const idx_r = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, idx_vreg, 0);
+    const idx_r = idx_carried orelse try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, idx_vreg, 0);
 
     const expected_typeidx: u32 = canonical_type.canonicalTypeidx(ctx.module_types, @intCast(ins.payload));
 
@@ -481,6 +482,7 @@ pub fn emitReturnCallRef(
     if (ctx.pushed_vregs.items.len < 1) return ctx_mod.Error.AllocationMissing;
     const funcref_vreg = ctx.pushed_vregs.pop().?;
 
+    const funcref_carried = try op_call.carryPastMarshal(ctx.allocator, ctx.buf, ctx.alloc, funcref_vreg);
     try op_call.marshalCallArgs(
         ctx.allocator,
         ctx.buf,
@@ -491,7 +493,7 @@ pub fn emitReturnCallRef(
     );
 
     // Funcref ptr → reg (AFTER marshalCallArgs, D-097 d-18 mirror).
-    const funcref_r = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, funcref_vreg, 0);
+    const funcref_r = funcref_carried orelse try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, funcref_vreg, 0);
 
     // Null check: OR funcref_r, funcref_r (ZF iff null) ; JZ → null_reference
     // stub (code 10), the kind `call_ref` reports for the same null.

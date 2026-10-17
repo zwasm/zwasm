@@ -94,15 +94,6 @@ pub const stack_pointer: Gpr = .rsp;
 /// ADR-0017 mapping for x86_64 prologue revisits this.
 pub const frame_pointer: Gpr = .rbp;
 
-/// Caller-saved scratch GPRs other than args / return. Per
-/// D-045 chunk 13b, R10 + R11 have been removed from the
-/// allocatable pool — they are now reserved as
-/// `spill_stage_gprs` (consumed by `gpr.zig`'s spill-aware
-/// helpers). The constant remains as an empty slice so the
-/// `allocatable_gprs = scratch ++ callee_saved` shape stays
-/// readable.
-pub const allocatable_caller_saved_scratch_gprs = [_]Gpr{};
-
 /// Reserved for runtime-ptr save per ADR-0026. Mirrors the
 /// role of arm64's `runtime_ptr_save_gpr` (X19, ADR-0017
 /// sub-2d-ii): the function prologue captures the inbound RDI
@@ -136,52 +127,25 @@ pub const reserved_invariant_gprs = [_]Gpr{runtime_ptr_save_gpr};
 /// `allocatable_callee_saved_gprs`).
 pub const allocatable_callee_saved_gprs = [_]Gpr{ .rbx, .r12, .r13, .r14 };
 
-/// Pool of GPRs the regalloc may freely use, in priority order:
-/// caller-saved scratch first (cheapest, no prologue save),
-/// then allocatable callee-saved (forces save/restore but
-/// invariant-safe).
-///
-/// **Excluded from the pool by construction**:
-///   - RDI, RSI, RDX, RCX, R8, R9 (arg marshalling — caller
-///     must own these around call sites)
-///   - RAX (return slot)
-///   - RSP (stack pointer)
-///   - RBP (frame pointer per the prologue convention; ADR-0026
-///     §"Frame-pointer policy")
-///   - R15 (`reserved_invariant_gprs` per ADR-0026)
-///   - R10, R11 (`spill_stage_gprs` per D-045 chunk 13b — used
-///     to stage spilled vregs through physical regs in the
-///     spill-aware emit path)
-///
-/// Pool size: 4 (RBX, R12, R13, R14) post-13b. For comparison
-/// arm64's pool is 8 — x86_64 has fewer GPRs to start with
-/// (16 vs 31), so the asymmetry is structural and accepted
-/// per P3 (cold-start) / ADR-0026.
-pub const allocatable_gprs = allocatable_caller_saved_scratch_gprs ++ allocatable_callee_saved_gprs;
+/// The argument registers the pool also hands out (slots 4-7): all four
+/// carry arguments under SysV, R8/R9 under Win64.
+pub const allocatable_arg_gprs = [_]Gpr{ .rsi, .rdi, .r8, .r9 };
 
-// Compile-time invariant: allocatable_gprs is pairwise disjoint
-// with arg_gprs / return_gpr / stack_pointer / frame_pointer /
-// reserved_invariant_gprs — the arm64-style W54-class structural
-// fix against pool/role overlap (per ADR-0018; same shape as
-// arm64/abi.zig comptime block).
+/// The regalloc pool, callee-saved first: slots 0-3 are the only homes for
+/// register-homed locals (ADR-0155), which stay put across runtime callouts.
+/// RSI/RDI/R8/R9 are argument registers; a value live across a call goes to
+/// a slot (ADR-0060), the call family moves its arguments in parallel
+/// (`gpr.ParallelMove`), and the other handlers that write them are fenced
+/// (`op_regs`, ADR-0077). Out of the pool: RAX/RCX/RDX (fixed roles in
+/// division, shifts and the memory ops), RSP, RBP, R15 (ADR-0026), R10/R11
+/// (spill stage).
+pub const allocatable_gprs = allocatable_callee_saved_gprs ++ allocatable_arg_gprs;
+
 comptime {
+    const fixed = [_]Gpr{ .rax, .rcx, .rdx, stack_pointer, frame_pointer } ++ reserved_invariant_gprs ++ spill_stage_gprs;
     for (allocatable_gprs) |a| {
-        for (arg_gprs) |arg| {
-            if (a == arg) @compileError("regalloc pool overlaps arg_gprs — SysV §3.2.3 invariant violated");
-        }
-        if (a == return_gpr) @compileError("regalloc pool overlaps return_gpr — SysV §3.2.1 invariant violated");
-        if (a == stack_pointer) @compileError("regalloc pool overlaps stack_pointer");
-        if (a == frame_pointer) @compileError("regalloc pool overlaps frame_pointer — ADR-0026 prologue convention violated");
-        for (reserved_invariant_gprs) |r| {
-            if (a == r) @compileError("regalloc pool overlaps reserved_invariant_gprs — ADR-0026 invariant violated");
-        }
-        // D-045 chunk 13b: pool ∩ spill_stage = ∅. Stage regs
-        // are reserved exclusively for `gpr.zig`'s spill-aware
-        // helpers; allowing the regalloc to assign them would
-        // race with handlers that load spilled operands into
-        // them mid-instruction.
-        for (spill_stage_gprs) |s| {
-            if (a == s) @compileError("regalloc pool overlaps spill_stage_gprs — D-045 13b invariant violated");
+        for (fixed) |f| {
+            if (a == f) @compileError("regalloc pool holds " ++ @tagName(a) ++ ", which has a fixed role");
         }
     }
     // Same disjointness for the FP / XMM side.
@@ -300,10 +264,6 @@ pub const sysv = struct {
     pub const return_xmm: Xmm = .xmm0;
     pub const callee_saved_gprs = [_]Gpr{ .rbx, .rbp, .r12, .r13, .r14, .r15 };
     pub const caller_saved_gprs = [_]Gpr{ .rax, .rcx, .rdx, .rdi, .rsi, .r8, .r9, .r10, .r11 };
-    /// Allocatable GPRs under SysV (D-045 chunk 13b: 4 regs;
-    /// R10/R11 reserved as spill-stage). Mirrors top-level
-    /// `allocatable_gprs` for symmetry with `win64.allocatable_gprs`.
-    pub const allocatable_gprs = [_]Gpr{ .rbx, .r12, .r13, .r14 };
     /// SysV does not reserve a shadow space below the call site.
     pub const shadow_space_bytes: u32 = 0;
     /// First arg in RDI per SysV §3.2.3 — the entry shim's
@@ -320,8 +280,7 @@ pub const sysv = struct {
 ///    (only 4 XMMs). FP and integer args share positions —
 ///    arg_n in either RXX_n or XMMn but not both.
 /// 2. **Callee-saved**: RDI/RSI promoted to callee-saved (vs
-///    SysV's caller-saved). Pool grows by 2 if Win64 is the
-///    target.
+///    SysV's caller-saved). The pool is the same under both.
 /// 3. **Shadow space**: 32 bytes reserved by the caller below
 ///    the call site. The callee owns these bytes (may spill
 ///    its 4 register args there).
@@ -339,17 +298,6 @@ pub const win64 = struct {
     pub const shadow_space_bytes: u32 = 32;
     pub const entry_arg0_gpr: Gpr = .rcx;
     pub const runtime_ptr_save_gpr: Gpr = .r15;
-
-    /// Allocatable GPRs under Win64. Two more than SysV because
-    /// RDI + RSI are callee-saved here (caller-saved on SysV).
-    /// **Order intentionally mirrors SysV for slots 0..5** so a
-    /// codegen pass that uses ≤ 6 slots produces identical
-    /// register choices under both ABIs (lets Mac-host byte-
-    /// level emit tests stay encoding-stable when the build
-    /// target switches). Slots 6/7 add RDI/RSI as a Win64-only
-    /// extension. RBP is the frame pointer; R15 is the reserved
-    /// runtime-ptr-save register.
-    pub const allocatable_gprs = [_]Gpr{ .rbx, .r12, .r13, .r14, .rdi, .rsi };
 };
 
 // ============================================================
@@ -376,19 +324,114 @@ pub const current = switch (current_cc) {
     .win64 => win64,
 };
 
-// Compile-time invariants for the Win64 pool — same shape as
-// the SysV block above (W54-class structural fix against
-// pool/role overlap).
-comptime {
-    for (win64.allocatable_gprs) |a| {
-        for (win64.arg_gprs) |arg| {
-            if (a == arg) @compileError("win64 regalloc pool overlaps win64.arg_gprs — Microsoft x64 §arg-passing violated");
-        }
-        if (a == win64.return_gpr) @compileError("win64 regalloc pool overlaps win64.return_gpr");
-        if (a == stack_pointer) @compileError("win64 regalloc pool overlaps stack_pointer");
-        if (a == frame_pointer) @compileError("win64 regalloc pool overlaps frame_pointer");
-        if (a == win64.runtime_ptr_save_gpr) @compileError("win64 regalloc pool overlaps win64.runtime_ptr_save_gpr — ADR-0026 invariant violated");
+// ============================================================
+// ADR-0077 op-internal register reservations
+// ============================================================
+
+const zir = @import("../../../ir/zir.zig");
+const regalloc = @import("../shared/regalloc.zig");
+const jit_abi = @import("../shared/jit_abi.zig");
+
+const zir_op_count = @typeInfo(zir.ZirOp).@"enum".fields.len;
+
+/// What an op's handler writes outside the value it defines, stated as
+/// registers. The slot ids the regalloc fences follow from the pool, so a
+/// register that is not in it fences nothing.
+const OpRegs = struct {
+    /// Scratch with no call around it: a vreg live across the op loses it.
+    scratch: []const Gpr = &.{},
+    /// Written before the handler has read every operand.
+    operand: []const Gpr = &.{},
+};
+
+/// The call family (`call`, `call_indirect`, `call_ref`, `return_call*`)
+/// moves its arguments in parallel (`gpr.ParallelMove`) and reserves nothing.
+const op_regs: [zir_op_count]OpRegs = blk: {
+    @setEvalBranchQuota(100_000);
+    var t = [_]OpRegs{.{}} ** zir_op_count;
+    t[@intFromEnum(zir.ZirOp.@"memory.init")] = .{ .scratch = &.{ .rdi, .r8, .r9 } };
+    t[@intFromEnum(zir.ZirOp.@"table.set")] = .{ .scratch = &.{.r9} };
+    for ([_]zir.ZirOp{ .@"table.fill", .@"table.copy", .@"table.init" }) |op| {
+        t[@intFromEnum(op)] = .{ .scratch = &.{ .rsi, .rdi, .r8, .r9 }, .operand = &.{.r8} };
     }
+    // Callouts that route their operands into the argument registers one at a
+    // time, so an early argument can land on a later operand.
+    for ([_]zir.ZirOp{
+        .@"array.copy", .@"array.fill",     .@"array.init_data", .@"array.init_elem",
+        .@"array.new",  .@"array.new_data", .@"array.new_elem",  .@"table.grow",
+    }) |op| {
+        t[@intFromEnum(op)] = .{ .operand = &current.arg_gprs };
+    }
+    for (0..zir_op_count) |i| {
+        const op: zir.ZirOp = @enumFromInt(i);
+        if (jit_abi.isAtomicRmw(op) or jit_abi.isAtomicCmpxchg(op) or
+            jit_abi.isAtomicNotify(op) or jit_abi.isAtomicWait(op))
+        {
+            t[i] = .{ .operand = &current.arg_gprs };
+        }
+    }
+    break :blk t;
+};
+
+fn poolSlots(comptime regs: []const Gpr) []const u16 {
+    comptime {
+        var ids: [regs.len]u16 = undefined;
+        var n: usize = 0;
+        for (regs) |r| {
+            for (allocatable_gprs, 0..) |p, i| {
+                if (p == r) {
+                    ids[n] = i;
+                    n += 1;
+                }
+            }
+        }
+        const out = ids[0..n].*;
+        return &out;
+    }
+}
+
+fn slotTable(comptime field: []const u8) [zir_op_count][]const u16 {
+    @setEvalBranchQuota(100_000);
+    var t: [zir_op_count][]const u16 = undefined;
+    for (op_regs, 0..) |e, i| t[i] = poolSlots(@field(e, field));
+    return t;
+}
+
+const op_scratch_slots = slotTable("scratch");
+const op_operand_slots = slotTable("operand");
+
+comptime {
+    @setEvalBranchQuota(100_000);
+    regalloc.validateRegallocOpScratchReservation(op_scratch_slots, allocatable_gprs.len);
+    regalloc.validateRegallocOpScratchReservation(op_operand_slots, allocatable_gprs.len);
+}
+
+const local_homing = @import("../../../ir/analysis/local_homing.zig");
+
+// A register-homed local holds a slot below `n_home_gpr` for the whole
+// function and is saved only around the call family (D-268), so those slots
+// must be callee-saved under both conventions and fenced by no op.
+// `local_homing` sizes itself for the build target, so only an x86_64 target
+// is checked against this pool.
+comptime {
+    if (builtin.target.cpu.arch == .x86_64) {
+        @setEvalBranchQuota(100_000);
+        if (local_homing.n_allocatable_gpr != allocatable_gprs.len) @compileError("local_homing.n_allocatable_gpr is not the pool size");
+        for (allocatable_gprs[0..local_homing.n_home_gpr]) |g| {
+            if (!isCalleeSaved(g)) @compileError("a home slot holds " ++ @tagName(g) ++ ", which a C callee may clobber");
+        }
+        for (op_scratch_slots ++ op_operand_slots) |sids| {
+            for (sids) |sid| {
+                if (sid < local_homing.n_home_gpr) @compileError("an op fences a home slot");
+            }
+        }
+    }
+}
+
+/// `shared/regalloc.zig::ScratchReservationFn` for x86_64.
+pub fn opScratchReservation(op: zir.ZirOp) regalloc.Reservation {
+    const i = @intFromEnum(op);
+    return .{ .scratch = op_scratch_slots[i], .operand = op_operand_slots[i] };
 }
 
 // ============================================================
@@ -426,24 +469,8 @@ test "return_gpr is RAX, return_xmm is XMM0" {
     try testing.expectEqual(Xmm.xmm0, return_xmm);
 }
 
-test "allocatable_gprs is 4 regs (RBX, R12..R14) post-D-045-13b" {
-    // D-045 chunk 13b: R10/R11 removed from the pool — reserved
-    // as spill-stage regs for spill-aware emit.
-    try testing.expectEqual(@as(usize, 4), allocatable_gprs.len);
-    try testing.expectEqual(Gpr.rbx, allocatable_gprs[0]);
-    try testing.expectEqual(Gpr.r12, allocatable_gprs[1]);
-    try testing.expectEqual(Gpr.r13, allocatable_gprs[2]);
-    try testing.expectEqual(Gpr.r14, allocatable_gprs[3]);
-}
-
-test "allocatable_gprs is disjoint from arg/return/SP/FP/reserved at runtime" {
-    for (allocatable_gprs) |a| {
-        for (arg_gprs) |arg| try testing.expect(a != arg);
-        try testing.expect(a != return_gpr);
-        try testing.expect(a != stack_pointer);
-        try testing.expect(a != frame_pointer);
-        for (reserved_invariant_gprs) |r| try testing.expect(a != r);
-    }
+test "allocatable_gprs: the callee-saved four, then RSI, RDI, R8, R9" {
+    try testing.expectEqualSlices(Gpr, &.{ .rbx, .r12, .r13, .r14, .rsi, .rdi, .r8, .r9 }, &allocatable_gprs);
 }
 
 test "runtime_ptr_save_gpr is R15 (ADR-0026 reservation)" {
@@ -452,16 +479,10 @@ test "runtime_ptr_save_gpr is R15 (ADR-0026 reservation)" {
     try testing.expectEqual(Gpr.r15, reserved_invariant_gprs[0]);
 }
 
-test "slotToReg: slot 0 → RBX (first allocatable post-13b; R10/R11 are spill-stage)" {
+test "slotToReg: slot 0 → RBX, slot 7 → R9, slot 8 → null (spill territory)" {
     try testing.expectEqual(Gpr.rbx, slotToReg(0).?);
-}
-
-test "slotToReg: slot 3 → R14 (last in the 4-slot pool post-13b)" {
-    try testing.expectEqual(Gpr.r14, slotToReg(3).?);
-}
-
-test "slotToReg: slot 4 returns null (pool exhausted; spill territory)" {
-    try testing.expect(slotToReg(4) == null);
+    try testing.expectEqual(Gpr.r9, slotToReg(7).?);
+    try testing.expect(slotToReg(8) == null);
 }
 
 test "fpSlotToReg: slot 0 → XMM8 (first allocatable XMM after arg regs)" {
@@ -568,22 +589,6 @@ test "win64.entry_arg0_gpr is RCX (Win64 first arg)" {
     try testing.expectEqual(Gpr.rdi, sysv.entry_arg0_gpr);
 }
 
-test "win64.allocatable_gprs adds RDI+RSI vs SysV (6 regs vs 4) post-D-045-13b" {
-    // D-045 chunk 13b: R10/R11 removed from the pool. SysV pool
-    // is 4 (RBX, R12..R14); Win64 adds RDI+RSI for 6.
-    try testing.expectEqual(@as(usize, 6), win64.allocatable_gprs.len);
-}
-
-test "win64.allocatable_gprs slots 0..3 mirror SysV (cross-Cc test stability)" {
-    // Slot 0..3 must agree byte-for-byte with SysV so tests that
-    // exercise ≤ 4 slots produce identical encodings under both
-    // ABIs. RDI/RSI are appended as slots 4 / 5 post-13b.
-    try testing.expectEqual(allocatable_gprs[0], win64.allocatable_gprs[0]);
-    try testing.expectEqual(allocatable_gprs[3], win64.allocatable_gprs[3]);
-    try testing.expectEqual(Gpr.rdi, win64.allocatable_gprs[4]);
-    try testing.expectEqual(Gpr.rsi, win64.allocatable_gprs[5]);
-}
-
 test "current_cc matches the build target (.windows → .win64; else → .sysv)" {
     const expected: Cc = switch (builtin.target.os.tag) {
         .windows => .win64,
@@ -603,4 +608,157 @@ test "current.entry_arg0_gpr and runtime_ptr_save_gpr match the active Cc" {
             try testing.expectEqual(Gpr.r15, current.runtime_ptr_save_gpr);
         },
     }
+}
+
+test "poolSlots: a register maps to its pool slot, one outside the pool to nothing" {
+    try testing.expectEqualSlices(u16, &.{ 0, 2 }, comptime poolSlots(&.{ .rbx, .rax, .r13 }));
+    try testing.expectEqual(@as(usize, 0), comptime poolSlots(&.{ .r10, .r11, .r15 }).len);
+}
+
+test "opScratchReservation: every fenced slot holds a register its handler writes" {
+    for (op_regs, 0..) |e, i| {
+        const res = opScratchReservation(@enumFromInt(i));
+        for (res.scratch) |sid| try testing.expect(std.mem.findScalar(Gpr, e.scratch, allocatable_gprs[sid]) != null);
+        for (res.operand) |sid| try testing.expect(std.mem.findScalar(Gpr, e.operand, allocatable_gprs[sid]) != null);
+    }
+}
+
+/// The registers of `regs` that the pool also hands out.
+fn inPool(comptime regs: []const Gpr) []const Gpr {
+    comptime {
+        var out: [regs.len]Gpr = undefined;
+        var n: usize = 0;
+        for (regs) |r| {
+            if (std.mem.findScalar(Gpr, &allocatable_gprs, r) != null) {
+                out[n] = r;
+                n += 1;
+            }
+        }
+        const final = out[0..n].*;
+        return &final;
+    }
+}
+
+/// Fillers v0-v3 take slots 0-3 and die at pc 7; v4-v7, defined at pc 4-7,
+/// end at the op on pc 8 (`across` = false: its operands) or one pc past it
+/// (`across` = true: live across it). Without a fence v4-v7 land in slots
+/// 4-7, the argument registers. Returns the register each of v4-v7 got.
+fn fencedRegs(op: zir.ZirOp, across: bool, fence: ?regalloc.ScratchReservationFn) ![4]?Gpr {
+    var f = zir.ZirFunc.init(0, .{ .params = &.{}, .results = &.{} }, &.{});
+    defer f.deinit(testing.allocator);
+    for (0..10) |pc| try f.instrs.append(testing.allocator, .{ .op = if (pc == 8) op else .nop });
+    var ranges: [8]zir.LiveRange = undefined;
+    for (0..4) |i| ranges[i] = .{ .def_pc = @intCast(i), .last_use_pc = 7 };
+    for (4..8) |i| ranges[i] = .{ .def_pc = @intCast(i), .last_use_pc = if (across) 9 else 8 };
+    f.liveness = .{ .ranges = &ranges };
+    const alloc = try regalloc.computeWith(testing.allocator, &f, allocatable_gprs.len, fence, .{ .gpr = allocatable_gprs.len, .fp = allocatable_xmms.len });
+    defer regalloc.deinit(testing.allocator, alloc);
+    var regs: [4]?Gpr = undefined;
+    for (&regs, 4..) |*r, v| r.* = switch (alloc.slot(v, .gpr)) {
+        .reg => |id| slotToReg(id),
+        .spill => null,
+    };
+    return regs;
+}
+
+/// `op`'s operands (or the vregs live across it) get none of `avoid`, and
+/// would without the fence.
+fn expectFenced(op: zir.ZirOp, across: bool, avoid: []const Gpr) !void {
+    const hits = struct {
+        fn count(regs: [4]?Gpr, set: []const Gpr) usize {
+            var n: usize = 0;
+            for (regs) |r| {
+                if (r) |g| {
+                    if (std.mem.findScalar(Gpr, set, g) != null) n += 1;
+                }
+            }
+            return n;
+        }
+    };
+    try testing.expect(hits.count(try fencedRegs(op, across, null), avoid) > 0);
+    try testing.expectEqual(@as(usize, 0), hits.count(try fencedRegs(op, across, &opScratchReservation), avoid));
+}
+
+const arg_regs_in_pool = inPool(&current.arg_gprs);
+
+test "fence: memory.init — nothing live across it in RDI, R8, R9" {
+    try expectFenced(.@"memory.init", true, comptime inPool(&.{ .rdi, .r8, .r9 }));
+}
+
+test "fence: table.set — nothing live across it in R9" {
+    try expectFenced(.@"table.set", true, comptime inPool(&.{.r9}));
+}
+
+test "fence: table.fill — operands not in R8, nothing live across it in RSI, RDI, R8, R9" {
+    try expectFenced(.@"table.fill", false, comptime inPool(&.{.r8}));
+    try expectFenced(.@"table.fill", true, comptime inPool(&.{ .rsi, .rdi, .r8, .r9 }));
+}
+
+test "fence: table.copy — operands not in R8, nothing live across it in RSI, RDI, R8, R9" {
+    try expectFenced(.@"table.copy", false, comptime inPool(&.{.r8}));
+    try expectFenced(.@"table.copy", true, comptime inPool(&.{ .rsi, .rdi, .r8, .r9 }));
+}
+
+test "fence: table.init — operands not in R8, nothing live across it in RSI, RDI, R8, R9" {
+    try expectFenced(.@"table.init", false, comptime inPool(&.{.r8}));
+    try expectFenced(.@"table.init", true, comptime inPool(&.{ .rsi, .rdi, .r8, .r9 }));
+}
+
+test "fence: array.copy — operands not in an argument register" {
+    try expectFenced(.@"array.copy", false, arg_regs_in_pool);
+}
+
+test "fence: array.fill — operands not in an argument register" {
+    try expectFenced(.@"array.fill", false, arg_regs_in_pool);
+}
+
+test "fence: array.init_data — operands not in an argument register" {
+    try expectFenced(.@"array.init_data", false, arg_regs_in_pool);
+}
+
+test "fence: array.init_elem — operands not in an argument register" {
+    try expectFenced(.@"array.init_elem", false, arg_regs_in_pool);
+}
+
+test "fence: array.new — operands not in an argument register" {
+    try expectFenced(.@"array.new", false, arg_regs_in_pool);
+}
+
+test "fence: array.new_data — operands not in an argument register" {
+    try expectFenced(.@"array.new_data", false, arg_regs_in_pool);
+}
+
+test "fence: array.new_elem — operands not in an argument register" {
+    try expectFenced(.@"array.new_elem", false, arg_regs_in_pool);
+}
+
+test "fence: table.grow — operands not in an argument register" {
+    try expectFenced(.@"table.grow", false, arg_regs_in_pool);
+}
+
+fn expectAtomicFamilyFenced(comptime pred: fn (zir.ZirOp) bool) !void {
+    var n: usize = 0;
+    for (0..zir_op_count) |i| {
+        const op: zir.ZirOp = @enumFromInt(i);
+        if (!pred(op)) continue;
+        try expectFenced(op, false, arg_regs_in_pool);
+        n += 1;
+    }
+    try testing.expect(n > 0);
+}
+
+test "fence: every atomic rmw — operands not in an argument register" {
+    try expectAtomicFamilyFenced(jit_abi.isAtomicRmw);
+}
+
+test "fence: every atomic cmpxchg — operands not in an argument register" {
+    try expectAtomicFamilyFenced(jit_abi.isAtomicCmpxchg);
+}
+
+test "fence: memory.atomic.notify — operands not in an argument register" {
+    try expectAtomicFamilyFenced(jit_abi.isAtomicNotify);
+}
+
+test "fence: memory.atomic.wait32 / wait64 — operands not in an argument register" {
+    try expectAtomicFamilyFenced(jit_abi.isAtomicWait);
 }

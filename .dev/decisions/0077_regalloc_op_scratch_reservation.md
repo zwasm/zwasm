@@ -221,3 +221,12 @@ once the D-133 sweep lands (sites go from 55 → 0).
 |------------|--------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | 2026-05-20 | `342554b2` | Initial Proposed version (B119 outcome).                                                                                                                                      |
 | 2026-05-20 | `1bc9c09b` | User review → Status: Accepted. Implementation deferred to fresh session; spike-first per `.claude/rules/spike_lifecycle.md`; D-133 row updated to point at ADR-0077 impl. |
+
+## Revision 2026-10-17 — an operand set
+
+A reservation has a second set, `operand`: slots a handler writes before it
+has read every operand, fenced for the vregs live across the op and also for
+the op's own operands. Which ops carry which registers is in the per-arch
+tables, not here. Rejected: rewriting each such handler to read its operands
+first or move them in parallel — thirteen handlers on x86_64, several with
+Win64-only paths no local host runs, against one rule in the regalloc.

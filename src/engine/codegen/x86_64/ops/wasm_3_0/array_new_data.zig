@@ -7,7 +7,7 @@
 //! 2 → 1.
 //!
 //! typeidx + segidx are immediates (ESI/EDX); offset + size are the popped
-//! operands (ECX/R8D). SysV arg regs ∉ regalloc pool → no parallel-move.
+//! operands (ECX/R8D), fenced off the arg regs (`abi.op_regs`, ADR-0077).
 //! Trampoline reuses memory.init's data_segments_ptr plumbing.
 //!
 //! Lowering: MOV ECX = offset; MOV R8D = size; MOV RDI, R15 (rt); MOV ESI =
@@ -36,7 +36,7 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // Marshal user args 3..4 = offset, size (args 1/2 = typeidx/segidx
     // immediates below) — all i32 (.d). SysV: arg_gprs[3..5] = RCX/R8
     // (regs). Win64: arg_gprs[3] = R9 → size (arg 4) spills to
-    // [RSP+0x20] (D-248). stage R10/R11 + arg regs ∉ pool.
+    // [RSP+0x20] (D-248). Operands are fenced off the arg regs.
     const xoff = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, args.lhs, 0);
     try gc_marshal.routeArg(ctx, 3, xoff, .d);
     const xsize = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, args.rhs, 1);

@@ -159,6 +159,44 @@ test "compile: function with 1 local + (i32.const 42) (local.set 0) (local.get 0
     try testing.expectEqual(@as(u8, 0xC3), out.bytes[out.bytes.len - 1]);
 }
 
+test "regalloc: every register-homed local sits in a callee-saved slot below 4 (D-268)" {
+    // Ten i32 locals, each set and then read, through the real liveness and
+    // regalloc with the x86_64 boundaries and fence: four of them home, and
+    // each home is in RBX/R12-R14, where a C callee leaves it alone.
+    // SIBLING-AT: src/engine/codegen/arm64/emit_test_local.zig (arm64 homes include caller-saved X9-X13)
+    if (comptime builtin.target.cpu.arch != .x86_64) return;
+    const local_homing = @import("../../../ir/analysis/local_homing.zig");
+    const sig: zir.FuncType = .{ .params = &.{}, .results = &.{.i32} };
+    var f = ZirFunc.init(0, sig, &([_]zir.ValType{.i32} ** 10));
+    defer f.deinit(testing.allocator);
+    for (0..10) |i| {
+        try f.instrs.append(testing.allocator, .{ .op = .@"i32.const", .payload = @intCast(i) });
+        try f.instrs.append(testing.allocator, .{ .op = .@"local.set", .payload = @intCast(i) });
+    }
+    try f.instrs.append(testing.allocator, .{ .op = .@"local.get", .payload = 0 });
+    for (1..10) |i| {
+        try f.instrs.append(testing.allocator, .{ .op = .@"local.get", .payload = @intCast(i) });
+        try f.instrs.append(testing.allocator, .{ .op = .@"i32.add" });
+    }
+    try f.instrs.append(testing.allocator, .{ .op = .end });
+    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    defer if (f.liveness) |lv| liveness.deinit(testing.allocator, lv);
+    const alloc = try regalloc.computeWith(testing.allocator, &f, abi.allocatable_gprs.len, &abi.opScratchReservation, .{
+        .gpr = abi.allocatable_gprs.len,
+        .fp = abi.allocatable_xmms.len,
+    });
+    defer regalloc.deinit(testing.allocator, alloc);
+
+    const plan = local_homing.plan(&f);
+    try testing.expectEqual(@as(u32, 4), plan.count);
+    const n_temp = alloc.slots.len - plan.count;
+    for (0..plan.count) |r| {
+        const sid = alloc.slots[n_temp + r];
+        try testing.expect(sid < 4);
+        try testing.expect(abi.isCalleeSaved(abi.slotToReg(sid).?));
+    }
+}
+
 test "compile: local.tee preserves stack — uses top vreg without popping" {
     // ADR-0155 stage 4 — homed local.tee: MOVs the (peeked) value into the home
     // register and leaves it on the operand stack (no pop). Real pipeline so the

@@ -821,9 +821,7 @@ pub fn emitV128Bitselect(
     switch (alloc.slot(a_v, .fpr)) {
         .reg => |id| a_x = abi.fpSlotToReg(id) orelse return Error.SlotOverflow,
         .spill => |off| {
-            const abs_off = spill_base_off + off;
-            if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-            const disp: i32 = -@as(i32, @intCast(abs_off));
+            const disp = try gpr.v128SpillDisp(spill_base_off, off);
             try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(.xmm7, disp).slice());
             a_x = .xmm7;
         },
@@ -877,9 +875,7 @@ pub fn emitV128Bitselect(
     // Store if result is spilled.
     if (result_slot == .spill) {
         const off = result_slot.spill;
-        const abs_off = spill_base_off + off;
-        if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-        const disp: i32 = -@as(i32, @intCast(abs_off));
+        const disp = try gpr.v128SpillDisp(spill_base_off, off);
         try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(disp, .xmm7).slice());
     }
     try pushed_vregs.append(allocator, result_v);
@@ -920,14 +916,11 @@ pub fn emitV128Bitselect(
 ///   MOVAPS dst_xmm, val2_xmm    ; dst = val2 (self-MOV when dst==val2)
 ///   PXOR   dst_xmm, XMM14        ; dst = val2 ^ tmp = cond ? val1 : val2
 ///
-/// **SPILL-EXEMPT** (mirror of arm64 emitV128Select): result_v
-/// resolves via `xmmDefSpilledV128(stage 0)`, val1 via
-/// `xmmLoadSpilledV128(stage 1)`, val2 via `resolveXmm` (rejects
-/// spilled with `Error.UnsupportedOp`). XMM14 (= fp spill stage
-/// 0) doubles as the scratch tmp here — safe because result is
-/// SPILL-EXEMPT (so XMM14 won't be the dst home) and val1 uses
-/// stage 1 (XMM15). XMM7 is the project-canonical SIMD scratch
-/// (`abi.zig:200`), out of the regalloc pool.
+/// val1 loads through stage 1 (XMM15) and val2 via `resolveXmm`
+/// (rejects spilled with `Error.UnsupportedOp`). XMM14 (= fp spill
+/// stage 0) is the scratch tmp, so a spilled result stages through
+/// XMM15 too: val1 is dead after the first MOVAPS. XMM7 is the
+/// project-canonical SIMD scratch, out of the regalloc pool.
 ///
 /// **Aliasing safety**: regalloc's LIFO slot-reuse can give
 /// `result_v` the same physical XMM as `val1_v` or `val2_v`. The
@@ -970,7 +963,7 @@ pub fn emitV128Select(
 
     const val1_x = try gpr.xmmLoadSpilledV128(allocator, buf, alloc, spill_base_off, val1_v, 1);
     const val2_x = try gpr.resolveXmm(alloc, val2_v);
-    const dst_x = try gpr.xmmDefSpilledV128(alloc, result_vreg, 0);
+    const dst_x = try gpr.xmmDefSpilledV128(alloc, result_vreg, 1);
 
     const xmm_tmp: inst.Xmm = abi.fp_spill_stage_xmms[0];
     try buf.appendSlice(allocator, inst.encMovapsXmmXmm(xmm_tmp, val1_x).slice());
@@ -979,7 +972,7 @@ pub fn emitV128Select(
     try buf.appendSlice(allocator, inst.encMovapsXmmXmm(dst_x, val2_x).slice());
     try buf.appendSlice(allocator, inst.encPxor(dst_x, xmm_tmp).slice());
 
-    try gpr.xmmStoreSpilledV128(allocator, buf, alloc, spill_base_off, result_vreg, 0);
+    try gpr.xmmStoreSpilledV128(allocator, buf, alloc, spill_base_off, result_vreg, 1);
 }
 
 pub fn emitV128AnyTrue(

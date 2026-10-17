@@ -7,9 +7,9 @@
 //! result. No result push (4 → 0).
 //!
 //! All four operands consumed into arg regs BEFORE the CALL (strict is_call).
-//! SysV arg regs RDI/RSI/RDX/RCX/R8/R9 ∉ regalloc pool ({RBX,R12,R13,R14}), so
-//! marshalling each operand (stage R10/R11 → MOV arg) cannot clobber another's
-//! source. The `typeidx` immediate is NOT marshalled — it won't fit the 6-arg
+//! The operand fence (`abi.op_regs`, ADR-0077) keeps the operands out of the
+//! argument registers, so marshalling each one (stage R10/R11 → MOV arg) cannot
+//! clobber another's source. The `typeidx` immediate is NOT marshalled — it won't fit the 6-arg
 //! budget, so the trampoline reads it back from the array header.
 //!
 //! Lowering: MOV RDI, R15 (rt); MOV ESI, segidx; MOV EDX = ref; MOV ECX =
@@ -45,7 +45,7 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // segidx immediate below) — all i32 (.d). SysV: arg_gprs[2..6] =
     // RDX/RCX/R8/R9 (all regs). Win64: arg_gprs[2..4] = R8/R9 →
     // src_off (arg 4) + len (arg 5) spill to [RSP+0x20]/[RSP+0x28]
-    // (D-248). stage R10/R11 + arg regs ∉ pool → no source clobbered.
+    // (D-248). Operands are fenced off the arg regs (`abi.op_regs`).
     const xref = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, ref_vreg, 0);
     // D-470 — the trampoline's result==0 conflates null-ref + OOB. Emit an INLINE
     // null-ref check (→ null_reference, kind 10, matching interp) BEFORE the call;

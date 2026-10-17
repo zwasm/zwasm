@@ -76,7 +76,15 @@ pub const VerifyError = error{
 /// per-arch comptime `validate_op_scratch_reservation_table`
 /// enforces this at build time; runtime
 /// `slotForbidden` defensively ignores out-of-range ids.
-pub const ScratchReservationFn = *const fn (op: zir.ZirOp) []const u16;
+pub const ScratchReservationFn = *const fn (op: zir.ZirOp) Reservation;
+
+pub const Reservation = struct {
+    /// Slots the handler clobbers: no vreg live across the op may hold one.
+    scratch: []const u16 = &.{},
+    /// Slots the handler writes before it has read every operand: the op's
+    /// own operands (last use at its pc) may not hold one either.
+    operand: []const u16 = &.{},
+};
 
 // forbiddenMaskForVreg + slotForbidden + validateRegallocOpScratchReservation
 // + max_slots extracted to `regalloc_compute.zig` per ADR-0098.
@@ -133,7 +141,7 @@ pub const Allocation = struct {
     /// physical register. A future class-aware allocator (Phase 8
     /// follow-up — D-036 §"option (b)") may reuse slot ids
     /// across disjoint classes; today the worst-case spill frame
-    /// covers any slot id ≥ `max_reg_slots_gpr`.
+    /// covers any slot id ≥ `spillOrigin()`.
     slots: []const u16,
     /// Distinct slots used. `max(slots) + 1`, or 0 for the
     /// empty-function case. Drives stack-frame sizing in the
@@ -170,12 +178,12 @@ pub const Allocation = struct {
     shape_tags: ?[]const ShapeTag = null,
     /// Per-slot byte offset table for spill slots
     /// (per ADR-0053 Part 1). When non-null, indexed by `slot_id -
-    /// max_reg_slots_gpr` (so `spill_offsets[0]` is the byte offset
+    /// spillOrigin()` (so `spill_offsets[0]` is the byte offset
     /// of the first spill slot). Populated post-`compute()` when
     /// `shape_tags` is non-null AND at least one slot is occupied
     /// by a v128 vreg — gives v128 spill slots 16-byte alignment +
     /// 16-byte stride, scalar spill slots stay 8-byte. `null` means
-    /// "use the legacy uniform `(id - max_reg_slots_gpr) * 8` formula"
+    /// "use the legacy uniform `(id - spillOrigin()) * 16` formula"
     /// — the all-scalar or no-spill case where v128 alignment is
     /// vacuously satisfied.
     spill_offsets: ?[]const u32 = null,
@@ -186,12 +194,11 @@ pub const Allocation = struct {
     /// for `.gpr` but may still be a V-register for `.fpr` (id ≤
     /// `max_reg_slots_fp - 1`).
     ///
-    /// Spill offsets always use the GPR boundary as origin so the
-    /// shared spill frame is class-agnostic; spillBytes() returns
-    /// `(n_slots - max_reg_slots_gpr) * 8` (worst case — all slots
-    /// past the GPR boundary count, even if some are FP regs that
-    /// don't actually spill). Tighter accounting lands when the
-    /// allocator becomes class-aware (D-036 §"option (b)").
+    /// Spill offsets count from `spillOrigin()` for both classes, so
+    /// the shared spill frame is class-agnostic; spillBytes() covers
+    /// every slot past it (worst case — an id one class holds in a
+    /// register still gets a cell). Tighter accounting lands when
+    /// the allocator becomes class-aware (D-036 §"option (b)").
     ///
     /// Special-cache classes (inst_ptr_special / vm_ptr_special /
     /// simd_base_special) and `simd` are not yet handled by the
@@ -218,18 +225,23 @@ pub const Allocation = struct {
         // 16-byte). Fallback path also returns 16-byte stride
         // post-widen — `Value` is 16 bytes regardless of variant.
         if (self.spill_offsets) |offsets| {
-            const spill_idx = id - self.max_reg_slots_gpr;
+            const spill_idx = id - self.spillOrigin();
             return .{ .spill = offsets[spill_idx] };
         }
-        return .{ .spill = (@as(u32, id) - self.max_reg_slots_gpr) * 16 };
+        return .{ .spill = (@as(u32, id) - self.spillOrigin()) * 16 };
+    }
+
+    /// The lowest slot id any class can spill at (ADR-0194).
+    pub fn spillOrigin(self: Allocation) u8 {
+        return @min(self.max_reg_slots_gpr, self.max_reg_slots_fp);
     }
 
     /// Total spill-frame bytes required by this allocation.
     /// Adds to the function's stack frame in the prologue.
-    /// Uses the GPR boundary as the conservative origin — see
-    /// `slot()`'s doc for the per-class accounting subtlety.
+    /// Counts from `spillOrigin()` — see `slot()`'s doc for the
+    /// per-class accounting subtlety.
     pub fn spillBytes(self: Allocation) u32 {
-        if (self.n_slots <= self.max_reg_slots_gpr) return 0;
+        if (self.n_slots <= self.spillOrigin()) return 0;
         // ADR-0053 Part 1: shape-aware total when `spill_offsets`
         // is populated — the last slot's offset plus its own size.
         // Size is 16 for v128 slots, 8 otherwise; recover from the
@@ -251,7 +263,7 @@ pub const Allocation = struct {
             const last = offsets[offsets.len - 1];
             return std.mem.alignForward(u32, last + 16, 16);
         }
-        return (@as(u32, self.n_slots) - self.max_reg_slots_gpr) * 16;
+        return (@as(u32, self.n_slots) - self.spillOrigin()) * 16;
     }
 
     /// Per-vreg shape tag query (per ADR-0041
@@ -276,6 +288,7 @@ const compute_mod = @import("regalloc_compute.zig");
 pub const max_slots = compute_mod.max_slots;
 pub const compute = compute_mod.compute;
 pub const computeWith = compute_mod.computeWith;
+pub const Boundaries = compute_mod.Boundaries;
 pub const validateRegallocOpScratchReservation = compute_mod.validateRegallocOpScratchReservation;
 
 /// Post-condition predicate: assert no two overlapping live
@@ -289,11 +302,10 @@ pub fn verify(func: *const ZirFunc, alloc: Allocation) VerifyError!void {
 
 /// `verify` + ADR-0077 op-scratch-overlap post-condition.
 ///
-/// When `scratch_reservations` is non-null, additionally scans
-/// every live vreg's strict-interior PC range and emits
-/// `OpScratchOverlap` if the vreg's assigned slot id falls in
-/// the op's reservation set. PC shape mirrors `computeWith`'s
-/// fence (`def_pc < pc < last_use_pc`), so verification fires
+/// When `scratch_reservations` is non-null, additionally emits
+/// `OpScratchOverlap` if a live vreg's assigned slot id falls in
+/// a reservation its range meets. The mask is the one
+/// `computeWith` builds, so verification fires
 /// iff the walker should have skipped the slot id but didn't —
 /// the canonical regression check for a buggy fence
 /// integration. Spill slots (id ≥ `force_spill_threshold`,
@@ -322,14 +334,9 @@ pub fn verifyWith(
         const force_spill_threshold: u16 = alloc.max_reg_slots_gpr;
         for (live.ranges, 0..) |r, vreg| {
             const sid = alloc.slots[vreg];
-            if (sid >= force_spill_threshold) continue;
-            var pc: u32 = r.def_pc + 1;
-            while (pc < r.last_use_pc) : (pc += 1) {
-                if (pc >= func.instrs.items.len) break;
-                for (fence(func.instrs.items[pc].op)) |reserved_sid| {
-                    if (sid == reserved_sid) return VerifyError.OpScratchOverlap;
-                }
-            }
+            if (sid >= force_spill_threshold or sid >= 16) continue;
+            const mask = compute_mod.forbiddenMaskForVreg(func.instrs.items, r, fence);
+            if (mask & (@as(u16, 1) << @intCast(sid)) != 0) return VerifyError.OpScratchOverlap;
         }
     }
 }
@@ -379,9 +386,9 @@ fn freshFunc() ZirFunc {
 /// `.@"table.fill"` (mirrors the production reservation set per
 /// the live-scratch census). Kept duplicated rather than
 /// pub-ifying the regalloc.zig test helper.
-fn testFenceTableFill(op: zir.ZirOp) []const u16 {
+fn testFenceTableFill(op: zir.ZirOp) Reservation {
     const reservation = [_]u16{ 0, 1, 2, 3, 4 };
-    return if (op == .@"table.fill") &reservation else &.{};
+    return if (op == .@"table.fill") .{ .scratch = &reservation } else .{};
 }
 
 test "verify: rejects allocation with slot index >= n_slots" {
@@ -525,7 +532,7 @@ test "Allocation.slot: id >= max_reg_slots_fp resolves to .spill for .fpr" {
     try testing.expectEqual(Slot{ .spill = (14 - 8) * 16 }, alloc.slot(2, .fpr));
 }
 
-test "Allocation.slot: spill offset is class-agnostic (shared frame origin = max_reg_slots_gpr)" {
+test "Allocation.slot: spill offset is class-agnostic (shared frame origin = spillOrigin())" {
     // A function with mixed GPR/FP vregs sharing a spill frame:
     // GPR vreg at slot 8 → spill 0; FP vreg at slot 14 → spill 96.
     // Even though FP doesn't *actually* spill at slot 8..12

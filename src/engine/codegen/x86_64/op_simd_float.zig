@@ -318,17 +318,15 @@ fn emitV128FpCmp(
             if (dst_x != base_home) try buf.appendSlice(allocator, inst.encMovapsXmmXmm(dst_x, base_home).slice());
         },
         .spill => |off| {
-            const abs_off = spill_base_off + off;
-            if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(dst_x, -@as(i32, @intCast(abs_off))).slice());
+            const disp = try gpr.v128SpillDisp(spill_base_off, off);
+            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(dst_x, disp).slice());
         },
     }
     try buf.appendSlice(allocator, encoder(dst_x, cmp_for_op, imm8).slice());
 
     if (result_slot == .spill) {
-        const abs_off = spill_base_off + result_slot.spill;
-        if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(-@as(i32, @intCast(abs_off)), .xmm7).slice());
+        const disp = try gpr.v128SpillDisp(spill_base_off, result_slot.spill);
+        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(disp, .xmm7).slice());
     }
     try pushed_vregs.append(allocator, result_v);
 }
@@ -598,9 +596,8 @@ fn loadV128Into(allocator: Allocator, buf: *std.ArrayList(u8), alloc: regalloc.A
             if (reg != home) try buf.appendSlice(allocator, inst.encMovapsXmmXmm(reg, home).slice());
         },
         .spill => |off| {
-            const abs_off = spill_base_off + off;
-            if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(reg, -@as(i32, @intCast(abs_off))).slice());
+            const disp = try gpr.v128SpillDisp(spill_base_off, off);
+            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(reg, disp).slice());
         },
     }
 }
@@ -611,9 +608,8 @@ fn resolveOrLoadV128(allocator: Allocator, buf: *std.ArrayList(u8), alloc: regal
     return switch (alloc.slot(v, .fpr)) {
         .reg => |id| abi.fpSlotToReg(id) orelse return Error.SlotOverflow,
         .spill => |off| blk: {
-            const abs_off = spill_base_off + off;
-            if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(temp, -@as(i32, @intCast(abs_off))).slice());
+            const disp = try gpr.v128SpillDisp(spill_base_off, off);
+            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(temp, disp).slice());
             break :blk temp;
         },
     };
@@ -622,9 +618,8 @@ fn resolveOrLoadV128(allocator: Allocator, buf: *std.ArrayList(u8), alloc: regal
 /// `storeV128IfSpilled`: flush XMM7 → the result's spill slot when the result spilled.
 fn storeV128IfSpilled(allocator: Allocator, buf: *std.ArrayList(u8), spill_base_off: u32, result_slot: regalloc.Slot) Error!void {
     if (result_slot == .spill) {
-        const abs_off = spill_base_off + result_slot.spill;
-        if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(-@as(i32, @intCast(abs_off)), .xmm7).slice());
+        const disp = try gpr.v128SpillDisp(spill_base_off, result_slot.spill);
+        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(disp, .xmm7).slice());
     }
 }
 
@@ -775,9 +770,8 @@ fn emitV128FpFmaX86(allocator: Allocator, buf: *std.ArrayList(u8), alloc: regall
             if (dst != a_home) try buf.appendSlice(allocator, inst.encMovapsXmmXmm(dst, a_home).slice());
         },
         .spill => |off| {
-            const abs_off = spill_base_off + off;
-            if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(dst, -@as(i32, @intCast(abs_off))).slice());
+            const disp = try gpr.v128SpillDisp(spill_base_off, off);
+            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(dst, disp).slice());
         },
     }
 
@@ -791,9 +785,8 @@ fn emitV128FpFmaX86(allocator: Allocator, buf: *std.ArrayList(u8), alloc: regall
     }
 
     if (result_slot == .spill) {
-        const abs_off = spill_base_off + result_slot.spill;
-        if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(-@as(i32, @intCast(abs_off)), .xmm7).slice());
+        const disp = try gpr.v128SpillDisp(spill_base_off, result_slot.spill);
+        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(disp, .xmm7).slice());
     }
     try pushed_vregs.append(allocator, result_v);
 }
@@ -1297,9 +1290,8 @@ pub fn emitF32x4ConvertI32x4U(allocator: Allocator, buf: *std.ArrayList(u8), all
             if (dst_x != src_home) try buf.appendSlice(allocator, inst.encMovapsXmmXmm(dst_x, src_home).slice());
         },
         .spill => |off| {
-            const abs_off = spill_base_off + off;
-            if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(dst_x, -@as(i32, @intCast(abs_off))).slice());
+            const disp = try gpr.v128SpillDisp(spill_base_off, off);
+            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(dst_x, disp).slice());
         },
     }
 
@@ -1328,9 +1320,8 @@ pub fn emitF32x4ConvertI32x4U(allocator: Allocator, buf: *std.ArrayList(u8), all
     try buf.appendSlice(allocator, inst.encAddps(dst_x, a_lo).slice());
 
     if (result_slot == .spill) {
-        const abs_off = spill_base_off + result_slot.spill;
-        if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(-@as(i32, @intCast(abs_off)), .xmm7).slice());
+        const disp = try gpr.v128SpillDisp(spill_base_off, result_slot.spill);
+        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(disp, .xmm7).slice());
     }
     try pushed_vregs.append(allocator, result_v);
 }
@@ -1424,9 +1415,8 @@ pub fn emitI32x4TruncSatF32x4U(allocator: Allocator, buf: *std.ArrayList(u8), al
             if (dst_x != src_home) try buf.appendSlice(allocator, inst.encMovapsXmmXmm(dst_x, src_home).slice());
         },
         .spill => |off| {
-            const abs_off = spill_base_off + off;
-            if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(dst_x, -@as(i32, @intCast(abs_off))).slice());
+            const disp = try gpr.v128SpillDisp(spill_base_off, off);
+            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(dst_x, disp).slice());
         },
     }
 
@@ -1485,9 +1475,8 @@ pub fn emitI32x4TruncSatF32x4U(allocator: Allocator, buf: *std.ArrayList(u8), al
     try buf.appendSlice(allocator, inst.encPaddD(dst_x, tmp1).slice());
 
     if (result_slot == .spill) {
-        const abs_off = spill_base_off + result_slot.spill;
-        if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(-@as(i32, @intCast(abs_off)), .xmm7).slice());
+        const disp = try gpr.v128SpillDisp(spill_base_off, result_slot.spill);
+        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(disp, .xmm7).slice());
     }
     try pushed_vregs.append(allocator, result_v);
 }
@@ -1659,9 +1648,8 @@ pub fn emitI32x4TruncSatF64x2SZero(
             if (dst_x != src_home) try buf.appendSlice(allocator, inst.encMovapsXmmXmm(dst_x, src_home).slice());
         },
         .spill => |off| {
-            const abs_off = spill_base_off + off;
-            if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(dst_x, -@as(i32, @intCast(abs_off))).slice());
+            const disp = try gpr.v128SpillDisp(spill_base_off, off);
+            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(dst_x, disp).slice());
         },
     }
     // 3: CMPPD tmp_mask, dst, EQ_OQ → mask of (lane==lane), 0 for NaN.
@@ -1675,9 +1663,8 @@ pub fn emitI32x4TruncSatF64x2SZero(
     try buf.appendSlice(allocator, inst.encCvttpd2dq(dst_x, dst_x).slice());
 
     if (result_slot == .spill) {
-        const abs_off = spill_base_off + result_slot.spill;
-        if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(-@as(i32, @intCast(abs_off)), .xmm7).slice());
+        const disp = try gpr.v128SpillDisp(spill_base_off, result_slot.spill);
+        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(disp, .xmm7).slice());
     }
     try pushed_vregs.append(allocator, result_v);
 }
@@ -1751,9 +1738,8 @@ pub fn emitI32x4TruncSatF64x2UZero(
             if (dst_x != src_home) try buf.appendSlice(allocator, inst.encMovapsXmmXmm(dst_x, src_home).slice());
         },
         .spill => |off| {
-            const abs_off = spill_base_off + off;
-            if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(dst_x, -@as(i32, @intCast(abs_off))).slice());
+            const disp = try gpr.v128SpillDisp(spill_base_off, off);
+            try buf.appendSlice(allocator, inst.encLoadXmmV128MemRBPDisp32(dst_x, disp).slice());
         },
     }
     // 2: t1 = zeros via PXOR.
@@ -1775,9 +1761,8 @@ pub fn emitI32x4TruncSatF64x2UZero(
     try buf.appendSlice(allocator, inst.encShufps(dst_x, t1, 0x88).slice());
 
     if (result_slot == .spill) {
-        const abs_off = spill_base_off + result_slot.spill;
-        if (abs_off > 0x7FFF_FFFF) return Error.SlotOverflow;
-        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(-@as(i32, @intCast(abs_off)), .xmm7).slice());
+        const disp = try gpr.v128SpillDisp(spill_base_off, result_slot.spill);
+        try buf.appendSlice(allocator, inst.encStoreXmmV128MemRBPDisp32(disp, .xmm7).slice());
     }
     try pushed_vregs.append(allocator, result_v);
 }

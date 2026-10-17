@@ -12,6 +12,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Changed
 
+- **The x86_64 JIT allocates eight general-purpose registers** (#503). The pool
+  was the four callee-saved registers; RSI, RDI, R8 and R9 join it, since every
+  value live across a call already goes to a slot (ADR-0060), call arguments now
+  move in parallel, and the handlers that write argument registers are fenced
+  (ADR-0077). The bench's shootout fixtures run 23–25% faster on the JIT and AOT
+  (geomean), and a 200k-row sqlite insert + index 8.5% faster.
+
 - **`zwasm --version` names the build mode** (#307). The line gains a `mode:`
   field carrying the optimize mode the binary was built at
   (`zwasm v2.7.0 (wasm: v3_0, wasi: p2, engine: both, mode: ReleaseSafe)`), so
@@ -41,6 +48,20 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   discarded.
 
 ### Fixed
+
+- **A spilled v128 value moves to and from a local whole** (#558).
+  On x86_64, `local.get`, `local.set` and `local.tee` of a v128 local moved 8 of
+  its 16 bytes through a spilled vreg, so with more than six v128 values live,
+  lanes 2 and 3 came back as garbage or 0.
+
+- **A v128 spill on x86_64 stays inside its own slot** (#559). The
+  slot address named the low edge of an 8-byte cell, so a 16-byte store reached
+  8 bytes into the slot above: a scalar spilled just before a v128 value read
+  back the v128's upper lanes.
+
+- **A v128 `select` whose result spills returns the selected value**
+  (#560). The x86_64 handler staged the spilled result through the
+  register it also used as scratch, so the result was 0.
 
 - **The JIT runs on aarch64-linux** (#547). The executable-memory layer had no
   branch for it, so every JIT compile there returned `NotImplemented`: the
