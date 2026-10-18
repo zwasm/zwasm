@@ -222,10 +222,10 @@ pub const Linker = struct {
         }
     }
 
-    /// ADR-0109 §3.8 — bulk WASI bindings. After `defineWasi`,
-    /// any `(import "wasi_snapshot_preview1" "<name>" ...)` in
-    /// the module is satisfied by the registered host (all 46 WASI
-    /// 0.1 thunks; Phase 11). Installs `cfg.args` + `cfg.envs`;
+    /// ADR-0109 Decision 10 — bulk WASI bindings. After `defineWasi`,
+    /// any `(import "wasi_snapshot_preview1" "<name>" ...)` the Linker
+    /// has no entry for is satisfied by the registered host (all 46
+    /// WASI 0.1 thunks; Phase 11). Installs `cfg.args` + `cfg.envs`;
     /// `cfg.preopens` are queued here and OPENED at `instantiate`
     /// (they need `cfg.io`). At-most-once per Linker.
     pub fn defineWasi(self: *Linker, cfg: WasiConfig) !void {
@@ -626,11 +626,12 @@ pub const Linker = struct {
             // instances created from it.
 
             for (decoded.items) |it| {
-                // ADR-0109 §3.8 — WASI shortcut: any
-                // `wasi_snapshot_preview1` import resolves through
-                // the registered host even if no entry was added
-                // via defineFunc.
-                if (std.mem.eql(u8, it.module, "wasi_snapshot_preview1")) {
+                // ADR-0109 Decision 10 + its 2026-10 revision: a
+                // `wasi_snapshot_preview1` import binds the Linker's own
+                // entry first; the host serves only a name with no entry
+                // (#504; the C API's rule since #488).
+                const entry = self.findEntry(it.module, it.name) orelse {
+                    if (!std.mem.eql(u8, it.module, "wasi_snapshot_preview1")) return error.UnknownImport;
                     if (it.kind != .func) return error.ImportKindMismatch;
                     const host = self.wasi_host orelse return error.UnknownImport;
                     const thunk = _api_wasi.lookupWasiThunk(it.name) orelse return error.UnsupportedWasiImport;
@@ -639,9 +640,7 @@ pub const Linker = struct {
                         .source = .wasi,
                     } }) catch return error.OutOfMemory;
                     continue;
-                }
-
-                const entry = self.findEntry(it.module, it.name) orelse return error.UnknownImport;
+                };
                 switch (it.kind) {
                     .func => {
                         const typeidx = switch (it.payload) {
@@ -1199,4 +1198,50 @@ test "Linker.defineWasi: WasiConfig.preopens materialise into the host at instan
     try testing.expectEqual(@as(usize, 1), host.preopens.len);
     try testing.expectEqualStrings("/sandbox", host.preopens[0].guest_path);
     try testing.expectEqual(@as(usize, 0), host.pending_preopens.items.len);
+}
+
+// (module (import "wasi_snapshot_preview1" "random_get" (func (param i32 i32) (result i32)))
+//   (func (export "f") (result i32) i32.const 0 i32.const 0 call 0))
+const random_get_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+    0x01, 0x0b, 0x02, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, // types: (i32 i32)->(i32), ()->(i32)
+    0x02, 0x25, 0x01, 0x16, 'w', 'a', 's', 'i', '_', 's', 'n', 'a', 'p', 's', 'h', 'o', 't', '_', 'p', 'r', 'e', 'v', 'i', 'e', 'w', '1', //
+    0x0a, 'r', 'a', 'n', 'd', 'o', 'm', '_', 'g', 'e', 't', 0x00, 0x00, // import random_get: type 0
+    0x03, 0x02, 0x01, 0x01, // funcs: 1x type 1
+    0x07, 0x05, 0x01, 0x01, 'f', 0x00, 0x01, // export "f" = func 1
+    0x0a, 0x0a, 0x01, 0x08, 0x00, 0x41, 0x00, 0x41, 0x00, 0x10, 0x00, 0x0b, // code
+};
+
+// The real `random_get` returns errno 0 for a zero-length buffer; 7 says the entry ran.
+fn stubRandomGet(_: *Caller, _: i32, _: i32) i32 {
+    return 7;
+}
+
+test "Linker.instantiate: a defineFunc entry under wasi_snapshot_preview1 binds with no WASI host (#504)" {
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&random_get_wasm);
+    defer mod.deinit();
+
+    var lk = eng.linker();
+    defer lk.deinit();
+    try lk.defineFunc("wasi_snapshot_preview1", "random_get", fn (*Caller, i32, i32) i32, stubRandomGet);
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    try testing.expectEqual(@as(i32, 7), try inst.typedFunc(fn () i32, "f").call(.{}));
+}
+
+test "Linker.instantiate: an entry under wasi_snapshot_preview1 wins over the WASI host (#504)" {
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&random_get_wasm);
+    defer mod.deinit();
+
+    var lk = eng.linker();
+    defer lk.deinit();
+    try lk.defineWasi(.{});
+    try lk.defineFunc("wasi_snapshot_preview1", "random_get", fn (*Caller, i32, i32) i32, stubRandomGet);
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    try testing.expectEqual(@as(i32, 7), try inst.typedFunc(fn () i32, "f").call(.{}));
 }

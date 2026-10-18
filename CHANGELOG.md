@@ -132,6 +132,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   store's WASI host and never read the slot; the JIT read it only for fields
   its dispatch does not implement. A NULL slot is still the host's.
 
+- **A Linker entry under `wasi_snapshot_preview1` binds before the WASI host**
+  (#504). `Linker.instantiate` served every such import from `defineWasi`'s
+  host, so a `defineFunc` stub of a WASI call was never bound, and failed
+  `UnknownImport` with no host. `zwasm run` hit the same on a component whose
+  `with` arg satisfies a core module's preview1 imports, the shape wit-component's
+  preview1 adapter produces. The host now serves only a name with no entry.
+
 - **A component reads the process stdin on demand, a terminal included**
   (#508). The component host served fd 0 from a byte slice only, so the CLI
   read a piped stdin to EOF before the guest ran, capped at 64 MiB, and handed

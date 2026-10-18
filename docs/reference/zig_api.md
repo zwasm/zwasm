@@ -84,6 +84,8 @@ traps for.
 `*Caller`), then `linker.instantiate(&module, .{})`. `defineWasi(.{ .args, .envs, .preopens, .io })`
 satisfies any `wasi_snapshot_preview1` import (`args` + `envs` + filesystem `preopens` —
 preopens need `.io`; stdio capture stays C-API-only). See `docs/examples/zig_dep` block (2).
+An entry defined under that module name takes precedence; the host serves the names
+that have none.
 A guest's `proc_exit` ends `invoke` with `error.ProcExit`, not a trap, and when
 its WASI came from `defineWasi`, `Instance.wasiExitCode()` then returns its code
 — whichever Linker's instance ran it; the next `invoke` clears it.

@@ -1736,6 +1736,28 @@ test "REQ-5 (cw CM-API): dropResource on a single-module component is a misuse e
     try testing.expectError(component.DropResourceError.NoResourceTable, opened.dropResource(1));
 }
 
+test "a preview1 import a `with` arg satisfies links through the poured entries, with no WASI host on the Linker (#504)" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/preview1_with_arg.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    var built = try cwasi.buildWasiP2Component(&eng, testing.allocator, bytes, &host, .{});
+    defer built.deinit();
+
+    // Instances are in definition order: the adapter, then $main.
+    try testing.expectEqual(@as(usize, 2), built.instances.items.len);
+    var res = [_]Value{.{ .i32 = 0 }};
+    try built.instances.items[1].invoke("f", &.{}, &res);
+    try testing.expectEqual(@as(i32, 7), res[0].i32);
+}
+
 test "exportedFuncs enumerates interface-nested funcs path-qualified (CWFS component intake)" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

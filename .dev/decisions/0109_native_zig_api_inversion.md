@@ -387,3 +387,8 @@ superseded by a follow-on ADR.
   shape problem. ClojureWasm wound down 2026-09-06 (#407), so no further
   consumer feedback will arrive — the wait D-075 held open is over; D-075
   retires in the same commit.
+- 2026-10-18 — Decision 10: a Linker entry under `wasi_snapshot_preview1`
+  takes precedence over the `defineWasi` host, which serves only a name with
+  no entry (#504; mirrors #488 on the C API). Before this the host answered
+  every such import and the Linker's own entries under that module name were
+  never read.
