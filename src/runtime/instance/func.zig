@@ -17,17 +17,25 @@ const runtime_mod = @import("../runtime.zig");
 /// reveals which Runtime owns the callee body — the encoding
 /// 6.K.3 needs to drop the cross-module-import error returns.
 ///
-/// Per ADR-0014 §2.1 / 6.K.1: the source runtime back-ref lives
-/// here (rather than baked into the Runtime via 6.K.2's Instance
-/// back-ref) because the Value's encoding contract is what matters
-/// for the table cell — every consumer dereferences the FuncEntity
-/// and reads `runtime` + `func_idx` from a single cache line.
+/// Per ADR-0014 §6.K.1 the funcref carries its own identity, and per
+/// ADR-0233 that identity is `{owner, func_idx}` on both engines: the
+/// function a funcref denotes is found from the entity alone, never
+/// from whichever instance handed the value over.
 pub const FuncEntity = struct {
-    /// Runtime whose `funcs[func_idx]` (and `host_calls[func_idx]`
-    /// when imported) describes the callee body.
+    /// Interpreter only: the Runtime whose `funcs[func_idx]` (and
+    /// `host_calls[func_idx]` when imported) describes the callee
+    /// body. `undefined` on the JIT, which has no interpreter Runtime.
     runtime: *runtime_mod.Runtime,
-    /// Index into `runtime.funcs`.
+    /// The defining function's index in `owner`'s function space (in
+    /// `runtime.funcs` on the interpreter).
     func_idx: u32,
+    /// The C-API `Instance` (`instance.zig`) that defines this
+    /// function, held untyped as `Runtime.instance` is (ADR-0233 D1).
+    /// For an import it is the definer's, except a host function's
+    /// import, which keeps the importer and its import index. Null
+    /// only in a unit test that builds a Runtime without going
+    /// through `api/`.
+    owner: ?*anyopaque = null,
     /// TODO(9.12-audit): table storage shape — see D-126 / ADR-0068.
     /// Canonical typeidx of this function's signature. JIT
     /// `emitTableSet` / `emitTableFill` / `emitTableInit` mirror

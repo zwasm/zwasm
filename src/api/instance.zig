@@ -276,17 +276,7 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
     // contract (use-after-free of caller-owned handle pointer).
     for (handle.live_instances.items) |inst_opaque| {
         const inst: *Instance = @ptrCast(@alignCast(inst_opaque));
-        const parked = if (inst.runtime) |rt| parkOrFreeInterp(alloc, handle, inst, rt) else false;
-        // #360 — a JIT-backed instance still live here has its JitInstance
-        // parked for the reap below. Before this it was dropped on the floor
-        // (the cascade only ever looked at `inst.runtime`), leaking the code
-        // pages and the runtime on the reverse-order teardown path.
-        if (inst.jit) |jp| {
-            // EXEMPT-FALLBACK: ADR-0014 — park OOM at store-teardown accepts a JitInstance leak over UAF.
-            parkJitAsZombie(alloc, handle, jp) catch {};
-            inst.jit = null;
-        }
-        if (!parked) alloc.destroy(inst);
+        if (!parkInstance(alloc, handle, inst)) alloc.destroy(inst);
     }
     handle.live_instances.deinit(alloc);
     // Reap zombies first: each one's runtime, arena and instance
@@ -303,11 +293,13 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
     handle.zombies.deinit(alloc);
     // #360 — and the JIT-backed zombies: an importer's bridge thunk pointed at
     // each of these, and every importer is gone with the cascade above.
-    for (handle.jit_zombies.items) |jp| {
-        const jit: *runner.JitInstance = @ptrCast(@alignCast(jp));
+    for (handle.jit_zombies.items) |ip| {
+        const inst: *Instance = @ptrCast(@alignCast(ip));
+        const jit = jitOf(inst).?;
         unregisterJitEh(jit);
         jit.deinit(alloc);
         alloc.destroy(jit);
+        alloc.destroy(inst);
     }
     handle.jit_zombies.deinit(alloc);
     // #360 — only now, with every parked runtime gone, may the module bytes
@@ -370,15 +362,40 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
     alloc.destroy(handle);
 }
 
-/// Retire an interpreter instance's state. With an arena, the runtime, the
-/// arena and the instance itself park on the store's zombie list until
-/// `wasm_store_delete`: cross-module funcrefs point into the arena (a failed
-/// instantiation keeps its partial writes, Wasm 2.0), and `runtime.instance`
-/// and the `Ref`s a host call is handed point at the instance (#539). Without
-/// an arena the runtime is freed. Returns whether the instance now belongs to
-/// the zombie list; the caller frees it only when this is false. Per
+/// Retire an instance's state. The instance itself parks with it until
+/// `wasm_store_delete`, because every `FuncEntity.owner` it defined points at
+/// it (ADR-0233 D3), as do `runtime.instance` and the `Ref`s a host call is
+/// handed (#539). Returns whether the instance now belongs to a zombie list;
+/// the caller frees it only when this is false.
+///
+/// Interpreter: parks with its runtime and arena when it has an arena —
+/// cross-module funcrefs point into the arena (a failed instantiation keeps
+/// its partial writes, Wasm 2.0); without one the runtime is freed. Per
 /// ADR-0014 §2.1 / 6.K.2 sub-change 4.
-fn parkOrFreeInterp(alloc: std.mem.Allocator, store: *Store, inst: *Instance, rt: *runtime.Runtime) bool {
+///
+/// JIT (#360): always parks with its `JitInstance`. A cross-module func import
+/// bakes the exporter's `&owned.rt` and entry address into the importer's
+/// bridge thunk (D-225), so the exporter must outlive every importer. Per
+/// ADR-0228 "exporter" means the DEFINING instance: in a chain A→B→C, C's
+/// thunk names A, and A must live as long as C even after B is gone. Nothing
+/// counts the takers; this unconditional park and the byte deferral in
+/// `wasm_module_delete` are what keep A alive, and
+/// `test/c_api_conformance/cross_module_reexport.c` deletes A and B before
+/// calling C to hold them to it. The arena holding `exports_storage` is freed
+/// — only the c_api handle reads it.
+fn parkInstance(alloc: std.mem.Allocator, store: *Store, inst: *Instance) bool {
+    if (inst.jit != null) {
+        if (inst.arena) |arena| {
+            arena.deinit();
+            alloc.destroy(arena);
+            inst.arena = null;
+        }
+        inst.exports_storage = &.{};
+        // EXEMPT-FALLBACK: ADR-0014 — park OOM leaks the JitInstance and the instance rather than leave an importer's bridge thunk or a funcref's owner dangling.
+        store.jit_zombies.append(alloc, inst) catch {};
+        return true;
+    }
+    const rt = inst.runtime orelse return false;
     const arena = inst.arena orelse {
         rt.deinit();
         alloc.destroy(rt);
@@ -388,28 +405,6 @@ fn parkOrFreeInterp(alloc: std.mem.Allocator, store: *Store, inst: *Instance, rt
     // EXEMPT-FALLBACK: ADR-0014 — a zombie-list OOM leaks the instance, runtime and arena rather than leave cross-module references dangling.
     store.zombies.append(alloc, .{ .runtime = rt, .arena = arena, .instance = inst }) catch {};
     return true;
-}
-
-/// #360 — the JIT counterpart of `parkOrFreeInterp`. A cross-module func import
-/// bakes the exporter's `&owned.rt` and entry address into the importer's
-/// bridge thunk (D-225), so the exporter's `JitInstance` must outlive every
-/// importer. Parking defers the free to `wasm_store_delete`, by when nothing
-/// can call in. Takes the erased pointer the `Instance.jit` field carries.
-///
-/// ADR-0228 — "exporter" means the DEFINING instance, not the one the
-/// embedder passed the extern from: a re-exported import resolves to the
-/// module that defines the function (`JitInstance.exportedFuncTarget`), so
-/// in a chain A→B→C, C's thunk names A, and A must live as long as C even
-/// after B is gone. Nothing counts the takers; the unconditional park here
-/// and the byte deferral in `wasm_module_delete` are what keep A alive, and
-/// `test/c_api_conformance/cross_module_reexport.c` deletes A and B before
-/// calling C to hold them to it.
-fn parkJitAsZombie(
-    store_alloc: std.mem.Allocator,
-    store: *Store,
-    jit: *anyopaque,
-) std.mem.Allocator.Error!void {
-    try store.jit_zombies.append(store_alloc, jit);
 }
 
 /// #426 — enter a heap-pinned `JitInstance` in the process-global EH registry
@@ -467,7 +462,7 @@ pub export fn zwasm_store_set_wasi(s: ?*Store, h: ?*wasi_host.Host) callconv(.c)
             // so each capture funds exactly the one retirement it can cause
             // (ADR-0224). Kept fallible rather than assuming the capacity so a
             // violated reservation degrades instead of panicking in a library.
-            // EXEMPT-FALLBACK: ADR-0014 — an append OOM accepts the leak over the UAF, mirroring parkOrFreeInterp.
+            // EXEMPT-FALLBACK: ADR-0014 — an append OOM accepts the leak over the UAF, mirroring parkInstance.
             store.retired_wasi_hosts.append(std.heap.c_allocator, old_opaque) catch {};
         } else {
             const old: *wasi_host.Host = @ptrCast(@alignCast(old_opaque));
@@ -924,7 +919,7 @@ fn buildBindings(
                 //
                 // Retention: naming the definer is the dependency the
                 // re-exporter's own binding already carries, and
-                // `parkOrFreeInterp` above is what meets it — an interp runtime is
+                // `parkInstance` above is what meets it — an interp runtime is
                 // never freed before its store. `cross_module_reexport.c`
                 // deletes A and B before calling C.
                 var target_rt = source_rt;
@@ -1470,8 +1465,22 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
     // memory / tables, BEFORE the instance is surfaced. A start trap fails
     // instantiation (mirrors the interp path; `trap_out` carries the trap). An
     // imported start is unsupported here → fail so an `.auto` caller can retry on
-    // interp rather than silently skip it. Run before `inst` exists so teardown
-    // is just the jit (no registry/arena to unwind).
+    // interp rather than silently skip it. `inst` is not registered or given an
+    // arena until after it, so its teardown is the jit and the struct alone.
+    const inst = alloc.create(Instance) catch {
+        unregisterJitEh(jit);
+        jit.deinit(alloc);
+        alloc.destroy(jit);
+        return error.Declined;
+    };
+    inst.* = .{
+        .store = store,
+        .id = inst_id,
+        .module = module,
+        .runtime = null,
+        .jit = jit,
+    };
+    jit.setOwner(inst);
     {
         // #345 — while the start function runs it OWNS the status, exactly as
         // an outermost `wasm_func_call` does: it can reach `proc_exit`, and a
@@ -1495,23 +1504,10 @@ fn instantiateJit(store: *Store, module: *const Module, builder_state: anytype, 
             unregisterJitEh(jit);
             jit.deinit(alloc);
             alloc.destroy(jit);
+            alloc.destroy(inst);
             return reject;
         };
     }
-
-    const inst = alloc.create(Instance) catch {
-        unregisterJitEh(jit);
-        jit.deinit(alloc);
-        alloc.destroy(jit);
-        return error.Declined;
-    };
-    inst.* = .{
-        .store = store,
-        .id = inst_id,
-        .module = module,
-        .runtime = null,
-        .jit = jit,
-    };
 
     // ADR-0200 — surface the JIT's func exports through the C-API discovery path
     // (`wasm_instance_exports` + Func handles). The JIT compiles NO
@@ -1622,9 +1618,9 @@ const BuildBindingsCApi = struct {
 /// Tear down a fully-built instance whose post-build finalize failed
 /// (instantiateRuntime trap OR start-function trap). Parks the committed
 /// runtime, arena and instance as a zombie when an arena exists
-/// (`parkOrFreeInterp`), else frees.
-fn failBuiltInstance(alloc: std.mem.Allocator, store: *Store, inst: *Instance, inst_rt: *runtime.Runtime) void {
-    const parked = parkOrFreeInterp(alloc, store, inst, inst_rt);
+/// (`parkInstance`), else frees.
+fn failBuiltInstance(alloc: std.mem.Allocator, store: *Store, inst: *Instance) void {
+    const parked = parkInstance(alloc, store, inst);
     removeFromLiveInstances(store, inst);
     if (!parked) alloc.destroy(inst);
 }
@@ -1783,8 +1779,7 @@ fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytyp
         if (err == error.CrossStoreImport) {
             crossStoreTrap(alloc, store, trap_out);
         }
-        const parked = parkOrFreeInterp(alloc, store, inst, inst_rt);
-        if (!parked) alloc.destroy(inst);
+        if (!parkInstance(alloc, store, inst)) alloc.destroy(inst);
         return null;
     };
 
@@ -1812,7 +1807,7 @@ fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytyp
         // instance's runtime + arena (committed cross-module writes
         // would UAF if the arena were destroyed). D-174: drops the
         // live_instances back-registry entry registered above.
-        failBuiltInstance(alloc, store, inst, inst_rt);
+        failBuiltInstance(alloc, store, inst);
         return null;
     };
 
@@ -1841,7 +1836,7 @@ fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytyp
                             reportInstantiateTrap(sa, store, inst_id, mapInterpTrap(err), trap_out);
                             if (trap_out) |to| trap_surface.attachTrace(sa, to.*, &trace);
                         }
-                        failBuiltInstance(alloc, store, inst, inst_rt);
+                        failBuiltInstance(alloc, store, inst);
                         return null;
                     };
                     return inst;
@@ -1850,7 +1845,7 @@ fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytyp
             const zfunc = inst.func_ptrs_storage[sfx];
             const num_locals = zfunc.sig.params.len + zfunc.locals.len;
             const locals = alloc.alloc(runtime.Value, num_locals) catch {
-                failBuiltInstance(alloc, store, inst, inst_rt);
+                failBuiltInstance(alloc, store, inst);
                 return null;
             };
             defer alloc.free(locals);
@@ -1863,7 +1858,7 @@ fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytyp
                 .pc = 0,
                 .func = zfunc,
             }) catch {
-                failBuiltInstance(alloc, store, inst, inst_rt);
+                failBuiltInstance(alloc, store, inst);
                 return null;
             };
             var trace: trap_trace.Trace = .{};
@@ -1878,7 +1873,7 @@ fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytyp
                     reportInstantiateTrap(sa, store, inst_id, mapInterpTrap(err), trap_out);
                     if (trap_out) |to| trap_surface.attachTrace(sa, to.*, &trace);
                 }
-                failBuiltInstance(alloc, store, inst, inst_rt);
+                failBuiltInstance(alloc, store, inst);
                 return null;
             };
             _ = inst_rt.popFrame();
@@ -1922,27 +1917,9 @@ pub export fn wasm_instance_delete(i: ?*Instance) callconv(.c) void {
     // free so wasm_store_delete doesn't try to cascade-cleanup an
     // already-freed handle.
     removeFromLiveInstances(store, handle);
-    if (handle.jit) |jp| {
-        // ADR-0200 / #360 — PARK the heap-pinned JitInstance rather than free it,
-        // the JIT counterpart of the interpreter arm below: an importer's bridge
-        // thunk holds this instance's runtime address and entry point (D-225), so
-        // freeing here would leave it calling into released code. Reaped by
-        // `wasm_store_delete`. The per-instance arena holding `exports_storage`
-        // IS freed — only the c_api handle reads it, and it is going away.
-        // EXEMPT-FALLBACK: ADR-0014 — park OOM accepts a JitInstance leak over UAF of an importer's bridge thunk.
-        parkJitAsZombie(alloc, store, jp) catch {};
-        handle.jit = null;
-        if (handle.arena) |arena| {
-            arena.deinit();
-            alloc.destroy(arena);
-            handle.arena = null;
-        }
-        handle.exports_storage = &.{};
-    }
     // A parked instance keeps its functions: a funcref into it runs until
     // `wasm_store_delete`, as an import of it does (#555).
-    const parked = if (handle.runtime) |rt| parkOrFreeInterp(alloc, store, handle, rt) else false;
-    if (!parked) alloc.destroy(handle);
+    if (!parkInstance(alloc, store, handle)) alloc.destroy(handle);
 }
 
 // ============================================================
@@ -4829,7 +4806,7 @@ const v128_cross_inst_importer_wasm = [_]u8{
 // on a 1-entry table. Wasm 2.0 §4.5.4 says active element bounds
 // are checked at instantiation; OOB raises a trap caught by the
 // wasm_instance_new wrapper → arena parks on store.zombies.
-// Used by gap A3 to exercise the parkOrFreeInterp catch-path.
+// Used by gap A3 to exercise the parkInstance catch-path.
 const trapping_oob_elem_wasm = [_]u8{
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
     0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type: () -> ()
@@ -5208,7 +5185,7 @@ test "wasm 2.0 c_api zombie partial-init: OOB element segment parks arena; store
     // Simpler form of the audit's full partial-init scenario: an
     // active element segment with OOB offset traps at instantiation
     // (Wasm 2.0 §4.5.4 — active elem bounds are runtime-checked).
-    // The trap must trigger the parkOrFreeInterp catch path in
+    // The trap must trigger the parkInstance catch path in
     // wasm_instance_new — without this the arena leaks AND any
     // cross-module funcrefs into the failed instance UAF.
     // wasm_store_delete then cleanly reaps the zombie (no second
@@ -5218,7 +5195,7 @@ test "wasm 2.0 c_api zombie partial-init: OOB element segment parks arena; store
     // cross-module table imports) requires hand-rolling a more
     // intricate Wasm module with table imports + multiple element
     // segments; deferred to v0.1.0 RC (D-075). This chunk covers
-    // the structural plumbing — the parkOrFreeInterp path itself —
+    // the structural plumbing — the parkInstance path itself —
     // which is the load-bearing invariant.
     const e = wasm_engine_new() orelse return error.EngineAllocFailed;
     defer wasm_engine_delete(e);
@@ -5239,7 +5216,7 @@ test "wasm 2.0 c_api zombie partial-init: OOB element segment parks arena; store
     try testing.expect(inst == null);
 
     // Zombie list grew by exactly one entry. Without the catch-path
-    // parkOrFreeInterp this would be 0 (arena freed prematurely) or the
+    // parkInstance this would be 0 (arena freed prematurely) or the
     // test would crash on UAF later.
     try testing.expectEqual(@as(usize, 1), s.zombies.items.len);
 

@@ -1272,6 +1272,7 @@ pub fn instantiateRuntime(
             entities[i] = .{
                 .runtime = rt,
                 .func_idx = @intCast(i),
+                .owner = rt.instance,
                 // TODO(9.12-audit): table storage shape — see D-126 / ADR-0068.
                 // Interp instantiate path; JIT mirror-write reads these.
                 // 0 = "not JIT-resolved" sentinel.
@@ -1290,6 +1291,7 @@ pub fn instantiateRuntime(
                         entities[imp_idx] = .{
                             .runtime = cm.source_runtime,
                             .func_idx = cm.source_funcidx,
+                            .owner = cm.source_runtime.instance,
                             .typeidx = 0,
                             .funcptr = 0,
                         };

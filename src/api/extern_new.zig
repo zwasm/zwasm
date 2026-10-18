@@ -416,22 +416,18 @@ pub export fn wasm_func_as_ref(f: ?*Func) callconv(.c) ?*instance.Ref {
 }
 
 /// `wasm_ref_as_func(ref) -> wasm_func_t*` (borrowed) — the Func a
-/// funcref `ref` denotes, decoded via `*FuncEntity` →
-/// `fe.runtime.instance` → a synthesized `{instance, func_idx}` Func
-/// (cached as `ref.func_view`, freed in `wasm_ref_delete`). Null if the
-/// ref is null/not a funcref, or the source instance is gone.
+/// funcref `ref` denotes: its `*FuncEntity`'s `{owner, func_idx}`
+/// (ADR-0233), cached as `ref.func_view` and freed in
+/// `wasm_ref_delete`. Null if the ref is null/not a funcref, or the
+/// entity names no instance.
 pub export fn wasm_ref_as_func(r: ?*instance.Ref) callconv(.c) ?*Func {
     const handle = r orelse return null;
     if (handle.func_view) |fv| return fv;
     const fe = runtime.Value.refAsFuncEntity(.{ .ref = handle.ref }) orelse return null;
-    // D-496/D-498 — prefer the Ref's own carried instance (set by wasm_table_get /
-    // funcref-result marshalling). A JIT-built FuncEntity has `runtime = undefined`
-    // (setup.zig: no interp Runtime on the JIT path), so `fe.runtime.instance` would
-    // dereference garbage → SEGV. The interp path falls back to fe.runtime.instance.
-    const inst: *instance.Instance = handle.instance orelse blk: {
-        const inst_opaque = fe.runtime.instance orelse return null;
-        break :blk @ptrCast(@alignCast(inst_opaque));
-    };
+    // `handle.instance` is whichever instance handed the value over; only
+    // the entity names the function's own (#566).
+    const owner = fe.owner orelse return null;
+    const inst: *instance.Instance = @ptrCast(@alignCast(owner));
     const store = inst.store orelse return null;
     const alloc = instance.storeAllocator(store) orelse return null;
     const fv = alloc.create(Func) catch return null;

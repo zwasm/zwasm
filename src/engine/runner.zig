@@ -1107,7 +1107,7 @@ pub const JitInstance = struct {
     /// that entry reads. Null while the import is unresolved or WASI-backed.
     /// The runtime and signature owner must outlive every importer holding
     /// the target. Today the C API keeps that by never freeing
-    /// a JIT instance before its store (`api/instance.zig` `parkJitAsZombie`
+    /// a JIT instance before its store (`api/instance.zig` `parkInstance`
     /// / `Module.jit_borrowers`); other callers keep it by hand.
     pub fn exportedFuncTarget(self: *JitInstance, allocator: Allocator, name: []const u8) ?setup_mod.FuncImportTarget {
         const idx = findExportFunc(allocator, self.wasm_bytes, name) catch return null;
@@ -1119,6 +1119,36 @@ pub const JitInstance = struct {
     /// import to the func the embedder's extern names, not to whichever
     /// export shares the import's field name, so it resolves by index.
     pub fn funcTarget(self: *JitInstance, idx: u32) ?setup_mod.FuncImportTarget {
+        var t = self.entryTarget(idx) orelse return null;
+        if (idx < self.owned.func_entities.len) {
+            const fe = self.owned.func_entities[idx];
+            t.owner = fe.owner;
+            t.owner_func_idx = fe.func_idx;
+        }
+        return t;
+    }
+
+    /// ADR-0233 D1 — make every entity name its defining function: `owner`
+    /// (the C-API `Instance`) for a function this instance defines or
+    /// imports from a host, the target's definer for a cross-module import.
+    /// Called before any guest code runs. A JIT `call_indirect` reads the
+    /// entity's `funcptr` / `typeidx`, never `func_idx`, so the rewrite of an
+    /// import's `func_idx` changes no dispatch.
+    pub fn setOwner(self: *JitInstance, owner: *anyopaque) void {
+        for (self.owned.func_entities, 0..) |*fe, i| {
+            if (i < self.import_targets.len) {
+                const t = self.import_targets[i];
+                if (t.owner) |definer| {
+                    fe.owner = definer;
+                    fe.func_idx = t.owner_func_idx;
+                    continue;
+                }
+            }
+            fe.owner = owner;
+        }
+    }
+
+    fn entryTarget(self: *JitInstance, idx: u32) ?setup_mod.FuncImportTarget {
         if (idx < self.compiled.num_imports) {
             if (idx < self.import_targets.len) {
                 const t = self.import_targets[idx];

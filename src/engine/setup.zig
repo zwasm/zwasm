@@ -45,10 +45,16 @@ const CompiledWasm = runner_mod.CompiledWasm;
 /// what the ABI does not pass in registers (#390); it borrows the exporter's
 /// compile arena, which lives as long as the exporter (see
 /// `JitInstance.exportedFuncTarget`). Empty when unresolved.
+///
+/// ADR-0233 D1 — `owner` / `owner_func_idx` are the defining function's
+/// `FuncEntity.owner` / `.func_idx`, copied into the importer's entity by
+/// `JitInstance.setOwner`.
 pub const FuncImportTarget = struct {
     callee_rt: usize = 0,
     callee_entry: usize = 0,
     sig: zir.FuncType = .{ .params = &.{}, .results = &.{} },
+    owner: ?*anyopaque = null,
+    owner_func_idx: u32 = 0,
 };
 
 /// D-478 — a resolved EMBEDDER host-func import (`wasm_func_new`), in
@@ -91,9 +97,9 @@ pub const RuntimeOwned = struct {
     // §9.9 / 9.9-m-1b: per-module FuncEntity array backing JIT
     // `ref.func`. JIT computes `&func_entities[idx]` for each
     // ref.func op; only the address matters for ref.is_null /
-    // ref.eq / select_typed [funcref] semantics. Struct contents
-    // (FuncEntity.runtime, .func_idx) are not exercised on this
-    // code path (no full Runtime; interp uses its own allocation).
+    // ref.eq / select_typed [funcref] semantics. `runtime` is
+    // undefined here (no interpreter Runtime); `owner` / `func_idx`
+    // are what the C API resolves a funcref by (`setOwner`).
     func_entities: []@import("../runtime/instance/func.zig").FuncEntity,
     // §9.9 / 9.9-m-3a: parallel data/elem segment "dropped"
     // flag arrays. bool stored as u8 (matches extern struct

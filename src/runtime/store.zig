@@ -34,9 +34,8 @@ const Runtime = runtime_mod.Runtime;
 /// Plain (non-`extern`) struct: C only sees `wasm_store_t` as
 /// opaque per upstream wasm.h, so the layout is private.
 /// Matches the `Instance` shape choice for the same reason.
-/// #446 — a standalone entity's backing, erased for the same Zone-1 reason as
-/// `jit_zombies`: this file cannot name `api/` types. The tag is what lets one
-/// list free three shapes — Zone 3 casts back and frees per kind.
+/// #446 — a standalone entity's backing, held untyped. The tag is what lets
+/// one list free three shapes — Zone 3 casts back and frees per kind.
 pub const HostBacking = struct {
     kind: enum(u8) { global, memory, table },
     ptr: *anyopaque,
@@ -103,10 +102,10 @@ pub const Store = struct {
     /// leaves the importer calling into released code — the same hazard
     /// ADR-0014 §2.1 parks the interpreter runtime for. JIT instances
     /// therefore park here instead and are freed by `wasm_store_delete`,
-    /// by when no importer can reach them. Stored as `*anyopaque` (an
-    /// `engine/runner.zig::JitInstance` erased) because this Zone-1 file
-    /// MUST NOT import Zone-2 `engine/` — same discipline as
-    /// `Instance.jit`; the Zone-3 store teardown casts back.
+    /// by when no importer can reach them. Each entry is the C-API
+    /// `Instance` (whose `jit` holds the `JitInstance`), parked with it
+    /// because `FuncEntity.owner` points at it (ADR-0233 D3); the
+    /// store teardown in `api/` casts it back.
     jit_zombies: std.ArrayList(*anyopaque) = .empty,
     /// #360 — byte buffers of modules the embedder deleted while a JIT-backed
     /// instance built from them was alive or parked. `setup.zig`'s passive
@@ -129,8 +128,8 @@ pub const Store = struct {
     ///
     /// Payloads therefore accumulate until teardown, the trade `jit_zombies`
     /// and `orphaned_module_bytes` already take; a refcount buys an earlier
-    /// free for a second lifetime rule. `*anyopaque` as `jit_zombies`, same
-    /// Zone-1 reason.
+    /// free for a second lifetime rule. `*anyopaque` because the payload is
+    /// an `api/` type (`HostFuncPayload`), which this Zone-1 file cannot name.
     host_func_payloads: std.ArrayList(*anyopaque) = .empty,
     /// #446 — the same rule for the other three standalone entities, whose
     /// backing an import binding aliases just as directly: `wasm_global_new`'s
@@ -193,7 +192,7 @@ pub const Store = struct {
 pub const Zombie = struct {
     runtime: *Runtime,
     arena: *std.heap.ArenaAllocator,
-    /// The `api/` `Instance`, erased for the Zone-1 reason `jit_zombies` is.
+    /// The C-API `Instance`, held untyped as `jit_zombies` holds it.
     /// Kept too because `runtime.instance` and the `Ref`s a host call is
     /// handed point at it (#539).
     instance: *anyopaque,

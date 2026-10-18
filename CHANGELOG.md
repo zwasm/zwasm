@@ -49,6 +49,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A funcref the host reads back calls its own instance's function** (#566).
+  Read from another instance's table or global, returned by its function or
+  handed to a host callback, `wasm_ref_as_func` resolved the funcref against
+  that instance, so the call ran whichever of its functions shared the index,
+  with no trap. A funcref also keeps working after `wasm_instance_delete` of a
+  JIT-backed instance, as an interpreter one's already did.
+
 - **A captured run closes the `--dir` directories it opened** (#573). An
   embedder calling `runWasmCapturedFull`, or the JIT or component runner,
   repeatedly lost one file descriptor per `--dir` per run, a failed run
