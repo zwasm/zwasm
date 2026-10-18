@@ -49,6 +49,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **Compiling a call-heavy function on the x86_64 JIT no longer costs calls ×
+  instructions** (#557). Every return path — and every call site emits one for
+  its trap exit — rebuilt the register-homing plan by scanning the whole
+  function; it now takes the plan the emitter already built. The generated
+  code is byte-identical; compiling sqlite takes 142 ms instead of 172 ms.
+
 - **Deep recursion through a large frame traps as `stack_overflow` on the
   JIT** (#495). A function whose frame exceeded the stack guard headroom
   (16 KiB on Linux and macOS) passed the prologue's stack probe and took the

@@ -56,18 +56,17 @@ const ZirFunc = zir.ZirFunc;
 /// No-op when `homing.count == 0` (the non-homing fast path is byte-identical).
 /// `base_disp` is `home_save_base_disp` from `emit.compile` (rank-0 save slot's
 /// RBP-relative disp; `0` when homing is off — also the un-homed default, so a
-/// `0` base with `count == 0` is a clean no-op). `homing` + `n_temp` are
-/// re-derived from `func` + `alloc` exactly as `emit.compile` does (the SSOT
-/// plan, guarded by `alloc.slots.len >= count` for hand-built test allocations).
+/// `0` base with `count == 0` is a clean no-op). `homing` is `ctx.homing`, the
+/// plan `emit.compile` built (empty when `alloc` has fewer slots than it homes);
+/// re-deriving it here would scan the whole function at every return path, and
+/// every call site has one (#557).
 fn restoreCalleeSavedHomes(
     allocator: Allocator,
     buf: *std.ArrayList(u8),
     alloc: regalloc.Allocation,
-    func: *const ZirFunc,
+    homing: local_homing.Plan,
     base_disp: i32,
 ) Error!void {
-    const planned = local_homing.plan(func);
-    const homing = if (alloc.slots.len >= planned.count) planned else local_homing.Plan{};
     if (homing.count == 0) return;
     const n_temp: u32 = @intCast(alloc.slots.len - homing.count);
     var r: u32 = 0;
@@ -484,13 +483,14 @@ pub fn emitBr(
     uses_runtime_ptr: bool,
     return_is_memory_class: bool,
     indirect_result_slot_neg_off: u32,
+    homing: local_homing.Plan,
     home_save_base_disp: i32,
     back_edge_interrupt_fixups: *std.ArrayList(u32),
     back_edge_fuel_fixups: *std.ArrayList(u32),
     depth: u32,
 ) Error!void {
     if (depth == labels.items.len) {
-        try emitFunctionReturn(allocator, buf, alloc, pushed_vregs, spill_base_off, func, frame_bytes, uses_runtime_ptr, return_is_memory_class, indirect_result_slot_neg_off, home_save_base_disp);
+        try emitFunctionReturn(allocator, buf, alloc, pushed_vregs, spill_base_off, func, frame_bytes, uses_runtime_ptr, return_is_memory_class, indirect_result_slot_neg_off, homing, home_save_base_disp);
         return;
     }
     if (depth > labels.items.len) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:78", 0);
@@ -713,6 +713,7 @@ pub fn emitFunctionReturn(
     uses_runtime_ptr: bool,
     return_is_memory_class: bool,
     indirect_result_slot_neg_off: u32,
+    homing: local_homing.Plan,
     home_save_base_disp: i32,
 ) Error!void {
     try marshalReturnRegs(allocator, buf, alloc, pushed_vregs, spill_base_off, func, return_is_memory_class, indirect_result_slot_neg_off);
@@ -728,7 +729,7 @@ pub fn emitFunctionReturn(
     }
     // ADR-0155 stage 4 — restore callee-saved homed registers before the ABI
     // epilogue (RBP-relative, so valid until POP RBP).
-    try restoreCalleeSavedHomes(allocator, buf, alloc, func, home_save_base_disp);
+    try restoreCalleeSavedHomes(allocator, buf, alloc, homing, home_save_base_disp);
     if (uses_runtime_ptr) {
         try buf.appendSlice(allocator, inst.encPopR(.r15).slice());
     }
@@ -752,6 +753,7 @@ fn emitBrTableJmp(
     uses_runtime_ptr: bool,
     return_is_memory_class: bool,
     indirect_result_slot_neg_off: u32,
+    homing: local_homing.Plan,
     home_save_base_disp: i32,
     back_edge_interrupt_fixups: *std.ArrayList(u32),
     back_edge_fuel_fixups: *std.ArrayList(u32),
@@ -764,7 +766,7 @@ fn emitBrTableJmp(
     // pre-d-23 rejected it. unwind.wast's `func-unwind-by-br_table`
     // shape is the surfacing fixture.
     if (depth == labels.items.len) {
-        try emitFunctionReturn(allocator, buf, alloc, pushed_vregs, spill_base_off, func, frame_bytes, uses_runtime_ptr, return_is_memory_class, indirect_result_slot_neg_off, home_save_base_disp);
+        try emitFunctionReturn(allocator, buf, alloc, pushed_vregs, spill_base_off, func, frame_bytes, uses_runtime_ptr, return_is_memory_class, indirect_result_slot_neg_off, homing, home_save_base_disp);
         return;
     }
     if (depth > labels.items.len) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:104", 0);
@@ -835,6 +837,7 @@ pub fn emitBrTable(
     uses_runtime_ptr: bool,
     return_is_memory_class: bool,
     indirect_result_slot_neg_off: u32,
+    homing: local_homing.Plan,
     home_save_base_disp: i32,
     back_edge_interrupt_fixups: *std.ArrayList(u32),
     back_edge_fuel_fixups: *std.ArrayList(u32),
@@ -872,7 +875,7 @@ pub fn emitBrTable(
         } else {
             try buf.appendSlice(allocator, inst.encJccRel32(.ne, 0).slice());
         }
-        try emitBrTableJmp(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, frame_bytes, uses_runtime_ptr, return_is_memory_class, indirect_result_slot_neg_off, home_save_base_disp, back_edge_interrupt_fixups, back_edge_fuel_fixups, targets[start + i]);
+        try emitBrTableJmp(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, frame_bytes, uses_runtime_ptr, return_is_memory_class, indirect_result_slot_neg_off, homing, home_save_base_disp, back_edge_interrupt_fixups, back_edge_fuel_fixups, targets[start + i]);
         const after: usize = buf.items.len;
         const disp: usize = after - (jne_at + jne_size);
         if (i <= 127) {
@@ -884,7 +887,7 @@ pub fn emitBrTable(
             std.mem.writeInt(u32, buf.items[jne_at + 2 ..][0..4], disp32, .little);
         }
     }
-    try emitBrTableJmp(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, frame_bytes, uses_runtime_ptr, return_is_memory_class, indirect_result_slot_neg_off, home_save_base_disp, back_edge_interrupt_fixups, back_edge_fuel_fixups, targets[start + count]);
+    try emitBrTableJmp(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, frame_bytes, uses_runtime_ptr, return_is_memory_class, indirect_result_slot_neg_off, homing, home_save_base_disp, back_edge_interrupt_fixups, back_edge_fuel_fixups, targets[start + count]);
 }
 
 /// Wasm spec §3.4.5 (br_if N) — pop cond, branch to label at
@@ -908,6 +911,7 @@ pub fn emitBrIf(
     uses_runtime_ptr: bool,
     return_is_memory_class: bool,
     indirect_result_slot_neg_off: u32,
+    homing: local_homing.Plan,
     home_save_base_disp: i32,
     back_edge_interrupt_fixups: *std.ArrayList(u32),
     back_edge_fuel_fixups: *std.ArrayList(u32),
@@ -916,7 +920,7 @@ pub fn emitBrIf(
     if (pushed_vregs.items.len < 1) return Error.AllocationMissing;
     const cond_v = pushed_vregs.pop().?;
     const cond_r = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, cond_v, 0);
-    try branchOnReg(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, frame_bytes, uses_runtime_ptr, return_is_memory_class, indirect_result_slot_neg_off, home_save_base_disp, back_edge_interrupt_fixups, back_edge_fuel_fixups, depth, cond_r);
+    try branchOnReg(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, frame_bytes, uses_runtime_ptr, return_is_memory_class, indirect_result_slot_neg_off, homing, home_save_base_disp, back_edge_interrupt_fixups, back_edge_fuel_fixups, depth, cond_r);
 }
 
 /// Conditional-branch-to-label body shared by `br_if` and `br_on_cast`
@@ -936,6 +940,7 @@ pub fn branchOnReg(
     uses_runtime_ptr: bool,
     return_is_memory_class: bool,
     indirect_result_slot_neg_off: u32,
+    homing: local_homing.Plan,
     home_save_base_disp: i32,
     back_edge_interrupt_fixups: *std.ArrayList(u32),
     back_edge_fuel_fixups: *std.ArrayList(u32),
@@ -951,7 +956,7 @@ pub fn branchOnReg(
         try buf.appendSlice(allocator, inst.encTestRR(.d, cond_r, cond_r).slice());
         const je_at: u32 = @intCast(buf.items.len);
         try buf.appendSlice(allocator, inst.encJccRel32(.e, 0).slice());
-        try emitFunctionReturn(allocator, buf, alloc, pushed_vregs, spill_base_off, func, frame_bytes, uses_runtime_ptr, return_is_memory_class, indirect_result_slot_neg_off, home_save_base_disp);
+        try emitFunctionReturn(allocator, buf, alloc, pushed_vregs, spill_base_off, func, frame_bytes, uses_runtime_ptr, return_is_memory_class, indirect_result_slot_neg_off, homing, home_save_base_disp);
         // Patch the JE rel32 to land on the byte AFTER the
         // emitFunctionReturn block.
         const skip_byte: u32 = @intCast(buf.items.len);
@@ -1467,7 +1472,7 @@ fn emitTrapExitStub(ctx: *ctx_mod.EmitCtx, kind: ?u32) Error!u32 {
     if (ctx.frame_bytes > 0) {
         try ctx.buf.appendSlice(ctx.allocator, rbp_disp.rspAdd(ctx.frame_bytes).slice());
     }
-    try restoreCalleeSavedHomes(ctx.allocator, ctx.buf, ctx.alloc, ctx.func, ctx.home_save_base_disp);
+    try restoreCalleeSavedHomes(ctx.allocator, ctx.buf, ctx.alloc, ctx.homing, ctx.home_save_base_disp);
     if (ctx.uses_runtime_ptr) {
         try ctx.buf.appendSlice(ctx.allocator, inst.encPopR(.r15).slice());
     }
@@ -1522,7 +1527,7 @@ fn emitEndInter(ctx: *ctx_mod.EmitCtx) Error!void {
         try ctx.buf.appendSlice(ctx.allocator, rbp_disp.rspAdd(ctx.frame_bytes).slice());
     }
     // ADR-0155 stage 4 — restore callee-saved homed registers (function-end).
-    try restoreCalleeSavedHomes(ctx.allocator, ctx.buf, ctx.alloc, ctx.func, ctx.home_save_base_disp);
+    try restoreCalleeSavedHomes(ctx.allocator, ctx.buf, ctx.alloc, ctx.homing, ctx.home_save_base_disp);
     if (ctx.uses_runtime_ptr) {
         try ctx.buf.appendSlice(ctx.allocator, inst.encPopR(.r15).slice());
     }
@@ -1790,6 +1795,7 @@ pub fn emitBrCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!void {
         ctx.uses_runtime_ptr,
         ctx.return_is_memory_class,
         ctx.indirect_result_slot_neg_off,
+        ctx.homing,
         ctx.home_save_base_disp,
         ctx.back_edge_interrupt_fixups,
         ctx.back_edge_fuel_fixups,
@@ -1811,6 +1817,7 @@ pub fn emitBrIfCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!void {
         ctx.uses_runtime_ptr,
         ctx.return_is_memory_class,
         ctx.indirect_result_slot_neg_off,
+        ctx.homing,
         ctx.home_save_base_disp,
         ctx.back_edge_interrupt_fixups,
         ctx.back_edge_fuel_fixups,
@@ -1836,6 +1843,7 @@ pub fn branchOnRegCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr, cond_r: a
         ctx.uses_runtime_ptr,
         ctx.return_is_memory_class,
         ctx.indirect_result_slot_neg_off,
+        ctx.homing,
         ctx.home_save_base_disp,
         ctx.back_edge_interrupt_fixups,
         ctx.back_edge_fuel_fixups,
@@ -1857,6 +1865,7 @@ pub fn emitBrTableCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!voi
         ctx.uses_runtime_ptr,
         ctx.return_is_memory_class,
         ctx.indirect_result_slot_neg_off,
+        ctx.homing,
         ctx.home_save_base_disp,
         ctx.back_edge_interrupt_fixups,
         ctx.back_edge_fuel_fixups,
@@ -1889,7 +1898,7 @@ pub fn emitReturnCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!void
         try ctx.buf.appendSlice(ctx.allocator, rbp_disp.rspAdd(ctx.frame_bytes).slice());
     }
     // ADR-0155 stage 4 — restore callee-saved homed registers (explicit return).
-    try restoreCalleeSavedHomes(ctx.allocator, ctx.buf, ctx.alloc, ctx.func, ctx.home_save_base_disp);
+    try restoreCalleeSavedHomes(ctx.allocator, ctx.buf, ctx.alloc, ctx.homing, ctx.home_save_base_disp);
     if (ctx.uses_runtime_ptr) {
         try ctx.buf.appendSlice(ctx.allocator, inst.encPopR(.r15).slice());
     }
