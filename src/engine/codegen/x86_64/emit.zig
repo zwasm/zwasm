@@ -123,6 +123,7 @@ const Label = label_mod.Label;
 // `localDisp` is re-exported below as `pub const` for test files
 // that reference `emit.localDisp` directly.
 const setup = @import("emit_setup.zig");
+const stack_limit = @import("../../../platform/stack_limit.zig");
 const computeOutgoingMaxBytes = setup.computeOutgoingMaxBytes;
 const computeLocalLayout = setup.computeLocalLayout;
 const LocalLayout = setup.LocalLayout;
@@ -190,12 +191,6 @@ pub fn compile(
     // longer capped at 15. Practical cap = i32 disp range / 8 =
     // ~268M slots — far past any realistic Wasm function.
 
-    // Prescan: does this function need the runtime-ptr save?
-    // Helper in `usage.zig`. Per ADR-0026
-    // (D-087/088/089 cohort) — see helper doc for the full
-    // op set.
-    const uses_runtime_ptr = usage.usesRuntimePtr(func);
-
     // Frame-bytes formula depends on prologue shape (SysV §3.2.2
     // 16-byte stack alignment; CALL pushes ret addr → entry RSP
     // ≡ 8 mod 16; PUSH RBP → 0 mod 16; PUSH R15 → 8 mod 16):
@@ -214,16 +209,18 @@ pub fn compile(
     // as `disp = -(spill_base_off + spill_off)`.
     // Per-function frame layout (group-by-type).
     // Mirror of arm64/emit.zig's LocalLayout: scalars at 8-byte
-    // stride, v128 at 16-byte stride. `base_off_for_locals` is
+    // stride, v128 at 16-byte stride. The layout's base offset is
     // -8 if uses_runtime_ptr (R15 save occupies [RBP-8]) else 0;
     // disps[i] is the most-negative byte of v128 slot `i` (since
     // MOVUPS [RBP+disp] writes UPWARD from disp).
-    const base_off_for_locals: i32 = if (uses_runtime_ptr) -8 else 0;
-    var layout = try computeLocalLayout(allocator, func, base_off_for_locals);
+    // Prescan: does this function need the runtime-ptr save? Helper in
+    // `usage.zig` (ADR-0026, D-087/088/089 cohort — see its doc for the op
+    // set); refined below by the frame size.
+    const body_uses_runtime_ptr = usage.usesRuntimePtr(func);
+    var layout = try computeLocalLayout(allocator, func, if (body_uses_runtime_ptr) -8 else 0);
     defer layout.deinit(allocator);
     const locals_bytes: u32 = layout.total_bytes;
     const spill_bytes: u32 = alloc.spillBytes();
-    const r15_save_bytes: u32 = if (uses_runtime_ptr) 8 else 0;
     // ADR-0026 2026-05-18 amend (Convention Swap) / ADR-0069 §Phase 2:
     // MEMORY-class returns (struct > 16 B per SysV §3.2.3; v2
     // trigger = `sig.results.len > 2`) follow the standard SysV
@@ -263,6 +260,25 @@ pub fn compile(
     const homing_plan_pre = local_homing.plan(func);
     const home_save_count: u32 = if (alloc.slots.len >= homing_plan_pre.count) homing_plan_pre.count else 0;
     const home_save_bytes: u32 = home_save_count * 8;
+    // Outgoing-args region pre-allocated at the
+    // BOTTOM of the frame (`[RSP, #0]` upward). For SysV this is
+    // pure overflow bytes; for Win64 it includes the 32-byte
+    // shadow space when any call exists. When `outgoing_max_bytes`
+    // > 0 the per-call `emitShadowAlloc` / `Free` become no-ops
+    // (the shadow is already part of the prologue's SUB RSP).
+    const outgoing_max_bytes: u32 = computeOutgoingMaxBytes(func, func_sigs, module_types, num_imports);
+    // A frame over `LEAF_FRAME_MAX` takes R15 even when the body does not,
+    // for the stack probe alone (the bound is stated at the probe below).
+    // `layout.total_bytes` does not depend on the base offset; only the
+    // disps are recomputed.
+    const leaf_frame_bytes: u32 = (outgoing_max_bytes + locals_bytes + spill_bytes + indirect_result_slot_bytes + home_save_bytes + 15) & ~@as(u32, 15);
+    const uses_runtime_ptr = body_uses_runtime_ptr or leaf_frame_bytes > stack_limit.LEAF_FRAME_MAX;
+    if (uses_runtime_ptr and !body_uses_runtime_ptr) {
+        const r15_layout = try computeLocalLayout(allocator, func, -8);
+        layout.deinit(allocator);
+        layout = r15_layout;
+    }
+    const r15_save_bytes: u32 = if (uses_runtime_ptr) 8 else 0;
     const spill_base_off: u32 = locals_bytes + r15_save_bytes + 8;
     // Buffer-ptr capture slot lives BELOW the spill region (deeper
     // into the frame, larger RBP-negative offset). Slot anchored at
@@ -281,13 +297,6 @@ pub fn compile(
     // CALL's return-address push clobbered it.
     const home_save_base_neg_off: u32 = locals_bytes + spill_bytes + indirect_result_slot_bytes + r15_save_bytes + 8;
     const home_save_base_disp: i32 = -@as(i32, @intCast(home_save_base_neg_off));
-    // Outgoing-args region pre-allocated at the
-    // BOTTOM of the frame (`[RSP, #0]` upward). For SysV this is
-    // pure overflow bytes; for Win64 it includes the 32-byte
-    // shadow space when any call exists. When `outgoing_max_bytes`
-    // > 0 the per-call `emitShadowAlloc` / `Free` become no-ops
-    // (the shadow is already part of the prologue's SUB RSP).
-    const outgoing_max_bytes: u32 = computeOutgoingMaxBytes(func, func_sigs, module_types, num_imports);
     // D-054: include r15_save_bytes so local 0 at
     // [RBP-16] (when uses_runtime_ptr=true) lives INSIDE the frame.
     // The prologue does PUSH R15 before MOV RBP,RSP so R15 actually
@@ -352,18 +361,19 @@ pub fn compile(
         else
             abi.current.entry_arg0_gpr;
         try buf.appendSlice(allocator, inst.encMovRR(.q, abi.current.runtime_ptr_save_gpr, rt_src_gpr).slice());
-        // ADR-0105 D2 — JIT-prologue stack-probe. Sibling to arm64's
-        // probe at the same prologue position (per ADR-0105 D2 syntax
-        // translated to Intel: `CMP RSP, [R15 + stack_limit_off]`
-        // followed by `JBE rel32` to the stack-overflow trap stub).
-        // When stack_limit = 0 (default; probe disabled), JBE never
-        // fires since RSP > 0 always. Probe placed BEFORE the
-        // jit_executed_flag sentinel so a probe-trap doesn't pollute
-        // the "function executed" flag. Gated on uses_runtime_ptr
-        // since the probe reads via R15. Functions without R15
-        // cannot recurse (no `call` op → no `uses_runtime_ptr` per
-        // `usage.usesRuntimePtr`) so they cannot stack-overflow.
-        try buf.appendSlice(allocator, inst.encCmpR64MemDisp32(.rsp, .r15, @intCast(jit_abi.stack_limit_off)).slice());
+        // ADR-0105 D2 — JIT-prologue stack-probe, sibling to arm64's at the
+        // same prologue position: `LEA RAX, [RSP - frame_bytes]; CMP RAX,
+        // [R15 + stack_limit_off]; JBE rel32` to the stack-overflow trap stub.
+        // It compares the SP the frame will leave, so a frame need not fit in
+        // the guard headroom (#495). A function without R15 has no probe, so
+        // its frame is held to `stack_limit.LEAF_FRAME_MAX`: its caller's
+        // probe leaves the headroom below the caller's frame. When
+        // stack_limit = 0 (probe disabled) JBE never fires. Placed BEFORE the
+        // jit_executed_flag sentinel so a probe-trap doesn't pollute the
+        // "function executed" flag.
+        const frame_i32: i32 = std.math.cast(i32, frame_bytes) orelse return Error.SlotOverflow;
+        try buf.appendSlice(allocator, inst.encLeaR64BaseRspDisp32(.rax, -frame_i32).slice());
+        try buf.appendSlice(allocator, inst.encCmpR64MemDisp32(.rax, .r15, @intCast(jit_abi.stack_limit_off)).slice());
         stack_probe_fixup = @intCast(buf.items.len);
         try buf.appendSlice(allocator, inst.encJccRel32(.be, 0).slice());
         // ADR-0179 #3a / D-314 — cooperative-interruption poll (sibling to the

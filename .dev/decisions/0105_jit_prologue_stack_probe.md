@@ -288,3 +288,23 @@ when D-162 closes + all 3 hosts PASS `assert_exhaustion` fixtures.
 | 2026-05-23 | `783517cb` | **Status: Proposed → Accepted** per user collab re-audit. Single design path with v1 + wasmtime precedent; ROADMAP §2 P3 (cold-start over peak; 2-instr prologue <1% overhead) + P10 (cross-platform uniformity teaches the same pattern on all 3 hosts) + P14 (`_resetstkoflw` Win64-only workaround explicitly Rejected) all align. No §14 forbidden-list conflict. Implementation per §"Implementation plan" cycles 1-3 now unblocked for the autonomous loop. |
 | 2026-05-24 | `b160206b` | **Status: Accepted → Closed (implemented)**. D-162 closed via cycles 1-3 implementation (stack-limit query + JIT-prologue compare-and-trap). SKIP-WIN64-EXHAUSTION arm removed from spec_assert_runner_base.zig; `check_phase9_close_invariants.sh` invariant I1a passes at 18/18. Per Phase C ADR canonical pass (§9.12-I). |
 | 2026-06-08 | (pending) | **Linux query made musl-portable** per ADR-0178 (cljw v1 handoff §A1). The glibc `pthread_getattr_np` path is now `comptime`-gated behind `builtin.abi.isGnu()`; musl/other Linux derives the main-thread limit from `/proc/self/maps` top minus `RLIMIT_STACK` (the glibc/sanitizer method) via `std.os.linux.*`. Sentinel-disabled on non-main musl threads / unbounded rlimit. glibc / Mac / Windows paths unchanged. |
+
+## Amendment — 2026-10 (#495)
+
+D6's fourth bullet assumed every frame fits in the headroom. A frame over
+16 KiB passed the probe and made its first store below the mapped stack,
+outside any guard reservation, so the host died with a fatal signal instead
+of trapping.
+
+- **D2 compares the SP the frame will leave.** x86_64: `LEA RAX, [RSP -
+  frame_bytes]; CMP RAX, [R15 + stack_limit_off]; JBE`. arm64: `SUB X17, SP,
+  #frame_bytes` in the frame allocation's imm12 steps (`ADD X17, SP, #0` with
+  no frame); `CMP X17, X16; B.LS`. The trap stub still runs before the frame
+  exists.
+- **D6's fourth bullet is withdrawn.** The headroom holds the first three only.
+  It is not raised instead: a frame has no upper bound, and a larger headroom
+  takes stack from every guest.
+- **An x86_64 function without R15 has no probe**, so its frame is bounded by
+  `stack_limit.LEAF_FRAME_MAX` (8 KiB, half the smallest headroom): the
+  caller's probe leaves the headroom below the caller's frame. A larger frame
+  takes R15 for the probe. arm64 probes every function.

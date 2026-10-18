@@ -49,6 +49,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **Deep recursion through a large frame traps as `stack_overflow` on the
+  JIT** (#495). A function whose frame exceeded the stack guard headroom
+  (16 KiB on Linux and macOS) passed the prologue's stack probe and took the
+  host down with a fatal signal. The probe now accounts for the frame, so it
+  traps like the interpreter.
+
 - **A spilled v128 value moves to and from a local whole** (#558).
   On x86_64, `local.get`, `local.set` and `local.tee` of a v128 local moved 8 of
   its 16 bytes through a spilled vreg, so with more than six v128 values live,

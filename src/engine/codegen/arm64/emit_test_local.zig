@@ -56,6 +56,51 @@ test "compile: empty function (no instrs, empty liveness) emits prologue+epilogu
     try prologue.assertPrologueOpcodes(out.bytes);
 }
 
+test "compile: #495 — the stack probe compares SP - frame_bytes, in the frame allocation's two imm12 steps" {
+    // 600 i64 locals = 4800 bytes = 1 << 12 + 704: both SUB steps are needed.
+    const locals = [_]zir.ValType{.i64} ** 600;
+    const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
+    var f = ZirFunc.init(0, sig, &locals);
+    defer f.deinit(testing.allocator);
+    try f.instrs.append(testing.allocator, .{ .op = .end });
+    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    defer if (f.liveness) |lv| liveness.deinit(testing.allocator, lv);
+    const alloc = try regalloc.compute(testing.allocator, &f);
+    defer regalloc.deinit(testing.allocator, alloc);
+    const out = try compile(testing.allocator, &f, alloc, &.{}, &.{}, 0, &.{}, &.{}, .i32, &.{}, false, false);
+    defer deinit(testing.allocator, out);
+
+    // Words 8.. : LDR X16 ← stack_limit; SUB X17, SP, #1, lsl #12;
+    // SUB X17, X17, #704; CMP X17, X16; B.LS.
+    try testing.expectEqual(inst.encSubImm12Lsl12(17, 31, 1), prologue.wordAt(out.bytes, 36));
+    try testing.expectEqual(inst.encSubImm12(17, 17, 704), prologue.wordAt(out.bytes, 40));
+    try testing.expectEqual(inst.encCmpRegX(17, 16), prologue.wordAt(out.bytes, 44));
+    // The frame allocation uses the same steps on SP, one word later than a
+    // sub-4-KiB frame's single SUB (the probe's extra word).
+    const frame_sub_at = prologue.body_start_offset(true);
+    try testing.expectEqual(inst.encSubImm12Lsl12(31, 31, 1), prologue.wordAt(out.bytes, frame_sub_at));
+    try testing.expectEqual(inst.encSubImm12(31, 31, 704), prologue.wordAt(out.bytes, frame_sub_at + 4));
+}
+
+test "compile: #495 — a frame under 4 KiB probes with one SUB, and no frame with ADD X17, SP, #0" {
+    const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
+    inline for (.{ 0, 3 }) |n| {
+        const locals = [_]zir.ValType{.i64} ** n;
+        var f = ZirFunc.init(0, sig, &locals);
+        defer f.deinit(testing.allocator);
+        try f.instrs.append(testing.allocator, .{ .op = .end });
+        f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{});
+        defer if (f.liveness) |lv| liveness.deinit(testing.allocator, lv);
+        const alloc = try regalloc.compute(testing.allocator, &f);
+        defer regalloc.deinit(testing.allocator, alloc);
+        const out = try compile(testing.allocator, &f, alloc, &.{}, &.{}, 0, &.{}, &.{}, .i32, &.{}, false, false);
+        defer deinit(testing.allocator, out);
+        const expected = if (n == 0) inst.encAddImm12(17, 31, 0) else inst.encSubImm12(17, 31, 32);
+        try testing.expectEqual(expected, prologue.wordAt(out.bytes, 36));
+        try testing.expectEqual(inst.encCmpRegX(17, 16), prologue.wordAt(out.bytes, 40));
+    }
+}
+
 test "compile: (i32.const 42) end yields 5-instr body returning 42 in X0" {
     const sig: zir.FuncType = .{ .params = &.{}, .results = &.{.i32} };
     var f = ZirFunc.init(0, sig, &.{});

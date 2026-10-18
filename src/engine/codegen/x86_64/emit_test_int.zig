@@ -562,12 +562,13 @@ test "compile: (i32.const 0) i32.load offset=0 end — ADR-0026 prologue + bound
     //   ...
     //
     // Total length: 139 (pre-A3) + 11 (the new trap_kind=6 store) = 150;
-    // +30/+28 (D-314 #3a interrupt poll+stub), +30/+28 (#3b fuel poll+stub).
-    try testing.expectEqual(@as(usize, 266), out.bytes.len);
+    // +30/+28 (D-314 #3a interrupt poll+stub), +30/+28 (#3b fuel poll+stub),
+    // +8 (#495 probe LEA).
+    try testing.expectEqual(@as(usize, 274), out.bytes.len);
     // Spot-check the prologue (verifies ADR-0026 + ADR-0105 structure).
     // The MOV R15, <entry_arg0> byte differs by Cc; derive the
     // expected sequence dynamically so this works on both SysV
-    // and Win64 builds. The ADR-0105 D2 probe inserts CMP+JBE
+    // and Win64 builds. The ADR-0105 D2 probe inserts LEA+CMP+JBE
     // between mov_r15_arg0 and the sentinel; the JBE's disp32
     // gets patched to the stack-overflow trap stub at function
     // close so we assert the opcode prefix only (the 4 disp32
@@ -576,11 +577,12 @@ test "compile: (i32.const 0) i32.load offset=0 end — ADR-0026 prologue + bound
     const exp_push_r15 = inst.encPushR(.r15);
     const exp_mov_rbp_rsp = inst.encMovRR(.q, .rbp, .rsp);
     const exp_mov_r15_arg0 = inst.encMovRR(.q, abi.current.runtime_ptr_save_gpr, abi.current.entry_arg0_gpr);
-    const exp_probe_cmp = inst.encCmpR64MemDisp32(.rsp, .r15, @import("../shared/jit_abi.zig").stack_limit_off);
+    const exp_probe_lea = inst.encLeaR64BaseRspDisp32(.rax, -8);
+    const exp_probe_cmp = inst.encCmpR64MemDisp32(.rax, .r15, @import("../shared/jit_abi.zig").stack_limit_off);
     const exp_sentinel = inst.encMovMemDisp32Imm32(.r15, @import("../shared/jit_abi.zig").jit_executed_flag_off, 1);
     const exp_sub_rsp_8 = inst.encSubRSpImm8(8);
-    // Pre-probe block (push_rbp + push_r15 + mov_rbp_rsp + mov_r15_arg0 + probe_cmp).
-    var pre_probe: [16]u8 = undefined;
+    // Pre-probe block (push_rbp + push_r15 + mov_rbp_rsp + mov_r15_arg0 + probe_lea + probe_cmp).
+    var pre_probe: [24]u8 = undefined;
     var off: usize = 0;
     @memcpy(pre_probe[off .. off + exp_push_rbp.len], exp_push_rbp.slice());
     off += exp_push_rbp.len;
@@ -590,13 +592,15 @@ test "compile: (i32.const 0) i32.load offset=0 end — ADR-0026 prologue + bound
     off += exp_mov_rbp_rsp.len;
     @memcpy(pre_probe[off .. off + exp_mov_r15_arg0.len], exp_mov_r15_arg0.slice());
     off += exp_mov_r15_arg0.len;
+    @memcpy(pre_probe[off .. off + exp_probe_lea.len], exp_probe_lea.slice());
+    off += exp_probe_lea.len;
     @memcpy(pre_probe[off .. off + exp_probe_cmp.len], exp_probe_cmp.slice());
     off += exp_probe_cmp.len;
-    try testing.expectEqual(@as(usize, 16), off);
-    try testing.expectEqualSlices(u8, &pre_probe, out.bytes[0..16]);
-    // JBE rel32 opcode prefix at bytes [16..18]; disp32 [18..22] patched.
-    try testing.expectEqualSlices(u8, &.{ 0x0F, 0x86 }, out.bytes[16..18]);
-    // Post-probe block (sentinel + sub_rsp_8) at [22..body_start].
+    try testing.expectEqual(@as(usize, 24), off);
+    try testing.expectEqualSlices(u8, &pre_probe, out.bytes[0..24]);
+    // JBE rel32 opcode prefix at bytes [24..26]; disp32 [26..30] patched.
+    try testing.expectEqualSlices(u8, &.{ 0x0F, 0x86 }, out.bytes[24..26]);
+    // Post-probe block (sentinel + sub_rsp_8) at [30..body_start].
     var post_probe: [15]u8 = undefined;
     off = 0;
     @memcpy(post_probe[off .. off + exp_sentinel.len], exp_sentinel.slice());
@@ -608,7 +612,7 @@ test "compile: (i32.const 0) i32.load offset=0 end — ADR-0026 prologue + bound
     // D-314 interrupt poll (30 B) inserted between the JBE and the sentinel.
     // Spot-check its leading MOV RAX,[R15+interrupt_ptr_off] opcode (49 8B 87);
     // the 2 disp32s (JZ skip, JNE stub) are patched, so assert opcode-only.
-    try testing.expectEqualSlices(u8, &.{ 0x49, 0x8B, 0x87 }, out.bytes[22..25]);
+    try testing.expectEqualSlices(u8, &.{ 0x49, 0x8B, 0x87 }, out.bytes[30..33]);
     // post-probe = sentinel + sub_rsp = the 15 bytes just before body_start.
     try testing.expectEqualSlices(u8, &post_probe, out.bytes[body_start - 15 .. body_start]);
     // JA placeholder = body_start + 25 (after const + memory-load + LEA bytes per layout comment).
@@ -1823,9 +1827,10 @@ test "compile: self-recursive (i64)->i64 — probe + i64-result marshal" {
     // Assertion 3: i64 result capture after CALL — must be 64-bit
     // form `MOV r64, RAX` (REX.W set). Look for the byte sequence
     // produced by `inst.encMovRR(.q, <vreg_reg>, .rax)` right after
-    // the CALL rel32 (E8 disp32 = 5 bytes).
+    // the CALL rel32 (E8 disp32 = 5 bytes). The search starts at the body:
+    // the prologue's probe LEA disp32 (`-frame_bytes`) can hold an E8 byte.
     var call_off: ?usize = null;
-    i = 0;
+    i = prologue.body_start_offset(true, sub_rsp_imm.?);
     while (i < out.bytes.len) : (i += 1) {
         if (out.bytes[i] == 0xE8) {
             call_off = i;
@@ -1875,6 +1880,84 @@ test "compile: self-recursive (i64)->i64 — probe + i64-result marshal" {
         }
     }
     try testing.expect(rt_restore_found);
+}
+
+/// Reads the imm32 of the prologue's `SUB RSP, imm32` (48 81 EC id) that ends
+/// a uses_runtime_ptr prologue with a frame of 128 bytes or more.
+fn prologueFrameImm32(bytes: []const u8) u32 {
+    const sub_at = prologue.body_start_offset(true, 128) - 7;
+    std.debug.assert(bytes[sub_at] == 0x48 and bytes[sub_at + 1] == 0x81 and bytes[sub_at + 2] == 0xEC);
+    return std.mem.readInt(u32, bytes[sub_at + 3 ..][0..4], .little);
+}
+
+test "compile: #495 — the stack probe compares RSP - frame_bytes, for a frame over the guard headroom" {
+    // 2100 i64 locals = 16800 bytes of locals, past the 16 KiB headroom; the
+    // self-call gives the function R15 and so the probe.
+    const locals = [_]zir.ValType{.i64} ** 2100;
+    const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
+    var f = ZirFunc.init(0, sig, &locals);
+    defer f.deinit(testing.allocator);
+    try f.instrs.append(testing.allocator, .{ .op = .call, .payload = 0 });
+    try f.instrs.append(testing.allocator, .{ .op = .end });
+    f.liveness = .{ .ranges = &.{} };
+    const alloc: regalloc.Allocation = .{ .slots = &.{}, .n_slots = 0 };
+    const out = try compile(testing.allocator, &f, alloc, &.{sig}, &.{sig}, 0, &.{}, &.{}, .i32, &.{}, false, false);
+    defer deinit(testing.allocator, out);
+
+    const frame_bytes = prologueFrameImm32(out.bytes);
+    try testing.expect(frame_bytes > 16 * 1024);
+    // PUSH RBP (1) + PUSH R15 (2) + MOV RBP,RSP (3) + MOV R15,<arg0> (3) = 9.
+    const lea = inst.encLeaR64BaseRspDisp32(.rax, -@as(i32, @intCast(frame_bytes)));
+    try testing.expectEqualSlices(u8, lea.slice(), out.bytes[9..][0..lea.len]);
+    const cmp = inst.encCmpR64MemDisp32(.rax, .r15, @intCast(jit_abi.stack_limit_off));
+    try testing.expectEqualSlices(u8, cmp.slice(), out.bytes[9 + lea.len ..][0..cmp.len]);
+    try testing.expectEqualSlices(u8, &.{ 0x0F, 0x86 }, out.bytes[9 + lea.len + cmp.len ..][0..2]);
+}
+
+test "compile: #495 — a call-free function takes R15 and the probe once its frame exceeds LEAF_FRAME_MAX" {
+    const stack_limit = @import("../../../platform/stack_limit.zig");
+    // 8-byte i64 slots, no spills / outgoing / homes: the R15-less frame is
+    // 16-aligned locals_bytes. 1024 locals = 8192 = LEAF_FRAME_MAX, 1026 = over.
+    comptime std.debug.assert(stack_limit.LEAF_FRAME_MAX == 1024 * 8);
+    const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
+    inline for (.{ 1024, 1026 }) |n| {
+        const locals = [_]zir.ValType{.i64} ** n;
+        var f = ZirFunc.init(0, sig, &locals);
+        defer f.deinit(testing.allocator);
+        try f.instrs.append(testing.allocator, .{ .op = .end });
+        f.liveness = .{ .ranges = &.{} };
+        const alloc: regalloc.Allocation = .{ .slots = &.{}, .n_slots = 0 };
+        const out = try compile(testing.allocator, &f, alloc, &.{}, &.{}, 0, &.{}, &.{}, .i32, &.{}, false, false);
+        defer deinit(testing.allocator, out);
+        if (n * 8 <= stack_limit.LEAF_FRAME_MAX) {
+            // PUSH RBP; MOV RBP,RSP; SUB RSP, 8192 — no R15, no probe.
+            try testing.expectEqualSlices(u8, inst.encMovRR(.q, .rbp, .rsp).slice(), out.bytes[1..4]);
+            try testing.expectEqualSlices(u8, &.{ 0x48, 0x81, 0xEC }, out.bytes[4..7]);
+            try testing.expectEqual(@as(u32, n * 8), std.mem.readInt(u32, out.bytes[7..11], .little));
+        } else {
+            try testing.expectEqualSlices(u8, inst.encPushR(.r15).slice(), out.bytes[1..3]);
+            const frame_bytes = prologueFrameImm32(out.bytes);
+            const lea = inst.encLeaR64BaseRspDisp32(.rax, -@as(i32, @intCast(frame_bytes)));
+            try testing.expectEqualSlices(u8, lea.slice(), out.bytes[9..][0..lea.len]);
+        }
+    }
+}
+
+fn compileAndDeinit(allocator: Allocator, f: *const ZirFunc) !void {
+    const alloc: regalloc.Allocation = .{ .slots = &.{}, .n_slots = 0 };
+    const out = try compile(allocator, f, alloc, &.{}, &.{}, 0, &.{}, &.{}, .i32, &.{}, false, false);
+    deinit(allocator, out);
+}
+
+test "compile: #495 — every allocation failure while a large call-free frame takes R15 frees cleanly" {
+    // Covers the failed recompute of the local layout for the R15 base.
+    const locals = [_]zir.ValType{.i64} ** 1026;
+    const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
+    var f = ZirFunc.init(0, sig, &locals);
+    defer f.deinit(testing.allocator);
+    try f.instrs.append(testing.allocator, .{ .op = .end });
+    f.liveness = .{ .ranges = &.{} };
+    try std.testing.checkAllAllocationFailures(testing.allocator, compileAndDeinit, .{&f});
 }
 
 test "compile: try_table emit populates EmitOutput.exception_handlers" {

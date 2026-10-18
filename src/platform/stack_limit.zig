@@ -70,6 +70,17 @@ pub const STACK_GUARD_HEADROOM: usize = if (builtin.os.tag == .windows)
 else
     16 * 1024;
 
+/// Largest frame an x86_64 JIT function may have without a prologue stack
+/// probe; the rule is at the probe in `x86_64/emit.zig` and in the ADR-0105
+/// amendment (#495). Fixed, not this build's headroom, because an AOT
+/// artifact runs under its target's: the assert keeps it at half of every
+/// OS's headroom, each checked in its own build.
+pub const LEAF_FRAME_MAX: usize = 8 * 1024;
+
+comptime {
+    std.debug.assert(2 * LEAF_FRAME_MAX <= STACK_GUARD_HEADROOM);
+}
+
 /// Interpreter native-recursion headroom (D-288 / ADR-0167). The
 /// interp recurses on the host stack per wasm call (`mvp.invoke`,
 /// ~8 KiB/frame) and checks `@frameAddress()` against

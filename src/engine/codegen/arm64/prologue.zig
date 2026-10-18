@@ -22,7 +22,9 @@
 //!   Word 7:   ORR X19, XZR, X0  (= MOV X19, X0)  (4 bytes — ADR-0017 sub-2d-ii)
 //!   Words 8-11: ADR-0105 D2 stack-probe         (16 bytes)
 //!               LDR X16, [X19, #stack_limit_off]
-//!               ADD X17, SP, #0   (= MOV X17, SP)
+//!               SUB X17, SP, #frame_bytes   (ADD X17, SP, #0 when no frame;
+//!                                            a frame >= 4 KiB adds a word,
+//!                                            as its SUB SP does)
 //!               CMP X17, X16
 //!               B.LS stack_overflow_trap_stub  (fixup)
 //!   Words 12-16: ADR-0179 #3a / D-314 interrupt poll (20 bytes)
@@ -75,6 +77,10 @@ pub const FpLrSave = struct {
 /// 20 bytes) after the stack probe, shifting to 76 → 80. ADR-0179
 /// #3b adds the fuel poll (7 instructions / 28 bytes) after it,
 /// shifting to 104 → 108.
+///
+/// Assumes a frame under 4 KiB. A frame of 4 KiB or more whose low
+/// 12 bits are nonzero adds a word to the stack probe and another to
+/// the frame allocation (#495), so its body starts 8 bytes later.
 pub fn body_start_offset(has_frame: bool) u32 {
     return if (has_frame) 108 else 104;
 }

@@ -18,23 +18,22 @@
 //!   SUB RSP, frame_bytes            (4 or 7 bytes — imm8 vs imm32)  [if frame_bytes > 0]
 //!
 //! Body byte offsets (post-ADR-0105 D2 — uses_runtime_ptr cases
-//! include the 13-byte stack-probe `CMP RSP, [R15 + stack_limit_off]`
-//! (7) + `JBE rel32` (6) inserted BEFORE the 11-byte sentinel
-//! `MOV [R15 + flag_off], 1`):
+//! include the 21-byte stack-probe `LEA RAX, [RSP - frame_bytes]` (8)
+//! + `CMP RAX, [R15 + stack_limit_off]` (7) + `JBE rel32` (6) inserted
+//! BEFORE the 11-byte sentinel `MOV [R15 + flag_off], 1`):
 //!
 //!   uses_runtime_ptr | frame range | body_start_offset
 //!   -----------------|-------------|-------------------
 //!   false            | 0           |  4
 //!   false            | 1..127      |  8
 //!   false            | 128..       | 11
-//!   true             | 0           | 33
-//!   true             | 1..127      | 37
-//!   true             | 128..       | 40
+//!   true             | 1..127      | 105
+//!   true             | 128..       | 108
 //!
 //! Probe + sentinel are gated on uses_runtime_ptr because both
 //! use R15 (only loaded in the uses_runtime_ptr branch). The
 //! probe is the x86_64 sibling of the arm64 prologue's
-//! LDR X16 / MOV X17,SP / CMP / B.LS sequence (ADR-0105 D2).
+//! LDR X16 / SUB X17,SP,#frame / CMP / B.LS sequence (ADR-0105 D2).
 //!
 //! Zone 2 (`src/engine/codegen/x86_64/`) — must NOT import
 //! `src/engine/codegen/arm64/` per ROADMAP §A3.
@@ -63,11 +62,12 @@ const mov_r15_argptr_size: u32 = 3;
 /// base; REX.B is required since R15 is R8..R15 cohort). Emitted
 /// inside the uses_runtime_ptr branch in emit.zig per ADR-0034.
 const sentinel_size: u32 = 11;
-/// ADR-0105 D2 stack-probe: `CMP RSP, [R15 + stack_limit_off]`
-/// (7 bytes: REX.W + 0x3B + ModR/M + disp32) + `JBE rel32`
-/// (6 bytes: 0x0F 0x86 + disp32). Emitted inside the
-/// uses_runtime_ptr branch BEFORE the sentinel; total 13 bytes.
-const stack_probe_size: u32 = 13;
+/// ADR-0105 D2 stack-probe: `LEA RAX, [RSP - frame_bytes]` (8 bytes:
+/// REX.W + 0x8D + ModR/M + SIB + disp32) + `CMP RAX, [R15 +
+/// stack_limit_off]` (7 bytes: REX.W + 0x3B + ModR/M + disp32) + `JBE
+/// rel32` (6 bytes: 0x0F 0x86 + disp32). Emitted inside the
+/// uses_runtime_ptr branch BEFORE the sentinel; total 21 bytes.
+const stack_probe_size: u32 = 21;
 /// ADR-0179 #3a / D-314 interrupt poll (inside the uses_runtime_ptr branch,
 /// after the stack probe, before the sentinel): MOV RAX,[R15+off] (7) +
 /// TEST RAX,RAX (3) + JZ rel32 (6) + MOV EAX,[RAX] (6) + TEST EAX,EAX (2) +
@@ -156,17 +156,13 @@ test "body_start_offset: no runtime_ptr, imm32 frame → 11 bytes" {
     try testing.expectEqual(@as(u32, 11), body_start_offset(false, 4096));
 }
 
-test "body_start_offset: uses_runtime_ptr, no frame → 93 bytes (incl. ADR-0105 probe +13 + D-055 sentinel +11)" {
-    try testing.expectEqual(@as(u32, 93), body_start_offset(true, 0));
+test "body_start_offset: uses_runtime_ptr, imm8 frame → 105 bytes (incl. ADR-0105 probe +21 + D-055 sentinel +11)" {
+    try testing.expectEqual(@as(u32, 105), body_start_offset(true, 16));
+    try testing.expectEqual(@as(u32, 105), body_start_offset(true, 127));
 }
 
-test "body_start_offset: uses_runtime_ptr, imm8 frame → 97 bytes (incl. ADR-0105 probe +13 + D-055 sentinel +11)" {
-    try testing.expectEqual(@as(u32, 97), body_start_offset(true, 16));
-    try testing.expectEqual(@as(u32, 97), body_start_offset(true, 127));
-}
-
-test "body_start_offset: uses_runtime_ptr, imm32 frame → 100 bytes (incl. ADR-0105 probe +13 + D-055 sentinel +11)" {
-    try testing.expectEqual(@as(u32, 100), body_start_offset(true, 128));
+test "body_start_offset: uses_runtime_ptr, imm32 frame → 108 bytes (incl. ADR-0105 probe +21 + D-055 sentinel +11)" {
+    try testing.expectEqual(@as(u32, 108), body_start_offset(true, 128));
 }
 
 test "rsp_sub_size: 0 → 0, 1..127 → 4, >=128 → 7" {

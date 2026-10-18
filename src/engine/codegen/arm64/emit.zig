@@ -334,18 +334,37 @@ pub fn compile(
     // saved per AAPCS64 — preserved across calls without explicit
     // save/restore.
     try gpr.writeU32(allocator, &buf, inst.encOrrReg(abi.runtime_ptr_save_gpr, 31, 0));
+    // Chunk d-9: frame_bytes up to 16 MiB-1 via the two-step
+    // `SUB <rd>, SP, #(N>>12), lsl #12; SUB <rd>, <rd>, #(N&0xFFF)`
+    // sequence, shared by the stack probe and the frame allocation below.
+    // Larger needs a MOVZ/MOVK chain (post-MVP). Long Go binaries with
+    // deep spill regions exceed the prior 4096 cap.
+    if (frame_bytes > 0xFFFFFF) {
+        dbg.print("codegen", "arm64/emit: SlotOverflow frame_bytes={d} func[{d}]\n", .{ frame_bytes, func.func_idx });
+        return Error.SlotOverflow;
+    }
+    const frame_hi: u12 = @intCast((frame_bytes >> 12) & 0xFFF);
+    const frame_lo: u12 = @intCast(frame_bytes & 0xFFF);
     // ADR-0105 D2 — JIT-prologue stack-probe. Insert BEFORE the
     // sentinel write so a probe-trap doesn't pollute the
     // jit_executed_flag (the function didn't actually run if it
-    // trapped at entry). Layout: LDR X16 ← stack_limit; MOV X17 ←
-    // SP (= ADD X17, SP, #0; rn=31 in ADD-imm means SP not XZR);
-    // CMP X17, X16; B.LS placeholder. When stack_limit = 0
-    // (probe disabled), CMP SP,0 is always > so B.LS never fires
-    // — graceful no-op for tests / non-init paths. The B.LS
-    // placeholder records its byte offset for end-of-function
-    // patching against the stack-overflow trap stub.
+    // trapped at entry). Layout: LDR X16 ← stack_limit; X17 ← SP -
+    // frame_bytes (the frame allocation's imm12 steps; `ADD X17, SP, #0`
+    // with no frame — rn=31 in ADD/SUB-imm means SP not XZR); CMP X17,
+    // X16; B.LS placeholder. It compares the SP the frame will leave, so
+    // a frame need not fit in the guard headroom (#495). When stack_limit
+    // = 0 (probe disabled) B.LS never fires. The B.LS placeholder records
+    // its byte offset for end-of-function patching against the
+    // stack-overflow trap stub.
     try gpr.writeU32(allocator, &buf, inst.encLdrImm(16, abi.runtime_ptr_save_gpr, jit_abi.stack_limit_off));
-    try gpr.writeU32(allocator, &buf, inst.encAddImm12(17, 31, 0));
+    if (frame_bytes == 0) {
+        try gpr.writeU32(allocator, &buf, inst.encAddImm12(17, 31, 0));
+    } else if (frame_hi != 0) {
+        try gpr.writeU32(allocator, &buf, inst.encSubImm12Lsl12(17, 31, frame_hi));
+        if (frame_lo != 0) try gpr.writeU32(allocator, &buf, inst.encSubImm12(17, 17, frame_lo));
+    } else {
+        try gpr.writeU32(allocator, &buf, inst.encSubImm12(17, 31, frame_lo));
+    }
     try gpr.writeU32(allocator, &buf, inst.encCmpRegX(17, 16));
     const stack_probe_fixup: u32 = @intCast(buf.items.len);
     try gpr.writeU32(allocator, &buf, inst.encBCond(.ls, 0));
@@ -387,19 +406,8 @@ pub fn compile(
     try gpr.writeU32(allocator, &buf, inst.encMovzImm16(17, 1));
     try gpr.writeU32(allocator, &buf, inst.encStrImmW(17, abi.runtime_ptr_save_gpr, jit_abi.jit_executed_flag_off));
     if (frame_bytes > 0) {
-        // Chunk d-9: support frame_bytes up to 16 MiB-1 via the
-        // two-step `SUB SP, SP, #(N>>12), lsl #12; SUB SP, SP,
-        // #(N&0xFFF)` sequence. Larger needs a MOVZ/MOVK chain
-        // (post-MVP). Long Go binaries with deep spill regions
-        // exceed the prior 4096 cap.
-        if (frame_bytes > 0xFFFFFF) {
-            dbg.print("codegen", "arm64/emit: SlotOverflow frame_bytes={d} func[{d}]\n", .{ frame_bytes, func.func_idx });
-            return Error.SlotOverflow;
-        }
-        const fb_high: u12 = @intCast((frame_bytes >> 12) & 0xFFF);
-        const fb_low: u12 = @intCast(frame_bytes & 0xFFF);
-        if (fb_high != 0) try gpr.writeU32(allocator, &buf, inst.encSubImm12Lsl12(31, 31, fb_high));
-        if (fb_low != 0) try gpr.writeU32(allocator, &buf, inst.encSubImm12(31, 31, fb_low));
+        if (frame_hi != 0) try gpr.writeU32(allocator, &buf, inst.encSubImm12Lsl12(31, 31, frame_hi));
+        if (frame_lo != 0) try gpr.writeU32(allocator, &buf, inst.encSubImm12(31, 31, frame_lo));
     }
     // ADR-0017 2026-05-18 amend / ADR-0069 §Phase 2 chunk (b)-e-1:
     // capture the caller-supplied hidden indirect-result-pointer
