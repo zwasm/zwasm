@@ -197,12 +197,9 @@ pub fn runWasmJitCaptured(
     if (argv.len > 0) try host.setArgs(argv);
     if (env_keys.len > 0) try host.setEnvs(env_keys, env_vals); // D-295 P0: --env KEY=VAL
     // D-244: map `--dir` host directories into the guest's preopen table so the
-    // JIT's path_open / fd_readdir / fd_filestat_get resolve against them (the
-    // fds live for the process lifetime, CLI-scoped, like the interp path).
-    for (preopens) |pd| {
-        const dir = try std.Io.Dir.cwd().openDir(io, pd.host_path, .{ .iterate = true });
-        _ = try host.addPreopen(dir.handle, pd.guest_path);
-    }
+    // JIT's path_open / fd_readdir / fd_filestat_get resolve against them.
+    for (preopens) |pd| try host.addPendingPreopen(pd.host_path, pd.guest_path);
+    try host.materializePendingPreopens();
     // D-244 chunk 2d: `proc_exit(N)` records `host.exit_code` then unwinds via
     // the JIT trap mechanism (returns Error.Trap). Surface the guest's exit
     // code; a trap with NO exit_code is a genuine fault → propagate (exit 1).
@@ -474,12 +471,9 @@ pub fn runComponentCaptured(
     if (env_keys.len > 0) try host.setEnvs(env_keys, env_vals); // D-295 P0: --env KEY=VAL
     stdin.applyTo(&host); // the guest's fd 0 source
     // `--dir` preopens feed the P2 host: `get-directories` enumerates them and
-    // the descriptor `*-at` methods resolve against their fds (CLI-scoped fd
-    // lifetime, like the core-module paths).
-    for (preopens) |pd| {
-        const dir = try std.Io.Dir.cwd().openDir(io, pd.host_path, .{ .iterate = true });
-        _ = try host.addPreopen(dir.handle, pd.guest_path);
-    }
+    // the descriptor `*-at` methods resolve against their fds.
+    for (preopens) |pd| try host.addPendingPreopen(pd.host_path, pd.guest_path);
+    try host.materializePendingPreopens();
 
     // REQ-4 — the component CLI path uses the default budget for now; wiring
     // the `--fuel`/`--max-memory` flags into `runComponentCaptured` is a
@@ -568,7 +562,6 @@ pub const StdinSource = union(enum) {
 
 /// Like `runWasmCaptured` but maps `preopens` host directories into the
 /// guest's WASI preopen table (the `--dir <host>[:<guest>]` flag). The
-/// opened host dir fds live for the process lifetime (CLI-scoped); the
 /// realworld runners pass `&.{}` (no preopens) per D-243.
 pub fn runWasmCapturedFull(
     alloc: std.mem.Allocator,
@@ -612,22 +605,13 @@ pub fn runWasmCapturedFull(
         return error.ConfigAllocFailed;
     };
     cfg.io = io;
-    // D-243 — map host directories into the guest's preopen table. Open
-    // each host dir and register its fd via addPreopen; path_open then
-    // resolves guest paths relative to it. The fd stays open for the
-    // process lifetime (host.deinit frees the preopen names, not the fds).
-    for (preopens) |pd| {
-        const host_dir = std.Io.Dir.cwd().openDir(io, pd.host_path, .{ .iterate = true }) catch |err| {
-            diagnostic.setDiag(.instantiate, .config_alloc_failed, .unknown, "wasi preopen dir open failed", .{});
-            wasm_c_api.zwasm_wasi_config_delete(cfg);
-            return err;
-        };
-        _ = cfg.addPreopen(host_dir.handle, pd.guest_path) catch {
-            diagnostic.setDiag(.instantiate, .config_alloc_failed, .unknown, "wasi preopen registration failed", .{});
-            wasm_c_api.zwasm_wasi_config_delete(cfg);
-            return error.ConfigAllocFailed;
-        };
-    }
+    // D-243 — map host directories into the guest's preopen table; the
+    // instantiation opens them (`Host.materializePendingPreopens`).
+    for (preopens) |pd| cfg.addPendingPreopen(pd.host_path, pd.guest_path) catch {
+        diagnostic.setDiag(.instantiate, .config_alloc_failed, .unknown, "wasi preopen registration failed", .{});
+        wasm_c_api.zwasm_wasi_config_delete(cfg);
+        return error.ConfigAllocFailed;
+    };
     if (stdout_capture) |buf| cfg.stdout_buffer = buf;
     if (stderr_capture) |buf| cfg.stderr_buffer = buf;
     stdin.applyTo(cfg);
@@ -681,6 +665,13 @@ pub fn runWasmCapturedFull(
             // `diag_print` already says "instantiation failed for <file>:".
             diagnostic.setDiag(.instantiate, .instance_alloc_failed, .unknown, "{s}", .{msg});
         } else {
+            // A request that failed to open stays first in the queue. Asking
+            // again names it, and tells it from a decline that left the queue
+            // unread (an embedder's `.jit` engine declines before opening it).
+            cfg.materializePendingPreopens() catch |err| {
+                diagnostic.setDiag(.instantiate, .instance_alloc_failed, .unknown, "wasi preopen dir '{s}' open failed: {s}", .{ cfg.pending_preopens.items[0].host_path, @errorName(err) });
+                return err;
+            };
             diagnostic.setDiag(.instantiate, .instance_alloc_failed, .unknown, "instantiation failed (no further detail in phase 1)", .{});
         }
         return error.InstanceAllocFailed;
@@ -1779,4 +1770,66 @@ test "runWasmCapturedFull: max_output_bytes caps the C-API capture path too" {
         .{ .fuel = 200_000 },
     );
     try testing.expect(uncapped.items.len > 100_000);
+}
+
+// #573 — the open fds of this process, counted by `/proc/self/fd` (Linux).
+// The iterator's own handle is in every count, so a difference of two counts
+// is the difference in open handles.
+fn openFdCount() !usize {
+    var dir = try std.Io.Dir.cwd().openDir(testing.io, "/proc/self/fd", .{ .iterate = true });
+    defer dir.close(testing.io);
+    var it = dir.iterate();
+    var n: usize = 0;
+    while (try it.next(testing.io)) |_| n += 1;
+    return n;
+}
+
+const preopen_cwd = [_]PreopenDir{.{ .host_path = ".", .guest_path = "/sandbox" }};
+const preopen_cwd_then_missing = [_]PreopenDir{
+    .{ .host_path = ".", .guest_path = "/sandbox" },
+    .{ .host_path = "definitely/not/a/real/dir-zwasm", .guest_path = "/x" },
+};
+
+const CapturedRunner = enum { full, jit, component };
+
+/// The fds each runner leaves open over ten runs with `preopens`; a run's
+/// outcome is checked against `expected` (an exit code, or the error a run
+/// that cannot open a `--dir` returns).
+fn fdsLeftOverTenRuns(preopens: []const PreopenDir, expected: anyerror!u8) ![3]isize {
+    const component_bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, "test/component/wasi_p2_hello.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(component_bytes);
+    var left: [3]isize = undefined;
+    for (std.enums.values(CapturedRunner), 0..) |runner_kind, i| {
+        const before = try openFdCount();
+        for (0..10) |_| {
+            var capture: std.ArrayList(u8) = .empty;
+            defer capture.deinit(testing.allocator);
+            const got = switch (runner_kind) {
+                .full => runWasmCapturedFull(testing.allocator, testing.io, &proc_exit_42_wasm, &.{}, null, null, .none, null, preopens, &.{}, &.{}, null, .{}),
+                .jit => runWasmJitCaptured(testing.allocator, testing.io, &proc_exit_42_wasm, null, &.{}, preopens, &.{}, &.{}, .{}, null, null, .none),
+                .component => runComponentCaptured(testing.allocator, testing.io, component_bytes, &.{}, preopens, &.{}, &.{}, .none, &capture),
+            };
+            if (expected) |code| {
+                try testing.expectEqual(if (runner_kind == .component) 0 else code, try got);
+            } else |err| try testing.expectError(err, got);
+        }
+        left[i] = @as(isize, @intCast(try openFdCount())) - @as(isize, @intCast(before));
+    }
+    return left;
+}
+
+test "a captured run closes its --dir handles, on every runner (#573)" {
+    if (comptime @import("builtin").os.tag != .linux) return;
+    try testing.expectEqual([3]isize{ 0, 0, 0 }, try fdsLeftOverTenRuns(&preopen_cwd, 42));
+}
+
+test "a captured run whose second --dir cannot be opened closes the first (#573)" {
+    if (comptime @import("builtin").os.tag != .linux) return;
+    try testing.expectEqual([3]isize{ 0, 0, 0 }, try fdsLeftOverTenRuns(&preopen_cwd_then_missing, error.FileNotFound));
+}
+
+test "runWasmCapturedFull: a --dir that cannot be opened is named in the diagnostic (#573)" {
+    try testing.expectError(error.FileNotFound, runWasmCapturedFull(testing.allocator, testing.io, &proc_exit_42_wasm, &.{}, null, null, .none, null, &preopen_cwd_then_missing, &.{}, &.{}, null, .{}));
+    const diag = diagnostic.lastDiagnostic().?;
+    try testing.expect(std.mem.find(u8, diag.message(), "definitely/not/a/real/dir-zwasm") != null);
 }

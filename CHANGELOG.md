@@ -49,6 +49,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A captured run closes the `--dir` directories it opened** (#573). An
+  embedder calling `runWasmCapturedFull`, or the JIT or component runner,
+  repeatedly lost one file descriptor per `--dir` per run, a failed run
+  included, until it reached the process limit. A directory that cannot be
+  opened is now reported at instantiation, by its path.
+
 - **Compiling a call-heavy function on the x86_64 JIT no longer costs calls ×
   instructions** (#557). Every return path — and every call site emits one for
   its trap exit — rebuilt the register-homing plan by scanning the whole
