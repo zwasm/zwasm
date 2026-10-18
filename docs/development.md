@@ -59,8 +59,10 @@ and the wasm level is the strip lever.
 
 The committed test corpus (spec suite, WASI conformance, real-world `.wasm`
 fixtures) runs with **no toolchain beyond Zig and `wasm-tools`**. Regenerating
-fixtures from source (emcc / TinyGo / Rust) is a maintainer task using the Nix
-`gen` shells — contributors never need it; the `.wasm` files are committed.
+fixtures from source is a maintainer task, with the toolchains `flake.nix` pins
+in the `gen` shells (MoonBit is installed by hand:
+`test/realworld/p10/moonbit/PROVENANCE.md`) — contributors never need it; the
+`.wasm` files are committed.
 
 ## Test layers
 

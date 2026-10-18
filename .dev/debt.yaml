@@ -827,7 +827,8 @@ entries:
       `Gens` mask). (2) filesystem half CLOSED at phase B — full 0.3
       descriptor surface (async-eager metadata family + via-stream data
       plane + read-directory stream), official filesystem corpus 14/14.
-      REMAINING = sockets (phase C) + http (phase D).
+      REMAINING = sockets (phase C) + http (phase D). (2026-08-10, superseded
+      by ADR-0205 phases C–D, 2026-08-11)
     first_raised: "2026-07-17"
     last_reviewed: "2026-08-10"
     refs: |-
@@ -2591,7 +2592,8 @@ entries:
       `GraphAsync`; fixtures `test/component/two_async_components_*.wat`; comp-spec 163/0. The async-import→guest
       trampoline + `TaskTable` refactor landed there. Residuals are D-463/D-464 (handle-isolation closed; broader
       adversarial = future-bucket). Only (2) remains: **(2) broader P3 host interfaces** (sockets/http async = Unit
-      E full; http needs the scheduler too) — FUTURE-BUCKET / consumer-gated, NOT `now`. Detailed history below.
+      E full; http needs the scheduler too) — FUTURE-BUCKET / consumer-gated, NOT `now` (2026-06, superseded by
+      ADR-0205 phases C–D, 2026-08-11). Detailed history below.
       GATES the ADR-0193 default flip: `-Dwasi` default stays `.p2` (async opt-in via `-Dwasi=p3`) until this
       Unit E/F host breadth settles; when it does, flip the build.zig default `.p2 → .p3` (one line) + the
       old-default-assuming sites (`check_build_dce` p2-clean assertion becomes p3-base, README/docs default text).

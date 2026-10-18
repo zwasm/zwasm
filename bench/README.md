@@ -38,6 +38,10 @@ bash scripts/record_latency_bench.sh --reason "<tag>: <gist>"   # + append
 Rationale and what each harness can and cannot see:
 [`ADR-0209`](../.dev/decisions/0209_percall_latency_bench.md).
 
+To compare two builds, copy their runners into one directory and start both
+from there: on x86_64 Linux the same runner started from a path 21 characters
+longer measured the JIT rows and `stack_limit_query_ns` 2% slower.
+
 The `results/` split (committed `history.yaml` vs gitignored
 `recent.yaml`) was introduced 2026-05-04 per §9.6 / 6.H +
 ADR-0012 §7. The two-file approach prevents per-commit bench

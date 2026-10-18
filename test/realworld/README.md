@@ -36,9 +36,10 @@ manual `test-realworld-diff-interp` step, so no exclusion is silent
 
 **Which runners answer "does JIT-emitted code compute the right answer?"** —
 `diff_runner.zig --jit` (56 fixtures vs wasmtime), and in `test-all` also
-`run_edge_realworld_p10` (8 fixtures in `p10/` vs static `.expect`) and
-`run_aot_diff` (56 of its 63 vs the `.cwasm` lane). They differ by oracle:
-an independent runtime, a checked-in expectation, and zwasm itself.
+`run_edge_realworld_p10` (the fixtures `p10/EXPECTED.txt` lists, vs static
+`.expect`) and `run_aot_diff` (the `test/realworld/wasm/` part of its corpus,
+vs the `.cwasm` lane). They differ by oracle: an independent runtime, a
+checked-in expectation, and zwasm itself.
 `run_runner_jit.zig` answers none of them — it only says the backend encoded
 every fixture. The same question for the **interpreter** is answered by the
 `--interp` lane above (52 vs wasmtime in `test-all`, 56 via the manual step).
