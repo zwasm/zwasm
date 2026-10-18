@@ -286,8 +286,6 @@ pub export fn wasm_store_delete(s: ?*Store) callconv(.c) void {
             parkJitAsZombie(alloc, handle, jp) catch {};
             inst.jit = null;
         }
-        inst.funcs_storage = &.{};
-        inst.func_ptrs_storage = &.{};
         if (!parked) alloc.destroy(inst);
     }
     handle.live_instances.deinit(alloc);
@@ -1627,8 +1625,6 @@ const BuildBindingsCApi = struct {
 /// (`parkOrFreeInterp`), else frees.
 fn failBuiltInstance(alloc: std.mem.Allocator, store: *Store, inst: *Instance, inst_rt: *runtime.Runtime) void {
     const parked = parkOrFreeInterp(alloc, store, inst, inst_rt);
-    inst.funcs_storage = &.{};
-    inst.func_ptrs_storage = &.{};
     removeFromLiveInstances(store, inst);
     if (!parked) alloc.destroy(inst);
 }
@@ -1788,8 +1784,6 @@ fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytyp
             crossStoreTrap(alloc, store, trap_out);
         }
         const parked = parkOrFreeInterp(alloc, store, inst, inst_rt);
-        inst.funcs_storage = &.{};
-        inst.func_ptrs_storage = &.{};
         if (!parked) alloc.destroy(inst);
         return null;
     };
@@ -1945,11 +1939,9 @@ pub export fn wasm_instance_delete(i: ?*Instance) callconv(.c) void {
         }
         handle.exports_storage = &.{};
     }
+    // A parked instance keeps its functions: a funcref into it runs until
+    // `wasm_store_delete`, as an import of it does (#555).
     const parked = if (handle.runtime) |rt| parkOrFreeInterp(alloc, store, handle, rt) else false;
-    // Emptied even when parked, so a funcref into a deleted instance is not
-    // found, though an import of it still runs (#555).
-    handle.funcs_storage = &.{};
-    handle.func_ptrs_storage = &.{};
     if (!parked) alloc.destroy(handle);
 }
 
