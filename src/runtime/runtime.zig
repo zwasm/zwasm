@@ -148,11 +148,11 @@ pub const Runtime = struct {
     /// they manage their own slices; `deinit` then performs real
     /// frees.
     alloc: Allocator,
-    /// Optional back-pointer to the owning `c_api/instance.Instance`,
-    /// stored as `?*anyopaque` to keep Zone 1 (`src/runtime/`) free
-    /// of any Zone 3 import. Used by §9.6 / 6.K.3 cross-module
-    /// dispatch to recover the source instance from a FuncEntity's
-    /// runtime back-ref. Not consulted on the hot path.
+    /// Optional back-pointer to the owning `runtime/instance/instance.zig`
+    /// `Instance`, erased as `?*anyopaque`; `hookSite` casts it back.
+    /// Used by §9.6 / 6.K.3 cross-module dispatch to recover the source
+    /// instance from a FuncEntity's runtime back-ref. Not consulted on
+    /// the hot path.
     instance: ?*anyopaque = null,
     /// Linear-memory bytes for memory 0 (legacy single-memory
     /// shortcut). Pointer-alias of `memories[0].bytes` once

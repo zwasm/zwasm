@@ -1,4 +1,4 @@
-//! `.cwasm` v0.1 binary format types + write/parse helpers
+//! `.cwasm` binary format types + write/parse helpers
 //! (per ADR-0039).
 //!
 //! Inline-bytes container: header + per-func metadata +
@@ -9,10 +9,8 @@
 //! `parseReloc` helpers.
 //!
 //! All multi-byte fields are little-endian. The header is
-//! exactly **60 bytes** (ADR-0039's "56 bytes" was an
-//! arithmetic miscount; corrected by ADR-0039 Revision 2);
-//! per-func metadata is exactly 12 bytes per entry; relocs
-//! are 9 bytes each (4 + 4 + 1, packed). All three are
+//! `header_size` bytes, each per-func metadata entry
+//! `func_meta_size` and each reloc `reloc_size` (packed). All three are
 //! fixed-shape so the loader can mmap the file and index
 //! sections without sequential parsing.
 //!
@@ -186,9 +184,8 @@ pub const CwasmImport = struct {
     kind: u8,
 };
 
-/// Per-function metadata entry. 12 bytes; emitted in
-/// `func_idx` order so the loader can index by `func_idx *
-/// func_meta_size`.
+/// Per-function metadata entry, emitted in `func_idx` order so the
+/// loader can index by `func_idx * func_meta_size`.
 pub const CwasmFuncMeta = struct {
     code_offset: u32, // offset within code section
     code_size: u32, // bytes of machine code for this func

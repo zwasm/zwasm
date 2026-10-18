@@ -23,7 +23,7 @@
 #     - clear history (rare; usually only when discharging)
 #
 # Discharge rule (project-wide): documented in
-# `.claude/rules/heisenbug_discharge.md`. Default: N consecutive
+# `.claude/references/investigation_discipline.md` §2. Default: N consecutive
 # `silent` outcomes since the last `fail`/`segv` → discharge
 # candidate. The autonomous /continue loop checks this each resume
 # for active heisenbug debt rows. (D-134 — the original
@@ -76,7 +76,7 @@ case "$mode_or_outcome" in
     if [ "$last_outcome" = "silent" ] && [ "$last_streak" -ge "$threshold" ]; then
       echo ""
       echo "*** DISCHARGE CANDIDATE: $last_streak consecutive silent runs ≥ threshold $threshold ***"
-      echo "    See .claude/rules/heisenbug_discharge.md for the close procedure."
+      echo "    See .claude/references/investigation_discipline.md §2 for the close procedure."
     fi
     exit 0
     ;;
@@ -123,6 +123,6 @@ echo "$name: $outcome @ $sha (streak: $streak)"
 if [ "$outcome" = "silent" ] && [ "$streak" -ge "$threshold" ]; then
   echo ""
   echo "*** DISCHARGE CANDIDATE: $streak consecutive silent runs ≥ threshold $threshold ***"
-  echo "    Per .claude/rules/heisenbug_discharge.md, the autonomous"
+  echo "    Per .claude/references/investigation_discipline.md §2, the autonomous"
   echo "    loop may now propose closing the corresponding debt row."
 fi

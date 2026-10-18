@@ -547,7 +547,7 @@ fn callRefOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// owned by another runtime runs in ITS context — own globals / memory /
 /// tables — via `invokeCrossRuntime` (D-325). Either way the callee runs
 /// nested, so a tail form follows with `tailReturn`: the trampoline (D-187)
-/// swaps frames only within one runtime.
+/// swaps frames only within one runtime (#538).
 fn routeForeignCallee(rt: *Runtime, callee_rt: *Runtime, func_idx: u32, callee: *const zir.ZirFunc) anyerror!bool {
     if (func_idx < callee_rt.host_calls.len) {
         if (callee_rt.host_calls[func_idx]) |hc| {

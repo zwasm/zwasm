@@ -13,8 +13,8 @@
 //! 2. **Unclassified → internal-error exit (ADR-0166)**: any other
 //!    fatal signal is a zwasm-INTERNAL bug (v2 emits explicit checks
 //!    everywhere elision is off). `installInternalFaultHandler` (called
-//!    once from `cli/main.zig` + embedding init) writes a fixed
-//!    "internal error" line (async-signal-safe) and `_exit`s with a
+//!    once from `cli/main.zig`) writes a fixed "internal error" line
+//!    (async-signal-safe) and `_exit`s with a
 //!    DISTINCT code — a diagnosable death, clearly NOT a wasm trap.
 //!
 //! Distinct from the test runner's `spec_assert_runner_base.
@@ -205,9 +205,9 @@ var install_state = std.atomic.Value(InstallState).init(.uninstalled);
 /// Idempotent auto-install for the JIT invoke path (ADR-0202 D4):
 /// guard-page elision REQUIRES a fault handler, so any JIT execution
 /// must have one armed. No-op if a handler is already installed
-/// (production CLI init, embedding init, or the spec runner); briefly
-/// spin-waits while another thread's install is in flight, so a
-/// handler is ALWAYS armed by the time this returns.
+/// (production CLI init or the spec runner); briefly spin-waits while
+/// another thread's install is in flight, so a handler is ALWAYS armed
+/// by the time this returns.
 ///
 /// Two axes, one call: the process-wide dispositions (the state machine
 /// below, once per process) and THIS thread's alternate stack (once per
@@ -241,8 +241,8 @@ pub fn markInstalled() void {
 
 /// FORCE-install the diagnostic-only internal-fault handler NOW — the
 /// production last-resort disposition (ADR-0166). Called once at CLI
-/// startup (`cli/main.zig`) + embedding init + the fork-recovery
-/// tests; installs regardless of prior state, including a marked
+/// startup (`cli/main.zig`) + the fork-recovery tests; installs
+/// regardless of prior state, including a marked
 /// external owner. No-op install body on wasi. Serializes with any
 /// in-flight install and publishes `installed` only after its OWN
 /// complete install.

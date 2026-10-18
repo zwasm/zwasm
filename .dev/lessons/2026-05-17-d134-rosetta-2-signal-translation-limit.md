@@ -223,7 +223,7 @@ ADR-0067 §Alternatives for the load-bearing decision record.
    24034/0/2015 + 13301/0/440 with Mac aarch64.
 
 The retry-loop streak discipline in
-[`heisenbug_discharge.md`](../../.claude/rules/heisenbug_discharge.md)
+[`investigation_discipline.md` §2](../../.claude/references/investigation_discipline.md)
 remains in force for future heisenbug debt rows; D-134 itself
 closed via root-cause identification + environmental host
 change rather than empirical streak.

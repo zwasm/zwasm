@@ -845,19 +845,11 @@ pub fn build(b: *std.Build) void {
     // consuming `manifest_runtime.txt` (assert_return / assert_trap /
     // module / register / invoke) instead of the parse-only
     // `manifest.txt`. Surfaces v2 interp behaviour gaps that the
-    // parse runner cannot see.
-    //
-    // **Not wired into `test-all` aggregate**. The current corpus
-    // panics inside `interp.popOperand`'s assert when a fixture
-    // exercises an operand-stack discipline bug (one of the 39
-    // trap-mid-execution patterns ADR-0011 surfaced). 6.E (interp
-    // behaviour bug investigation) addresses these; once the
-    // underlying gaps close, this step joins `test-all`.
-    // Until then, run standalone for triage:
+    // parse runner cannot see. Run standalone for triage:
     //   zig build test-wasmtime-misc-runtime
     const run_wasmtime_misc_runtime = b.addRunArtifact(wast_runtime_runner_exe);
     run_wasmtime_misc_runtime.addArg(b.pathFromRoot("test/wasmtime_misc/wast"));
-    const test_wasmtime_misc_runtime_step = b.step("test-wasmtime-misc-runtime", "Run the runtime-asserting WAST runner against the wasmtime_misc corpus (NOT in test-all; surfaces 6.E targets)");
+    const test_wasmtime_misc_runtime_step = b.step("test-wasmtime-misc-runtime", "Run the runtime-asserting WAST runner against the wasmtime_misc corpus (also in test-all)");
     test_wasmtime_misc_runtime_step.dependOn(&run_wasmtime_misc_runtime.step);
 
     // `zig build test-realworld` — parse-smoke a vendored set of
@@ -1793,14 +1785,6 @@ pub fn build(b: *std.Build) void {
     // with a null WASI host, so its traps measured the harness, not
     // the JIT. `test-realworld-diff-jit` carries the execution side
     // now (D-283).
-    //
-    // test-wasmtime-misc-runtime (today 266/0/0 with panics
-    // resolved) is the only runtime-asserting runner for non-SIMD
-    // wasm-2.0 features — ADR-0056's discovery #1 ("non-SIMD spec
-    // coverage is fake green") surfaces it as the bridge until
-    // 9.9-l-1 lands the non-SIMD spec_assert_runner. The block at
-    // line 333-343 above (NOT in test-all) is now historical; the
-    // panic gap referenced there has closed.
     //
     // §9.9 / 9.9-m-5 (per ADR-0056): test-edge-cases wired into
     // test-all on all hosts. D-087 (x86_64 trunc trap), D-088
