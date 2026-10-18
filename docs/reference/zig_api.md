@@ -47,6 +47,7 @@ lifetime.
 
 - `engine`: `.auto` (default — prefers JIT, interp fallback when the JIT declines the module; an invalid module is `InstantiateFailed` on every engine, #233) · `.jit` · `.interp`.
   The request, not the outcome: `Instance.engine()` reads back which engine ended up running the instance (`.jit` / `.interp`, never `.auto`).
+  Read by `Module.instantiate` only: a `Linker` instance runs on the interpreter whatever `engine` says, and `Instance.engine()` reports `.interp` (#574).
 - `fuel`: a `Budget` — `.{ .limited = N }` (default finite) or `.unmetered`.
 - `max_memory_pages`, `max_table_elements`: `Budget` host caps (finite by default).
 
