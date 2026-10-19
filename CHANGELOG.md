@@ -49,6 +49,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **An unknown `zwasm run` option is a usage error** (#236). It was taken as
+  the module path and reported as a file that cannot be read, with exit 1; it
+  now exits 2 and names the option. An option whose value starts with `-` is a
+  usage error too, and `--` ends the options.
+
 - **A host callback whose argument or result buffer cannot be allocated
   reports out of memory** (#337). The interpreter trapped as if the guest had
   run `unreachable`; `zwasm_trap_kind` now answers `ZWASM_TRAP_OUT_OF_MEMORY`

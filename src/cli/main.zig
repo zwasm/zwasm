@@ -140,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
             var next_arg = arg_it.next();
             while (next_arg) |a| {
                 if (std.mem.eql(u8, a, "--invoke")) {
-                    const spec = arg_it.next() orelse {
+                    const spec = optionValue(&arg_it) orelse {
                         try printlnErr(io, "usage: zwasm run --invoke <name>[=arg1,arg2,...] <path.wasm> [args...]");
                         std.process.exit(2);
                     };
@@ -157,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
                     const mode = if (std.mem.startsWith(u8, a, eq))
                         a[eq.len..]
                     else
-                        arg_it.next() orelse {
+                        optionValue(&arg_it) orelse {
                             try printlnErr(io, "usage: zwasm run --engine <auto|interp|jit> <path.wasm> [args...]");
                             std.process.exit(2);
                         };
@@ -184,7 +184,7 @@ pub fn main(init: std.process.Init) !void {
                 } else if (std.mem.eql(u8, a, "--dir")) {
                     // `--dir <host>[:<guest>]` — preopen a host dir for the
                     // guest. Without a colon the guest path mirrors the host.
-                    const spec = arg_it.next() orelse {
+                    const spec = optionValue(&arg_it) orelse {
                         try printlnErr(io, "usage: zwasm run --dir <host>[:<guest>] <path.wasm> [args...]");
                         std.process.exit(2);
                     };
@@ -197,7 +197,7 @@ pub fn main(init: std.process.Init) !void {
                     // `--env KEY=VAL` — inject a WASI environment variable. A
                     // bare `--env KEY` (no '=') sets an empty value, matching
                     // wasmtime's permissive parse.
-                    const spec = arg_it.next() orelse {
+                    const spec = optionValue(&arg_it) orelse {
                         try printlnErr(io, "usage: zwasm run --env KEY=VAL <path.wasm> [args...]");
                         std.process.exit(2);
                     };
@@ -210,7 +210,7 @@ pub fn main(init: std.process.Init) !void {
                     }
                     next_arg = arg_it.next();
                 } else if (std.mem.eql(u8, a, "--fuel")) {
-                    const v = arg_it.next() orelse {
+                    const v = optionValue(&arg_it) orelse {
                         try printlnErr(io, "usage: zwasm run --fuel <N> <path.wasm> [args...]");
                         std.process.exit(2);
                     };
@@ -220,7 +220,7 @@ pub fn main(init: std.process.Init) !void {
                     };
                     next_arg = arg_it.next();
                 } else if (std.mem.eql(u8, a, "--timeout")) {
-                    const v = arg_it.next() orelse {
+                    const v = optionValue(&arg_it) orelse {
                         try printlnErr(io, "usage: zwasm run --timeout <ms> <path.wasm> [args...]");
                         std.process.exit(2);
                     };
@@ -230,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
                     };
                     next_arg = arg_it.next();
                 } else if (std.mem.eql(u8, a, "--max-memory")) {
-                    const v = arg_it.next() orelse {
+                    const v = optionValue(&arg_it) orelse {
                         try printlnErr(io, "usage: zwasm run --max-memory <bytes> <path.wasm> [args...]");
                         std.process.exit(2);
                     };
@@ -240,7 +240,7 @@ pub fn main(init: std.process.Init) !void {
                     };
                     next_arg = arg_it.next();
                 } else if (std.mem.eql(u8, a, "--max-table-elements")) {
-                    const v = arg_it.next() orelse {
+                    const v = optionValue(&arg_it) orelse {
                         try printlnErr(io, "usage: zwasm run --max-table-elements <N> <path.wasm> [args...]");
                         std.process.exit(2);
                     };
@@ -261,6 +261,17 @@ pub fn main(init: std.process.Init) !void {
                     // (least surprise — "clear" must not imply "populate").
                     cache_clear = true;
                     next_arg = arg_it.next();
+                } else if (std.mem.eql(u8, a, "--")) {
+                    // End of options: the next token is the path even if it
+                    // starts with `-` (wasmtime's spelling). Tested before
+                    // `isOption`, which `--` also satisfies.
+                    next_arg = arg_it.next();
+                    break;
+                } else if (isOption(a)) {
+                    var buf: [256]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&buf, "zwasm run: unknown option '{s}' — run 'zwasm --help' for usage", .{a}) catch "zwasm run: unknown option";
+                    try printlnErr(io, msg);
+                    std.process.exit(2);
                 } else break;
             }
             const path_arg = next_arg orelse {
@@ -407,6 +418,19 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     try stdout.flush();
+}
+
+/// A `run` option's value; null when it is missing or is itself an option, so
+/// `--invoke --bogus m.wasm` is a usage error instead of a lookup of an export
+/// named `--bogus` (#236).
+fn optionValue(it: *std.process.Args.Iterator) ?[]const u8 {
+    const v = it.next() orelse return null;
+    return if (isOption(v)) null else v;
+}
+
+/// `-` followed by anything. `-` alone stays a path, as on wasmtime.
+fn isOption(token: []const u8) bool {
+    return token.len > 1 and token[0] == '-';
 }
 
 /// Platform default cache root for `--cache` (ADR-0203 D5): the user

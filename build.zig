@@ -1362,6 +1362,28 @@ pub fn build(b: *std.Build) void {
     const test_cli_invalid_module_step = b.step("test-cli-invalid-module", "Run each invalid-module fixture through `zwasm run`, `zwasm run --engine=jit` and `zwasm compile` and require exit 1 with the reason on stderr from all three (issue #233)");
     test_cli_invalid_module_step.dependOn(&run_cli_invalid_module.step);
 
+    // `zig build test-cli-usage` — issues #236 / #232: an unknown `run`
+    // option is a usage error (exit 2), `--` ends the options, and a known
+    // option after the module path stays the guest's argv. Subprocess for the
+    // same reason as above: only `main.zig` parses `run`'s options.
+    const cli_usage_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/runners/cli_usage_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_usage_mod.addImport("spawned_cli", spawned_cli_mod);
+    const cli_usage_exe = b.addExecutable(.{
+        .name = "zwasm-cli-usage",
+        .root_module = cli_usage_mod,
+    });
+    const run_cli_usage = b.addRunArtifact(cli_usage_exe);
+    run_cli_usage.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
+    run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/default_entry/start_void.wasm"));
+    run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/cli_usage/argv_echo.wasm"));
+    run_cli_usage.has_side_effects = true;
+    const test_cli_usage_step = b.step("test-cli-usage", "Run `zwasm run` with unknown, misplaced and value-swallowing options and require a usage error (exit 2), and `--` and post-path options to reach the module (issues #236, #232)");
+    test_cli_usage_step.dependOn(&run_cli_usage.step);
+
     // `zig build test-wasi-p1-official` — the OFFICIAL wasi-testsuite
     // wasm32-wasip1 corpus (D-582). Deliberately NOT in `test-all` yet: the
     // corpus is not green on every OS (D-583 carries the live count — no copy
@@ -1767,7 +1789,8 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_cli_argv0.step); // issue #256 CLI argv[0] = base name
     test_all_step.dependOn(&run_cli_default_entry.step); // issue #220 default-entry parity across the two run drivers
     test_all_step.dependOn(&run_cli_invalid_module.step); // issue #233 the same verdict from run, run --engine=jit and compile
-    test_all_step.dependOn(&run_spawned_cli_unit.step); // the `--version` mode parser all five spawning runners go through
+    test_all_step.dependOn(&run_cli_usage.step); // issues #236 / #232 run's options: unknown = exit 2, `--` ends them
+    test_all_step.dependOn(&run_spawned_cli_unit.step); // the `--version` mode parser every spawning runner goes through
     test_all_step.dependOn(&run_wasi_p1.step);
     // §9.7 / 7.8 row close (D-045 chunks 1-14 fully discharged):
     // wire test-spec-assert into test-all on ALL hosts. Three-host
