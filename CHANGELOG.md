@@ -49,6 +49,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A host callback whose argument or result buffer cannot be allocated
+  reports out of memory** (#337). The interpreter trapped as if the guest had
+  run `unreachable`; `zwasm_trap_kind` now answers `ZWASM_TRAP_OUT_OF_MEMORY`
+  (10), not `ZWASM_TRAP_UNREACHABLE` (1).
+
 - **An out-of-bounds access in an embedder's first multi-result call traps
   instead of killing the process** (#302). The JIT entry that multi-result
   exports, and argument lists with no dedicated helper, go through never

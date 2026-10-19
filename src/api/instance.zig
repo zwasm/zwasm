@@ -2072,6 +2072,15 @@ fn allocRefHandle(rm: ?RefMarshalCtx, payload: u64) ?*anyopaque {
     return @ptrCast(r);
 }
 
+/// The args and results buffers `hostFuncThunk` hands its callback: both, or
+/// neither. Takes the allocator so a test can fail either allocation.
+fn allocHostMarshalBuffers(ca: std.mem.Allocator, np: usize, nr: usize) runtime.Trap!struct { args: []Val, results: []Val } {
+    const args = ca.alloc(Val, np) catch return runtime.Trap.OutOfMemory;
+    errdefer ca.free(args);
+    const results = ca.alloc(Val, nr) catch return runtime.Trap.OutOfMemory;
+    return .{ .args = args, .results = results };
+}
+
 /// `HostCall` fn_ptr for a `wasm_func_new` host callback (wired by the
 /// buildBindings host-func arm). Marshals the guest's operand-stack args
 /// (top `params.len`, left-to-right) into a `wasm_val_vec_t`, invokes the
@@ -2084,9 +2093,10 @@ fn hostFuncThunk(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const nr = p.results.len;
     if (rt.operand_len < np) return runtime.Trap.StackOverflow;
     const ca = std.heap.c_allocator;
-    const args_data = ca.alloc(Val, p.params.len) catch return runtime.Trap.Unreachable;
+    const bufs = try allocHostMarshalBuffers(ca, p.params.len, nr);
+    const args_data = bufs.args;
     defer ca.free(args_data);
-    const res_data = ca.alloc(Val, nr) catch return runtime.Trap.Unreachable;
+    const res_data = bufs.results;
     defer ca.free(res_data);
     // D-269B: a ref-kind arg is marshalled OUT as an owned `*Ref` that
     // zwasm lends to the callback and frees after it returns. Recover
@@ -3658,6 +3668,29 @@ test "#443: a result the marshaller cannot finish writes nothing and strands no 
     }
     // And nothing stranded: `testing.allocator` reports the first handle at the
     // end of this test if the loop returned without releasing it.
+}
+
+// ============================================================
+// #337 — a host callback's marshalling buffers that cannot be allocated
+// ============================================================
+
+/// Fails the `fail_at`-th marshalling allocation and checks the kind a C host
+/// reads: `hostFuncThunk` returns the helper's error unchanged, and the interp
+/// hands it to `mapInterpTrap`.
+fn expectHostMarshalOom(fail_at: usize) !void {
+    var one_shot: OneShotFailingAllocator = .{ .backing = testing.allocator, .fail_at = fail_at };
+    if (allocHostMarshalBuffers(one_shot.allocator(), 2, 1)) |_| {
+        return error.AllocationDidNotFail;
+    } else |err| try testing.expectEqual(TrapKind.out_of_memory, mapInterpTrap(err));
+}
+
+test "#337: the args buffer that cannot be allocated reports out of memory" {
+    try expectHostMarshalOom(0);
+}
+
+test "#337: the results buffer that cannot be allocated reports out of memory and releases the args buffer" {
+    try expectHostMarshalOom(1);
+    // `testing.allocator` reports the args buffer if it was not released.
 }
 
 // ============================================================
