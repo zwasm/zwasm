@@ -47,7 +47,8 @@ pub const usage =
     \\zwasm — a WebAssembly runtime
     \\
     \\Usage:
-    \\  zwasm run <file.wasm|file.cwasm> [args...]   Run a module (WASI _start / main)
+    \\  zwasm run [options] <file.wasm|file.cwasm> [args...]  Run a module (WASI _start / main)
+    \\    options go before the module path; everything after it is the guest's argv:
     \\    [--invoke <name>[=a,b,...]]                Invoke a named export (optional call args)
     \\    [--engine <auto|interp|jit>]                    Engine: default auto (prefers JIT, interp fallback); interp|jit force one (both full WASI; jit adds SIMD)
     \\    [--dir <host>[:<guest>]]                   Preopen a host directory for WASI

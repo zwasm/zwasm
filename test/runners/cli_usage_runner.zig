@@ -44,6 +44,7 @@ const rows = [_]Row{
     .{ .args = &.{ "run", "--dir", "--bogus", M }, .exit = 2, .stderr = .{ .has = "usage: zwasm run --dir" } },
     .{ .args = &.{ "run", "--", M }, .exit = 0 },
     .{ .args = &.{ "run", E, "--engine", "jit" }, .exit = 0, .stdout = .{ .is = "--engine\njit\n" }, .stderr = .{ .is = "" } },
+    .{ .args = &.{"--help"}, .exit = 0, .stdout = .{ .has = "run [options]" } },
 };
 
 pub fn main(init: std.process.Init) !u8 {

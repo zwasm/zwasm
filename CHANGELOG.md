@@ -54,6 +54,9 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   now exits 2 and names the option. An option whose value starts with `-` is a
   usage error too, and `--` ends the options.
 
+- **`zwasm --help` says `run`'s options go before the module path** (#232).
+  Everything after the path is the guest's argv, as on wasmtime.
+
 - **A host callback whose argument or result buffer cannot be allocated
   reports out of memory** (#337). The interpreter trapped as if the guest had
   run `unreachable`; `zwasm_trap_kind` now answers `ZWASM_TRAP_OUT_OF_MEMORY`

@@ -11,7 +11,7 @@ job, not a runtime's. Dispatch source:
 
 ```
 zwasm                                     # version + build-options banner
-zwasm run <file.wasm|.cwasm> [args...]    # run a module
+zwasm run [options] <file.wasm|.cwasm> [args...]  # run a module
 zwasm compile <file.wasm> -o <out.cwasm>  # compile to a .cwasm AOT artifact
 zwasm --version | -V                      # version + build identity (wasm/wasi/engine/mode)
 zwasm --help | -h | help                  # usage
@@ -31,6 +31,10 @@ stderr. A module with neither export is refused the same way (use `--invoke`).
 The same contract holds on every engine and on a `.cwasm` (CWAS magic, which
 loads + runs directly with no parse/compile); a shape the JIT cannot call is
 refused with the reason rather than silently skipped (ADR-0230).
+
+Options go before the module path; everything after it is the guest's argv,
+even a token that spells a `run` option. `--` ends the options, for a module
+path that begins with `-`.
 
 | Flag                       | Effect                                                                                                                                                                                                                                       |
 |----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
