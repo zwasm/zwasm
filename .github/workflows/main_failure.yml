@@ -66,8 +66,8 @@ jobs:
             printf '````\n' >> "$body"
           done
 
-          oldest_open() { gh issue list --label "$LABEL" --state open --json number --jq '[.[].number] | min // empty'; }
-          issue="$(oldest_open)"
+          open_issues() { gh issue list --label "$LABEL" --state open --json number --jq '[.[].number]'; }
+          issue="$(open_issues | jq -r 'min // empty')"
           if [ -z "$issue" ]; then
             issue_body="$RUNNER_TEMP/issue.md"
             cat > "$issue_body" <<'EOF'
@@ -80,8 +80,17 @@ jobs:
             # Two reports can both find no tracker and both open one. The lowest
             # number is the tracker; a concurrency group would instead drop the
             # middle report of a burst (only one run per group stays pending).
-            oldest="$(oldest_open)"
-            if [ "$oldest" != "$issue" ]; then
+            # The search lags the create (#589), so wait until it lists this
+            # issue, then yield only to a lower number: on a lagging list the two
+            # reports can each see only the other's issue, and yielding both ways
+            # closes both.
+            for _ in 1 2 3 4 5 6; do
+              open="$(open_issues)"
+              jq -e --argjson n "$issue" 'any(. == $n)' <<<"$open" >/dev/null && break
+              sleep 5
+            done
+            oldest="$(jq -r 'min // empty' <<<"$open")"
+            if [ -n "$oldest" ] && [ "$oldest" -lt "$issue" ]; then
               gh issue close "$issue" --comment "opened by a concurrent report; the tracker is #$oldest"
               issue="$oldest"
             fi
