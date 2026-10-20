@@ -65,9 +65,7 @@ const rows = [_]Row{
     Row.same("start_void", .{ .exit = 0 }),
     Row.same("main_i32", .{ .exit = 0, .stdout = "42\n" }),
     Row.same("only_f", no_entry),
-    // The `.cwasm` of a module with no function export fails to load before
-    // the entry is judged — #432's answer, pinned as it is today.
-    .{ .fixture = "no_func_export", .auto = no_entry, .interp = no_entry, .jit = no_entry, .cwasm = .{ .exit = 1, .stderr = .{ .contains = "MissingTypeSection" } } },
+    Row.same("no_func_export", no_entry),
     // C2 — an entry with parameters is refused by name, on every path.
     Row.same("start_param", .{ .exit = 1, .stderr = .{ .contains = "the default entry '_start' takes 1 parameter and none were supplied" } }),
     Row.same("main_param", .{ .exit = 1, .stderr = .{ .contains = "the default entry 'main' takes 1 parameter and none were supplied" } }),

@@ -120,8 +120,12 @@ pub fn deserializeToCompiledWasm(allocator: Allocator, cwasm_bytes: []const u8) 
 
     // Types (mirrors compile.zig:623 — arena-backed; FuncType param/result
     // slices in func_sigs alias these and share the CompiledWasm lifetime).
-    const type_section = module.find(.type) orelse return Error.MissingTypeSection;
-    const types = try sections.decodeTypes(a, type_section.body);
+    // No type section is an empty type space, as compileWasm's no-function
+    // early return treats it; a typeidx into it fails the range checks below.
+    const types: []const zir.FuncType = if (module.find(.type)) |ts|
+        (try sections.decodeTypes(a, ts.body)).items
+    else
+        &.{};
 
     // Imports (mirrors compile.zig:74-76 + :644-648).
     var imports_buf: ?sections.Imports = null;
@@ -152,15 +156,15 @@ pub fn deserializeToCompiledWasm(allocator: Allocator, cwasm_bytes: []const u8) 
         for (ib.items) |imp| {
             if (imp.kind != .func) continue;
             const tidx = imp.payload.func_typeidx;
-            if (tidx >= types.items.len) return Error.MissingTypeSection;
-            func_sigs[w] = types.items[tidx];
+            if (tidx >= types.len) return Error.MissingTypeSection;
+            func_sigs[w] = types[tidx];
             func_typeidxs[w] = tidx;
             w += 1;
         }
     }
     for (defined_func_typeidx, 0..) |type_idx, i| {
-        if (type_idx >= types.items.len) return Error.MissingTypeSection;
-        func_sigs[num_imports + i] = types.items[type_idx];
+        if (type_idx >= types.len) return Error.MissingTypeSection;
+        func_sigs[num_imports + i] = types[type_idx];
         func_typeidxs[num_imports + i] = type_idx;
     }
 
@@ -202,8 +206,8 @@ pub fn deserializeToCompiledWasm(allocator: Allocator, cwasm_bytes: []const u8) 
         const out = try allocator.alloc(u32, tags_slice.len);
         errdefer allocator.free(out);
         for (tags_slice, 0..) |tag, i| {
-            if (tag.typeidx >= types.items.len) return Error.InvalidFuncIndex;
-            out[i] = @intCast(types.items[tag.typeidx].params.len);
+            if (tag.typeidx >= types.len) return Error.InvalidFuncIndex;
+            out[i] = @intCast(types[tag.typeidx].params.len);
         }
         break :blk out;
     };
@@ -213,9 +217,9 @@ pub fn deserializeToCompiledWasm(allocator: Allocator, cwasm_bytes: []const u8) 
         const out = try allocator.alloc(u32, tags_slice.len);
         errdefer allocator.free(out);
         for (tags_slice, 0..) |tag, i| {
-            if (tag.typeidx >= types.items.len) return Error.InvalidFuncIndex;
+            if (tag.typeidx >= types.len) return Error.InvalidFuncIndex;
             var slots: u32 = 0;
-            for (types.items[tag.typeidx].params) |p| {
+            for (types[tag.typeidx].params) |p| {
                 slots += runtime_mod.slotCountForValType(p);
             }
             out[i] = slots;
