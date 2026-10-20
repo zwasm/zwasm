@@ -70,6 +70,7 @@ const ZirOp = zir.ZirOp;
 const ZirInstr = zir.ZirInstr;
 const Liveness = zir.Liveness;
 const LiveRange = zir.LiveRange;
+const RegClass = zir.RegClass;
 
 pub const Error = error{
     UnsupportedControlFlow,
@@ -97,6 +98,7 @@ pub const stackEffect = stack_effect_mod.stackEffect;
 // ADR-0155 (D-265 Phase IV stage 1) — register-homed locals. The homing plan
 // is the single source of truth shared with regalloc + emit.
 const local_homing = @import("local_homing.zig");
+const result_class = @import("liveness_result_class.zig");
 
 /// One control-nesting frame for the single-pass liveness walk.
 /// Hoisted to module scope (was local to `compute`) so the D-330
@@ -179,6 +181,13 @@ fn calleeSig(
     return module_types[instr.payload];
 }
 
+/// A tag's function type: `tag_typeidxs` maps the tag index to a
+/// `module_types` index.
+fn tagSig(tag_idx: u32, tag_typeidxs: []const u32, module_types: []const zir.FuncType) Error!zir.FuncType {
+    if (tag_idx >= tag_typeidxs.len or tag_typeidxs[tag_idx] >= module_types.len) return Error.UnsupportedOp;
+    return module_types[tag_typeidxs[tag_idx]];
+}
+
 fn isControlFlow(op: ZirOp) bool {
     // After sub-7.5c-iv, every Wasm 1.0 control-flow op is
     // handled explicitly in `compute`. The function exists
@@ -208,10 +217,12 @@ fn isControlFlow(op: ZirOp) bool {
 /// `func_sigs` indexes function signatures by func_idx; consulted
 /// by `call N` to determine the pop/push count. `module_types`
 /// indexes type signatures by typeidx; consulted by
-/// `call_indirect type_idx`. `tag_param_counts` indexes a tag's
-/// payload count by tag index; consulted by `throw`, with the emit's
-/// fallback of 0 for an index past the end. Pass empty slices when
-/// the function has no calls or throws (the straight-line tests).
+/// `call_indirect type_idx`. `tag_typeidxs` maps a tag index to its
+/// type in `module_types`; consulted by `throw` (payload count, with the
+/// emit's fallback of 0 for an index past the end) and by a catch clause
+/// (payload classes). `globals_valtypes` gives `global.get` its class.
+/// Pass empty slices when the function uses none of them (the
+/// straight-line tests).
 ///
 /// **Phase 7.5 scope**: extends Phase-5's straight-line MVP +
 /// conversions + sat_trunc (sub-h5) with `call` + `call_indirect`.
@@ -223,10 +234,15 @@ pub fn compute(
     func: *const ZirFunc,
     func_sigs: []const zir.FuncType,
     module_types: []const zir.FuncType,
-    tag_param_counts: []const u32,
+    tag_typeidxs: []const u32,
+    globals_valtypes: []const zir.ValType,
 ) Error!Liveness {
     var ranges: std.ArrayList(LiveRange) = .empty;
     errdefer ranges.deinit(allocator);
+    // `classes[v]` is vreg v's register class; every append to `ranges`
+    // appends here too.
+    var classes: std.ArrayList(RegClass) = .empty;
+    errdefer classes.deinit(allocator);
 
     var sim_stack: [max_simulated_stack]u32 = undefined;
     var sim_len: usize = 0;
@@ -525,10 +541,17 @@ pub fn compute(
                         if (depth >= block_stack_len) continue;
                         const fr = &block_stack[block_stack_len - 1 - depth];
                         if (fr.is_if or fr.is_loop or fr.merge_captured or fr.result_arity == 0) continue;
+                        // Wasm 3.0 EH §3.3.10.6 (try_table) — the target's results are
+                        // the tag's params, then the exnref for the `_ref` kinds.
+                        const params: []const zir.ValType = switch (ce.kind) {
+                            .catch_, .catch_ref => (try tagSig(ce.tag_idx, tag_typeidxs, module_types)).params,
+                            .catch_all, .catch_all_ref => &.{},
+                        };
                         var i: u32 = 0;
                         while (i < fr.result_arity) : (i += 1) {
                             fr.merge_vregs[i] = @intCast(ranges.items.len);
                             try ranges.append(allocator, .{ .def_pc = pc, .last_use_pc = pc });
+                            try classes.append(allocator, if (i < params.len) result_class.ofValType(params[i]) else .gpr);
                         }
                         fr.merge_captured = true;
                     }
@@ -684,7 +707,8 @@ pub fn compute(
             // its `emitEndIntra`. Pops are tolerant like the `call` arm's.
             var n_pop: usize = 0;
             if (instr.op == .throw) {
-                n_pop = if (instr.payload < tag_param_counts.len) tag_param_counts[instr.payload] else 0;
+                const t = instr.payload;
+                n_pop = if (t < tag_typeidxs.len and tag_typeidxs[t] < module_types.len) module_types[tag_typeidxs[t]].params.len else 0;
             } else if (instr.op == .throw_ref) {
                 n_pop = 1;
             } else if (instr.op != .@"return" and instr.op != .@"unreachable") {
@@ -872,9 +896,10 @@ pub fn compute(
                 ranges.items[arg_vreg].last_use_pc = pc;
             }
             // Push results.
-            for (callee_sig.results) |_| {
+            for (callee_sig.results) |t| {
                 const vreg: u32 = @intCast(ranges.items.len);
                 try ranges.append(allocator, .{ .def_pc = pc, .last_use_pc = pc });
+                try classes.append(allocator, result_class.ofValType(t));
                 if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
                 sim_stack[sim_len] = vreg;
                 sim_len += 1;
@@ -898,6 +923,7 @@ pub fn compute(
             }
             const vreg: u32 = @intCast(ranges.items.len);
             try ranges.append(allocator, .{ .def_pc = pc, .last_use_pc = pc });
+            try classes.append(allocator, .gpr);
             if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
             sim_stack[sim_len] = vreg;
             sim_len += 1;
@@ -922,10 +948,15 @@ pub fn compute(
         }
 
         // Push side — open a fresh vreg per produced value.
+        const class: RegClass = if (eff.pushes == 0) .gpr else result_class.ofInstr(instr, func, globals_valtypes) orelse {
+            std.debug.print("liveness: UnsupportedOp[result-class-missing] op={s} func_idx={d}\n", .{ @tagName(instr.op), func.func_idx });
+            return Error.UnsupportedOp;
+        };
         i = 0;
         while (i < eff.pushes) : (i += 1) {
             const vreg: u32 = @intCast(ranges.items.len);
             try ranges.append(allocator, .{ .def_pc = pc, .last_use_pc = pc });
+            try classes.append(allocator, class);
             if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
             sim_stack[sim_len] = vreg;
             sim_len += 1;
@@ -945,11 +976,15 @@ pub fn compute(
         var r: u32 = 0;
         while (r < homing.count) : (r += 1) {
             try ranges.append(allocator, .{ .def_pc = 0, .last_use_pc = last_pc });
+            try classes.append(allocator, result_class.ofValType(func.localValType(homing.local_idx[r])));
         }
     }
 
+    const owned_ranges = try ranges.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_ranges);
     return .{
-        .ranges = try ranges.toOwnedSlice(allocator),
+        .ranges = owned_ranges,
+        .classes = try classes.toOwnedSlice(allocator),
         .stack_depth = snap_depth,
         .stack_digest = snap_digest,
     };
@@ -957,6 +992,7 @@ pub fn compute(
 
 pub fn deinit(allocator: Allocator, info: Liveness) void {
     if (info.ranges.len != 0) allocator.free(info.ranges);
+    if (info.classes.len != 0) allocator.free(info.classes);
     if (info.stack_depth.len != 0) allocator.free(info.stack_depth);
     if (info.stack_digest.len != 0) allocator.free(info.stack_digest);
 }
@@ -964,7 +1000,13 @@ pub fn deinit(allocator: Allocator, info: Liveness) void {
 const testing = std.testing;
 
 fn buildFunc(allocator: Allocator, ops: []const ZirInstr) !ZirFunc {
-    const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
+    return buildFuncWithParams(allocator, &.{}, ops);
+}
+
+/// Params, not declared locals, give `local.get` a type without
+/// adding register-homed pseudo-vregs to `ranges`.
+fn buildFuncWithParams(allocator: Allocator, params: []const zir.ValType, ops: []const ZirInstr) !ZirFunc {
+    const sig: zir.FuncType = .{ .params = params, .results = &.{} };
     var f = ZirFunc.init(0, sig, &.{});
     errdefer f.deinit(allocator);
     for (ops) |o| try f.instrs.append(allocator, o);
@@ -981,7 +1023,7 @@ test "compute: straight-line i32.const + i32.const + i32.add + drop + end" {
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(usize, 3), live.ranges.len);
@@ -1004,7 +1046,7 @@ test "compute: function-level end closes the still-live vreg" {
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(usize, 1), live.ranges.len);
@@ -1014,7 +1056,7 @@ test "compute: function-level end closes the still-live vreg" {
 
 test "compute: D-093 (d-3) local.tee keeps the input vreg alive across the tee" {
     // local.get 0 ; local.tee 1 ; drop ; end
-    var f = try buildFunc(testing.allocator, &.{
+    var f = try buildFuncWithParams(testing.allocator, &.{ .i32, .i32 }, &.{
         .{ .op = .@"local.get", .payload = 0 },
         .{ .op = .@"local.tee", .payload = 1 },
         .{ .op = .drop },
@@ -1022,7 +1064,7 @@ test "compute: D-093 (d-3) local.tee keeps the input vreg alive across the tee" 
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     // local.tee is operand-stack-transparent (matches emit's
@@ -1050,7 +1092,7 @@ test "compute: br closes all live vregs at branch site (sub-7.5c-iv)" {
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
     try testing.expectEqual(@as(usize, 1), live.ranges.len);
     try testing.expectEqual(@as(u32, 2), live.ranges[0].last_use_pc);
@@ -1067,7 +1109,7 @@ test "compute: pop on empty stack is tolerant (validator-cleared dead-code path)
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
     try testing.expectEqual(@as(usize, 0), live.ranges.len);
 }
@@ -1091,7 +1133,7 @@ test "compute: dead code after `br 0` does not underflow" {
 
     // Should compute successfully — no underflow on the dead
     // i32.const after the br.
-    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
     // Two i32.const pushes → 2 vreg ranges.
     try testing.expectEqual(@as(usize, 2), live.ranges.len);
@@ -1109,7 +1151,7 @@ test "compute: select consumes 3 vregs and produces 1" {
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(usize, 4), live.ranges.len);
@@ -1129,7 +1171,7 @@ test "compute: install onto ZirFunc.liveness slot round-trips" {
     });
     defer f.deinit(testing.allocator);
 
-    f.liveness = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    f.liveness = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer if (f.liveness) |li| deinit(testing.allocator, li);
 
     try testing.expect(f.liveness != null);
@@ -1142,7 +1184,7 @@ test "compute: a frame whose body ended in a terminator closes to its result sha
     // the loop's `.end` hands vreg 0 on as the loop's result and the
     // `i32.add` pops it. Its range must reach the add (pre-fix the
     // terminator drained it and the range stopped at the `return`).
-    var f = try buildFunc(testing.allocator, &.{
+    var f = try buildFuncWithParams(testing.allocator, &.{ .i32, .i32 }, &.{
         .{ .op = .loop, .extra = 1 },
         .{ .op = .@"local.get", .payload = 0 },
         .{ .op = .@"return" },
@@ -1153,7 +1195,7 @@ test "compute: a frame whose body ended in a terminator closes to its result sha
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(usize, 3), live.ranges.len);
@@ -1168,7 +1210,7 @@ test "compute: the snapshot carries a frame's results past a br-only body" {
     // loop closed to its one result. The snapshot must read the same.
     dbg.initFromEnv("liveverify");
     defer dbg.resetForTest();
-    var f = try buildFunc(testing.allocator, &.{
+    var f = try buildFuncWithParams(testing.allocator, &.{ .i32, .i32 }, &.{
         .{ .op = .block, .extra = 1 },
         .{ .op = .@"i32.const", .payload = 5 },
         .{ .op = .@"local.set", .payload = 0 },
@@ -1181,7 +1223,7 @@ test "compute: the snapshot carries a frame's results past a br-only body" {
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(u32, 1), live.stack_depth[7]);
@@ -1205,7 +1247,7 @@ test "compute: a frame closed before any vreg exists leaves the snapshot short" 
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(usize, 0), live.ranges.len);
@@ -1232,7 +1274,7 @@ test "compute: a tail call pops its arguments before the stack freezes" {
     defer f.deinit(testing.allocator);
     const sigs = [_]zir.FuncType{.{ .params = &.{ .i32, .i32 }, .results = &.{.i32} }};
 
-    const live = try compute(testing.allocator, &f, &sigs, &.{}, &.{});
+    const live = try compute(testing.allocator, &f, &sigs, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(u32, 3), live.ranges[1].last_use_pc);
@@ -1256,7 +1298,8 @@ test "compute: a throw pops its tag's payload before the stack freezes" {
     });
     defer f.deinit(testing.allocator);
 
-    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{1});
+    const tag_type: zir.FuncType = .{ .params = &.{.i32}, .results = &.{} };
+    const live = try compute(testing.allocator, &f, &.{}, &.{tag_type}, &.{0}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(u32, 3), live.ranges[1].last_use_pc);

@@ -1078,6 +1078,8 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
         break :blk out;
     };
     errdefer if (tag_param_counts.len > 0) allocator.free(tag_param_counts);
+    const tag_typeidxs: []u32 = try a.alloc(u32, tags_slice.len);
+    for (tags_slice, tag_typeidxs) |tag, *t| t.* = tag.typeidx;
 
     // ADR-0120 D5 / cycle 1 — parallel slot-count table (v128 = 2
     // slots; all v0.1 numeric/ref types = 1). The JIT throw / catch
@@ -1129,7 +1131,7 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
     };
 
     // 10.G GC-on-JIT (D-212) — typeidx-indexed rows of struct field valtype
-    // bytes, so the regalloc vreg-class classifier + struct.get emit can
+    // bytes, so liveness's result class + struct.get emit can
     // FP-class an f32/f64 field result (the f32-return / call boundary reads
     // the FP home; a GPR-class struct.get result left V0/XMM0 stale).
     const struct_field_valtypes: [][]const u8 = blk: {
@@ -1278,6 +1280,7 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
             .register_write,
             memory0_idx_type,
             tag_param_counts,
+            tag_typeidxs,
             struct_field_counts,
             array_elem_valtypes,
             struct_field_valtypes,

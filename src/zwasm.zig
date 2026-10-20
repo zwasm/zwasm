@@ -385,6 +385,7 @@ test {
     _ = @import("engine/runner_tail_call_test.zig");
     _ = @import("ir/analysis/loop_info.zig");
     _ = @import("ir/analysis/liveness.zig");
+    _ = @import("ir/analysis/liveness_result_class.zig");
     _ = @import("ir/verifier.zig");
     _ = @import("ir/analysis/const_prop.zig");
     _ = @import("parse/parser.zig");

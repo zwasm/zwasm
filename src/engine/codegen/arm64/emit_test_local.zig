@@ -63,7 +63,7 @@ test "compile: #495 — the stack probe compares SP - frame_bytes, in the frame 
     var f = ZirFunc.init(0, sig, &locals);
     defer f.deinit(testing.allocator);
     try f.instrs.append(testing.allocator, .{ .op = .end });
-    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer if (f.liveness) |lv| liveness.deinit(testing.allocator, lv);
     const alloc = try regalloc.compute(testing.allocator, &f);
     defer regalloc.deinit(testing.allocator, alloc);
@@ -89,7 +89,7 @@ test "compile: #495 — a frame under 4 KiB probes with one SUB, and no frame wi
         var f = ZirFunc.init(0, sig, &locals);
         defer f.deinit(testing.allocator);
         try f.instrs.append(testing.allocator, .{ .op = .end });
-        f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{});
+        f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
         defer if (f.liveness) |lv| liveness.deinit(testing.allocator, lv);
         const alloc = try regalloc.compute(testing.allocator, &f);
         defer regalloc.deinit(testing.allocator, alloc);
@@ -189,7 +189,7 @@ test "compile: 1 local — prologue includes SUB SP,SP,#16; epilogue ADD SP,SP,#
     try f.instrs.append(testing.allocator, .{ .op = .@"local.set", .payload = 0 });
     try f.instrs.append(testing.allocator, .{ .op = .@"local.get", .payload = 0 });
     try f.instrs.append(testing.allocator, .{ .op = .end });
-    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer if (f.liveness) |lv| liveness.deinit(testing.allocator, lv);
     const alloc = try regalloc.compute(testing.allocator, &f);
     defer regalloc.deinit(testing.allocator, alloc);
@@ -225,7 +225,7 @@ test "compile: 3 locals — frame rounds up to 32 bytes (3*8=24 → align to 32)
     try f.instrs.append(testing.allocator, .{ .op = .@"local.set", .payload = 2 });
     try f.instrs.append(testing.allocator, .{ .op = .@"local.get", .payload = 2 });
     try f.instrs.append(testing.allocator, .{ .op = .end });
-    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer if (f.liveness) |lv| liveness.deinit(testing.allocator, lv);
     const alloc = try regalloc.compute(testing.allocator, &f);
     defer regalloc.deinit(testing.allocator, alloc);
@@ -263,7 +263,7 @@ test "compile: local.tee writes to local but keeps value pushed" {
     try f.instrs.append(testing.allocator, .{ .op = .@"local.tee", .payload = 0 });
     // After tee, vreg0 still on stack. end consumes it.
     try f.instrs.append(testing.allocator, .{ .op = .end });
-    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{});
+    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer if (f.liveness) |lv| liveness.deinit(testing.allocator, lv);
     const alloc = try regalloc.compute(testing.allocator, &f);
     defer regalloc.deinit(testing.allocator, alloc);

@@ -125,6 +125,9 @@ pub fn compileOne(
     /// throw / try_table payload marshalling. `&.{}` for modules
     /// without tags.
     tag_param_counts: []const u32,
+    /// Per-tag index into `module_types`, for liveness's catch-payload
+    /// classes. `&.{}` for modules without tags.
+    tag_typeidxs: []const u32,
     /// GC-on-JIT: typeidx-indexed struct field counts (from
     /// the module's struct defs). Threaded into the lowerer so `struct.new`
     /// stamps its variadic field count into `ZirInstr.extra`. `&.{}` for
@@ -137,7 +140,7 @@ pub fn compileOne(
     array_elem_valtypes: []const u8,
     /// GC-on-JIT (D-212) — typeidx-indexed struct field valtype byte
     /// rows. Referenced (not owned) by the produced `ZirFunc` so the
-    /// regalloc vreg-class classifier + struct.get/array.get emit can
+    /// liveness result class + struct.get/array.get emit can
     /// FP-class f32/f64 field/element results. `&.{}` when no struct types.
     struct_field_valtypes: []const []const u8,
     /// D-235 — module-level func-subtyping flag (`usesTypeSubtyping`).
@@ -226,7 +229,7 @@ pub fn compileOne(
     }
 
     trace.passEnter(func_idx, .liveness);
-    const lv = try liveness.compute(allocator, &func, func_sigs, module_types, tag_param_counts);
+    const lv = try liveness.compute(allocator, &func, func_sigs, module_types, tag_typeidxs, globals_valtypes);
     func.liveness = lv;
     // ZirFunc.deinit does NOT walk into the (optional) liveness
     // slot — that slot is owned by the FuncResult, freed via
@@ -337,7 +340,7 @@ test "compileOne: pass_diagnostics records all 6 passes when trace enabled" {
     // Pure instruction bytes: `i32.const 7` (0x41 0x07) + `end` (0x0B).
     const body = [_]u8{ 0x41, 0x07, 0x0B };
     const sig: FuncType = .{ .params = &.{}, .results = &.{.i32} };
-    var r = try compileOne(testing.allocator, 42, sig, &body, &.{}, &.{}, &.{sig}, 0, &.{}, &.{}, &.{}, .register_write, .i32, &.{}, &.{}, &.{}, &.{}, false, false, &.{});
+    var r = try compileOne(testing.allocator, 42, sig, &body, &.{}, &.{}, &.{sig}, 0, &.{}, &.{}, &.{}, .register_write, .i32, &.{}, &.{}, &.{}, &.{}, &.{}, false, false, &.{});
     defer deinitFuncResult(testing.allocator, &r);
 
     // Per-function slot populated with 6 records, in pipeline order.
@@ -375,7 +378,7 @@ test "compileOne: tiny straight-line module — (func (result i32) i32.const 7 e
     const body = [_]u8{ 0x41, 0x07, 0x0B };
     const sig: FuncType = .{ .params = &.{}, .results = &.{.i32} };
 
-    var r = try compileOne(testing.allocator, 0, sig, &body, &.{}, &.{}, &.{sig}, 0, &.{}, &.{}, &.{}, .register_write, .i32, &.{}, &.{}, &.{}, &.{}, false, false, &.{});
+    var r = try compileOne(testing.allocator, 0, sig, &body, &.{}, &.{}, &.{sig}, 0, &.{}, &.{}, &.{}, .register_write, .i32, &.{}, &.{}, &.{}, &.{}, &.{}, false, false, &.{});
     defer deinitFuncResult(testing.allocator, &r);
 
     const bodies = [_]linker.FuncBody{

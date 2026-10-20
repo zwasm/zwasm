@@ -197,7 +197,7 @@ fn emitMergeMov(
         try gpr.xmmStoreSpilledV128(allocator, buf, alloc, spill_base_off, merge_vreg, 1);
         return;
     }
-    if (regalloc.vregClassByDef(func, merge_vreg) == .fpr) {
+    if (regalloc.vregClass(func, merge_vreg) == .fpr) {
         const src_x = try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
         const merge_x = try gpr.xmmDefSpilled(alloc, merge_vreg, 1);
         if (merge_x != src_x) {
@@ -281,7 +281,7 @@ fn captureOrEmitBlockMergeMov(
                 all_gpr_reg_to_reg = false;
                 break;
             }
-            if (regalloc.vregClassByDef(func, merge_vreg) == .fpr) {
+            if (regalloc.vregClass(func, merge_vreg) == .fpr) {
                 all_gpr_reg_to_reg = false;
                 break;
             }

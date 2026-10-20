@@ -102,7 +102,7 @@ pub const ParallelMove = struct {
 /// Copies `src_vreg`'s value into `merge_vreg`'s storage. Picks the
 /// right register-class path:
 ///   - `.v128` (per `alloc.shapeTag`)  → q-form (16-byte) MOV
-///   - `.fpr`  (per `regalloc.vregClassByDef`) → FMOV D (8-byte)
+///   - `.fpr`  (per `regalloc.vregClass`) → FMOV D (8-byte)
 ///   - `.gpr`  (default)                → 32-bit ORR (legacy)
 ///
 /// Earlier code only dispatched on `.v128` — FP scalar fell through
@@ -133,7 +133,7 @@ pub fn emitMergeMov(
         try gpr.qStoreSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, merge_vreg, stage_dst);
         return;
     }
-    if (regalloc.vregClassByDef(ctx.func, merge_vreg) == .fpr) {
+    if (regalloc.vregClass(ctx.func, merge_vreg) == .fpr) {
         const src_v = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, stage_src);
         const merge_v = try gpr.fpDefSpilled(ctx.alloc, merge_vreg, stage_dst);
         if (merge_v != src_v) {
@@ -228,7 +228,7 @@ pub fn captureOrEmitBlockMergeMov(ctx: *EmitCtx, tgt_idx: usize) Error!bool {
                 all_gpr_reg_to_reg = false;
                 break;
             }
-            if (regalloc.vregClassByDef(ctx.func, merge_vreg) == .fpr) {
+            if (regalloc.vregClass(ctx.func, merge_vreg) == .fpr) {
                 all_gpr_reg_to_reg = false;
                 break;
             }

@@ -360,13 +360,10 @@ comptime {
     _ = reg_class;
 }
 
-// VregClass + vregClassByDef + vregClassOfOp extracted to
-// `regalloc_vreg_class.zig` per ADR-0092. Re-exported here so
-// callers reach `regalloc.VregClass` / `regalloc.vregClassByDef`
-// unchanged.
-const vreg_class_mod = @import("regalloc_vreg_class.zig");
-pub const VregClass = vreg_class_mod.VregClass;
-pub const vregClassByDef = vreg_class_mod.vregClassByDef;
+/// The register class liveness recorded for `vreg` (#601).
+pub fn vregClass(func: *const ZirFunc, vreg: u32) zir.RegClass {
+    return func.liveness.?.classes[vreg];
+}
 
 // ============================================================
 // Tests

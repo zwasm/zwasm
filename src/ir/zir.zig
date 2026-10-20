@@ -459,6 +459,11 @@ pub const Liveness = struct {
     /// final consuming instr (pop-side or function-level end).
     ranges: []const LiveRange = &.{},
 
+    /// `classes[v]` is the register class of the value vreg `v` holds
+    /// (#601). Same length as `ranges` when `liveness.compute` built it;
+    /// empty in hand-built test fixtures.
+    classes: []const RegClass = &.{},
+
     /// D-596 — per-pc snapshot of the simulated operand stack, taken BEFORE
     /// instr `pc`. Populated only when `ZWASM_DEBUG=liveverify` is on; the
     /// emit compares it against its own `pushed_vregs` so a divergence

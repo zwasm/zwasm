@@ -49,6 +49,15 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **The JIT merges an `if` or `block` result in its own register class**
+  (#601). The merge move took the class of a neighbouring value after a void or
+  multi-result call, `table.fill` or `atomic.fence`, called an f32 `call`,
+  `global.get` or `select` result an integer, and missed the values a
+  `try_table` catch hands its target block, so the function returned a stale
+  register with exit 0. The class now comes from liveness, which numbers the
+  values in the first place. A v128 result still takes the 16-byte move from
+  the shape tags, which miscount after a call or a catch (#605).
+
 - **`zwasm compile` writes only what `zwasm run` reads** (#530). `run` read
   64 MiB and `compile` wrote any size, so a 150 MB artifact compiled with exit
   0 and failed to run as `StreamTooLong`. `compile`, `run` and the cache share

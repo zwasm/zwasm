@@ -3320,7 +3320,7 @@ test "entry: br_on_non_null falls through on null funcref param" {
         .{ .def_pc = 1, .last_use_pc = 5 },
         .{ .def_pc = 3, .last_use_pc = 5 },
         .{ .def_pc = 5, .last_use_pc = 6 },
-    } };
+    }, .classes = &.{ .gpr, .gpr, .gpr } };
     const slots = [_]u16{ 0, 1, 2 };
     const alloc: regalloc.Allocation = .{ .slots = &slots, .n_slots = 3 };
     const sigs = [_]zir.FuncType{sig};
