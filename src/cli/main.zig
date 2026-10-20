@@ -43,6 +43,7 @@ const zwasm = @import("zwasm");
 const cli_run = zwasm.cli.run;
 const cli_cache = zwasm.cli.cache;
 const cli_compile = zwasm.cli.compile;
+const cli_limits = zwasm.cli.limits;
 const cli_dispatch = zwasm.cli.dispatch;
 const diag_print = zwasm.cli.diag_print;
 const diagnostic = zwasm.diagnostic;
@@ -282,10 +283,9 @@ pub fn main(init: std.process.Init) !void {
             defer gpa.free(path);
 
             const cwd = std.Io.Dir.cwd();
-            const bytes = cwd.readFileAlloc(io, path, gpa, .limited(64 * 1024 * 1024)) catch |err| {
+            const bytes = cwd.readFileAlloc(io, path, gpa, .limited(cli_limits.max_file_bytes)) catch |err| {
                 var buf: [256]u8 = undefined;
-                const msg = std.fmt.bufPrint(&buf, "zwasm run: cannot read '{s}': {s}", .{ path, @errorName(err) }) catch "zwasm run: read failed";
-                try printlnErr(io, msg);
+                try printlnErr(io, readFailureMsg(&buf, path, err));
                 std.process.exit(1);
             };
             defer gpa.free(bytes);
@@ -392,8 +392,8 @@ pub fn main(init: std.process.Init) !void {
                     printlnErr(io, "usage: zwasm compile <file.wasm> -o <out.cwasm>") catch {};
                     std.process.exit(2);
                 }
-                // #233 — the validate diagnostic is already on stderr.
-                if (err == error.InvalidModule) std.process.exit(1);
+                // #233 / #530 — the diagnostic or the refusal is already on stderr.
+                if (err == error.InvalidModule or err == error.ArtifactTooLarge) std.process.exit(1);
                 var buf: [256]u8 = undefined;
                 const msg = std.fmt.bufPrint(&buf, "zwasm compile: {s}", .{@errorName(err)}) catch "zwasm compile: failed";
                 // EXEMPT-FALLBACK: ADR-0016 phase 1 — compile-error stderr report is last-resort; the process exits 1 regardless.
@@ -480,6 +480,15 @@ fn exitWithRunFailure(io: std.Io, err: anyerror, path: []const u8, bytes: []cons
     std.process.exit(1);
 }
 
+/// `run`'s refusal of a file it cannot read; over the cap it names the cap
+/// rather than `StreamTooLong` (#530).
+fn readFailureMsg(buf: []u8, path: []const u8, err: anyerror) []const u8 {
+    return (if (err == error.StreamTooLong)
+        std.fmt.bufPrint(buf, "zwasm run: cannot read '{s}': larger than the {d} MiB cap", .{ path, cli_limits.max_file_bytes >> 20 })
+    else
+        std.fmt.bufPrint(buf, "zwasm run: cannot read '{s}': {s}", .{ path, @errorName(err) })) catch "zwasm run: read failed";
+}
+
 fn printlnErr(io: std.Io, msg: []const u8) !void {
     var stderr_buf: [512]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
@@ -506,4 +515,10 @@ test "build options are wired" {
     _ = build_options.wasm_level;
     _ = build_options.wasi_level;
     _ = build_options.engine_mode;
+}
+
+test "readFailureMsg: a file over the cap names the cap, any other failure its error" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("zwasm run: cannot read 'big.cwasm': larger than the 256 MiB cap", readFailureMsg(&buf, "big.cwasm", error.StreamTooLong));
+    try std.testing.expectEqualStrings("zwasm run: cannot read 'gone.wasm': FileNotFound", readFailureMsg(&buf, "gone.wasm", error.FileNotFound));
 }

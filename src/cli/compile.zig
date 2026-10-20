@@ -18,6 +18,7 @@ const std = @import("std");
 const zwasm = @import("zwasm");
 const runner = zwasm.engine.runner;
 const aot_produce = zwasm.engine.codegen.aot.produce;
+const limits = @import("limits.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -28,6 +29,9 @@ pub const Error = error{
     /// #233 — the front-end validator rejected the input; the diagnostic is
     /// already on stderr, the way `zwasm run` reports it.
     InvalidModule,
+    /// #530 — the artifact is over the cap `zwasm run` reads, so it is not
+    /// written; the refusal is already on stderr.
+    ArtifactTooLarge,
 } || runner.Error || aot_produce.Error;
 
 /// Drive the compile subcommand. `arg_it` is positioned past
@@ -57,7 +61,7 @@ pub fn run(
     const out = output_path orelse return Error.UsageError;
 
     const cwd = std.Io.Dir.cwd();
-    const wasm_bytes = cwd.readFileAlloc(io, in, gpa, .limited(64 * 1024 * 1024)) catch {
+    const wasm_bytes = cwd.readFileAlloc(io, in, gpa, .limited(limits.max_file_bytes)) catch {
         return Error.ReadInputFailed;
     };
     defer gpa.free(wasm_bytes);
@@ -96,9 +100,33 @@ pub fn run(
     const cwasm_bytes = try aot_produce.produceFromCompiledWasm(gpa, &compiled, wasm_bytes);
     defer gpa.free(cwasm_bytes);
 
+    var stderr_buf: [256]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
+    try checkArtifactLen(&stderr_writer.interface, cwasm_bytes.len, limits.max_file_bytes);
+
     cwd.writeFile(io, .{ .sub_path = out, .data = cwasm_bytes }) catch {
         return Error.WriteOutputFailed;
     };
 
     return 0;
+}
+
+/// #530 — refuse, on `stderr`, an artifact of `len` bytes over `cap`.
+fn checkArtifactLen(stderr: *std.Io.Writer, len: usize, cap: usize) Error!void {
+    if (len <= cap) return;
+    // EXEMPT-FALLBACK: ADR-0016 phase 1 — the refusal is last-resort stderr; ArtifactTooLarge is returned regardless.
+    stderr.print("zwasm compile: artifact is {d} bytes, over the {d} MiB cap zwasm run reads\n", .{ len, cap >> 20 }) catch {};
+    // EXEMPT-FALLBACK: ADR-0016 phase 1 — flushing the refusal just written; failure here is unrecoverable.
+    stderr.flush() catch {};
+    return Error.ArtifactTooLarge;
+}
+
+test "checkArtifactLen: an artifact over the cap is refused with its size and the cap" {
+    const cap: usize = 1 << 20;
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try checkArtifactLen(&w, cap, cap);
+    try std.testing.expectEqual(@as(usize, 0), w.end);
+    try std.testing.expectError(Error.ArtifactTooLarge, checkArtifactLen(&w, cap + 1, cap));
+    try std.testing.expectEqualStrings("zwasm compile: artifact is 1048577 bytes, over the 1 MiB cap zwasm run reads\n", w.buffered());
 }

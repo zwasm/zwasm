@@ -61,7 +61,9 @@ maximum. A component run keeps the Zig API's finite defaults instead.
 Reads a `.wasm`, runs the JIT pipeline, and writes a `.cwasm` AOT artifact
 to the `-o` / `--output` path (format-versioned; an artifact with an
 incompatible artifact-format version or CPU arch is refused with a
-specific error).
+specific error). The input and the artifact are capped at 256 MiB, the most
+`zwasm run` and the `--cache` store read: `compile` refuses a larger
+artifact rather than write one `run` cannot load.
 `zwasm run <file.cwasm>` executes it through the full runtime — identical
 WASI / sandbox / `--invoke` behaviour to running the source `.wasm`
 (ADR-0203: cache-hit == cache-miss by construction).

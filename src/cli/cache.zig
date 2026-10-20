@@ -38,10 +38,7 @@ const zwasm = @import("zwasm");
 const runner = @import("../engine/runner.zig");
 const produce = @import("../engine/codegen/aot/produce.zig");
 const format = @import("../engine/codegen/aot/format.zig");
-
-/// Entry read cap AND store cap — an artifact too big to read back is
-/// never hittable, so storing it would only burn a full rewrite per run.
-const max_entry_bytes: usize = 256 << 20;
+const limits = @import("limits.zig");
 
 /// `zwasm-<version>-<arch>-<os>-<bounds>` — the versioned cache
 /// subdirectory. Bounds mode is the one codegen knob not implied by the
@@ -83,7 +80,7 @@ pub fn lookupOrProduce(
     // HIT — but only after the cheap entry gate (header + section bounds):
     // a corrupt / truncated / format-drifted entry is DELETED (self-heal)
     // and degrades to a miss, never to a failed run (ADR-0203 D5).
-    if (cwd.readFileAlloc(io, path, gpa, .limited(max_entry_bytes))) |cached| {
+    if (cwd.readFileAlloc(io, path, gpa, .limited(limits.max_file_bytes))) |cached| {
         if (entryIsValid(cached)) return cached;
         gpa.free(cached);
         cwd.deleteFile(io, path) catch {
@@ -106,7 +103,7 @@ pub fn lookupOrProduce(
 
     // Best-effort store: mkdir -p + temp write + atomic rename. An artifact
     // above the read cap is skipped — it could never be hit back.
-    if (cwasm.len <= max_entry_bytes) store(gpa, io, root, sub, &key, cwasm) catch {
+    if (cwasm.len <= limits.max_file_bytes) store(gpa, io, root, sub, &key, cwasm) catch {
         // EXEMPT-FALLBACK: cache write failure only loses the speedup for
         // the NEXT run (ADR-0203 D5); this run proceeds with the artifact.
     };

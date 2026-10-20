@@ -49,6 +49,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **`zwasm compile` writes only what `zwasm run` reads** (#530). `run` read
+  64 MiB and `compile` wrote any size, so a 150 MB artifact compiled with exit
+  0 and failed to run as `StreamTooLong`. `compile`, `run` and the cache share
+  one 256 MiB cap, which raises `run`'s `.wasm` limit too; a refusal names it.
+
 - **An unknown `zwasm run` option is a usage error** (#236). It was taken as
   the module path and reported as a file that cannot be read, with exit 1; it
   now exits 2 and names the option. An option whose value starts with `-` is a

@@ -288,6 +288,7 @@ pub const cli = struct {
     pub const cache = @import("cli/cache.zig");
     pub const invoke_args = @import("cli/invoke_args.zig");
     pub const compile = @import("cli/compile.zig");
+    pub const limits = @import("cli/limits.zig");
     pub const dispatch = @import("cli/dispatch.zig");
     pub const diag_print = @import("cli/diag_print.zig");
 };
