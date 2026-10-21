@@ -59,6 +59,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **On x86_64 Windows, a JIT function with more than two results reads its
+  float params from the registers the caller wrote** (#607). It read each one
+  from the XMM one position early, so the param held whatever that register
+  held, with no trap.
+
 - **Loading a `.cwasm` no longer costs call relocs × functions** (#613). The
   loader found each reloc's function by scanning the function table from the
   first; it now binary-searches it. The artifact is unchanged; esbuild's (8,565

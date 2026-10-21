@@ -501,7 +501,7 @@ pub fn compile(
             break :param_marshal;
         }
         var int_arg_idx: usize = if (return_is_memory_class) 2 else 1;
-        var fp_arg_idx: usize = if (abi.current_cc == .win64) 1 else 0;
+        var fp_arg_idx: usize = if (abi.current_cc == .win64) int_arg_idx else 0;
         // Per-overflow NSAA index for SysV. Mirror of
         // the caller-side counter in op_call.marshalCallArgs.
         // Both classes share the NSAA stream in declaration

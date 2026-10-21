@@ -1,8 +1,6 @@
 ;; #602: a tag mixing i32, f32 and f64 params. Each payload slot is loaded by
 ;; its own type; the i32 must stay a GPR load. f(5, 2.5, -0.125, 1) throws all
-;; three; the result combines them: 5000 + 250 + 1250 = 6500. $f returns one
-;; i32 so that no call here takes the multi-result return path, whose Win64
-;; FP params are #607.
+;; three; the result combines them: 5000 + 250 + 1250 = 6500.
 (module
   (tag $t (param i32 f32 f64))
   (func $thrower (param i32 f32 f64) (local.get 0) (local.get 1) (local.get 2) (throw $t))
