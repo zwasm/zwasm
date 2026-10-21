@@ -302,18 +302,22 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   has one identity whichever generation the guest speaks. Fixtures:
   `test/component/wasi_p2_fs_meta_rust.wasm` (the rust-std guest links and
   runs) and `test/component/wasi_p2_fs_meta.wasm` (the fd route and the path
-  route hash one file to the same value). A guest that reads or writes a
-  file's contents still fails on the 0.2 path: rust-std does both through
-  `read-via-stream` / `write-via-stream`, which stay err(unsupported) stubs.
+  route hash one file to the same value).
+
+- **A rust-std `wasm32-wasip2` guest reads and writes files** (#617).
+  `fs::read`, `fs::write` and an append-mode write go through
+  `wasi:filesystem/types@0.2` `[method]descriptor.read-via-stream`,
+  `write-via-stream` and `append-via-stream`, which answered err(unsupported);
+  each now returns a stream that reads or writes the file from its offset.
 
 - **The 0.2 filesystem `error-code` ordinals past `no-lock` were one too
   high.** `P2ErrorCode` named only the members the P1 errnos map onto, each
   with a hand-written ordinal, and after `no-entry` (20) it left a gap of two
   where `no-lock` takes one. `unsupported` lowered as 28, which is `no-tty` in
-  the WIT, so every err(unsupported) stub (the `*-via-stream` and `get-flags`
-  methods) reached a rust-std guest as ENOTTY "Not a tty" instead of ENOTSUP;
-  `not-directory`, `not-permitted`, `read-only` and the rest of the tail were
-  shifted the same way, so every 0.2 filesystem error past `no-lock` reached
+  the WIT, so every err(unsupported) stub (the `get-flags` method) reached a
+  rust-std guest as ENOTTY "Not a tty" instead of ENOTSUP; `not-directory`,
+  `not-permitted`, `read-only` and the rest of the tail were shifted the same
+  way, so every 0.2 filesystem error past `no-lock` reached
   the guest as its neighbour. The enum now declares all 37 members in WIT
   order with no explicit values, so the ordinals cannot drift from the
   declaration.

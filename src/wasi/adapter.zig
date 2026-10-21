@@ -153,10 +153,13 @@ pub const P2Op = enum {
     // wasi:random.
     random_get_bytes,
     // wasi:filesystem/types — `descriptor` resource methods. A descriptor is a
-    // P1 fd; these forward to the seekable-fd P1 ops (the stream-via methods
-    // that MINT new stream resources land in a later chunk).
+    // P1 fd; these forward to the seekable-fd P1 ops. The via-stream trio
+    // mints a stream that preads / pwrites that fd at its own position.
     fs_descriptor_read,
     fs_descriptor_write,
+    fs_read_via_stream,
+    fs_write_via_stream,
+    fs_append_via_stream,
     fs_descriptor_open_at,
     fs_descriptor_sync,
     fs_descriptor_stat,
@@ -326,13 +329,9 @@ pub const P2Op = enum {
     // directly (error / pollable / terminal handles); all route to the
     // generic drop.
     io_resource_drop,
-    // wasi:filesystem/types stream-mint + get-flags methods rust-std links
-    // but a CLI/TCP guest never calls — honest err(unsupported), the
-    // FILESYSTEM error-code ordinal (27). rust-std's fs::read / fs::write
-    // reach the via-stream pair, so a guest that reads or writes a file
-    // still fails here.
-    fs_stub_via_stream_offset,
-    fs_stub_via_stream,
+    // wasi:filesystem/types get-flags, which rust-std links but a CLI/TCP
+    // guest never calls — honest err(unsupported), the FILESYSTEM error-code
+    // ordinal (27).
     fs_stub_get_flags,
     // wasi:filesystem/types metadata-hash + metadata-hash-at — wasi-libc fills
     // st_ino / d_ino from them, so rust-std's fs::metadata, File::metadata and
@@ -450,6 +449,8 @@ pub fn p1Target(op: P2Op) P1Target {
         .random_get_bytes => .random_get,
         .fs_descriptor_read => .fd_pread,
         .fs_descriptor_write => .fd_pwrite,
+        .fs_read_via_stream => .fd_pread,
+        .fs_write_via_stream, .fs_append_via_stream => .fd_pwrite,
         .fs_descriptor_open_at => .path_open,
         .fs_descriptor_sync => .fd_sync,
         .fs_descriptor_stat => .fd_filestat_get,
@@ -470,7 +471,7 @@ pub fn p1Target(op: P2Op) P1Target {
         .fs_descriptor_read_directory, .fs_dir_entry_stream_read => .fd_readdir,
         .fs_dir_entry_stream_drop => .noop,
         .io_resource_drop => .noop,
-        .fs_stub_via_stream_offset, .fs_stub_via_stream, .fs_stub_get_flags => .noop,
+        .fs_stub_get_flags => .noop,
         .fs_descriptor_metadata_hash => .fd_filestat_get,
         .fs_descriptor_metadata_hash_at => .path_filestat_get,
         // wasi:sockets — no P1 facility; the host backing is std.Io.net
@@ -714,9 +715,9 @@ const table = [_]Entry{
     .{ .iface = "wasi:io/poll", .func = "[resource-drop]pollable", .op = .io_resource_drop },
     .{ .iface = "wasi:cli/terminal-input", .func = "[resource-drop]terminal-input", .op = .io_resource_drop },
     .{ .iface = "wasi:cli/terminal-output", .func = "[resource-drop]terminal-output", .op = .io_resource_drop },
-    .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.read-via-stream", .op = .fs_stub_via_stream_offset, .gens = p2_only },
-    .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.write-via-stream", .op = .fs_stub_via_stream_offset, .gens = p2_only },
-    .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.append-via-stream", .op = .fs_stub_via_stream, .gens = p2_only },
+    .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.read-via-stream", .op = .fs_read_via_stream, .gens = p2_only },
+    .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.write-via-stream", .op = .fs_write_via_stream, .gens = p2_only },
+    .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.append-via-stream", .op = .fs_append_via_stream, .gens = p2_only },
     .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.get-flags", .op = .fs_stub_get_flags, .gens = p2_only },
     .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.metadata-hash", .op = .fs_descriptor_metadata_hash, .gens = p2_only },
     .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.metadata-hash-at", .op = .fs_descriptor_metadata_hash_at, .gens = p2_only },

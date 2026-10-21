@@ -240,6 +240,7 @@ fn inStreamReadImpl(caller: *Caller, self_handle: u32, len: u64, retptr: u32, bl
     const mem = try ctxMemory(caller);
     const h = try ctx.resources.peek(self_handle);
     if (h.rt == WasiP2Ctx.SOCK_INPUT_STREAM_RT) return sockStreamRead(ctx, mem, h.rep, len, retptr, blocking);
+    if (h.rt == WasiP2Ctx.FILE_INPUT_STREAM_RT) return fileStreamRead(ctx, mem, h.rep, len, retptr);
     if (h.rt != WasiP2Ctx.INPUT_STREAM_RT) return resource_table.Error.TypeMismatch;
     const n: u32 = @intCast(@min(len, std.math.maxInt(u32)));
     // `read` may not wait: nothing queued on an inherited stdin is ok([]).
@@ -295,6 +296,32 @@ fn sockStreamRead(ctx: *WasiP2Ctx, mem: Memory, rep: u32, len: u64, retptr: u32,
     try mem.write(retptr + 8, @as(u32, @intCast(got)));
 }
 
+/// File-backed `input-stream.read` / `blocking-read` (a file never waits):
+/// pread at the stream's position and advance it. EOF and a P1 error both
+/// answer stream-error::closed — last-operation-failed needs an error
+/// resource, as on the socket path.
+fn fileStreamRead(ctx: *WasiP2Ctx, mem: Memory, rep: u32, len: u64, retptr: u32) WasiP2Error!void {
+    const n: u32 = @intCast(@min(len, std.math.maxInt(u32)));
+    const data_ptr: u32 = if (n == 0) 0 else try ctx.reallocGuest(n, 1);
+    const stream = try ctxFileStream(ctx, rep);
+    var got: usize = 0;
+    const errno = wasi_fd.preadSlice(ctx.host, stream.fd, try mem.sliceAt(data_ptr, n), stream.pos, &got);
+    if (errno != .success or (got == 0 and n != 0)) {
+        try mem.write(retptr, @as(u8, 1));
+        try mem.write(retptr + 4, @as(u8, 1)); // closed
+        return;
+    }
+    stream.pos += got;
+    try mem.write(retptr, @as(u8, 0));
+    try mem.write(retptr + 4, data_ptr);
+    try mem.write(retptr + 8, @as(u32, @intCast(got)));
+}
+
+fn ctxFileStream(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*WasiP2Ctx.FileStream {
+    if (rep >= ctx.file_streams.items.len) return WasiP2Error.InvalidHandle;
+    return &ctx.file_streams.items[rep];
+}
+
 /// `wasi:random/random` `get-random-bytes(len: u64) -> list<u8>`. Allocates
 /// `len` bytes via the guest `cabi_realloc` (nested invoke), fills them with
 /// secure random, and writes `(data_ptr, len)` to the return area at `retptr`.
@@ -333,6 +360,18 @@ pub fn p2OutStreamWrite(caller: *Caller, self_handle: u32, ptr: u32, len: u32, r
             try mem.write(retptr + 4, @as(u8, 1)); // stream-error::closed
             return;
         };
+        try mem.write(retptr, @as(u8, 0));
+        return;
+    }
+    if (h.rt == WasiP2Ctx.FILE_OUTPUT_STREAM_RT) {
+        // pwrite at the stream's position; a failure is closed, as above.
+        const stream = try ctxFileStream(ctx, h.rep);
+        if (wasi_fd.pwriteSlice(ctx.host, stream.fd, bytes, stream.pos) != .success) {
+            try mem.write(retptr, @as(u8, 1));
+            try mem.write(retptr + 4, @as(u8, 1)); // stream-error::closed
+            return;
+        }
+        stream.pos += bytes.len;
         try mem.write(retptr, @as(u8, 0));
         return;
     }
@@ -383,14 +422,15 @@ pub fn p2DescriptorDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
 fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     // fd-backed resources (stdio/descriptor streams) close their fd; a pollable
-    // carries no host fd and a directory-entry-stream borrows its descriptor's
-    // fd (rep = `dir_streams` index), so those only release the handle slot.
+    // carries no host fd and a directory-entry-stream or file stream borrows
+    // its descriptor's fd (rep = a `dir_streams` / `file_streams` index), so
+    // those only release the handle slot.
     if (try ctx.resources.dropAny(self_handle)) |h| {
         switch (h.rt) {
-            // Pollables / dir-entry-streams / networks / socket streams /
-            // terminals carry no exclusively-owned host fd — only the handle
-            // slot is released.
-            WasiP2Ctx.POLLABLE_RT, WasiP2Ctx.DIR_STREAM_RT, WasiP2Ctx.NETWORK_RT, WasiP2Ctx.SOCK_POLLABLE_RT, WasiP2Ctx.SOCK_INPUT_STREAM_RT, WasiP2Ctx.SOCK_OUTPUT_STREAM_RT, WasiP2Ctx.TERMINAL_RT, WasiP2Ctx.STDIN_POLLABLE_RT => {},
+            // Pollables / dir-entry-streams / file streams / networks /
+            // socket streams / terminals carry no exclusively-owned host fd —
+            // only the handle slot is released.
+            WasiP2Ctx.POLLABLE_RT, WasiP2Ctx.DIR_STREAM_RT, WasiP2Ctx.FILE_INPUT_STREAM_RT, WasiP2Ctx.FILE_OUTPUT_STREAM_RT, WasiP2Ctx.NETWORK_RT, WasiP2Ctx.SOCK_POLLABLE_RT, WasiP2Ctx.SOCK_INPUT_STREAM_RT, WasiP2Ctx.SOCK_OUTPUT_STREAM_RT, WasiP2Ctx.TERMINAL_RT, WasiP2Ctx.STDIN_POLLABLE_RT => {},
             // The tcp-socket handle owns the OS socket.
             WasiP2Ctx.TCP_SOCKET_RT => {
                 const sock = ctxTcpSocket(ctx, h.rep) catch return; // slot already gone
@@ -580,7 +620,7 @@ pub fn p2GetDirectories(caller: *Caller, retptr: u32) WasiP2Error!void {
 fn p2OutStreamFlush(caller: *Caller, self_handle: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const h = try ctx.resources.peek(self_handle); // validate handle (fd or socket stream)
-    if (h.rt != WasiP2Ctx.OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.SOCK_OUTPUT_STREAM_RT)
+    if (h.rt != WasiP2Ctx.OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.SOCK_OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.FILE_OUTPUT_STREAM_RT)
         return resource_table.Error.TypeMismatch;
     const mem = try ctxMemory(caller);
     try mem.write(retptr, @as(u8, 0)); // result disc: ok (nothing buffered at this layer)
@@ -800,6 +840,41 @@ fn p2DescriptorReadDirectory(caller: *Caller, self_handle: u32, retptr: u32) Was
     const handle = try ctx.resources.new(WasiP2Ctx.DIR_STREAM_RT, state_index);
     try mem.write(retptr, @as(u8, 0)); // result disc: ok
     try mem.write(retptr + 4, handle); // own<directory-entry-stream>
+}
+
+/// `wasi:filesystem/types` `[method]descriptor.read-via-stream` /
+/// `write-via-stream` (self, offset, retptr) and `append-via-stream` (self,
+/// retptr): mint a stream over `self`'s fd that starts at `offset` (append: at
+/// the file's size, as the 0.3 host does) and store `result<own<stream>,
+/// error-code>` (ok handle@+4) at `retptr`.
+fn p2DescriptorReadViaStream(caller: *Caller, self_handle: u32, offset: u64, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const fd: wasi_p1.Fd = @intCast(try ctx.resources.rep(WasiP2Ctx.DESCRIPTOR_RT, self_handle));
+    return mintFileStream(ctx, try ctxMemory(caller), WasiP2Ctx.FILE_INPUT_STREAM_RT, fd, offset, retptr);
+}
+
+fn p2DescriptorWriteViaStream(caller: *Caller, self_handle: u32, offset: u64, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const fd: wasi_p1.Fd = @intCast(try ctx.resources.rep(WasiP2Ctx.DESCRIPTOR_RT, self_handle));
+    return mintFileStream(ctx, try ctxMemory(caller), WasiP2Ctx.FILE_OUTPUT_STREAM_RT, fd, offset, retptr);
+}
+
+fn p2DescriptorAppendViaStream(caller: *Caller, self_handle: u32, retptr: u32) WasiP2Error!void {
+    const ctx = caller.data(WasiP2Ctx);
+    const fd: wasi_p1.Fd = @intCast(try ctx.resources.rep(WasiP2Ctx.DESCRIPTOR_RT, self_handle));
+    const mem = try ctxMemory(caller);
+    switch (try descriptorFilestat(ctx, mem, fd)) {
+        .ok => |st| try mintFileStream(ctx, mem, WasiP2Ctx.FILE_OUTPUT_STREAM_RT, fd, st.size, retptr),
+        .err => |errno| try writeP1Err(mem, retptr, 4, errno),
+    }
+}
+
+fn mintFileStream(ctx: *WasiP2Ctx, mem: Memory, rt: u32, fd: wasi_p1.Fd, pos: u64, retptr: u32) WasiP2Error!void {
+    const index: u32 = @intCast(ctx.file_streams.items.len);
+    ctx.file_streams.append(ctx.alloc, .{ .fd = fd, .pos = pos }) catch return WasiP2Error.OutOfMemory;
+    const handle = try ctx.resources.new(rt, index);
+    try mem.write(retptr, @as(u8, 0)); // result disc: ok
+    try mem.write(retptr + 4, handle);
 }
 
 /// `wasi:filesystem/types` `[method]directory-entry-stream.read-directory-entry`
@@ -1117,7 +1192,7 @@ fn p2CheckWrite(caller: *Caller, self_handle: u32, retptr: u32) WasiP2Error!void
         try mem.write(retptr + 8, @as(u64, if (writable) 4096 else 0));
         return;
     }
-    if (h.rt != WasiP2Ctx.OUTPUT_STREAM_RT) return resource_table.Error.TypeMismatch;
+    if (h.rt != WasiP2Ctx.OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.FILE_OUTPUT_STREAM_RT) return resource_table.Error.TypeMismatch;
     try mem.write(retptr, @as(u8, 0)); // result disc: ok
     try mem.write(retptr + 8, @as(u64, 4096)); // bytes the guest may write now
 }
@@ -1353,23 +1428,13 @@ fn p2SockStubRecv(caller: *Caller, _: u32, _: u64, retptr: u32) WasiP2Error!void
 fn p2SockStubSend(caller: *Caller, _: u32, _: u32, _: u32, retptr: u32) WasiP2Error!void {
     return sockStubWriteErr(caller, retptr, 8);
 }
-/// wasi:filesystem not-supported stubs (rust-std links the *-via-stream /
-/// metadata methods; a CLI/TCP guest never calls them) — err(unsupported),
-/// the FILESYSTEM error-code ordinal, at the shape's payload offset.
-fn fsStubWriteUnsupported(caller: *Caller, retptr: u32, comptime off: u32) WasiP2Error!void {
+/// `[method]descriptor.get-flags` not-supported stub (rust-std links it; a
+/// CLI/TCP guest never calls it) — err(unsupported), the FILESYSTEM
+/// error-code ordinal, at payload offset 1.
+fn p2FsStubGetFlags(caller: *Caller, _: u32, retptr: u32) WasiP2Error!void {
     const mem = try ctxMemory(caller);
     try mem.write(retptr, @as(u8, 1));
-    try mem.write(retptr + off, @intFromEnum(adapter.P2ErrorCode.unsupported));
-}
-
-fn p2FsStubViaStreamOffset(caller: *Caller, _: u32, _: u64, retptr: u32) WasiP2Error!void {
-    return fsStubWriteUnsupported(caller, retptr, 4);
-}
-fn p2FsStubViaStream(caller: *Caller, _: u32, retptr: u32) WasiP2Error!void {
-    return fsStubWriteUnsupported(caller, retptr, 4);
-}
-fn p2FsStubGetFlags(caller: *Caller, _: u32, retptr: u32) WasiP2Error!void {
-    return fsStubWriteUnsupported(caller, retptr, 1);
+    try mem.write(retptr + 1, @intFromEnum(adapter.P2ErrorCode.unsupported));
 }
 
 /// Store a `result<metadata-hash-value{lower: u64, upper: u64}, error-code>`
@@ -1486,8 +1551,9 @@ fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: a
             if (try p3h.registerP3Arms(lk, module, name, op, ctx)) return;
             return error.UnsupportedWasiImport;
         },
-        .fs_stub_via_stream_offset => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2FsStubViaStreamOffset, mapGuestFault),
-        .fs_stub_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2FsStubViaStream, mapGuestFault),
+        .fs_read_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2DescriptorReadViaStream, mapGuestFault),
+        .fs_write_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2DescriptorWriteViaStream, mapGuestFault),
+        .fs_append_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorAppendViaStream, mapGuestFault),
         .fs_stub_get_flags => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2FsStubGetFlags, mapGuestFault),
         .fs_descriptor_metadata_hash => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorMetadataHash, mapGuestFault),
         .fs_descriptor_metadata_hash_at => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorMetadataHashAt, mapGuestFault),

@@ -111,6 +111,9 @@ pub const WasiP2Ctx = struct {
     /// Live directory-entry-stream cursors; a DIR_STREAM_RT handle's rep
     /// indexes this list.
     dir_streams: std.ArrayList(DirStream) = .empty,
+    /// Live 0.2 file via-streams; a FILE_INPUT_STREAM_RT /
+    /// FILE_OUTPUT_STREAM_RT handle's rep indexes this list.
+    file_streams: std.ArrayList(FileStream) = .empty,
     /// Live tcp sockets (ADR-0180); a TCP_SOCKET_RT / SOCK_*_STREAM_RT /
     /// SOCK_POLLABLE_RT handle's rep (low bits) indexes this list.
     tcp_sockets: std.ArrayList(p2sock.TcpSocket) = .empty,
@@ -286,10 +289,20 @@ pub const WasiP2Ctx = struct {
     /// The pollable `input-stream.subscribe` mints for stdin: ready once a
     /// byte is queued or stdin has ended (`wasi_fd.stdinReady`). Rep unused.
     pub const STDIN_POLLABLE_RT: u32 = 19;
+    /// The streams a 0.2 descriptor's `read-via-stream` / `write-via-stream` /
+    /// `append-via-stream` mint. Rep indexes `file_streams` (NOT a P1 fd — the
+    /// stream borrows the descriptor's fd), so the generic drop must NOT
+    /// `fd_close` it.
+    pub const FILE_INPUT_STREAM_RT: u32 = 20;
+    pub const FILE_OUTPUT_STREAM_RT: u32 = 21;
 
     /// Iteration state of one live directory-entry-stream: the directory's
     /// P1 fd + the P1 readdir cookie to resume after.
     pub const DirStream = struct { fd: wasi_p1.Fd, cookie: u64 };
+
+    /// One live 0.2 file via-stream: the descriptor's P1 fd + the position
+    /// the next pread / pwrite uses.
+    pub const FileStream = struct { fd: wasi_p1.Fd, pos: u64 };
 
     /// A WASI-0.3 file via-stream peer: the P1 fd + the tracked byte position
     /// the next pread/pwrite uses (advanced per completed copy).
@@ -362,6 +375,7 @@ pub const WasiP2Ctx = struct {
         self.blocked_socket_reads.deinit(self.alloc);
         self.blocked_udp_receives.deinit(self.alloc);
         self.dir_streams.deinit(self.alloc);
+        self.file_streams.deinit(self.alloc);
         self.resources.deinit();
         self.guest_resources.deinit();
         for (self.rb_ctxs.items) |p| self.alloc.destroy(p);
