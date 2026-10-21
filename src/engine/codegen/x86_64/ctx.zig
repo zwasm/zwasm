@@ -105,7 +105,7 @@ pub const InitArgs = struct {
     /// ADR-0120 — see EmitCtx
     /// field of the same name. Default-empty preserves existing
     /// InitArgs construction sites.
-    tag_param_counts: []const u32 = &.{},
+    tag_typeidxs: []const u32 = &.{},
     /// D-235 — see the EmitCtx field of the same name. Default `false`
     /// preserves existing InitArgs construction sites.
     uses_type_subtyping: bool = false,
@@ -335,11 +335,10 @@ pub const EmitCtx = struct {
     /// kind=6 stub is force-emitted as the redirect target. Set only
     /// for qualifying modules under the `.auto` knob. Default false.
     bounds_elided: bool = false,
-    /// ADR-0120 — per-tag param
-    /// count threaded from `CompiledWasm.tag_param_counts` for
-    /// `throw.emit` / `try_table.emit` payload-marshalling.
+    /// ADR-0120 — per-tag index into `module_types`, for `throw.emit` /
+    /// `try_table.emit` payload-marshalling (read through `tagParams`).
     /// Default-empty preserves existing EmitCtx construction sites.
-    tag_param_counts: []const u32 = &.{},
+    tag_typeidxs: []const u32 = &.{},
     /// D-235 — true iff this module declares func subtyping. When true,
     /// `op_call.emitCallIndirect` replaces the inline D-111 structural sig
     /// `CMP` with a `jitCallIndirectSubtypeOk` trampoline call. Default
@@ -368,6 +367,15 @@ pub const EmitCtx = struct {
     /// each register-resident home reg's incoming (caller) value here, and every
     /// return path restores it (callee-saved ABI contract). `0` when no homing.
     home_save_base_disp: i32 = 0,
+
+    /// Wasm 3.0 EH (ADR-0120) — the params of tag `tag_idx`; empty when the
+    /// tag or its type index is out of range.
+    pub fn tagParams(self: *const EmitCtx, tag_idx: u32) []const zir.ValType {
+        if (tag_idx >= self.tag_typeidxs.len) return &.{};
+        const type_idx = self.tag_typeidxs[tag_idx];
+        if (type_idx >= self.module_types.len) return &.{};
+        return self.module_types[type_idx].params;
+    }
 
     pub fn init(args: InitArgs) EmitCtx {
         const simd_consts_base: u32 =
@@ -422,7 +430,7 @@ pub const EmitCtx = struct {
             .exception_table_builder = args.exception_table_builder,
             .open_try_tables = args.open_try_tables,
             .landing_pad_fixups = args.landing_pad_fixups,
-            .tag_param_counts = args.tag_param_counts,
+            .tag_typeidxs = args.tag_typeidxs,
             .uses_type_subtyping = args.uses_type_subtyping,
             .homing = args.homing,
             .n_temp = args.n_temp,

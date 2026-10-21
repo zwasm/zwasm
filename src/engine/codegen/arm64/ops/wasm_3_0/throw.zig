@@ -81,18 +81,11 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // value goes to index 0. Loop from high index down so each
     // pop deposits into its natural buf slot.
     //
-    // For tag_idx outside `tag_param_counts.len` (test-side
+    // For a tag_idx `tagParams` has no type for (test-side
     // EmitCtx defaults to `&.{}`), N=0 — same as pre-Cycle-4
     // shape; no pops, just a `STR Wzr` for the length.
-    //
-    // Gpr-class only this cycle: i32 / i64 / funcref / externref
-    // operand values flow through `gprLoadSpilled`. f32 / f64 /
-    // v128 / exnref tag params fall back to v0.2 scope per
-    // ADR-0120 Consequence §3.
-    const n_payload: u32 = if (ctx.tag_param_counts.len > tag_idx)
-        ctx.tag_param_counts[tag_idx]
-    else
-        0;
+    const params = ctx.tagParams(tag_idx);
+    const n_payload: u32 = @intCast(params.len);
     std.debug.assert(n_payload <= 16);
 
     if (n_payload > 0) {
@@ -101,9 +94,21 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
         while (i > 0) {
             i -= 1;
             const val_vreg = ctx.pushed_vregs.pop().?;
-            const stage_reg = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, val_vreg, 0);
             const slot_off: u14 = @intCast(jit_abi.eh_payload_buf_off + i * 8);
-            try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrImm(stage_reg, abi.runtime_ptr_save_gpr, slot_off));
+            switch (params[i]) {
+                .f32 => {
+                    const src = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, val_vreg, 0);
+                    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrSImm(src, abi.runtime_ptr_save_gpr, slot_off));
+                },
+                .f64 => {
+                    const src = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, val_vreg, 0);
+                    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrDImm(src, abi.runtime_ptr_save_gpr, slot_off));
+                },
+                .i32, .i64, .v128, .ref => {
+                    const stage_reg = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, val_vreg, 0);
+                    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrImm(stage_reg, abi.runtime_ptr_save_gpr, slot_off));
+                },
+            }
         }
     }
 

@@ -1279,7 +1279,6 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
             select_types.items,
             .register_write,
             memory0_idx_type,
-            tag_param_counts,
             tag_typeidxs,
             struct_field_counts,
             array_elem_valtypes,

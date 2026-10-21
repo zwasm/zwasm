@@ -172,10 +172,10 @@ pub fn compile(
     globals_offsets: []const u32,
     globals_valtypes: []const zir.ValType,
     memory0_idx_type: sections.MemoryEntry.IdxType,
-    /// Wasm 3.0 EH (ADR-0120) — per-tag
-    /// param counts threaded into EmitCtx for throw / try_table
-    /// payload marshalling. Pass `&.{}` for modules without tags.
-    tag_param_counts: []const u32,
+    /// Wasm 3.0 EH (ADR-0120) — per-tag param types threaded into
+    /// EmitCtx for throw / try_table payload marshalling. Pass `&.{}`
+    /// for modules without tags.
+    tag_typeidxs: []const u32,
     /// D-235 — module-level func-subtyping flag (`usesTypeSubtyping`).
     /// Routes `call_indirect` through the subtype trampoline. `false` for
     /// non-subtyping modules + test helpers.
@@ -866,7 +866,7 @@ pub fn compile(
         .exception_table_builder = if (has_try_table) &eh_builder else null,
         .open_try_tables = if (has_try_table) &open_try_tables else null,
         .landing_pad_fixups = if (has_try_table) &landing_pad_fixups else null,
-        .tag_param_counts = tag_param_counts,
+        .tag_typeidxs = tag_typeidxs,
         .frame_bytes = frame_bytes,
         .uses_type_subtyping = uses_type_subtyping,
         // ADR-0155 stage 2 — register-homed-local call-site spill/reload.
@@ -1678,7 +1678,7 @@ pub fn compile(
                     // matches, emit a per-clause prelude:
                     //   - .catch_all / .catch_all_ref: zero-byte prelude
                     //     (post-emitEndIntra position is the landing).
-                    //   - .catch_ / .catch_ref: load N=tag_param_counts
+                    //   - .catch_ / .catch_ref: load N=tagParams
                     //     [tag_idx] values from `eh_payload_buf` into
                     //     the block-result vreg slots (= top N entries
                     //     of `pushed_vregs` after emitEndIntra), then
@@ -1708,7 +1708,7 @@ pub fn compile(
                             if (k == .catch_ or k == .catch_ref) {
                                 const tag_idx_opt = eh_builder.entries.items[fx.entry_idx].tag_idx;
                                 if (tag_idx_opt) |t| {
-                                    if (ctx.tag_param_counts.len > t and ctx.tag_param_counts[t] > 0) {
+                                    if (ctx.tagParams(t).len > 0) {
                                         any_payload = true;
                                         break;
                                     }
@@ -1777,26 +1777,35 @@ pub fn compile(
                                 try op_call.reloadHomedCallerSaved(&ctx);
                                 if (entry.kind == .catch_ or entry.kind == .catch_ref) {
                                     const tag_idx = entry.tag_idx orelse return Error.UnsupportedOp;
-                                    const n_payload: u32 = if (ctx.tag_param_counts.len > tag_idx)
-                                        ctx.tag_param_counts[tag_idx]
-                                    else
-                                        0;
-                                    if (n_payload > 0) {
+                                    const params = ctx.tagParams(tag_idx);
+                                    if (params.len > 0) {
                                         // D-328/D-327: the catch result vregs are the
                                         // DEEPEST `result_arity` slots; for catch_ref
                                         // the exnref is the single TOP result, so the
                                         // tag params are the deepest np (base skips the
                                         // exnref slot).
                                         const extra: usize = if (is_ref) 1 else 0;
-                                        if (pushed_vregs.items.len < n_payload + extra) return Error.AllocationMissing;
-                                        const base = pushed_vregs.items.len - n_payload - extra;
-                                        var k: u32 = 0;
-                                        while (k < n_payload) : (k += 1) {
+                                        if (pushed_vregs.items.len < params.len + extra) return Error.AllocationMissing;
+                                        const base = pushed_vregs.items.len - params.len - extra;
+                                        for (params, 0..) |param, k| {
                                             const target_vreg = pushed_vregs.items[base + k];
-                                            const dest_reg = try gpr.gprDefSpilled(alloc, target_vreg, 0);
-                                            const slot_off: u15 = @intCast(jit_abi.eh_payload_buf_off + k * 8);
-                                            try gpr.writeU32(allocator, &buf, inst.encLdrImm(dest_reg, abi.runtime_ptr_save_gpr, slot_off));
-                                            try gpr.gprStoreSpilled(allocator, &buf, alloc, spill_base_off, target_vreg, 0);
+                                            const slot_off: u14 = @intCast(jit_abi.eh_payload_buf_off + k * 8);
+                                            switch (param) {
+                                                .f32, .f64 => {
+                                                    const dest = try gpr.fpDefSpilled(alloc, target_vreg, 0);
+                                                    const word = if (param == .f32)
+                                                        inst.encLdrSImm(dest, abi.runtime_ptr_save_gpr, slot_off)
+                                                    else
+                                                        inst.encLdrDImm(dest, abi.runtime_ptr_save_gpr, slot_off);
+                                                    try gpr.writeU32(allocator, &buf, word);
+                                                    try gpr.fpStoreSpilled(allocator, &buf, alloc, spill_base_off, target_vreg, 0);
+                                                },
+                                                .i32, .i64, .v128, .ref => {
+                                                    const dest_reg = try gpr.gprDefSpilled(alloc, target_vreg, 0);
+                                                    try gpr.writeU32(allocator, &buf, inst.encLdrImm(dest_reg, abi.runtime_ptr_save_gpr, slot_off));
+                                                    try gpr.gprStoreSpilled(allocator, &buf, alloc, spill_base_off, target_vreg, 0);
+                                                },
+                                            }
                                         }
                                     }
                                 }

@@ -62,13 +62,8 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // write at `[R15 + eh_payload_buf_off + i*8]`, then store N
     // (or 0) to `[R15 + eh_payload_len_off]`. See arm64
     // throw.emit for the operand-stack-order rationale.
-    //
-    // Gpr-class only this cycle; f32/f64/v128/exnref tag params
-    // deferred per ADR-0120 Consequence §3.
-    const n_payload: u32 = if (ctx.tag_param_counts.len > tag_idx)
-        ctx.tag_param_counts[tag_idx]
-    else
-        0;
+    const params = ctx.tagParams(tag_idx);
+    const n_payload: u32 = @intCast(params.len);
     std.debug.assert(n_payload <= 16);
 
     if (n_payload > 0) {
@@ -77,9 +72,18 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
         while (i > 0) {
             i -= 1;
             const val_vreg = ctx.pushed_vregs.pop().?;
-            const stage_reg = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, val_vreg, 0);
             const slot_off: i32 = @intCast(jit_abi.eh_payload_buf_off + i * 8);
-            try ctx.buf.appendSlice(ctx.allocator, inst.encStoreR64MemDisp32(stage_reg, abi.runtime_ptr_save_gpr, slot_off).slice());
+            switch (params[i]) {
+                .f32, .f64 => {
+                    const kind: inst.SseScalarKind = if (params[i] == .f32) .f32 else .f64;
+                    const src_xmm = try gpr.xmmLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, val_vreg, 0);
+                    try ctx.buf.appendSlice(ctx.allocator, inst.encMovssMovsdXmmMemBaseDisp32(kind, true, src_xmm, abi.runtime_ptr_save_gpr, slot_off).slice());
+                },
+                .i32, .i64, .v128, .ref => {
+                    const stage_reg = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, val_vreg, 0);
+                    try ctx.buf.appendSlice(ctx.allocator, inst.encStoreR64MemDisp32(stage_reg, abi.runtime_ptr_save_gpr, slot_off).slice());
+                },
+            }
         }
     }
 

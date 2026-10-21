@@ -146,10 +146,10 @@ pub fn compile(
     globals_offsets: []const u32,
     globals_valtypes: []const zir.ValType,
     memory0_idx_type: sections.MemoryEntry.IdxType,
-    /// Wasm 3.0 EH (ADR-0120) — per-tag
-    /// param counts threaded into EmitCtx via InitArgs for throw /
-    /// try_table payload marshalling. Pass `&.{}` for tag-less modules.
-    tag_param_counts: []const u32,
+    /// Wasm 3.0 EH (ADR-0120) — per-tag param types threaded into
+    /// EmitCtx via InitArgs for throw / try_table payload marshalling.
+    /// Pass `&.{}` for tag-less modules.
+    tag_typeidxs: []const u32,
     /// D-235 — module-level func-subtyping flag (`usesTypeSubtyping`).
     /// Routes `call_indirect` through the subtype trampoline. `false` for
     /// non-subtyping modules + test helpers.
@@ -907,7 +907,7 @@ pub fn compile(
         .exception_table_builder = if (has_try_table) &eh_builder else null,
         .open_try_tables = if (has_try_table) &open_try_tables else null,
         .landing_pad_fixups = if (has_try_table) &landing_pad_fixups else null,
-        .tag_param_counts = tag_param_counts,
+        .tag_typeidxs = tag_typeidxs,
         .uses_type_subtyping = uses_type_subtyping,
         // ADR-0155 stage 4 — register-homed-local emit + (no-op) call-site spill.
         .homing = homing,
@@ -1026,7 +1026,7 @@ pub fn compile(
                     }
                     if (k == .catch_ or k == .catch_ref) {
                         if (eh_builder.entries.items[fx.entry_idx].tag_idx) |t| {
-                            if (ctx.tag_param_counts.len > t and ctx.tag_param_counts[t] > 0) {
+                            if (ctx.tagParams(t).len > 0) {
                                 any_payload = true;
                                 break;
                             }
@@ -1092,24 +1092,30 @@ pub fn compile(
                         try op_call.reloadHomedCallerSaved(&ctx);
                         if (entry.kind == .catch_ or entry.kind == .catch_ref) {
                             const tag_idx = entry.tag_idx orelse return Error.UnsupportedOp;
-                            const n_payload: u32 = if (ctx.tag_param_counts.len > tag_idx)
-                                ctx.tag_param_counts[tag_idx]
-                            else
-                                0;
-                            if (n_payload > 0) {
+                            const params = ctx.tagParams(tag_idx);
+                            if (params.len > 0) {
                                 // D-328/D-327: tag params are the DEEPEST np result
                                 // vregs; for catch_ref the exnref is the TOP result, so
                                 // the base skips it.
                                 const extra: usize = if (is_ref) 1 else 0;
-                                if (pushed_vregs.items.len < n_payload + extra) return Error.AllocationMissing;
-                                const base = pushed_vregs.items.len - n_payload - extra;
-                                var k: u32 = 0;
-                                while (k < n_payload) : (k += 1) {
+                                if (pushed_vregs.items.len < params.len + extra) return Error.AllocationMissing;
+                                const base = pushed_vregs.items.len - params.len - extra;
+                                for (params, 0..) |param, k| {
                                     const target_vreg = pushed_vregs.items[base + k];
-                                    const dest_reg = try gpr.gprDefSpilled(alloc, target_vreg, 0);
                                     const off: i32 = @intCast(jit_abi.eh_payload_buf_off + k * 8);
-                                    try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(dest_reg, abi.runtime_ptr_save_gpr, off).slice());
-                                    try gpr.gprStoreSpilled(allocator, &buf, alloc, spill_base_off, target_vreg, 0);
+                                    switch (param) {
+                                        .f32, .f64 => {
+                                            const kind: inst.SseScalarKind = if (param == .f32) .f32 else .f64;
+                                            const dest_xmm = try gpr.xmmDefSpilled(alloc, target_vreg, 0);
+                                            try buf.appendSlice(allocator, inst.encMovssMovsdXmmMemBaseDisp32(kind, false, dest_xmm, abi.runtime_ptr_save_gpr, off).slice());
+                                            try gpr.xmmStoreSpilled(allocator, &buf, alloc, spill_base_off, target_vreg, 0);
+                                        },
+                                        .i32, .i64, .v128, .ref => {
+                                            const dest_reg = try gpr.gprDefSpilled(alloc, target_vreg, 0);
+                                            try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(dest_reg, abi.runtime_ptr_save_gpr, off).slice());
+                                            try gpr.gprStoreSpilled(allocator, &buf, alloc, spill_base_off, target_vreg, 0);
+                                        },
+                                    }
                                 }
                             }
                         }

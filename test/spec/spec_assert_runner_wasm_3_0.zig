@@ -428,64 +428,21 @@ const JitKnownFail = struct {
     /// be turned into a row by copying it off the diagnostic output.
     key: []const u8,
     /// Failing DIRECTIVES for that export, not distinct exports: the corpus
-    /// asserts `throw-catch-param-f32` twice (5.0 and 10.5) and both fail.
+    /// asserts `throw-catch-param-f32` twice (5.0 and 10.5), and both failed
+    /// until #602.
     /// A set keyed on the export alone would report 4 where there are 8 and
     /// would not notice one of the pair being fixed.
     count: u32,
 };
 
-/// x86_64 — measured 2026-09-02 on x86_64-linux, `ZWASM_SPEC_ENGINE=jit`.
-///
-/// These 8 are every f32/f64 `assert_return` directive in the
-/// exception-handling corpus, and they are the ONLY float directives in it;
-/// every non-float directive passes. The JIT returns a constant bit pattern
-/// that does not depend on the argument (f32 → 0x66666666 for both the 5.0
-/// and 10.5 cases, f64 → 0x4050066666666666 for both), so this is a wrong
-/// value returned without an error — not a trap and not a refusal to
-/// compile. The mechanism is NOT diagnosed here: the symptom is #378, and
-/// this row exists so the lane can gate on everything else meanwhile.
-///
-/// Windows is x86_64 too but does NOT share this row — see below.
-const jit_known_fail_x86_64_sysv: []const JitKnownFail = &.{
-    .{ .key = "exception-handling/try_table/throw-catch-param-f32", .count = 2 },
-    .{ .key = "exception-handling/try_table/throw-catch-param-f64", .count = 2 },
-    .{ .key = "exception-handling/try_table/throw-catch_ref-param-f32", .count = 2 },
-    .{ .key = "exception-handling/try_table/throw-catch_ref-param-f64", .count = 2 },
-};
-
-/// x86_64-windows — measured 2026-09-02 by this lane's own first CI run.
-///
-/// The same 8 float directives. A ninth row, `imported-mismatch` (a no-arg
-/// `-> i32:3` assert, #379), stood here until #385: its `$imported-throw` is a
-/// func import from the `register`ed "test" module, so the call crosses the
-/// D-225 bridge thunk — which was SysV-only and handed the Win64 callee the
-/// IMPORTER's runtime. The thrown tag then compared against the wrong
-/// instance's identity and the inner `catch $e0` caught what `catch_all`
-/// should have. Measured by this gate's own stale signal: `0 stale` on
-/// main + #384, `1 stale` with the Cc-aware thunk. Keyed on the target and
-/// not the arch for the same reason as before: the Win64 float rows are
-/// theirs alone.
-const jit_known_fail_x86_64_windows: []const JitKnownFail = &.{
-    .{ .key = "exception-handling/try_table/throw-catch-param-f32", .count = 2 },
-    .{ .key = "exception-handling/try_table/throw-catch-param-f64", .count = 2 },
-    .{ .key = "exception-handling/try_table/throw-catch_ref-param-f32", .count = 2 },
-    .{ .key = "exception-handling/try_table/throw-catch_ref-param-f64", .count = 2 },
-};
-
-/// aarch64 (the macOS leg) — measured 2026-09-02 by this lane's own first CI
-/// run: `8 failed`, `4 enumerated, 0 unexpected, 0 stale`. The same 8
-/// directives as the SysV x86_64 row, which is why the defect is not in
-/// either backend's register allocator.
-///
-/// Written first as a prediction copied from x86_64 and left to be falsified,
-/// rather than defaulted to empty: an empty row fails the leg with 8
-/// unexpected entries and reports only that nobody had looked.
-const jit_known_fail_aarch64: []const JitKnownFail = &.{
-    .{ .key = "exception-handling/try_table/throw-catch-param-f32", .count = 2 },
-    .{ .key = "exception-handling/try_table/throw-catch-param-f64", .count = 2 },
-    .{ .key = "exception-handling/try_table/throw-catch_ref-param-f32", .count = 2 },
-    .{ .key = "exception-handling/try_table/throw-catch_ref-param-f64", .count = 2 },
-};
+/// x86_64-linux and aarch64-linux — measured empty on 2026-10-20 once #602
+/// moved f32 / f64 tag payloads through the FP registers; the 8 float
+/// `try_table` directives these rows held since 2026-09-02 (#378) pass.
+/// x86_64-windows is the same backend; its first CI run with this row
+/// empty confirms it.
+const jit_known_fail_x86_64_sysv: []const JitKnownFail = &.{};
+const jit_known_fail_x86_64_windows: []const JitKnownFail = &.{};
+const jit_known_fail_aarch64: []const JitKnownFail = &.{};
 
 /// A target with no row expects ZERO JIT fails. That is the loud default: a
 /// host nobody measured reports every fail as unexpected rather than

@@ -49,6 +49,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A caught exception's f32 or f64 payload reaches the catch's target block
+  intact on the JIT** (#602, #378). `throw` stored each tag param from a
+  general-purpose register and the landing pad loaded it back into one,
+  whatever its type, so a float payload came out as whatever the FP register
+  held, with no trap. The 8 float `try_table` directives of the
+  exception-handling spec corpus now pass on the JIT lane.
+
 - **The JIT merges an `if` or `block` result in its own register class**
   (#601). The merge move took the class of a neighbouring value after a void or
   multi-result call, `table.fill` or `atomic.fence`, called an f32 `call`,

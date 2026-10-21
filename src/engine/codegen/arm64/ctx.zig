@@ -274,15 +274,13 @@ pub const EmitCtx = struct {
     /// the engine knob is `.auto`. memory64 / bulk / GC-array checks
     /// are NEVER elided. Default false = explicit checks (status quo).
     bounds_elided: bool = false,
-    /// Wasm 3.0 EH (ADR-0120) — per-tag
-    /// param count threaded from `CompiledWasm.tag_param_counts`
-    /// (compile.zig). Indexed by `tag_idx`. `throw.emit` /
-    /// `try_table.emit` consume this to know how many operand
-    /// values to marshal between the regalloc stack and the
-    /// per-Runtime `eh_payload_buf`. Default-empty preserves the
-    /// existing EmitCtx construction sites (entry / linker /
-    /// wrapper_thunk test helpers and any pre-EH compile path).
-    tag_param_counts: []const u32 = &.{},
+    /// Wasm 3.0 EH (ADR-0120) — per-tag index into `module_types`.
+    /// `throw.emit` / `try_table.emit` marshal each payload value between
+    /// the regalloc stack and the per-Runtime `eh_payload_buf` by its type
+    /// (read through `tagParams`). Default-empty preserves the existing
+    /// EmitCtx construction sites (entry / linker / wrapper_thunk test
+    /// helpers and any pre-EH compile path).
+    tag_typeidxs: []const u32 = &.{},
 
     /// ADR-0112 D3 — total frame size
     /// (16-byte aligned) the function's prologue allocated via
@@ -323,6 +321,15 @@ pub const EmitCtx = struct {
     /// for every binary op-handler. Returns the lhs / rhs / result
     /// vreg ids or `AllocationMissing` (stack underflow) /
     /// `SlotOverflow` (allocator out of slots).
+    /// Wasm 3.0 EH (ADR-0120) — the params of tag `tag_idx`; empty when the
+    /// tag or its type index is out of range.
+    pub fn tagParams(self: *const EmitCtx, tag_idx: u32) []const zir.ValType {
+        if (tag_idx >= self.tag_typeidxs.len) return &.{};
+        const type_idx = self.tag_typeidxs[tag_idx];
+        if (type_idx >= self.module_types.len) return &.{};
+        return self.module_types[type_idx].params;
+    }
+
     pub fn popBinary(self: *EmitCtx) Error!struct { lhs: u32, rhs: u32, result: u32 } {
         if (self.pushed_vregs.items.len < 2) return Error.AllocationMissing;
         const rhs = self.pushed_vregs.pop().?;
