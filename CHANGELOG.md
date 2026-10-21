@@ -53,6 +53,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **Loading a `.cwasm` no longer costs call relocs × functions** (#613). The
+  loader found each reloc's function by scanning the function table from the
+  first; it now binary-searches it. The artifact is unchanged; esbuild's (8,565
+  functions, 97,064 relocs) loads in 150 ms instead of 369 ms.
+
 - **The JIT merges a v128 `if` or `block` result as a vector** (#605). It
   took the 16-byte move from shape tags that a second walk of the function
   numbered: a call's results and `struct.new` counted as no push, a

@@ -234,70 +234,16 @@ pub fn deserializeToCompiledWasm(allocator: Allocator, cwasm_bytes: []const u8) 
     // ---- Compiler output, reconstructed from the artifact.
     // Per-func bodies view into the code section + per-func extras.
     const n_funcs: usize = h.n_funcs;
-    var metas = try allocator.alloc(format.CwasmFuncMeta, n_funcs);
-    defer allocator.free(metas);
-    for (0..n_funcs) |i| {
-        metas[i] = try format.parseFuncMeta(meta_bytes[i * format.func_meta_size ..][0..format.func_meta_size]);
-        if (@as(u64, metas[i].code_offset) + metas[i].code_size > code.len) return Error.TruncatedImage;
-    }
-
-    // Regroup the flat reloc section into per-func fixup lists. Serialized
-    // reloc offsets are code-SECTION-relative (serialise.zig rebases at
-    // write); invert via each func's [code_offset, +code_size) range.
-    const n_relocs = reloc_bytes.len / format.reloc_size;
-    var fixup_counts = try allocator.alloc(u32, n_funcs);
-    defer allocator.free(fixup_counts);
-    @memset(fixup_counts, 0);
-    var reloc_owner = try allocator.alloc(u32, n_relocs);
-    defer allocator.free(reloc_owner);
-    var parsed_relocs = try allocator.alloc(format.CwasmReloc, n_relocs);
-    defer allocator.free(parsed_relocs);
-    for (0..n_relocs) |ri| {
-        const r = try format.parseReloc(reloc_bytes[ri * format.reloc_size ..][0..format.reloc_size]);
-        parsed_relocs[ri] = r;
-        const owner = blk: {
-            for (metas, 0..) |m, fi| {
-                if (r.code_offset >= m.code_offset and r.code_offset < @as(u64, m.code_offset) + m.code_size)
-                    break :blk fi;
-            }
-            return Error.TruncatedReloc;
-        };
-        reloc_owner[ri] = @intCast(owner);
-        fixup_counts[owner] += 1;
-    }
-    // CallFixup lists (linker input; freed after link).
-    const CallFixup = std.meta.Child(@FieldType(linker.FuncBody, "call_fixups"));
-    var fixup_storage = try allocator.alloc(CallFixup, n_relocs);
-    defer allocator.free(fixup_storage);
-    var fixup_slices = try allocator.alloc([]CallFixup, n_funcs);
-    defer allocator.free(fixup_slices);
-    {
-        var cursor: usize = 0;
-        for (0..n_funcs) |fi| {
-            fixup_slices[fi] = fixup_storage[cursor..][0..fixup_counts[fi]];
-            cursor += fixup_counts[fi];
-        }
-        var write_idx = try allocator.alloc(u32, n_funcs);
-        defer allocator.free(write_idx);
-        @memset(write_idx, 0);
-        for (0..n_relocs) |ri| {
-            const fi = reloc_owner[ri];
-            const r = parsed_relocs[ri];
-            fixup_slices[fi][write_idx[fi]] = .{
-                .byte_offset = r.code_offset - metas[fi].code_offset,
-                .target_func_idx = r.target_func_idx,
-            };
-            write_idx[fi] += 1;
-        }
-    }
+    const layout = try readFuncLayout(allocator, meta_bytes, reloc_bytes, n_funcs, code.len);
+    defer layout.deinit(allocator);
 
     var bodies = try allocator.alloc(linker.FuncBody, n_funcs);
     defer allocator.free(bodies);
     for (0..n_funcs) |i| {
         const extra = try format.parseFuncExtra(extras_bytes[i * format.func_extra_size ..][0..format.func_extra_size]);
         bodies[i] = .{
-            .bytes = code[metas[i].code_offset..][0..metas[i].code_size],
-            .call_fixups = fixup_slices[i],
+            .bytes = code[layout.metas[i].code_offset..][0..layout.metas[i].code_size],
+            .call_fixups = layout.fixups[i],
             .frame_bytes = extra.frame_bytes,
             .oob_stub_off = extra.oob_stub_off,
         };
@@ -374,6 +320,97 @@ pub fn deserializeToCompiledWasm(allocator: Allocator, cwasm_bytes: []const u8) 
         },
         .wasm_bytes = wasm_bytes,
     };
+}
+
+const CallFixup = std.meta.Child(@FieldType(linker.FuncBody, "call_fixups"));
+
+/// The artifact's per-func code ranges, and its flat reloc section regrouped
+/// into the call fixups each func owns (linker input).
+const FuncLayout = struct {
+    metas: []format.CwasmFuncMeta,
+    fixup_storage: []CallFixup,
+    fixups: [][]CallFixup,
+
+    fn deinit(self: FuncLayout, allocator: Allocator) void {
+        allocator.free(self.fixups);
+        allocator.free(self.fixup_storage);
+        allocator.free(self.metas);
+    }
+};
+
+fn readFuncLayout(
+    allocator: Allocator,
+    meta_bytes: []const u8,
+    reloc_bytes: []const u8,
+    n_funcs: usize,
+    code_len: usize,
+) Error!FuncLayout {
+    const metas = try allocator.alloc(format.CwasmFuncMeta, n_funcs);
+    errdefer allocator.free(metas);
+    for (0..n_funcs) |i| {
+        metas[i] = try format.parseFuncMeta(meta_bytes[i * format.func_meta_size ..][0..format.func_meta_size]);
+        if (@as(u64, metas[i].code_offset) + metas[i].code_size > code_len) return Error.TruncatedImage;
+        // relocOwner's binary search holds only over ascending, disjoint ranges.
+        if (i > 0 and metas[i].code_offset < @as(u64, metas[i - 1].code_offset) + metas[i - 1].code_size)
+            return Error.TruncatedImage;
+    }
+
+    // Serialized reloc offsets are code-SECTION-relative (serialise.zig
+    // rebases at write); relocOwner inverts that.
+    const n_relocs = reloc_bytes.len / format.reloc_size;
+    const fixup_counts = try allocator.alloc(u32, n_funcs);
+    defer allocator.free(fixup_counts);
+    @memset(fixup_counts, 0);
+    const reloc_owner = try allocator.alloc(u32, n_relocs);
+    defer allocator.free(reloc_owner);
+    const parsed_relocs = try allocator.alloc(format.CwasmReloc, n_relocs);
+    defer allocator.free(parsed_relocs);
+    for (0..n_relocs) |ri| {
+        const r = try format.parseReloc(reloc_bytes[ri * format.reloc_size ..][0..format.reloc_size]);
+        parsed_relocs[ri] = r;
+        const owner = relocOwner(metas, r.code_offset) orelse return Error.TruncatedReloc;
+        reloc_owner[ri] = owner;
+        fixup_counts[owner] += 1;
+    }
+
+    const fixup_storage = try allocator.alloc(CallFixup, n_relocs);
+    errdefer allocator.free(fixup_storage);
+    const fixups = try allocator.alloc([]CallFixup, n_funcs);
+    errdefer allocator.free(fixups);
+    var cursor: usize = 0;
+    for (0..n_funcs) |fi| {
+        fixups[fi] = fixup_storage[cursor..][0..fixup_counts[fi]];
+        cursor += fixup_counts[fi];
+    }
+    const write_idx = try allocator.alloc(u32, n_funcs);
+    defer allocator.free(write_idx);
+    @memset(write_idx, 0);
+    for (0..n_relocs) |ri| {
+        const fi = reloc_owner[ri];
+        const r = parsed_relocs[ri];
+        fixups[fi][write_idx[fi]] = .{
+            .byte_offset = r.code_offset - metas[fi].code_offset,
+            .target_func_idx = r.target_func_idx,
+        };
+        write_idx[fi] += 1;
+    }
+    return .{ .metas = metas, .fixup_storage = fixup_storage, .fixups = fixups };
+}
+
+/// The func whose `[code_offset, +code_size)` holds `off`, or null when `off`
+/// falls in the padding between funcs or past the last one. `metas` is
+/// ascending and disjoint (readFuncLayout checks it), so only the last func
+/// starting at or before `off` can hold it.
+fn relocOwner(metas: []const format.CwasmFuncMeta, off: u32) ?u32 {
+    const after = std.sort.partitionPoint(format.CwasmFuncMeta, metas, off, startsAtOrBefore);
+    if (after == 0) return null;
+    const m = metas[after - 1];
+    if (off - m.code_offset >= m.code_size) return null;
+    return @intCast(after - 1);
+}
+
+fn startsAtOrBefore(off: u32, m: format.CwasmFuncMeta) bool {
+    return m.code_offset <= off;
 }
 
 // =====================================================================
@@ -456,4 +493,90 @@ test "v0.5 round-trip: produce → deserialize → fromCompiled → invoke == fr
     try inst.runStart(); // D-518 shape: start must run through the full path
     const aot_r = try inst.invoke(testing.allocator, "main", &.{});
     try testing.expectEqual(fresh_r, aot_r);
+}
+
+// readFuncLayout over artifacts produceCwasm builds from three hand-made
+// funcs: fn0 [0, 6) + 2 bytes of padding, fn1 [8, 12), fn2 [12, 17).
+const serialise = @import("serialise.zig");
+
+const layout_test_funcs = [_][]const u8{ &([_]u8{0xAA} ** 6), &([_]u8{0xBB} ** 4), &([_]u8{0xCC} ** 5) };
+
+fn layoutTestArtifact(relocs: []const format.CwasmReloc, owners: []const u32) ![]u8 {
+    return serialise.produceCwasm(testing.allocator, .{
+        .arch = format.arch_x86_64,
+        .bytes_per_func = &layout_test_funcs,
+        .n_slots_per_func = &.{ 0, 0, 0 },
+        .sig_idx_per_func = &.{ 0, 0, 0 },
+        .relocs = relocs,
+        .func_idx_for_reloc = owners,
+        .types_serialised = &.{},
+        .n_imports = 0,
+        .n_types = 0,
+    });
+}
+
+fn readArtifactLayout(cwasm: []const u8) Error!FuncLayout {
+    const h = try format.parseHeader(cwasm);
+    return readFuncLayout(
+        testing.allocator,
+        cwasm[h.metadata_offset..][0..h.metadata_size],
+        cwasm[h.relocs_offset..][0..h.relocs_size],
+        h.n_funcs,
+        h.code_size,
+    );
+}
+
+fn directCall(code_offset: u32, target_func_idx: u32) format.CwasmReloc {
+    return .{ .code_offset = code_offset, .target_func_idx = target_func_idx, .kind = format.reloc_kind_direct_call };
+}
+
+test "readFuncLayout: a reloc in the padding between funcs or past the last func is TruncatedReloc" {
+    const cases = [_]struct { owner: u32, off: u32 }{
+        .{ .owner = 0, .off = 6 }, // 6: fn0's padding
+        .{ .owner = 2, .off = 5 }, // 17: past fn2, inside the code section's padding
+        .{ .owner = 2, .off = 100 }, // 112: past the code section
+    };
+    for (cases) |c| {
+        const cwasm = try layoutTestArtifact(&.{directCall(c.off, 0)}, &.{c.owner});
+        defer testing.allocator.free(cwasm);
+        try testing.expectError(Error.TruncatedReloc, readArtifactLayout(cwasm));
+    }
+}
+
+test "readFuncLayout: a reloc on a func's first or last byte belongs to that func, in any reloc order" {
+    const cwasm = try layoutTestArtifact(
+        &.{ directCall(4, 10), directCall(0, 11), directCall(0, 12), directCall(5, 13) },
+        &.{ 2, 1, 0, 0 },
+    );
+    defer testing.allocator.free(cwasm);
+    const layout = try readArtifactLayout(cwasm);
+    defer layout.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), layout.fixups[0].len);
+    try testing.expectEqual(@as(u32, 0), layout.fixups[0][0].byte_offset);
+    try testing.expectEqual(@as(u32, 12), layout.fixups[0][0].target_func_idx);
+    try testing.expectEqual(@as(u32, 5), layout.fixups[0][1].byte_offset);
+    try testing.expectEqual(@as(u32, 13), layout.fixups[0][1].target_func_idx);
+    try testing.expectEqual(@as(usize, 1), layout.fixups[1].len);
+    try testing.expectEqual(@as(u32, 0), layout.fixups[1][0].byte_offset);
+    try testing.expectEqual(@as(u32, 11), layout.fixups[1][0].target_func_idx);
+    try testing.expectEqual(@as(usize, 1), layout.fixups[2].len);
+    try testing.expectEqual(@as(u32, 4), layout.fixups[2][0].byte_offset);
+    try testing.expectEqual(@as(u32, 10), layout.fixups[2][0].target_func_idx);
+}
+
+test "readFuncLayout: func ranges out of order or overlapping are TruncatedImage" {
+    const patches = [_][2]u32{
+        .{ 8, 0 }, // fn0 [8, 14), fn1 [0, 4): disjoint, but fn1 starts first
+        .{ 0, 4 }, // fn1 [4, 8) overlaps fn0 [0, 6)
+    };
+    for (patches) |p| {
+        const cwasm = try layoutTestArtifact(&.{}, &.{});
+        defer testing.allocator.free(cwasm);
+        const h = try format.parseHeader(cwasm);
+        for (p, 0..) |code_offset, i| {
+            std.mem.writeInt(u32, cwasm[h.metadata_offset + i * format.func_meta_size ..][0..4], code_offset, .little);
+        }
+        try testing.expectError(Error.TruncatedImage, readArtifactLayout(cwasm));
+    }
 }
