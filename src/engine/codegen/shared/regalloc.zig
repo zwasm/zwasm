@@ -109,10 +109,8 @@ pub const Slot = union(enum) {
 /// require 16-byte alignment for fast paths; the spill-frame
 /// layout queries this tag to size the per-vreg stride.
 ///
-/// 9.4 MVP: `shapeTag(vreg)` returns `.scalar` by default (no
-/// per-vreg shape storage yet). 9.5 ARM64 NEON emit will
-/// populate `Allocation.shape_tags` from ZirOp metadata when
-/// `compute()` runs over a function containing SIMD ops.
+/// `compute()` derives the tags from liveness's classes (`.simd`
+/// → `.v128`); `shapeTag(vreg)` reads `.scalar` when there are none.
 pub const ShapeTag = enum(u2) { scalar, v128, _ };
 
 const result_abi_mod = @import("result_abi.zig");
@@ -170,11 +168,9 @@ pub const Allocation = struct {
     /// failure rather than silent miscompile.
     max_reg_slots_fp: u8 = 13,
     /// Per-vreg shape tags (per ADR-0041 §"Decision" / 2).
-    /// `null` means all vregs are `.scalar` (no SIMD ops in the
+    /// `null` means all vregs are `.scalar` (no `.simd` vreg in the
     /// function); a populated slice indexes by vreg id. Length when
-    /// non-null equals `slots.len`. The MVP leaves this `null`;
-    /// ARM64 NEON emit populates it during `compute()` when
-    /// the function's ZirInstr stream contains v128 ops.
+    /// non-null equals `slots.len`.
     shape_tags: ?[]const ShapeTag = null,
     /// Per-slot byte offset table for spill slots
     /// (per ADR-0053 Part 1). When non-null, indexed by `slot_id -
@@ -346,12 +342,6 @@ pub fn deinit(allocator: Allocator, alloc: Allocation) void {
     if (alloc.shape_tags) |tags| if (tags.len != 0) allocator.free(tags);
     if (alloc.spill_offsets) |so| if (so.len != 0) allocator.free(so);
 }
-
-// populateShapeTags extracted to `regalloc_shape_tags.zig` per
-// ADR-0090. Re-exported so callers reach
-// `regalloc.populateShapeTags` unchanged.
-const shape_tags_mod = @import("regalloc_shape_tags.zig");
-pub const populateShapeTags = shape_tags_mod.populateShapeTags;
 
 // reg_class is the upstream-class-aware refinement hook used by
 // the per-arch wiring; reference it so `no_unused`
@@ -654,135 +644,6 @@ test "Allocation.shapeTag: out-of-range vreg returns .scalar" {
     try testing.expectEqual(ShapeTag.v128, alloc.shapeTag(0));
     // Out-of-range — defensive default, not a hard error.
     try testing.expectEqual(ShapeTag.scalar, alloc.shapeTag(99));
-}
-
-// ============================================================
-// populateShapeTags tests (per ADR-0041
-// §"Decision" / 2)
-// ============================================================
-
-test "populateShapeTags: no SIMD ops returns null" {
-    var f = freshFunc();
-    defer f.deinit(testing.allocator);
-    try f.instrs.append(testing.allocator, .{ .op = .@"i32.const", .payload = 7 });
-    try f.instrs.append(testing.allocator, .{ .op = .end });
-    const tags = try populateShapeTags(testing.allocator, &f, 1);
-    try testing.expect(tags == null);
-}
-
-test "populateShapeTags: i32x4.splat produces a v128 vreg" {
-    var f = freshFunc();
-    defer f.deinit(testing.allocator);
-    // i32.const 7 (vreg 0, scalar) ; i32x4.splat (vreg 1, v128) ; end
-    try f.instrs.append(testing.allocator, .{ .op = .@"i32.const", .payload = 7 });
-    try f.instrs.append(testing.allocator, .{ .op = .@"i32x4.splat" });
-    try f.instrs.append(testing.allocator, .{ .op = .end });
-    const tags = try populateShapeTags(testing.allocator, &f, 2);
-    try testing.expect(tags != null);
-    defer testing.allocator.free(tags.?);
-    try testing.expectEqual(@as(usize, 2), tags.?.len);
-    try testing.expectEqual(ShapeTag.scalar, tags.?[0]);
-    try testing.expectEqual(ShapeTag.v128, tags.?[1]);
-}
-
-test "populateShapeTags: v128.const + i32x4.add produces 2 v128 vregs" {
-    var f = freshFunc();
-    defer f.deinit(testing.allocator);
-    // v128.const (vreg 0) ; v128.const (vreg 1) ; i32x4.add (vreg 2) ; end
-    try f.instrs.append(testing.allocator, .{ .op = .@"v128.const" });
-    try f.instrs.append(testing.allocator, .{ .op = .@"v128.const" });
-    try f.instrs.append(testing.allocator, .{ .op = .@"i32x4.add" });
-    try f.instrs.append(testing.allocator, .{ .op = .end });
-    const tags = try populateShapeTags(testing.allocator, &f, 3);
-    try testing.expect(tags != null);
-    defer testing.allocator.free(tags.?);
-    try testing.expectEqual(@as(usize, 3), tags.?.len);
-    try testing.expectEqual(ShapeTag.v128, tags.?[0]);
-    try testing.expectEqual(ShapeTag.v128, tags.?[1]);
-    try testing.expectEqual(ShapeTag.v128, tags.?[2]);
-}
-
-test "populateShapeTags: extract_lane produces scalar from v128" {
-    var f = freshFunc();
-    defer f.deinit(testing.allocator);
-    // v128.const (vreg 0, v128) ; i32x4.extract_lane (vreg 1, scalar) ; end
-    try f.instrs.append(testing.allocator, .{ .op = .@"v128.const" });
-    try f.instrs.append(testing.allocator, .{ .op = .@"i32x4.extract_lane" });
-    try f.instrs.append(testing.allocator, .{ .op = .end });
-    const tags = try populateShapeTags(testing.allocator, &f, 2);
-    try testing.expect(tags != null);
-    defer testing.allocator.free(tags.?);
-    try testing.expectEqual(@as(usize, 2), tags.?.len);
-    try testing.expectEqual(ShapeTag.v128, tags.?[0]);
-    try testing.expectEqual(ShapeTag.scalar, tags.?[1]);
-}
-
-test "populateShapeTags: empty func returns null (no SIMD)" {
-    var f = freshFunc();
-    defer f.deinit(testing.allocator);
-    try f.instrs.append(testing.allocator, .{ .op = .end });
-    const tags = try populateShapeTags(testing.allocator, &f, 0);
-    try testing.expect(tags == null);
-}
-
-test "populateShapeTags: D-061 — v128 params trigger populate via local.get tagging" {
-    // simd_select.0 fixture shape: (v128, v128, i32) → v128 with
-    // body `local.get 0; local.get 1; local.get 2; select; end`.
-    // Without D-061 fix populateShapeTags would return null
-    // (no SIMD op in body) and arm64/emit's select handler would
-    // dispatch through the .scalar branch — UnsupportedOp.
-    const params = [_]zir.ValType{ .v128, .v128, .i32 };
-    const results = [_]zir.ValType{.v128};
-    const sig: zir.FuncType = .{ .params = &params, .results = &results };
-    var f = zir.ZirFunc.init(0, sig, &.{});
-    defer f.deinit(testing.allocator);
-    try f.instrs.append(testing.allocator, .{ .op = .@"local.get", .payload = 0 });
-    try f.instrs.append(testing.allocator, .{ .op = .@"local.get", .payload = 1 });
-    try f.instrs.append(testing.allocator, .{ .op = .@"local.get", .payload = 2 });
-    try f.instrs.append(testing.allocator, .{ .op = .select });
-    try f.instrs.append(testing.allocator, .{ .op = .end });
-    const tags = try populateShapeTags(testing.allocator, &f, 4);
-    try testing.expect(tags != null);
-    defer testing.allocator.free(tags.?);
-    try testing.expectEqual(@as(usize, 4), tags.?.len);
-    try testing.expectEqual(ShapeTag.v128, tags.?[0]); // local.get 0 → v128 param
-    try testing.expectEqual(ShapeTag.v128, tags.?[1]); // local.get 1 → v128 param
-    try testing.expectEqual(ShapeTag.scalar, tags.?[2]); // local.get 2 → i32 param
-    // tags[3] is `select`'s result; left .scalar today
-    // (per-vreg type-flow tracking via operand-stack simulation
-    // is a separate enhancement — see populateShapeTags doc).
-}
-
-test "populateShapeTags: scalar binop between SIMD ops keeps vreg numbering aligned" {
-    // i32x4.splat (v128 vreg 0)
-    // i32.const   (scalar vreg 1)
-    // i32.add     (scalar vreg 2 — pre-D-061 walk would NOT
-    //              increment, drifting tags[3] for the next push)
-    // i32x4.splat (v128 vreg 3)
-    var f = freshFunc();
-    defer f.deinit(testing.allocator);
-    try f.instrs.append(testing.allocator, .{ .op = .@"i32.const" });
-    try f.instrs.append(testing.allocator, .{ .op = .@"i32x4.splat" });
-    try f.instrs.append(testing.allocator, .{ .op = .@"i32.const" });
-    try f.instrs.append(testing.allocator, .{ .op = .@"i32.const" });
-    try f.instrs.append(testing.allocator, .{ .op = .@"i32.add" });
-    try f.instrs.append(testing.allocator, .{ .op = .drop });
-    try f.instrs.append(testing.allocator, .{ .op = .@"i32.const" });
-    try f.instrs.append(testing.allocator, .{ .op = .@"i32x4.splat" });
-    try f.instrs.append(testing.allocator, .{ .op = .end });
-    const tags = try populateShapeTags(testing.allocator, &f, 7);
-    try testing.expect(tags != null);
-    defer testing.allocator.free(tags.?);
-    // vreg layout (def-order): 0=i32.const, 1=i32x4.splat,
-    // 2=i32.const, 3=i32.const, 4=i32.add, 5=i32.const, 6=i32x4.splat.
-    // Seven pushes; tags[1] = v128, tags[6] = v128.
-    try testing.expectEqual(ShapeTag.scalar, tags.?[0]);
-    try testing.expectEqual(ShapeTag.v128, tags.?[1]);
-    try testing.expectEqual(ShapeTag.scalar, tags.?[2]);
-    try testing.expectEqual(ShapeTag.scalar, tags.?[3]);
-    try testing.expectEqual(ShapeTag.scalar, tags.?[4]);
-    try testing.expectEqual(ShapeTag.scalar, tags.?[5]);
-    try testing.expectEqual(ShapeTag.v128, tags.?[6]);
 }
 
 // compute+shape_tags / spill_offsets / computeSpillOffsets / fence /

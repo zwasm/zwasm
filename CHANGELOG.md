@@ -49,6 +49,14 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **The JIT merges a v128 `if` or `block` result as a vector** (#605). It
+  took the 16-byte move from shape tags that a second walk of the function
+  numbered: a call's results and `struct.new` counted as no push, a
+  `try_table` catch's values were missed, and a v128 `select`, `global.get`,
+  call result or relaxed-SIMD op was tagged scalar, so the vector went through
+  a scalar register. The tags now come from the classes liveness records,
+  which also give those values 16-byte spill cells.
+
 - **A caught exception's f32 or f64 payload reaches the catch's target block
   intact on the JIT** (#602, #378). `throw` stored each tag param from a
   general-purpose register and the landing pad loaded it back into one,

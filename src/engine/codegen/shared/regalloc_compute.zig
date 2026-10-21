@@ -12,7 +12,6 @@ const std = @import("std");
 const dbg = @import("../../../support/dbg.zig");
 const zir = @import("../../../ir/zir.zig");
 const regalloc = @import("regalloc.zig");
-const shape_tags_mod = @import("regalloc_shape_tags.zig");
 const local_homing = @import("../../../ir/analysis/local_homing.zig");
 const jit_abi = @import("jit_abi.zig");
 
@@ -38,6 +37,17 @@ pub const max_slots: u16 = 65535;
 
 const max_reg_slots_gpr_default: u16 = 8;
 const default_boundaries: Boundaries = .{ .gpr = max_reg_slots_gpr_default, .fp = 13 };
+
+/// One tag per vreg, read off the classes liveness recorded (#605): `.v128`
+/// where the class is `.simd`. Null, read as all scalar, when no vreg is
+/// `.simd` or the liveness carries no classes (hand-built test fixtures).
+fn shapeTagsFromClasses(allocator: Allocator, live: zir.Liveness) Error!?[]ShapeTag {
+    if (std.mem.findScalar(zir.RegClass, live.classes, .simd) == null) return null;
+    std.debug.assert(live.classes.len == live.ranges.len);
+    const tags = try allocator.alloc(ShapeTag, live.classes.len);
+    for (live.classes, tags) |c, *t| t.* = if (c == .simd) .v128 else .scalar;
+    return tags;
+}
 
 /// The per-class register boundaries `computeWith` records on the
 /// Allocation (`max_reg_slots_gpr` / `max_reg_slots_fp`). The spill-frame
@@ -242,7 +252,7 @@ pub fn computeWith(
 
     var slots = try allocator.alloc(u16, live.ranges.len);
     errdefer allocator.free(slots);
-    const shape_tags = try shape_tags_mod.populateShapeTags(allocator, func, live.ranges.len);
+    const shape_tags = try shapeTagsFromClasses(allocator, live);
     errdefer if (shape_tags) |t| allocator.free(t);
 
     var n_slots: u16 = 0;
@@ -821,7 +831,7 @@ test "compute: SIMD function gets populated shape_tags" {
         .{ .def_pc = 0, .last_use_pc = 1 },
         .{ .def_pc = 1, .last_use_pc = 2 },
     };
-    f.liveness = .{ .ranges = &ranges };
+    f.liveness = .{ .ranges = &ranges, .classes = &.{ .gpr, .simd } };
     const alloc = try compute(testing.allocator, &f);
     defer regalloc.deinit(testing.allocator, alloc);
     try testing.expect(alloc.shape_tags != null);

@@ -7,7 +7,7 @@
 //! and the value crosses the loop back-edge in a register (the D-265 win).
 //!
 //! This module is the SINGLE SOURCE OF TRUTH for the plan. `liveness.compute`,
-//! `regalloc_shape_tags`, `regalloc_compute`, and the arm64 emit driver each
+//! `regalloc_compute`, and the arm64 emit driver each
 //! call `plan(func)` and MUST observe the identical mapping (the lockstep
 //! invariant from the spike). Because every caller re-derives the plan purely
 //! from `*const ZirFunc`, the three passes cannot drift.
@@ -160,7 +160,7 @@ fn isHomeableType(ty: ValType) bool {
 }
 
 /// Compute the register-homing plan for `func`. Pure function of the ZirFunc;
-/// every consumer (liveness / shape_tags / regalloc / emit) gets the identical
+/// every consumer (liveness / regalloc / emit) gets the identical
 /// plan. Returns `count == 0` when homing is gated off (non-aarch64, or the
 /// function contains a call-like op).
 pub fn plan(func: *const ZirFunc) Plan {

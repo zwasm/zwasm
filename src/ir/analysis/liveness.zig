@@ -1306,3 +1306,24 @@ test "compute: a throw pops its tag's payload before the stack freezes" {
     try testing.expectEqual(@as(u32, 1), live.stack_depth[5]);
     try testing.expectEqual(snapshotDigest(&.{0}), live.stack_digest[5]);
 }
+
+test "compute: classes mark the v128 values a select and a call produce" {
+    // local.get 0 (v128) ; local.get 1 (v128) ; local.get 2 (i32) ;
+    // select (v128, extra = 0x7B) ; call 0 (v128) -> v128 ; end
+    var f = try buildFuncWithParams(testing.allocator, &.{ .v128, .v128, .i32 }, &.{
+        .{ .op = .@"local.get", .payload = 0 },
+        .{ .op = .@"local.get", .payload = 1 },
+        .{ .op = .@"local.get", .payload = 2 },
+        .{ .op = .select, .extra = 0x7B },
+        .{ .op = .call, .payload = 0 },
+        .{ .op = .drop },
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+    const sigs = [_]zir.FuncType{.{ .params = &.{.v128}, .results = &.{.v128} }};
+
+    const live = try compute(testing.allocator, &f, &sigs, &.{}, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqualSlices(RegClass, &.{ .simd, .simd, .gpr, .simd, .simd }, live.classes);
+}

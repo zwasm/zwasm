@@ -18,10 +18,8 @@ pub const StackEffect = struct { pops: u8, pushes: u8 };
 /// memory ops, pseudo opcodes); callers translate that into the
 /// appropriate error.
 ///
-/// Exposed (pub since §9.9 / 9.9-d-6 / D-061) so
-/// `regalloc.populateShapeTags` can mirror this same vreg
-/// numbering — keeping the two in sync without duplicating
-/// the catalogue.
+/// Public so `liveness_result_class.zig`'s coverage test can ask
+/// which ops push.
 pub fn stackEffect(op: ZirOp) ?StackEffect {
     return switch (op) {
         // 0 → 0
@@ -50,8 +48,7 @@ pub fn stackEffect(op: ZirOp) ?StackEffect {
         // and fabricate a fresh vreg, opening a regalloc reuse
         // window the subsequent push could clobber. See the
         // dedicated dispatch arm in `compute()` for the
-        // last-use extension. populateShapeTags also matches
-        // (no shape_tag increment at local.tee).
+        // last-use extension.
         .@"local.tee" => .{ .pops = 0, .pushes = 0 },
         // any.convert_extern / extern.convert_any (10.G) are pure identity:
         // externref and anyref share the Value.ref slot, the distinction is

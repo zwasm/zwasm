@@ -426,11 +426,9 @@ pub const MemArgExtra = packed struct(u32) {
 /// `i8x16.`, `i16x8.`, `i32x4.`, `i64x2.`, `f32x4.`, or
 /// `f64x2.` is a SIMD op.
 ///
-/// Used by `regalloc.compute()` to populate
-/// `Allocation.shape_tags` per ADR-0041 §"Decision" / 2 +
-/// §14 (single_slot_dual_meaning). Emit pass queries the
-/// resulting shape tag to select 16-byte vs 8-byte spill
-/// stride and Q vs D/S register view.
+/// Used by liveness's result class (`liveness_result_class.zig`),
+/// whose `.simd` vregs `regalloc.compute()` tags `.v128` in
+/// `Allocation.shape_tags` per ADR-0041 §"Decision" / 2.
 pub fn isSimdZirOp(op: ZirOp) bool {
     const name = @tagName(op);
     return std.mem.startsWith(u8, name, "v128.") or

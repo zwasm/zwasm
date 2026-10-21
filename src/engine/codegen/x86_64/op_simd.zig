@@ -2,9 +2,9 @@
 //! x86_64 emit pass — SIMD-128 op handlers.
 //!
 //! Mirrors the role of `arm64/op_simd.zig` for the SSE2 / SSE4.1
-//! lowering of v128 ops. The shape-tag pipeline itself
-//! (`engine/codegen/shared/regalloc.populateShapeTags`) is shared
-//! across arches per ADR-0041 §"Decision" / 2 and needs no
+//! lowering of v128 ops. The shape tags come from liveness's
+//! classes (`regalloc_compute.shapeTagsFromClasses`), shared
+//! across arches per ADR-0041 §"Decision" / 2, and need no
 //! x86_64-side wiring.
 //!
 //! Packed integer add/sub family (8 ops):
