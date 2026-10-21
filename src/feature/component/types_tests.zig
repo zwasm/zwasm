@@ -640,3 +640,14 @@ test "resourcetype (0x3f) decodes — a valid resource def is no longer falsely 
     try testing.expectEqual(@as(usize, 1), info.deftypes.items.len);
     try testing.expectEqual(@as(?u32, null), info.deftypes.items[0].resource.dtor);
 }
+
+test "parseWasiGen: a 0.3.x patch release is p3, whatever its patch number" {
+    // WASI 0.3.1 / 0.3.2 rename only the version, and filesystem's p2 and p3
+    // rows share func names, so a 0.3.2 import that fell to `.any` would bind
+    // the p2 op.
+    try testing.expectEqual(types.WasiGen.p3, types.parseWasiGen("0.3.0"));
+    try testing.expectEqual(types.WasiGen.p3, types.parseWasiGen("0.3.2"));
+    try testing.expectEqual(types.WasiGen.p3, types.parseWasiGen("0.3.0-rc-2026-03-15"));
+    try testing.expectEqual(types.WasiGen.p2, types.parseWasiGen("0.2.6"));
+    try testing.expectEqual(types.WasiGen.any, types.parseWasiGen("0.30.0"));
+}

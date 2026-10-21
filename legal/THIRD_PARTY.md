@@ -25,6 +25,9 @@ These ship in the published artifact:
   `wasm32-wasip3` conformance binaries + manifests (`prod/testsuite-base`
   branch, stripped; pin + regen in `scripts/vendor_wasip3_official.sh`),
   Apache-2.0 (ADR-0205 D3).
+- `test/component/wasip3/cli-env-v032.{wasm,json}` — the official `cli-env`
+  above with its `@0.3.0` names rewritten to `@0.3.2`
+  (`scripts/gen_wasip3_v032.sh`), Apache-2.0.
 - `test/wasi/wasip1_official/**` — WebAssembly/wasi-testsuite prebuilt
   `wasm32-wasip1` conformance binaries + manifests + preopen trees, one
   subtree per source language (`prod/testsuite-base` branch, stripped; pin +

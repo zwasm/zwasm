@@ -27,6 +27,10 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Added
 
+- **A WASI 0.3.2 component binds** — the WASI 0.3.1 and 0.3.2 releases change
+  only the package version strings; `test-all` now carries a component bound
+  to the 0.3.2 names.
+
 - **`wasm_trap_origin` and `wasm_trap_trace` name where an interpreter trap
   happened** (#498). The origin is the frame that trapped and the trace every
   frame the trap unwound, innermost first, across instances, each with its
@@ -330,6 +334,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   The Zig API reference states which part of the package SemVer covers — the
   facade — and that the internal namespaces the package root also exports
   (`ir`, `runtime`, …) may change in any release.
+
+### Known limitations
+
+- **The Component Model features WASI 0.3.1 adopted are refused at decode**
+  (#611, #612). A `map<K, V>` type fails `InvalidDefType`, and an import or
+  export carrying an `implements` attribute fails `InvalidExternDesc` /
+  `InvalidSort`. No WASI interface through 0.3.2 uses either.
 
 ## [2.7.0] - 2026-09-14
 

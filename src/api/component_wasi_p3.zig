@@ -838,6 +838,26 @@ test "WASI 0.3 conformance (wasip3): cli-clocks reads wall+monotonic clocks (rea
     try testing.expectEqual(@as(?u32, 0), host.exit_code);
 }
 
+test "WASI 0.3 conformance (wasip3): cli-env-v032 binds the 0.3.2 interface names" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/wasip3/cli-env-v032.wasm", testing.allocator, .limited(8 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    // The official cli-env guest renamed to the 0.3.2 names
+    // (scripts/gen_wasip3_v032.sh); it asserts its own argv[0] is "cli-env.wasm".
+    try host.setArgs(&.{ "cli-env.wasm", "a", "b", "42" });
+    try host.setEnvs(&.{ "foo", "baz" }, &.{ "bar", "42" });
+
+    try wasi_p2.runWasiMain(&eng, testing.allocator, bytes, &host, .{});
+    try testing.expectEqual(@as(?u32, 0), host.exit_code orelse 0);
+}
+
 // ============================================================
 // Official wasi-testsuite conformance (ADR-0205 D3)
 // ============================================================

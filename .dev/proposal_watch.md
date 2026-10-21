@@ -5,7 +5,7 @@
 > re-evaluated when they advance. Phase 4 non-web proposals are the
 > v0.2.0 line.
 
-Last reviewed: **2026-08-10**.
+Last reviewed: **2026-08-10**. WASI release train (ADR-0205 D6): **2026-10-21**.
 
 > **WASI 0.3.0 RATIFIED 2026-06-11** (Bytecode Alliance; Wasmtime 43+). It
 > rebases WASI onto the **Component Model async primitives** (`async` func,
@@ -85,8 +85,14 @@ Text Encoding Builtins` (skip).
 |----------------|---------------|-----------------------------------------|
 | 0.1 (preview1) | ✅ COMPLETE   | de-facto baseline; complete since Phase 11 |
 | 0.2 (preview2) | ✅ COMPLETE (default-ON) | Component Model campaign done 2026-06-13 (ADR-0170); official corpus 158/0/0 |
-| 0.3            | 🚧 FULL-coverage campaign (ADR-0205) | **released 2026-06-11**; rebases WASI on CM async (async func / `stream<T>` / `future<T>` — NOT core stack-switching, see callout). zwasm ships the CM-async substrate + cli/clocks/random host; full-coverage campaign phases A–E per ADR-0205 (2026-08-10 entry below) |
+| 0.3            | ✅ 0.3.0 COMPLETE (opt-in `-Dwasi=p3`) | 0.3.0 **released 2026-06-11**; rebases WASI on CM async (async func / `stream<T>` / `future<T>` — NOT core stack-switching, see callout). Full-coverage campaign done (ADR-0205 Accepted); official corpus 45/45 on all three OSes. 0.3.1 / 0.3.2 rename only, but their CM `map` / `implements` are refused (#611, #612; 2026-10-21 entry below) |
 
+- **2026-10-21** — **WASI 0.3.1 (08-11) and 0.3.2 (10-13)**: the `.wit` diff
+  from `v0.3.0` is the version strings plus one doc comment in
+  `http/types.wit`. 0.3.1 adopted the CM `map<K, V>` type and the
+  `implements` annotation (`docs/ComponentModelFeatures.md`): a 0.3.1+ runtime
+  must accept both, though no 0.3.2 WIT uses either; zwasm refuses both at
+  decode (#611, #612). Next train: 0.3.3 on 2026-12-08.
 - **2026-08-10** — **WASI 0.3 full-coverage campaign kickoff (ADR-0205,
   user-directed)**. Reference clones re-pulled / re-cloned (WASI monorepo →
   HEAD `a72eb09`; wasmtime / wasm-tools / WebAssembly{spec wg-3.0, testsuite,
