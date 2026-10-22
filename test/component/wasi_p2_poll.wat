@@ -1,8 +1,8 @@
 ;; WASI Preview 2 poll component (D3-7). Mints two pollables — one from
 ;; monotonic-clock.subscribe-duration, one from input-stream.subscribe(stdin) —
 ;; then drives wasi:io/poll: poll([p1,p2]) must report BOTH ready (indices 0,1),
-;; pollable.ready(p) must be true, pollable.block(p) returns at once. A clock
-;; pollable ignores its deadline and the test host's stdin is a byte slice, so
+;; pollable.ready(p) must be true, pollable.block(p) returns at once. The clock
+;; pollable's duration is 0 and the test host's stdin is a byte slice, so
 ;; both are ready and every check has a fixed expected value; a mismatch
 ;; traps (unreachable), so a clean run proves the poll trampolines are correct.
 (component

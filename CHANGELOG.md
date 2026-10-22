@@ -67,6 +67,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   so a second append stream on the file, or a write through another
   descriptor, was overwritten.
 
+- **A WASI 0.2 clock pollable is ready at its deadline** (#621).
+  `subscribe-duration` and `subscribe-instant` dropped their argument and
+  returned an always-ready pollable, so a guest's sleep returned at once: a
+  50 ms `subscribe-duration` then `poll` took 0.16 ms, where wasmtime takes
+  54.62 ms.
+
 - **On x86_64 Windows, a JIT function with more than two results reads its
   float params from the registers the caller wrote** (#607). It read each one
   from the XMM one position early, so the param held whatever that register

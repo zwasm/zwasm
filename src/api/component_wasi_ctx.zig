@@ -120,6 +120,8 @@ pub const WasiP2Ctx = struct {
     /// Live 0.2 file via-streams; a FILE_INPUT_STREAM_RT /
     /// FILE_OUTPUT_STREAM_RT handle's rep indexes this list.
     file_streams: std.ArrayList(FileStream) = .empty,
+    /// Live clock pollables; a CLOCK_POLLABLE_RT handle's rep indexes this list.
+    clock_deadlines: std.ArrayList(ClockDeadline) = .empty,
     /// Live tcp sockets (ADR-0180); a TCP_SOCKET_RT / SOCK_*_STREAM_RT /
     /// SOCK_POLLABLE_RT handle's rep (low bits) indexes this list.
     tcp_sockets: std.ArrayList(p2sock.TcpSocket) = .empty,
@@ -301,6 +303,9 @@ pub const WasiP2Ctx = struct {
     /// `fd_close` it.
     pub const FILE_INPUT_STREAM_RT: u32 = 20;
     pub const FILE_OUTPUT_STREAM_RT: u32 = 21;
+    /// The pollable `monotonic-clock.subscribe-instant` / `subscribe-duration`
+    /// mint. Rep indexes `clock_deadlines`.
+    pub const CLOCK_POLLABLE_RT: u32 = 22;
 
     /// Iteration state of one live directory-entry-stream: the directory's
     /// P1 fd + the P1 readdir cookie to resume after.
@@ -311,6 +316,10 @@ pub const WasiP2Ctx = struct {
     /// writes at the file's end as of each write. A `dropped` entry is free
     /// for the next mint.
     pub const FileStream = struct { fd: wasi_p1.Fd, pos: u64, append: bool = false, dropped: bool = false };
+
+    /// One clock pollable: ready once the monotonic clock reaches
+    /// `deadline_ns`. A `dropped` entry is free for the next mint.
+    pub const ClockDeadline = struct { deadline_ns: u64, dropped: bool = false };
 
     /// A WASI-0.3 file via-stream peer: the P1 fd + the tracked byte position
     /// the next pread/pwrite uses (advanced per completed copy). An `append`
@@ -385,6 +394,7 @@ pub const WasiP2Ctx = struct {
         self.blocked_udp_receives.deinit(self.alloc);
         self.dir_streams.deinit(self.alloc);
         self.file_streams.deinit(self.alloc);
+        self.clock_deadlines.deinit(self.alloc);
         self.resources.deinit();
         self.guest_resources.deinit();
         for (self.rb_ctxs.items) |p| self.alloc.destroy(p);

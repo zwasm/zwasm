@@ -137,10 +137,12 @@ fn p2ExitWithCode(caller: *Caller, code: u32) WasiP2Error!void {
 /// memory / return area. `now()` is infallible in WIT and the component-run
 /// path always has `host.io`, so a clock-read failure is a host-setup bug.
 fn p2MonotonicNow(caller: *Caller) WasiP2Error!i64 {
-    const ctx = caller.data(WasiP2Ctx);
-    const ns = wasi_clocks.clockTimeNs(ctx.host, 1) catch
+    return @bitCast(try monotonicNs(caller.data(WasiP2Ctx)));
+}
+
+fn monotonicNs(ctx: *WasiP2Ctx) WasiP2Error!u64 {
+    return wasi_clocks.clockTimeNs(ctx.host, 1) catch
         return WasiP2Error.NoHostIo; // precondition: the component-run path plants host.io
-    return @bitCast(ns);
 }
 
 /// `wasi:clocks/wall-clock` `now()` → datetime{seconds: u64, nanoseconds: u32}.
@@ -439,6 +441,10 @@ fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
             WasiP2Ctx.FILE_INPUT_STREAM_RT, WasiP2Ctx.FILE_OUTPUT_STREAM_RT => {
                 if (h.rep < ctx.file_streams.items.len) ctx.file_streams.items[h.rep].dropped = true;
             },
+            // A clock pollable's entry is free for the next mint.
+            WasiP2Ctx.CLOCK_POLLABLE_RT => {
+                if (h.rep < ctx.clock_deadlines.items.len) ctx.clock_deadlines.items[h.rep].dropped = true;
+            },
             // The tcp-socket handle owns the OS socket.
             WasiP2Ctx.TCP_SOCKET_RT => {
                 const sock = ctxTcpSocket(ctx, h.rep) catch return; // slot already gone
@@ -629,6 +635,89 @@ test "0.2 via-stream: a dropped file stream's entry serves the next mint" {
     try p2DescriptorWriteViaStream(&caller, desc, 0, 0);
     try testing.expectEqual(@as(usize, 1), ctx.file_streams.items.len);
     _ = try ctxFileStream(&ctx, 0);
+}
+
+test "0.2 subscribe-duration: the pollable is not ready before its deadline, and block waits for it (#621)" {
+    const Runtime = @import("../runtime/runtime.zig").Runtime;
+    const testing = std.testing;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = threaded.io();
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var rt = Runtime.init(testing.allocator);
+    defer rt.deinit();
+    var caller: Caller = .{ .rt = &rt, .host_data = &ctx };
+
+    const start = try monotonicNs(&ctx);
+    const p = try p2SubscribeDuration(&caller, 20 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u32, 0), try p2PollableReady(&caller, p));
+    try p2PollableBlock(&caller, p);
+    try testing.expect(try monotonicNs(&ctx) - start >= 20 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u32, 1), try p2PollableReady(&caller, p));
+}
+
+test "0.2 subscribe-instant: a past instant is ready at once, and a dropped pollable's entry serves the next mint (#621)" {
+    const Runtime = @import("../runtime/runtime.zig").Runtime;
+    const testing = std.testing;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = threaded.io();
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var rt = Runtime.init(testing.allocator);
+    defer rt.deinit();
+    var caller: Caller = .{ .rt = &rt, .host_data = &ctx };
+
+    const start = try monotonicNs(&ctx);
+    const p = try p2SubscribeInstant(&caller, start - 1);
+    try testing.expectEqual(@as(u32, 1), try p2PollableReady(&caller, p));
+    try p2PollableBlock(&caller, p);
+    try testing.expect(try monotonicNs(&ctx) - start < 200 * std.time.ns_per_ms);
+
+    try p2ResourceDrop(&caller, p);
+    _ = try p2SubscribeInstant(&caller, start);
+    try testing.expectEqual(@as(usize, 1), ctx.clock_deadlines.items.len);
+}
+
+test "0.2 poll: of two clock pollables, only the earlier deadline is reported, at that deadline (#621)" {
+    const testing = std.testing;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/greet_core.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(bytes);
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    ctx.realloc_instance = &inst; // poll's list<u32> comes from the guest's cabi_realloc
+    ctx.mem_instance = &inst;
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+    const mem = inst.memory().?;
+
+    const start = try monotonicNs(&ctx);
+    try mem.write(@as(u32, 64), try p2SubscribeDuration(&caller, 40 * std.time.ns_per_ms));
+    try mem.write(@as(u32, 68), try p2SubscribeDuration(&caller, 10 * std.time.ns_per_ms));
+    try p2Poll(&caller, 64, 2, 16);
+    const elapsed = try monotonicNs(&ctx) - start;
+    try testing.expectEqual(@as(u32, 1), try mem.read(u32, 20));
+    try testing.expectEqual(@as(u32, 1), try mem.read(u32, try mem.read(u32, 16)));
+    try testing.expect(elapsed >= 10 * std.time.ns_per_ms);
+    try testing.expect(elapsed < 200 * std.time.ns_per_ms); // 40 ms is the bound; the rest is room for a lagging CI runner
 }
 
 /// True if `inst` exports a function named `name`.
@@ -1098,13 +1187,13 @@ fn p2DescriptorRead(caller: *Caller, self_handle: u32, length: u64, offset: u64,
 //
 // A synchronous host answers a pollable ready at once (POLLABLE_RT, rep
 // unused) unless its source can wait: a socket stream (SOCK_POLLABLE_RT,
-// ADR-0180) and stdin (STDIN_POLLABLE_RT) answer from the host fd, and `block`
-// / `poll` sleep in 2 ms steps until one is ready. Only a socket gives up, after
-// 30 s; stdin waits as long as `blocking-read` would. A clock pollable ignores
-// its deadline and is always ready.
+// ADR-0180) and stdin (STDIN_POLLABLE_RT) answer from the host fd, a clock
+// (CLOCK_POLLABLE_RT) from its deadline on the monotonic clock, and `block` /
+// `poll` sleep in 2 ms steps until one is ready. Only a socket gives up, after
+// 30 s; stdin waits as long as `blocking-read` would, a clock until its deadline.
 
-/// `wasi:io/streams`/`wasi:clocks` `subscribe*` → mint a pollable handle for
-/// `self`'s source; see the readiness rule above.
+/// `wasi:io/streams` `subscribe` → mint a pollable handle for `self`'s source;
+/// see the readiness rule above.
 fn p2Subscribe(caller: *Caller, self_handle: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const h = ctx.resources.peek(self_handle) catch return ctx.resources.new(WasiP2Ctx.POLLABLE_RT, 0);
@@ -1130,38 +1219,62 @@ fn sockPollableReady(ctx: *WasiP2Ctx, rep: u32) bool {
 }
 
 /// Whether the pollable `h` is ready now, or null when `h` is not a pollable.
-fn pollableReady(ctx: *WasiP2Ctx, h: resource_table.ResourceHandle) ?bool {
+fn pollableReady(ctx: *WasiP2Ctx, h: resource_table.ResourceHandle) WasiP2Error!?bool {
     return switch (h.rt) {
         WasiP2Ctx.POLLABLE_RT => true,
         WasiP2Ctx.SOCK_POLLABLE_RT => sockPollableReady(ctx, h.rep),
         WasiP2Ctx.STDIN_POLLABLE_RT => wasi_fd.stdinReady(ctx.host),
+        WasiP2Ctx.CLOCK_POLLABLE_RT => try monotonicNs(ctx) >= ctx.clock_deadlines.items[h.rep].deadline_ns,
         else => null,
     };
 }
 
-/// `wasi:clocks/monotonic-clock` `subscribe-instant`/`subscribe-duration`
-/// (when: u64) → pollable. Same always-ready handle; the deadline is ignored.
-fn p2SubscribeClock(caller: *Caller, _: u64) WasiP2Error!u32 {
+/// Whether `block` / `poll` give up on `h` after 30 s (see the readiness rule).
+fn pollableCapped(h: resource_table.ResourceHandle) bool {
+    return h.rt != WasiP2Ctx.STDIN_POLLABLE_RT and h.rt != WasiP2Ctx.CLOCK_POLLABLE_RT;
+}
+
+/// `wasi:clocks/monotonic-clock` `subscribe-instant(when: instant)` → pollable.
+fn p2SubscribeInstant(caller: *Caller, when: u64) WasiP2Error!u32 {
+    return mintClockPollable(caller.data(WasiP2Ctx), when);
+}
+
+/// `wasi:clocks/monotonic-clock` `subscribe-duration(when: duration)` → pollable.
+fn p2SubscribeDuration(caller: *Caller, when: u64) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
-    return ctx.resources.new(WasiP2Ctx.POLLABLE_RT, 0);
+    return mintClockPollable(ctx, try monotonicNs(ctx) +| when);
+}
+
+fn mintClockPollable(ctx: *WasiP2Ctx, deadline_ns: u64) WasiP2Error!u32 {
+    const entry: WasiP2Ctx.ClockDeadline = .{ .deadline_ns = deadline_ns };
+    const index: u32 = for (ctx.clock_deadlines.items, 0..) |d, i| {
+        if (d.dropped) {
+            ctx.clock_deadlines.items[i] = entry;
+            break @intCast(i);
+        }
+    } else blk: {
+        ctx.clock_deadlines.append(ctx.alloc, entry) catch return WasiP2Error.OutOfMemory;
+        break :blk @intCast(ctx.clock_deadlines.items.len - 1);
+    };
+    return ctx.resources.new(WasiP2Ctx.CLOCK_POLLABLE_RT, index);
 }
 
 /// `wasi:io/poll` `[method]pollable.ready` (self) -> bool.
 fn p2PollableReady(caller: *Caller, self_handle: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const h = try ctx.resources.peek(self_handle);
-    return @intFromBool(pollableReady(ctx, h) orelse return resource_table.Error.TypeMismatch);
+    return @intFromBool(try pollableReady(ctx, h) orelse return resource_table.Error.TypeMismatch);
 }
 
 /// `wasi:io/poll` `[method]pollable.block` (self): wait until `self` is ready.
 fn p2PollableBlock(caller: *Caller, self_handle: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const h = try ctx.resources.peek(self_handle);
-    if (pollableReady(ctx, h) orelse return resource_table.Error.TypeMismatch) return;
+    if (try pollableReady(ctx, h) orelse return resource_table.Error.TypeMismatch) return;
     const io = try ctxIo(ctx);
-    const capped = h.rt != WasiP2Ctx.STDIN_POLLABLE_RT;
+    const capped = pollableCapped(h);
     var waited: u32 = 0;
-    while (!pollableReady(ctx, h).? and (!capped or waited < 30_000)) : (waited +|= 2) {
+    while (!(try pollableReady(ctx, h)).? and (!capped or waited < 30_000)) : (waited +|= 2) {
         io.sleep(.{ .nanoseconds = 2 * std.time.ns_per_ms }, .awake) catch break;
     }
 }
@@ -1181,8 +1294,8 @@ fn p2Poll(caller: *Caller, in_ptr: u32, in_len: u32, retptr: u32) WasiP2Error!vo
         var i: u32 = 0;
         while (i < in_len) : (i += 1) {
             const h = try ctx.resources.peek(try mem.readElem(u32, in_ptr, i));
-            const is_ready = pollableReady(ctx, h) orelse return resource_table.Error.TypeMismatch;
-            if (h.rt == WasiP2Ctx.STDIN_POLLABLE_RT) capped = false;
+            const is_ready = try pollableReady(ctx, h) orelse return resource_table.Error.TypeMismatch;
+            if (!pollableCapped(h)) capped = false;
             if (is_ready) {
                 try mem.writeElem(data_ptr, ready_n, i);
                 ready_n += 1;
@@ -1626,7 +1739,8 @@ fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: a
         .poll_pollable_block => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2PollableBlock, mapGuestFault),
         .poll_poll => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32) WasiP2Error!void, p2Poll, mapGuestFault),
         .in_stream_subscribe, .out_stream_subscribe => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!u32, p2Subscribe, mapGuestFault),
-        .clocks_subscribe_instant, .clocks_subscribe_duration => try defineMapped(lk, module, name, ctx, fn (*Caller, u64) WasiP2Error!u32, p2SubscribeClock, mapGuestFault),
+        .clocks_subscribe_instant => try defineMapped(lk, module, name, ctx, fn (*Caller, u64) WasiP2Error!u32, p2SubscribeInstant, mapGuestFault),
+        .clocks_subscribe_duration => try defineMapped(lk, module, name, ctx, fn (*Caller, u64) WasiP2Error!u32, p2SubscribeDuration, mapGuestFault),
         .cli_get_environment => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetEnvironment, mapGuestFault),
         .cli_get_arguments => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2GetArguments, mapGuestFault),
         .cli_initial_cwd => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2ReturnNone, mapGuestFault),
