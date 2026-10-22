@@ -59,6 +59,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A 0.2 or 0.3 `append-via-stream` writes at the file's end as of each
+  write** (#617, #627). It wrote at the size read when the stream was opened,
+  so a second append stream on the file, or a write through another
+  descriptor, was overwritten.
+
 - **On x86_64 Windows, a JIT function with more than two results reads its
   float params from the registers the caller wrote** (#607). It read each one
   from the XMM one position early, so the param held whatever that register

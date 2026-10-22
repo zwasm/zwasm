@@ -307,12 +307,14 @@ pub const WasiP2Ctx = struct {
     pub const DirStream = struct { fd: wasi_p1.Fd, cookie: u64 };
 
     /// One live 0.2 file via-stream: the descriptor's P1 fd + the position
-    /// the next pread / pwrite uses.
-    pub const FileStream = struct { fd: wasi_p1.Fd, pos: u64 };
+    /// the next pread / pwrite uses. An `append` stream ignores `pos` and
+    /// writes at the file's end as of each write.
+    pub const FileStream = struct { fd: wasi_p1.Fd, pos: u64, append: bool = false };
 
     /// A WASI-0.3 file via-stream peer: the P1 fd + the tracked byte position
-    /// the next pread/pwrite uses (advanced per completed copy).
-    pub const FileStreamRole = struct { fd: wasi_p1.Fd, pos: u64, result_future: u32 = 0 };
+    /// the next pread/pwrite uses (advanced per completed copy). An `append`
+    /// sink's copies write at the file's end as of each copy instead.
+    pub const FileStreamRole = struct { fd: wasi_p1.Fd, pos: u64, result_future: u32 = 0, append: bool = false };
 
     /// The substrate→P3 reverse-dep inversion (ADR-0207): the shared engine /
     /// drop / poll paths reach the 0.3 trampoline layer ONLY through these
@@ -1112,7 +1114,9 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
         const pos_invalid = role.pos > std.math.maxInt(i64);
         if (end.side == .writable) {
             const bytes = try mem.sliceAt(ptr, try streamSpan(count, abc.elem_size));
-            const errno: wasi_p1.Errno = if (pos_invalid) .inval else wasi_fd.pwriteSlice(abc.ctx.host, role.fd, bytes, role.pos);
+            const errno: wasi_p1.Errno = if (role.append)
+                wasi_fd.appendSlice(abc.ctx.host, role.fd, bytes)
+            else if (pos_invalid) .inval else wasi_fd.pwriteSlice(abc.ctx.host, role.fd, bytes, role.pos);
             if (errno != .success) return abc.ctx.p3().fail_file_stream(abc.ctx, end, role, errno);
             role.pos += bytes.len;
             return (async_mod.ReturnCode{ .completed = @intCast(count) }).encode();

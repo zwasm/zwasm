@@ -635,6 +635,19 @@ pub fn pwriteSlice(host: *Host, fd: p1.Fd, bytes: []const u8, offset: u64) p1.Er
     return .success;
 }
 
+/// `pwriteSlice` at the file's end, re-read per call: the WASI-P2
+/// `append-via-stream` write. The host handle carries no O_APPEND (see
+/// `writeSlice`), so the kernel will not retarget the write.
+pub fn appendSlice(host: *Host, fd: p1.Fd, bytes: []const u8) p1.Errno {
+    const slot = host.translateFd(fd) orelse return .badf;
+    if (slot.kind != .file) return pwriteSlice(host, fd, bytes, 0); // its errno for the kind
+    const handle = slot.host_handle orelse return .badf;
+    const io = host.io orelse return .nosys;
+    const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
+    const end = (file.stat(io) catch return .io).size;
+    return pwriteSlice(host, fd, bytes, end);
+}
+
 /// Positional read into one contiguous byte range (mirror of `pwriteSlice`;
 /// the WASI-0.3 file via-stream source reads through this). `n_out` receives
 /// the byte count (0 = EOF).

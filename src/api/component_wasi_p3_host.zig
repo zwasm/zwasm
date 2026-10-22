@@ -1,4 +1,4 @@
-// FILE-SIZE-EXEMPT: the complete wasi 0.3 host layer (fs3/sock3/http3 + async-lowered table + hook targets; ADR-0207 (c), M4-measured 2026-08-12); a per-proposal 3-way sub-split would force pub-leak of the hook targets through hooksTable/registerP3Arms (ADR-0099 N2), so cohesion wins while under the 2500 exempt cap.
+// FILE-SIZE-EXEMPT: (cap=2600) the complete wasi 0.3 host layer (fs3/sock3/http3 + async-lowered table + hook targets; ADR-0207 (c), M4-measured 2026-08-12); a per-proposal 3-way sub-split would force pub-leak of the hook targets through hooksTable/registerP3Arms, and a sibling test file would force pub-leak of the fs3 entry points its tests drive (ADR-0099 N2), so cohesion wins.
 //! WASI **0.3** (P3) host layer — fs3 / sock3 / http3 trampolines, the
 //! async-lowered binding table, and the classifier's P3 arm registration
 //! (ADR-0207 (c); file name reserved by ADR-0190). Depends ONLY on the
@@ -532,11 +532,12 @@ fn fs3ReadViaStream(caller: *Caller, self_handle: u32, offset_raw: i64, retptr: 
 fn fs3WriteViaStream(caller: *Caller, self_handle: u32, data_handle: u32, offset_raw: i64) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const fd = try fs3Fd(ctx, self_handle);
-    return fs3RegisterFileSink(ctx, fd, data_handle, @bitCast(offset_raw));
+    return fs3RegisterFileSink(ctx, .{ .fd = fd, .pos = @bitCast(offset_raw) }, data_handle);
 }
 
-/// `append-via-stream` (self, data) → future handle: the sink position starts
-/// at the current file size.
+/// `append-via-stream` (self, data) → future handle: each copy writes at the
+/// file's end as of that copy. The size read here places only a write the
+/// guest parked before the sink existed, drained in `fs3RegisterFileSink`.
 fn fs3AppendViaStream(caller: *Caller, self_handle: u32, data_handle: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
@@ -545,10 +546,10 @@ fn fs3AppendViaStream(caller: *Caller, self_handle: u32, data_handle: u32) WasiP
         .ok => |fs| fs.size,
         .err => 0,
     };
-    return fs3RegisterFileSink(ctx, fd, data_handle, size);
+    return fs3RegisterFileSink(ctx, .{ .fd = fd, .pos = size, .append = true }, data_handle);
 }
 
-fn fs3RegisterFileSink(ctx: *WasiP2Ctx, fd: wasi_p1.Fd, data_handle: u32, pos: u64) WasiP2Error!u32 {
+fn fs3RegisterFileSink(ctx: *WasiP2Ctx, sink: WasiP2Ctx.FileStreamRole, data_handle: u32) WasiP2Error!u32 {
     // Copy the shared id out BEFORE minting the future pair — the mint grows
     // the end table and invalidates `get`'s pointer.
     const shared_id = blk: {
@@ -557,7 +558,9 @@ fn fs3RegisterFileSink(ctx: *WasiP2Ctx, fd: wasi_p1.Fd, data_handle: u32, pos: u
         break :blk end.shared;
     };
     const fut = try async_mod.newFuturePair(&ctx.streams, &ctx.shared, null);
-    try ctx.host_file_streams.put(ctx.alloc, shared_id, .{ .fd = fd, .pos = pos, .result_future = fut.readable });
+    var role = sink;
+    role.result_future = fut.readable;
+    try ctx.host_file_streams.put(ctx.alloc, shared_id, role);
     try ctx.host_result_futures.put(ctx.alloc, fut.readable, null);
     try fs3DrainParkedWrite(ctx, shared_id);
     return fut.readable;
@@ -2484,4 +2487,55 @@ pub fn registerP3Arms(lk: *Linker, module: []const u8, name: []const u8, op: ada
         .cli_get_stdout, .cli_get_stderr, .cli_get_stdin, .cli_stdout_write_via_stream, .cli_stderr_write_via_stream, .cli_stdin_read_via_stream, .out_stream_write, .out_stream_blocking_write_and_flush, .out_stream_blocking_flush, .out_stream_drop, .in_stream_read, .in_stream_blocking_read, .in_stream_drop, .cli_exit, .cli_exit_with_code, .clocks_wall_now, .clocks_monotonic_now, .clocks_system_now, .clocks_system_get_resolution, .clocks_monotonic_get_resolution, .clocks_wait_until, .clocks_wait_for, .random_get_bytes, .fs_descriptor_read, .fs_descriptor_write, .fs_descriptor_open_at, .fs_descriptor_sync, .fs_descriptor_stat, .fs_descriptor_get_type, .fs_descriptor_drop, .fs_get_directories, .poll_pollable_ready, .poll_pollable_block, .poll_poll, .in_stream_subscribe, .out_stream_subscribe, .clocks_subscribe_instant, .clocks_subscribe_duration, .cli_get_environment, .cli_get_arguments, .cli_initial_cwd, .cli_get_terminal_stdin, .cli_get_terminal_stdout, .cli_get_terminal_stderr, .out_stream_check_write, .random_get_u64, .random_insecure_get_bytes, .random_insecure_get_u64, .random_insecure_seed, .fs_descriptor_stat_at, .fs_descriptor_create_directory_at, .fs_descriptor_link_at, .fs_descriptor_readlink_at, .fs_descriptor_remove_directory_at, .fs_descriptor_rename_at, .fs_descriptor_symlink_at, .fs_descriptor_sync_data, .fs_descriptor_unlink_file_at, .fs_descriptor_read_directory, .fs_dir_entry_stream_read, .fs_dir_entry_stream_drop, .io_resource_drop, .fs_read_via_stream, .fs_write_via_stream, .fs_append_via_stream, .fs_stub_get_flags, .fs_descriptor_metadata_hash, .fs_descriptor_metadata_hash_at, .sock_instance_network, .sock_create_tcp, .sock_tcp_start_bind, .sock_tcp_finish_bind, .sock_tcp_start_connect, .sock_tcp_finish_connect, .sock_tcp_subscribe, .sock_tcp_shutdown, .sock_tcp_is_listening, .sock_tcp_drop, .sock_tcp_start_listen, .sock_tcp_finish_listen, .sock_tcp_accept, .sock_tcp_local_address, .sock_tcp_remote_address, .sock_tcp_set_backlog, .sock_stub_unit2, .sock_stub_unit3i, .sock_stub_unit3l, .sock_stub_unit15, .sock_stub_val1, .sock_stub_val4, .sock_stub_val8, .sock_stub_val15_4, .sock_stub_resolve, .sock_stub_recv, .sock_stub_send, .sock_stub_subscribe => return false,
     }
     return true;
+}
+
+test "0.3 append-via-stream: two append sinks on one file each write at the end the other left" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try tmp.dir.writeFile(io, .{ .sub_path = "log.txt", .data = "abc" });
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    const dirfd = try host.addPreopen(tmp.dir.handle, "/w");
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+
+    // A module exporting one page of memory and a bump cabi_realloc stands in
+    // for the guest's.
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x01\x09\x01\x60\x04\x7f\x7f\x7f\x7f\x01\x7f\x03\x02\x01\x00\x05\x03\x01\x00\x01\x06\x07\x01\x7f\x01\x41\x80\x08\x0b\x07\x19\x02\x06memory\x02\x00\x0ccabi_realloc\x00\x00\x0a\x0d\x01\x0b\x00\x23\x00\x23\x00\x20\x03j\x24\x00\x0b");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    ctx.realloc_instance = &inst;
+    const bytes = (try ctx.memory()).slice();
+
+    @memcpy(bytes[0..7], "log.txt");
+    try testing.expectEqual(wasi_p1.Errno.success, wasi_fd.pathOpen(&host, bytes, dirfd, 0, 0, 7, 0, wasi_p1.RIGHTS_FD_WRITE | wasi_p1.RIGHTS_FD_SEEK | wasi_p1.RIGHTS_FD_FILESTAT_GET, 0, 0, 8));
+    const desc = try ctx.resources.new(WasiP2Ctx.DESCRIPTOR_RT, std.mem.readInt(u32, bytes[8..12], .little));
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+    // Both sinks register while the file holds "abc".
+    var guest_ends: [2]u32 = undefined;
+    for (&guest_ends) |*w| {
+        const pair = try async_mod.newStreamPair(&ctx.streams, &ctx.shared, null);
+        _ = try fs3AppendViaStream(&caller, desc, pair.readable);
+        w.* = pair.writable;
+    }
+
+    var abc: ctx_mod.AsyncBuiltinCtx = .{ .ctx = &ctx, .type_index = 0 };
+    var copy_caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &abc };
+    @memcpy(bytes[16..18], "XY");
+    _ = try ctx_mod.p2StreamFutureCopy(&copy_caller, guest_ends[0], 16, 1);
+    _ = try ctx_mod.p2StreamFutureCopy(&copy_caller, guest_ends[1], 17, 1);
+    const got = try tmp.dir.readFileAlloc(io, "log.txt", testing.allocator, .limited(16));
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("abcXY", got);
 }

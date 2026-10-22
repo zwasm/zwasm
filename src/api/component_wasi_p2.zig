@@ -366,7 +366,11 @@ pub fn p2OutStreamWrite(caller: *Caller, self_handle: u32, ptr: u32, len: u32, r
     if (h.rt == WasiP2Ctx.FILE_OUTPUT_STREAM_RT) {
         // pwrite at the stream's position; a failure is closed, as above.
         const stream = try ctxFileStream(ctx, h.rep);
-        if (wasi_fd.pwriteSlice(ctx.host, stream.fd, bytes, stream.pos) != .success) {
+        const errno = if (stream.append)
+            wasi_fd.appendSlice(ctx.host, stream.fd, bytes)
+        else
+            wasi_fd.pwriteSlice(ctx.host, stream.fd, bytes, stream.pos);
+        if (errno != .success) {
             try mem.write(retptr, @as(u8, 1));
             try mem.write(retptr + 4, @as(u8, 1)); // stream-error::closed
             return;
@@ -528,6 +532,45 @@ test "D-444 II: p2ResourceDrop(HTTP_REQUEST_RT) — releases transferred ends + 
     try ctx.http_requests.append(ctx.alloc, .{ .headers_rep = 99 });
     const h2 = try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, 1);
     try p2ResourceDrop(&caller, h2);
+}
+
+test "0.2 append-via-stream: two append streams on one file each write at the end the other left" {
+    const Runtime = @import("../runtime/runtime.zig").Runtime;
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try tmp.dir.writeFile(io, .{ .sub_path = "log.txt", .data = "abc" });
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    const dirfd = try host.addPreopen(tmp.dir.handle, "/w");
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var rt = Runtime.init(testing.allocator);
+    defer rt.deinit();
+    rt.memory = try testing.allocator.alloc(u8, 64);
+    const mem = rt.memory;
+    var caller: Caller = .{ .rt = &rt, .host_data = &ctx };
+
+    @memcpy(mem[0..7], "log.txt");
+    try testing.expectEqual(wasi_p1.Errno.success, wasi_fd.pathOpen(&host, mem, dirfd, 0, 0, 7, 0, wasi_p1.RIGHTS_FD_WRITE | wasi_p1.RIGHTS_FD_SEEK, 0, 0, 8));
+    const desc = try ctx.resources.new(WasiP2Ctx.DESCRIPTOR_RT, std.mem.readInt(u32, mem[8..12], .little));
+    try p2DescriptorAppendViaStream(&caller, desc, 16);
+    try p2DescriptorAppendViaStream(&caller, desc, 24);
+    const first = std.mem.readInt(u32, mem[20..24], .little);
+    const second = std.mem.readInt(u32, mem[28..32], .little);
+
+    @memcpy(mem[32..34], "XY");
+    try p2OutStreamWrite(&caller, first, 32, 1, 40);
+    try testing.expectEqual(@as(u8, 0), mem[40]);
+    try p2OutStreamWrite(&caller, second, 33, 1, 40);
+    try testing.expectEqual(@as(u8, 0), mem[40]);
+    const got = try tmp.dir.readFileAlloc(io, "log.txt", testing.allocator, .limited(16));
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("abcXY", got);
 }
 
 /// True if `inst` exports a function named `name`.
@@ -845,34 +888,30 @@ fn p2DescriptorReadDirectory(caller: *Caller, self_handle: u32, retptr: u32) Was
 
 /// `wasi:filesystem/types` `[method]descriptor.read-via-stream` /
 /// `write-via-stream` (self, offset, retptr) and `append-via-stream` (self,
-/// retptr): mint a stream over `self`'s fd that starts at `offset` (append: at
-/// the file's size, as the 0.3 host does) and store `result<own<stream>,
-/// error-code>` (ok handle@+4) at `retptr`.
+/// retptr): mint a stream over `self`'s fd that starts at `offset` (append:
+/// writes at the file's end as of each write, as O_APPEND does) and store
+/// `result<own<stream>, error-code>` (ok handle@+4) at `retptr`.
 fn p2DescriptorReadViaStream(caller: *Caller, self_handle: u32, offset: u64, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const fd: wasi_p1.Fd = @intCast(try ctx.resources.rep(WasiP2Ctx.DESCRIPTOR_RT, self_handle));
-    return mintFileStream(ctx, try ctxMemory(caller), WasiP2Ctx.FILE_INPUT_STREAM_RT, fd, offset, retptr);
+    return mintFileStream(ctx, try ctxMemory(caller), WasiP2Ctx.FILE_INPUT_STREAM_RT, .{ .fd = fd, .pos = offset }, retptr);
 }
 
 fn p2DescriptorWriteViaStream(caller: *Caller, self_handle: u32, offset: u64, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const fd: wasi_p1.Fd = @intCast(try ctx.resources.rep(WasiP2Ctx.DESCRIPTOR_RT, self_handle));
-    return mintFileStream(ctx, try ctxMemory(caller), WasiP2Ctx.FILE_OUTPUT_STREAM_RT, fd, offset, retptr);
+    return mintFileStream(ctx, try ctxMemory(caller), WasiP2Ctx.FILE_OUTPUT_STREAM_RT, .{ .fd = fd, .pos = offset }, retptr);
 }
 
 fn p2DescriptorAppendViaStream(caller: *Caller, self_handle: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const fd: wasi_p1.Fd = @intCast(try ctx.resources.rep(WasiP2Ctx.DESCRIPTOR_RT, self_handle));
-    const mem = try ctxMemory(caller);
-    switch (try descriptorFilestat(ctx, mem, fd)) {
-        .ok => |st| try mintFileStream(ctx, mem, WasiP2Ctx.FILE_OUTPUT_STREAM_RT, fd, st.size, retptr),
-        .err => |errno| try writeP1Err(mem, retptr, 4, errno),
-    }
+    return mintFileStream(ctx, try ctxMemory(caller), WasiP2Ctx.FILE_OUTPUT_STREAM_RT, .{ .fd = fd, .pos = 0, .append = true }, retptr);
 }
 
-fn mintFileStream(ctx: *WasiP2Ctx, mem: Memory, rt: u32, fd: wasi_p1.Fd, pos: u64, retptr: u32) WasiP2Error!void {
+fn mintFileStream(ctx: *WasiP2Ctx, mem: Memory, rt: u32, stream: WasiP2Ctx.FileStream, retptr: u32) WasiP2Error!void {
     const index: u32 = @intCast(ctx.file_streams.items.len);
-    ctx.file_streams.append(ctx.alloc, .{ .fd = fd, .pos = pos }) catch return WasiP2Error.OutOfMemory;
+    ctx.file_streams.append(ctx.alloc, stream) catch return WasiP2Error.OutOfMemory;
     const handle = try ctx.resources.new(rt, index);
     try mem.write(retptr, @as(u8, 0)); // result disc: ok
     try mem.write(retptr + 4, handle);
