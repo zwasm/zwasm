@@ -352,6 +352,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   order with no explicit values, so the ordinals cannot drift from the
   declaration.
 
+### Security
+
+- **A list size the WASI host derives from a guest's count is checked.** When
+  that size does not fit in u32 the call traps as the guest's memory access
+  (`OutOfBoundsStore`); before, the host process stopped.
+
 ### Documentation
 
 - `zwasm.h` and the C / CLI references say what the engine does: which

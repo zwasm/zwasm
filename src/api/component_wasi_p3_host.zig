@@ -950,7 +950,7 @@ fn readSock3AddrVariant(mem: Memory, base: u32) WasiP2Error!?std.Io.net.IpAddres
             const flow = try mem.read(u32, pay + 4);
             var bytes: [16]u8 = undefined;
             for (0..8) |i| {
-                const seg = try mem.read(u16, pay + 8 + @as(u32, @intCast(i * 2)));
+                const seg = try mem.readElem(u16, pay + 8, @intCast(i));
                 bytes[i * 2] = @intCast(seg >> 8);
                 bytes[i * 2 + 1] = @truncate(seg);
             }
@@ -1445,7 +1445,7 @@ fn sock3UdpReceiveComplete(ctx: *WasiP2Ctx, rep: u32, retptr: u32) WasiP2Error!v
             try mem.write(retptr + 20, a.flow);
             for (0..8) |i| {
                 const seg: u16 = (@as(u16, a.bytes[i * 2]) << 8) | a.bytes[i * 2 + 1];
-                try mem.write(retptr + 24 + @as(u32, @intCast(i * 2)), seg);
+                try mem.writeElem(retptr + 24, @intCast(i), seg);
             }
             try mem.write(retptr + 40, @as(u32, 0)); // scope-id
         },
@@ -1535,7 +1535,7 @@ fn http3AllocBlob(ctx: *WasiP2Ctx, mem: Memory, bytes: []const u8) WasiP2Error!u
 /// Marshal `list<field-value>`: the elem table is one allocation, each
 /// value another (see `http3AllocBlob`); (ptr,len) lands at `retptr`.
 fn http3WriteValueList(ctx: *WasiP2Ctx, mem: Memory, retptr: u32, values: []const []const u8) WasiP2Error!void {
-    const base = if (values.len == 0) 4 else try ctx.reallocGuest(@intCast(values.len * 8), 4);
+    const base = if (values.len == 0) 4 else try ctx.reallocGuestArray(values.len, 8, 4);
     for (values, 0..) |v, i| {
         const p = try http3AllocBlob(ctx, mem, v);
         const rec = base + @as(u32, @intCast(i * 8));
@@ -1627,7 +1627,7 @@ fn http3FieldsCopyAll(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void 
     // Elem table = one allocation; each name string and value list its own
     // (per-element buffer ownership — see http3AllocBlob).
     const items = fields.entries.items;
-    const base = if (items.len == 0) 4 else try ctx.reallocGuest(@intCast(items.len * 16), 4);
+    const base = if (items.len == 0) 4 else try ctx.reallocGuestArray(items.len, 16, 4);
     for (items, 0..) |p, i| {
         const np = try http3AllocBlob(ctx, mem, p.name);
         const vp = try http3AllocBlob(ctx, mem, p.value);
@@ -2364,7 +2364,7 @@ fn sock3ResolveAddresses(caller: *Caller, name_ptr: u32, name_len: u32, retptr: 
     };
     // ok: list<ip-address>; ip-address variant = disc u8@0, payload@2
     // (ipv4 4×u8 / ipv6 8×u16-le) → elem size 18 align 2.
-    const base = try ctx.reallocGuest(@intCast(n * 18), 2);
+    const base = try ctx.reallocGuestArray(n, 18, 2);
     for (addrs[0..n], 0..) |a, i| {
         const elem_ptr = base + @as(u32, @intCast(i * 18));
         switch (a) {
@@ -2376,7 +2376,7 @@ fn sock3ResolveAddresses(caller: *Caller, name_ptr: u32, name_len: u32, retptr: 
                 try mem.write(elem_ptr, @as(u8, 1));
                 for (0..8) |j| {
                     const seg: u16 = (@as(u16, v.bytes[j * 2]) << 8) | v.bytes[j * 2 + 1];
-                    try mem.write(elem_ptr + 2 + @as(u32, @intCast(j * 2)), seg);
+                    try mem.writeElem(elem_ptr + 2, @intCast(j), seg);
                 }
             },
         }

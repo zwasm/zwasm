@@ -410,6 +410,15 @@ pub const WasiP2Ctx = struct {
         return ptr;
     }
 
+    /// `reallocGuest` for a list of `count` elements of `elem_size` bytes.
+    /// A byte size past u32 has nowhere to be written in a 32-bit memory, so
+    /// it is the store's trap (`OutOfBoundsStore`), not an allocator call.
+    pub fn reallocGuestArray(self: *WasiP2Ctx, count: usize, elem_size: u32, alignment: u32) WasiP2Error!u32 {
+        const size = std.math.mul(u64, count, elem_size) catch return error.OutOfBoundsStore;
+        if (size > std.math.maxInt(u32)) return error.OutOfBoundsStore;
+        return self.reallocGuest(@intCast(size), alignment);
+    }
+
     /// The guest linear memory the lowered funcs operate on (`mem_instance`).
     pub fn memory(self: *WasiP2Ctx) WasiP2Error!Memory {
         const inst = self.mem_instance orelse return WasiP2Error.NoMemory;
@@ -727,6 +736,18 @@ test "D-444 II: writeIpSocketAddressResult — CABI in-memory layout for both ad
     // Decode/write agree on the big-endian segment convention (round-trip).
     const back = decodeIpSocketAddress(1, .{ 0xBEEF, 0x1122_3344, 0x0102, 0x0304, 0x0506, 0x0708, 0x090A, 0x0B0C, 0x0D0E, 0x0F10, 0 }).?;
     try std.testing.expectEqualSlices(u8, &b16, &back.ip6.bytes);
+}
+
+test "reallocGuestArray: the largest list byte size u32 holds reaches the allocator, one element more is the store's trap" {
+    const testing = std.testing;
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    // No guest allocator is bound, so a size that passes the check stops at it.
+    try testing.expectError(error.NoRealloc, ctx.reallocGuestArray(0x3FFF_FFFF, 4, 4));
+    try testing.expectError(error.OutOfBoundsStore, ctx.reallocGuestArray(0x4000_0000, 4, 4));
+    try testing.expectError(error.OutOfBoundsStore, ctx.reallocGuestArray(std.math.maxInt(usize), 18, 2));
 }
 
 /// `tcp.local-address` (self, retptr) -> result<ip-socket-address, error-code>.

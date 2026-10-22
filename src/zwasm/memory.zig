@@ -74,6 +74,19 @@ pub const Memory = struct {
         }
     }
 
+    /// `read` of element `index` of a `T` array at `base`. The address is
+    /// computed in u64, so an index past the end is the load's trap.
+    pub fn readElem(self: Memory, comptime T: type, base: u32, index: u32) Error!T {
+        const addr = @as(u64, base) + @as(u64, index) * @sizeOf(T);
+        return self.read(T, std.math.cast(u32, addr) orelse return error.OutOfBoundsLoad);
+    }
+
+    /// `write` counterpart of `readElem`.
+    pub fn writeElem(self: Memory, base: u32, index: u32, val: anytype) Error!void {
+        const addr = @as(u64, base) + @as(u64, index) * @sizeOf(@TypeOf(val));
+        return self.write(std.math.cast(u32, addr) orelse return error.OutOfBoundsStore, val);
+    }
+
     /// Wasm spec §4.2.8 — bounds-checked sub-slice `[offset, offset+len)`
     /// onto linear memory (a mutable view; writes through it persist).
     /// `OutOfBoundsLoad` when the window exceeds the current memory size.
@@ -150,6 +163,28 @@ test "Memory.sliceAt: in-bounds window is a mutable view; OOB → error" {
     try testing.expectEqual(@as(u8, 0xAB), try mem.read(u8, 8)); // …visible via read
     // window crossing the 1-page (65536) boundary → OOB.
     try testing.expectError(error.OutOfBoundsLoad, mem.sliceAt(65530, 16));
+}
+
+test "Memory.readElem/writeElem: element addresses past u32 are the access's trap" {
+    // (module (memory 1) (export "mem" (memory 0)))
+    const bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+        0x05, 0x03, 0x01, 0x00, 0x01, // memory: min 1
+        0x07, 0x07, 0x01, 0x03, 'm', 'e', 'm', 0x02, 0x00, // export "mem" = memory 0
+    };
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile(&bytes);
+    defer mod.deinit();
+    var inst = try mod.instantiate(.{});
+    defer inst.deinit();
+
+    const mem = inst.memory().?;
+    try mem.writeElem(16, 3, @as(u32, 0xCAFE));
+    try testing.expectEqual(@as(u32, 0xCAFE), try mem.read(u32, 28));
+    try testing.expectEqual(@as(u32, 0xCAFE), try mem.readElem(u32, 16, 3));
+    try testing.expectError(error.OutOfBoundsStore, mem.writeElem(0xFFFF_FFF0, 0x4000_0000, @as(u32, 1)));
+    try testing.expectError(error.OutOfBoundsLoad, mem.readElem(u32, 4, 0x4000_0000));
 }
 
 test "Memory engine=.jit: read/write/grow through the live JIT vm_base view (ADR-0200 incr 5)" {
