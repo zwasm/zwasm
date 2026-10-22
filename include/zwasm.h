@@ -171,8 +171,9 @@ WASM_API_EXTERN void zwasm_instance_clear_memory_pages_limit(wasm_instance_t*);
 /* ── Cooperative interruption (cancel / host-driven timeout) ─────────── */
 
 /* Callable from any thread; the running guest traps with kind
- * ZWASM_TRAP_INTERRUPTED at its next poll (a loop back-edge, or a function
- * entry on the JIT's terms above). Idempotent; clear before re-invoking. */
+ * ZWASM_TRAP_INTERRUPTED at its next poll (a loop back-edge, a function
+ * entry on the JIT's terms above, or a preview1 poll_oneoff clock wait).
+ * Idempotent; clear before re-invoking. */
 WASM_API_EXTERN void zwasm_instance_interrupt(wasm_instance_t*);
 WASM_API_EXTERN void zwasm_instance_clear_interrupt(wasm_instance_t*);
 

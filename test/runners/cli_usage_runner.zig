@@ -4,10 +4,12 @@
 //! a module path that cannot be read (exit 1) — and `--` ends them. Anything
 //! after the path is the guest's argv, even when it spells a known option.
 //! And which engine runs a SIMD module, said where the run fails (#597).
+//! `--timeout` fires while the guest sleeps in `poll_oneoff` (#598).
 //!
 //! Usage: `zig build test-cli-usage` /
 //!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>
-//!         <simd_op.wasm> <simd_jit_decline.wasm> <select_v128_spilled_val2.wasm>`
+//!         <simd_op.wasm> <simd_jit_decline.wasm> <select_v128_spilled_val2.wasm>
+//!         <poll_sleep.wasm>`
 
 const std = @import("std");
 const spawned_cli = @import("spawned_cli");
@@ -35,13 +37,14 @@ const Row = struct {
 
 /// Stand-ins for the module paths, in argument order: a `_start` that does
 /// nothing, one that echoes argv[1..] a line each, one SIMD op, a SIMD module
-/// the JIT declines, and #596's select.
+/// the JIT declines, #596's select, and a 5 s sleep in `poll_oneoff`.
 const M = "<module>";
 const E = "<argv_echo>";
 const S = "<simd_op>";
 const D = "<simd_jit_decline>";
 const V = "<select_spill>";
-const placeholders = [_][]const u8{ M, E, S, D, V };
+const P = "<poll_sleep>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P };
 
 const rows = [_]Row{
     .{ .args = &.{ "run", "--bogus", M }, .exit = 2, .stderr = .{ .has = "unknown option '--bogus'" } },
@@ -55,6 +58,8 @@ const rows = [_]Row{
     .{ .args = &.{ "run", "--engine", "interp", S }, .exit = 1, .stderr = .{ .has = "the interpreter does not execute `v128.const`" } },
     .{ .args = &.{ "run", D }, .exit = 1, .stderr = .{ .has = "`return_call` with a 3-result callee\nthe interpreter does not execute `v128.const`" } },
     .{ .args = &.{ "run", "--invoke", "test", V }, .exit = 0, .stdout = .{ .is = "63\n" } },
+    .{ .args = &.{ "run", "--timeout", "500", "--engine", "interp", P }, .exit = 1, .stderr = .{ .has = "interrupted" } },
+    .{ .args = &.{ "run", "--timeout", "500", "--engine", "jit", P }, .exit = 1, .stderr = .{ .has = "interrupted" } },
 };
 
 pub fn main(init: std.process.Init) !u8 {

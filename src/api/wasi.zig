@@ -252,7 +252,9 @@ fn thunkPollOneoff(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const nsubscriptions = rt.popOperand().u32;
     const out_ptr = rt.popOperand().u32;
     const in_ptr = rt.popOperand().u32;
-    return pushErrno(rt, wasi_clocks.pollOneoff(host, rt.memory, in_ptr, out_ptr, nsubscriptions, nevents_ptr));
+    const errno = wasi_clocks.pollOneoff(host, rt.memory, in_ptr, out_ptr, nsubscriptions, nevents_ptr, rt.interrupt);
+    if (errno == .intr) return runtime.Trap.Interrupted;
+    return pushErrno(rt, errno);
 }
 
 // fd thunks

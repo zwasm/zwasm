@@ -179,6 +179,10 @@ pub fn randomFill(host: *Host, dest: []u8) p1.Errno {
 // poll_oneoff
 // ============================================================
 
+/// How often a clock wait in `pollOneoff` reads the interrupt flag: the
+/// longest a raised flag goes unseen there.
+const interrupt_poll_ns: u64 = 10 * std.time.ns_per_ms;
+
 /// How ready an fd subscription is: the byte count the event reports and its
 /// `eventrwflags`. Every fd this table can hold is ready the moment it is
 /// valid — see `pollOneoff`'s note on why that is the truth here and not a
@@ -290,6 +294,10 @@ fn writeEvent(mem: []u8, off: usize, userdata: u64, ty: p1.EventType, nbytes: u6
 /// id u32 @16, timeout u64 @24, precision u64 @32, flags u16 @40
 /// (bit 0 = ABSTIME); fd body — fd u32 @16. Event (32 B): userdata @0,
 /// error u16 @8, type @10, fd_readwrite @16 (nbytes u64 @16, flags u16 @24).
+///
+/// `interrupt` is the engine's cooperative-interruption flag (ADR-0179 #3a).
+/// A clock wait reads it every `interrupt_poll_ns` and answers `.intr` with no
+/// event once it is raised; the caller turns that into its `interrupted` trap.
 pub fn pollOneoff(
     host: *Host,
     mem: []u8,
@@ -297,6 +305,7 @@ pub fn pollOneoff(
     out_ptr: u32,
     nsubscriptions: u32,
     nevents_ptr: u32,
+    interrupt: ?*const std.atomic.Value(u32),
 ) p1.Errno {
     if (nsubscriptions == 0) return writeU32LE(mem, nevents_ptr, 0);
     const io = host.io orelse return .nosys;
@@ -359,15 +368,22 @@ pub fn pollOneoff(
     if (nevents > 0) return writeU32LE(mem, nevents_ptr, nevents);
 
     // Pure-clock poll: block until the earliest subscription fires (monotonic;
-    // a duration is a duration regardless of the named clock). Cancellation
-    // just proceeds.
+    // a duration is a duration regardless of the named clock). The guest
+    // crosses no poll site while it sleeps here, so the wait is sliced to see
+    // the interrupt flag (#598).
     if (best_rel_ns) |ns| {
-        if (ns > 0) std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(ns)), .awake) catch |err| switch (err) {
-            // A cancelled sleep just wakes early; poll_oneoff still reports the
-            // clock event and the guest re-polls if its real deadline has not
-            // elapsed. There is no other Cancelable error to handle.
-            error.Canceled => {},
-        };
+        const start = std.Io.Timestamp.now(io, .awake);
+        while (true) {
+            if (interrupt) |flag| if (flag.load(.monotonic) != 0) return .intr;
+            const elapsed: u64 = @intCast(@max(0, start.untilNow(io, .awake).toNanoseconds()));
+            if (elapsed >= ns) break;
+            std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@min(ns - elapsed, interrupt_poll_ns)), .awake) catch |err| switch (err) {
+                // A cancelled sleep just wakes early; poll_oneoff still reports
+                // the clock event and the guest re-polls if its real deadline
+                // has not elapsed. There is no other Cancelable error to handle.
+                error.Canceled => break,
+            };
+        }
     }
 
     // One clock event: userdata echoed, error=success(0), type=clock, rest zero.
@@ -503,7 +519,7 @@ test "pollOneoff: zero subscriptions writes nevents=0" {
     var h = try Host.init(testing.allocator);
     defer h.deinit();
     var mem: [8]u8 = @splat(0xFF);
-    const e = pollOneoff(&h, &mem, 0, 0, 0, 0);
+    const e = pollOneoff(&h, &mem, 0, 0, 0, 0, null);
     try testing.expectEqual(p1.Errno.success, e);
     try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, mem[0..4], .little));
 }
@@ -519,12 +535,38 @@ test "pollOneoff: a clock subscription fires + writes one event" {
     std.mem.writeInt(u32, mem[16..20], 1, .little); // clock_id @16 = monotonic
     std.mem.writeInt(u64, mem[24..32], 0, .little); // timeout @24 = 0 (relative → immediate)
     // flags @40 = 0 (relative)
-    const e = pollOneoff(&h, &mem, 0, 48, 1, 80);
+    const e = pollOneoff(&h, &mem, 0, 48, 1, 80, null);
     try testing.expectEqual(p1.Errno.success, e);
     try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, mem[80..84], .little)); // nevents
     try testing.expectEqual(@as(u64, 0xCAFE), std.mem.readInt(u64, mem[48..56], .little)); // event.userdata
     try testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, mem[56..58], .little)); // event.error = success
     try testing.expectEqual(@as(u8, @intFromEnum(p1.EventType.clock)), mem[58]); // event.type @ 48+10
+}
+
+fn raiseAfter(io: std.Io, ms: u64, flag: *std.atomic.Value(u32)) void {
+    io.sleep(.{ .nanoseconds = @as(i96, ms) * std.time.ns_per_ms }, .awake) catch return;
+    flag.store(1, .monotonic);
+}
+
+test "pollOneoff: the host's interrupt ends a clock wait with intr and no event (#598)" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = io;
+    var mem: [128]u8 = @splat(0);
+    mem[8] = @intFromEnum(p1.EventType.clock);
+    std.mem.writeInt(u32, mem[16..20], 1, .little); // monotonic
+    std.mem.writeInt(u64, mem[24..32], 5 * std.time.ns_per_s, .little);
+
+    var flag = std.atomic.Value(u32).init(0);
+    var fut = try io.concurrent(raiseAfter, .{ io, 50, &flag });
+    defer fut.cancel(io);
+    const start = std.Io.Timestamp.now(io, .awake);
+    try testing.expectEqual(p1.Errno.intr, pollOneoff(&h, &mem, 0, 48, 1, 80, &flag));
+    try testing.expect(start.untilNow(io, .awake).toNanoseconds() < std.time.ns_per_s);
+    try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, mem[80..84], .little)); // nevents untouched
 }
 
 // ---- poll_oneoff: fd-readiness ----
@@ -564,7 +606,7 @@ test "pollOneoff: fd_read on stdin with bytes left reports the remaining count" 
 
     var mem: [640]u8 = @splat(0);
     sub(&mem, 0, 0xB0B, .fd_read, 0);
-    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
     try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, mem[512..516], .little));
     const e = evt(&mem, 48, 0);
     try testing.expectEqual(@as(u64, 0xB0B), e.userdata);
@@ -585,13 +627,13 @@ test "pollOneoff: fd_read on a drained stdin is ready with nbytes=0 and HANGUP" 
 
     var mem: [640]u8 = @splat(0);
     sub(&mem, 0, 0x1, .fd_read, 0);
-    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
     var e = evt(&mem, 48, 0);
     try testing.expectEqual(@as(u64, 0), e.nbytes);
     try testing.expectEqual(p1.EVENTRWFLAGS_FD_READWRITE_HANGUP, e.flags);
 
     h.stdin_bytes = null;
-    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
     e = evt(&mem, 48, 0);
     try testing.expectEqual(@as(u64, 0), e.nbytes);
     try testing.expectEqual(p1.EVENTRWFLAGS_FD_READWRITE_HANGUP, e.flags);
@@ -605,7 +647,7 @@ test "pollOneoff: fd_write on stdout and stderr both fire, in subscription order
     var mem: [640]u8 = @splat(0);
     sub(&mem, 0, 0xA, .fd_write, 1);
     sub(&mem, 1, 0xB, .fd_write, 2);
-    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 96, 2, 512));
+    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 96, 2, 512, null));
     try testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, mem[512..516], .little));
 
     const e0 = evt(&mem, 96, 0);
@@ -629,7 +671,7 @@ test "pollOneoff: a ready fd wins over a pending clock — no clock event, no sl
     std.mem.writeInt(u64, mem[24..32], 3600 * std.time.ns_per_s, .little);
     sub(&mem, 1, 0xFD, .fd_write, 1);
 
-    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 96, 2, 512));
+    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 96, 2, 512, null));
     // Exactly one event, and it is the fd: a returned clock event would tell
     // the guest its timeout won.
     try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, mem[512..516], .little));
@@ -658,7 +700,7 @@ test "pollOneoff: fd_read on a file reports size minus cursor, and HANGUP at EOF
 
     var mem: [640]u8 = @splat(0);
     sub(&mem, 0, 0xF11E, .fd_read, fd);
-    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
     var e = evt(&mem, 48, 0);
     try testing.expectEqual(@as(u64, 6), e.nbytes);
     try testing.expectEqual(@as(u16, 0), e.flags);
@@ -666,7 +708,7 @@ test "pollOneoff: fd_read on a file reports size minus cursor, and HANGUP at EOF
     // Cursor at end: still ready (a read there returns 0, it does not block)
     // but the hangup bit says there is nothing more coming.
     h.translateFd(fd).?.pos = 6;
-    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
     e = evt(&mem, 48, 0);
     try testing.expectEqual(@as(u64, 0), e.nbytes);
     try testing.expectEqual(p1.EVENTRWFLAGS_FD_READWRITE_HANGUP, e.flags);
@@ -674,7 +716,7 @@ test "pollOneoff: fd_read on a file reports size minus cursor, and HANGUP at EOF
     // A file is writable-ready too.
     h.translateFd(fd).?.rights_base |= p1.RIGHTS_FD_WRITE;
     sub(&mem, 0, 0xF11E, .fd_write, fd);
-    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
     try testing.expectEqual(@as(u8, @intFromEnum(p1.EventType.fd_write)), evt(&mem, 48, 0).ty);
 
     h.translateFd(fd).?.kind = .closed;
@@ -690,19 +732,19 @@ test "pollOneoff: an fd that cannot carry the subscription fails the whole call 
     var mem: [640]u8 = @splat(0);
     // Out of range.
     sub(&mem, 0, 0, .fd_read, 99);
-    try testing.expectEqual(p1.Errno.badf, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.badf, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
     // A directory has no stream to poll.
     sub(&mem, 0, 0, .fd_read, dirfd);
-    try testing.expectEqual(p1.Errno.badf, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.badf, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
     // Wrong direction: stdout is not readable, stdin is not writable.
     sub(&mem, 0, 0, .fd_read, 1);
-    try testing.expectEqual(p1.Errno.badf, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.badf, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
     sub(&mem, 0, 0, .fd_write, 0);
-    try testing.expectEqual(p1.Errno.badf, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.badf, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
     // A closed slot is in range but is not a descriptor.
     h.fd_table.items[0].kind = .closed;
     sub(&mem, 0, 0, .fd_read, 0);
-    try testing.expectEqual(p1.Errno.badf, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.badf, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
 }
 
 test "pollOneoff: an fd without POLL_FD_READWRITE is notcapable, not badf" {
@@ -715,7 +757,7 @@ test "pollOneoff: an fd without POLL_FD_READWRITE is notcapable, not badf" {
 
     var mem: [640]u8 = @splat(0);
     sub(&mem, 0, 0, .fd_read, 0);
-    try testing.expectEqual(p1.Errno.notcapable, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.notcapable, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
 }
 
 test "pollOneoff: an unknown subscription tag is inval" {
@@ -724,7 +766,7 @@ test "pollOneoff: an unknown subscription tag is inval" {
     h.io = testing.io;
     var mem: [640]u8 = @splat(0);
     mem[8] = 7; // not clock / fd_read / fd_write
-    try testing.expectEqual(p1.Errno.inval, pollOneoff(&h, &mem, 0, 48, 1, 512));
+    try testing.expectEqual(p1.Errno.inval, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
 }
 
 test "pollOneoff: the out array is bounds-checked for every subscription" {
@@ -738,5 +780,5 @@ test "pollOneoff: the out array is bounds-checked for every subscription" {
     sub(&mem, 0, 0xA, .fd_write, 1);
     sub(&mem, 1, 0xB, .fd_write, 2);
     sub(&mem, 2, 0xC, .fd_write, 1);
-    try testing.expectEqual(p1.Errno.fault, pollOneoff(&h, &mem, 0, 144, 3, 190));
+    try testing.expectEqual(p1.Errno.fault, pollOneoff(&h, &mem, 0, 144, 3, 190, null));
 }

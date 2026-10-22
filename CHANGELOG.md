@@ -59,6 +59,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **`--timeout` fires while the guest sleeps in `poll_oneoff`** (#598). The
+  clock wait slept in one call and read no interrupt flag, so a 5 s sleep under
+  `--timeout 500` ran 5 s and could exit 0. It now traps `interrupted` within
+  10 ms of the flag, also for `Instance.interrupt` and `zwasm_instance_interrupt`.
+
 - **The interpreter refuses a module holding an op it does not execute, at
   instantiation** (#597). A SIMD op trapped as the guest's own `unreachable`,
   and the default engine sent a SIMD module the JIT declined there. The failure

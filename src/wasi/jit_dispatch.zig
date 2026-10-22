@@ -377,7 +377,13 @@ pub fn poll_oneoff(rt: *JitRuntime, in_ptr: i32, out_ptr: i32, nsubscriptions: i
     dbg.print("mem.cksum", "jit poll_oneoff {x}", .{dbg.fnv1a(memOf(rt))});
     dbg.print("wasi.jit", "poll_oneoff nsubs={d}", .{nsubscriptions});
     const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_clocks.pollOneoff(host, memOf(rt), @bitCast(in_ptr), @bitCast(out_ptr), @bitCast(nsubscriptions), @bitCast(nevents_ptr))));
+    const errno = wasi_clocks.pollOneoff(host, memOf(rt), @bitCast(in_ptr), @bitCast(out_ptr), @bitCast(nsubscriptions), @bitCast(nevents_ptr), rt.interrupt_ptr);
+    if (errno == .intr) {
+        // Unwinds as `proc_exit` does; 16 is the interrupt poll stub's kind.
+        rt.trap_kind = 16;
+        rt.trap_flag = 1;
+    }
+    return @intCast(@intFromEnum(errno));
 }
 
 // --- proc ---
