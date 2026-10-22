@@ -1265,6 +1265,28 @@ test "0.2 metadata-hash + metadata-hash-at: the fd route and the path route give
     try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
 }
 
+test "0.2 descriptor.read: a read at offset 0 answers, and one ending past the i64 range is err(invalid)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/wasi_p2_fs_read_offset.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "hello" });
+    _ = try host.addPreopen(tmp.dir.handle, "/sandbox");
+
+    // The guest traps unless the read at 0 returns 5 bytes and the 1-byte
+    // reads at i64::MAX and u64::MAX each return err(invalid).
+    try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
+}
+
 test "D2: WASI-P2 get-directories returns a preopen descriptor list (realloc from trampoline)" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

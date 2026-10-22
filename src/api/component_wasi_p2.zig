@@ -573,6 +573,38 @@ test "0.2 append-via-stream: two append streams on one file each write at the en
     try testing.expectEqualStrings("abcXY", got);
 }
 
+test "0.2 descriptor.write / write-via-stream: an offset past the i64 range is invalid / closed" {
+    const Runtime = @import("../runtime/runtime.zig").Runtime;
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = threaded.io();
+    const dirfd = try host.addPreopen(tmp.dir.handle, "/w");
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var rt = Runtime.init(testing.allocator);
+    defer rt.deinit();
+    rt.memory = try testing.allocator.alloc(u8, 64);
+    const mem = rt.memory;
+    var caller: Caller = .{ .rt = &rt, .host_data = &ctx };
+
+    @memcpy(mem[0..5], "f.txt");
+    try testing.expectEqual(wasi_p1.Errno.success, wasi_fd.pathOpen(&host, mem, dirfd, 0, 0, 5, wasi_p1.OFLAGS_CREAT, wasi_p1.RIGHTS_FD_WRITE | wasi_p1.RIGHTS_FD_SEEK, 0, 0, 8));
+    const desc = try ctx.resources.new(WasiP2Ctx.DESCRIPTOR_RT, std.mem.readInt(u32, mem[8..12], .little));
+
+    try p2DescriptorWrite(&caller, desc, 0, 1, std.math.maxInt(u64), 16);
+    try testing.expectEqual(@as(u8, 1), mem[16]);
+    try testing.expectEqual(@intFromEnum(adapter.P2ErrorCode.invalid), mem[24]);
+    try p2DescriptorWriteViaStream(&caller, desc, std.math.maxInt(u64), 32);
+    try p2OutStreamWrite(&caller, std.mem.readInt(u32, mem[36..40], .little), 0, 1, 40);
+    try testing.expectEqual(@as(u8, 1), mem[40]); // err
+    try testing.expectEqual(@as(u8, 1), mem[44]); // stream-error::closed
+}
+
 /// True if `inst` exports a function named `name`.
 fn instanceExportsFunc(inst: *Instance, name: []const u8) bool {
     for (inst.handle.exports_storage) |e| {

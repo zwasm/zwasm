@@ -364,6 +364,10 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Security
 
+- **A positional file read or write past the i64 offset range answers
+  `invalid`**: WASI 0.1 `fd_pread` / `fd_pwrite`, 0.2 `descriptor.read` /
+  `write`, and the 0.2 / 0.3 file via-streams. It failed as an I/O error.
+
 - **A size or address the WASI host derives from a guest's values is
   checked.** When it does not fit in u32 the call traps as the guest's memory
   access (`OutOfBoundsStore`); before, the host process stopped.

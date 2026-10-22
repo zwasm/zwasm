@@ -530,6 +530,13 @@ pub fn fdAdvise(host: *Host, fd: p1.Fd, offset: u64, len: u64, advice: u8) p1.Er
 // fd_pread / fd_pwrite  (D-278)
 // ============================================================
 
+/// Whether `len` bytes at `offset` stay inside the i64 range the host's
+/// pread / pwrite take. Past it the kernel answers EINVAL, which std.Io does
+/// not expect there, so callers answer `inval` before the syscall.
+fn positionalInRange(offset: u64, len: usize) bool {
+    return offset <= std.math.maxInt(i64) and len <= std.math.maxInt(i64) - offset;
+}
+
 /// `fd_pread(fd, iovec_ptr, iovec_count, offset, *nread_out) → errno` —
 /// positional scatter read at an explicit `offset` that does NOT move the
 /// fd cursor (`std.Io.File.readPositional`). EOF returns success with the
@@ -565,6 +572,10 @@ pub fn fdPread(
         const buf_len = readU32LE(mem, entry_off + 4) orelse return .fault;
         const dst = sliceMem(mem, buf, buf_len) orelse return .fault;
         if (dst.len == 0) continue;
+        if (!positionalInRange(cur_off, dst.len)) {
+            if (total == 0) return .inval;
+            break;
+        }
         const n = file.readPositional(io, &[_][]u8{dst}, cur_off) catch return .io;
         if (n == 0) break; // EOF
         total += @intCast(n);
@@ -607,6 +618,10 @@ pub fn fdPwrite(
         const buf_len = readU32LE(mem, entry_off + 4) orelse return .fault;
         const src = sliceMemConst(mem, buf, buf_len) orelse return .fault;
         if (src.len == 0) continue;
+        if (!positionalInRange(cur_off, src.len)) {
+            if (total == 0) return .inval;
+            break;
+        }
         const n = file.writePositional(io, &[_][]const u8{src}, cur_off) catch return .io;
         total += @intCast(n);
         cur_off += n;
@@ -627,6 +642,7 @@ pub fn pwriteSlice(host: *Host, fd: p1.Fd, bytes: []const u8, offset: u64) p1.Er
         .dir => return .isdir,
         .closed => return .badf,
     }
+    if (!positionalInRange(offset, bytes.len)) return .inval;
     const handle = slot.host_handle orelse return .badf;
     const io = host.io orelse return .nosys;
     const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
@@ -659,6 +675,7 @@ pub fn preadSlice(host: *Host, fd: p1.Fd, dest: []u8, offset: u64, n_out: *usize
         .dir => return .isdir,
         .closed => return .badf,
     }
+    if (!positionalInRange(offset, dest.len)) return .inval;
     const handle = slot.host_handle orelse return .badf;
     const io = host.io orelse return .nosys;
     const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
@@ -1622,7 +1639,7 @@ test "fdSync / fdDatasync: real file fd succeeds; stdio noop; closed badf" {
     try testing.expectEqual(p1.Errno.badf, fdDatasync(&h, fd));
 }
 
-test "fdPwrite / fdPread: positional round-trip at an offset (no cursor move)" {
+test "fdPwrite / fdPread: positional round-trip at an offset (no cursor move); past the i64 range is inval" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var h = try Host.init(testing.allocator);
@@ -1650,6 +1667,17 @@ test "fdPwrite / fdPread: positional round-trip at an offset (no cursor move)" {
     try testing.expectEqual(p1.Errno.success, fdPread(&h, &mem, fd, 40, 1, 3, 68));
     try testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, mem[68..72], .little));
     try testing.expectEqualStrings("WORLD", mem[48..53]);
+
+    // 5 bytes past the i64 offset range are refused before the syscall; the
+    // last start that fits is maxInt(i64) - 5.
+    var n: usize = undefined;
+    for ([_]u64{ std.math.maxInt(i64) - 4, std.math.maxInt(u64) }) |off| {
+        try testing.expectEqual(p1.Errno.inval, fdPwrite(&h, &mem, fd, 16, 1, off, 64));
+        try testing.expectEqual(p1.Errno.inval, fdPread(&h, &mem, fd, 40, 1, off, 68));
+        try testing.expectEqual(p1.Errno.inval, pwriteSlice(&h, fd, mem[24..29], off));
+        try testing.expectEqual(p1.Errno.inval, preadSlice(&h, fd, mem[48..53], off, &n));
+    }
+    try testing.expectEqual(p1.Errno.success, preadSlice(&h, fd, mem[48..53], std.math.maxInt(i64) - 5, &n));
 
     const slot = h.translateFd(fd).?;
     const file: std.Io.File = .{ .handle = slot.host_handle.?, .flags = .{ .nonblocking = false } };
