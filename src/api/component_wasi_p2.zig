@@ -575,15 +575,16 @@ pub fn p2DescriptorOpenAt(caller: *Caller, self_handle: u32, path_flags: u32, pa
     // the parent's inheriting set.
     const rights = wasi_p1.rightsForRightlessOpen(oflags);
     // pathOpen writes the opened fd to retptr+4; reuse that slot for the result payload.
-    const errno = wasi_fd.pathOpen(ctx.host, mem.slice(), dirfd, 0, path_ptr, path_len, oflags, rights.base, rights.inheriting, 0, retptr + 4);
+    const payload_ptr = std.math.add(u32, retptr, 4) catch return error.OutOfBoundsStore;
+    const errno = wasi_fd.pathOpen(ctx.host, mem.slice(), dirfd, 0, path_ptr, path_len, oflags, rights.base, rights.inheriting, 0, payload_ptr);
     if (errno != .success) {
         try writeP1Err(mem, retptr, 4, errno);
         return;
     }
-    const opened_fd = try mem.read(u32, retptr + 4);
+    const opened_fd = try mem.read(u32, payload_ptr);
     const handle = try ctx.resources.new(WasiP2Ctx.DESCRIPTOR_RT, opened_fd);
     try mem.write(retptr, @as(u8, 0)); // result disc: ok
-    try mem.write(retptr + 4, handle); // own<descriptor>
+    try mem.write(payload_ptr, handle); // own<descriptor>
 }
 
 /// `wasi:filesystem/preopens` `get-directories` (retptr): build a

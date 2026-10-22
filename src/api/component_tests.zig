@@ -1091,6 +1091,25 @@ test "wasi:io/poll: a poll whose result list's byte size does not fit in u32 tra
     try testing.expectError(error.OutOfBoundsStore, runWasiP2Main(&eng, testing.allocator, bytes, &host, .{}));
 }
 
+test "wasi:filesystem: an open-at whose result payload's address does not fit in u32 traps as the store of that result" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/open_at_retptr_max.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    _ = try host.addPreopen(tmp.dir.handle, "/sandbox");
+
+    try testing.expectError(error.OutOfBoundsStore, runWasiP2Main(&eng, testing.allocator, bytes, &host, .{}));
+}
+
 test "E2: WASI-P2 cli/environment + terminal + check-write (a capture is not a terminal)" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

@@ -354,9 +354,9 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Security
 
-- **A list size the WASI host derives from a guest's count is checked.** When
-  that size does not fit in u32 the call traps as the guest's memory access
-  (`OutOfBoundsStore`); before, the host process stopped.
+- **A size or address the WASI host derives from a guest's values is
+  checked.** When it does not fit in u32 the call traps as the guest's memory
+  access (`OutOfBoundsStore`); before, the host process stopped.
 
 ### Documentation
 
