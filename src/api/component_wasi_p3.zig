@@ -560,6 +560,27 @@ test "D-335 typed marshalling: a stream<u32>.write of 2 elements transfers 8 byt
     try testing.expectEqualSlices(u8, &.{ 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55 }, capture.items);
 }
 
+test "a stream<u32>.write whose byte span does not fit in u32 traps as the access to that span" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/stream_write_count_max.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    host.stdout_buffer = &capture;
+
+    var built = try wasi_p2.buildWasiP2Component(&eng, testing.allocator, bytes, &host, .{});
+    defer built.deinit();
+    try testing.expectError(error.OutOfBoundsLoad, driveAsyncMain(&built));
+    try testing.expectEqual(@as(usize, 0), capture.items.len);
+}
+
 test "D-335 unit E1: wasi:cli/stderr write-via-stream routes a guest stream.write to fd 2" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

@@ -53,6 +53,12 @@ const rt_value = @import("../runtime/value.zig");
 /// buffer the delivered bytes are copied into when the source becomes ready.
 pub const PendingRead = struct { ptr: u32, cap: u32, elem_size: u32 = 1 };
 pub const PendingWrite = struct { ptr: u32, count: u32, elem_size: u32 = 1 };
+/// The byte span of `count` stream elements of `elem_size` bytes, the length a
+/// copy hands to `Memory.sliceAt`. A span past u32 cannot lie in a 32-bit
+/// memory, so it is the trap `sliceAt` gives a span past the end.
+pub fn streamSpan(count: u32, elem_size: u32) Memory.Error!u32 {
+    return std.math.cast(u32, @as(u64, count) * elem_size) orelse error.OutOfBoundsLoad;
+}
 /// A socket read (accept / tcp-rx) that returned BLOCKED: the tcp socket rep
 /// plus the parked destination span, executed at readiness by
 /// `pollBlockedSockets` (the socket analogue of `PendingRead`).
@@ -488,7 +494,7 @@ pub const WasiP2Ctx = struct {
                 end.setPendingEvent(.{ .code = .stream_read, .index = h, .payload = (async_mod.ReturnCode{ .completed = @intCast(filled) }).encode() });
             } else if (self.host_tcp_rx.get(end.shared) != null) {
                 const sock = self.tcpSocketRep(pr.rep) orelse continue;
-                const buf = try mem.sliceAt(pr.ptr, pr.cap * pr.elem_size);
+                const buf = try mem.sliceAt(pr.ptr, try streamSpan(pr.cap, pr.elem_size));
                 const n = sock.recv(io, buf) catch 0;
                 if (n == 0) {
                     // Ready-then-zero = peer FIN → the stream closes.
@@ -557,7 +563,7 @@ pub const WasiP2Ctx = struct {
             if (self.host_sources.get(end.shared) == null) continue;
             const mem = try self.memory();
             // D-335: cap is in ELEMENTS; slice cap*elem_size bytes, COMPLETE in elements.
-            const buf = try mem.sliceAt(pr.ptr, pr.cap * pr.elem_size);
+            const buf = try mem.sliceAt(pr.ptr, try streamSpan(pr.cap, pr.elem_size));
             const n: u32 = @intCast(try readStdinP2(self.host, buf));
             end.state = .done;
             end.setPendingEvent(.{ .code = .stream_read, .index = m, .payload = (async_mod.ReturnCode{ .completed = @intCast(n / pr.elem_size) }).encode() });
@@ -1105,13 +1111,13 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
         // preads at u64::MAX and expects error-code::invalid).
         const pos_invalid = role.pos > std.math.maxInt(i64);
         if (end.side == .writable) {
-            const bytes = try mem.sliceAt(ptr, count * abc.elem_size);
+            const bytes = try mem.sliceAt(ptr, try streamSpan(count, abc.elem_size));
             const errno: wasi_p1.Errno = if (pos_invalid) .inval else wasi_fd.pwriteSlice(abc.ctx.host, role.fd, bytes, role.pos);
             if (errno != .success) return abc.ctx.p3().fail_file_stream(abc.ctx, end, role, errno);
             role.pos += bytes.len;
             return (async_mod.ReturnCode{ .completed = @intCast(count) }).encode();
         }
-        const buf = try mem.sliceAt(ptr, count * abc.elem_size);
+        const buf = try mem.sliceAt(ptr, try streamSpan(count, abc.elem_size));
         var n: usize = 0;
         const errno: wasi_p1.Errno = if (pos_invalid) .inval else wasi_fd.preadSlice(abc.ctx.host, role.fd, buf, role.pos, &n);
         if (errno != .success) return abc.ctx.p3().fail_file_stream(abc.ctx, end, role, errno);
@@ -1171,7 +1177,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
             return (async_mod.ReturnCode{ .blocked = {} }).encode();
         }
         _ = abc.ctx.blocked_socket_reads.remove(handle);
-        const buf = try mem.sliceAt(ptr, count * abc.elem_size);
+        const buf = try mem.sliceAt(ptr, try streamSpan(count, abc.elem_size));
         const n = sock.recv(io, buf) catch 0;
         if (n == 0) {
             // Ready-then-zero = peer FIN → close the stream.
@@ -1198,7 +1204,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
             end.state = .done;
             return (async_mod.ReturnCode{ .dropped = 0 }).encode();
         }
-        const n = @min(remaining, count * abc.elem_size);
+        const n = @min(remaining, try streamSpan(count, abc.elem_size));
         const buf = try mem.sliceAt(ptr, @intCast(n));
         @memcpy(buf, body.data[body.pos..][0..n]);
         body.pos += n;
@@ -1209,7 +1215,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
     if (abc.ctx.host_capture_sinks.get(end.shared)) |cap| {
         if (end.side != .writable) return WasiP2Error.InvalidHandle;
         const mem = try abc.ctx.memory();
-        const bytes = try mem.sliceAt(ptr, count * abc.elem_size);
+        const bytes = try mem.sliceAt(ptr, try streamSpan(count, abc.elem_size));
         cap.appendSlice(abc.ctx.alloc, bytes) catch return WasiP2Error.OutOfMemory;
         return (async_mod.ReturnCode{ .completed = @intCast(count) }).encode();
     }
@@ -1219,7 +1225,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
         if (end.side != .writable) return WasiP2Error.InvalidHandle;
         const mem = try abc.ctx.memory();
         const io = try ctxIo(abc.ctx);
-        const bytes = try mem.sliceAt(ptr, count * abc.elem_size);
+        const bytes = try mem.sliceAt(ptr, try streamSpan(count, abc.elem_size));
         const sock = try ctxTcpSocket(abc.ctx, role.rep);
         var off: usize = 0;
         while (off < bytes.len) {
@@ -1247,7 +1253,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
         if (abc.ctx.host_sinks.get(end.shared)) |fd| {
             const mem = try abc.ctx.memory();
             // D-335: `count` is in ELEMENTS; the byte span is count * elem_size.
-            const bytes = try mem.sliceAt(ptr, count * abc.elem_size);
+            const bytes = try mem.sliceAt(ptr, try streamSpan(count, abc.elem_size));
             if (wasi_fd.writeSlice(abc.ctx.host, fd, bytes) != .success) return WasiP2Error.WriteFailed;
             return (async_mod.ReturnCode{ .completed = @intCast(count) }).encode();
         }
@@ -1268,7 +1274,7 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
             const mem = try abc.ctx.memory();
             // D-335: `count` is in ELEMENTS; slice count*elem_size bytes, and
             // COMPLETE in elements (n bytes read / elem_size).
-            const buf = try mem.sliceAt(ptr, count * abc.elem_size);
+            const buf = try mem.sliceAt(ptr, try streamSpan(count, abc.elem_size));
             const n: u32 = @intCast(try readStdinP2(abc.ctx.host, buf));
             return (async_mod.ReturnCode{ .completed = @intCast(n / abc.elem_size) }).encode();
         }

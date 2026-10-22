@@ -576,7 +576,7 @@ fn fs3DrainParkedWrite(ctx: *WasiP2Ctx, shared_id: u32) WasiP2Error!void {
     const pw = ctx.pending_writes.get(pending.waitable) orelse return;
     const role = ctx.host_file_streams.getPtr(shared_id) orelse return;
     const mem = try ctx.memory();
-    const bytes = try mem.sliceAt(pw.ptr, pw.count * pw.elem_size);
+    const bytes = try mem.sliceAt(pw.ptr, try ctx_mod.streamSpan(pw.count, pw.elem_size));
     const errno = wasi_fd.pwriteSlice(ctx.host, role.fd, bytes, role.pos);
     const writer = try ctx.streams.get(pending.waitable);
     if (errno != .success) {
@@ -1060,7 +1060,7 @@ fn sock3DrainParkedTcpWrite(ctx: *WasiP2Ctx, shared_id: u32) WasiP2Error!void {
     const pw = ctx.pending_writes.get(pending.waitable) orelse return;
     const role = ctx.host_tcp_tx.get(shared_id) orelse return;
     const mem = try ctx.memory();
-    const bytes = try mem.sliceAt(pw.ptr, pw.count * pw.elem_size);
+    const bytes = try mem.sliceAt(pw.ptr, try ctx_mod.streamSpan(pw.count, pw.elem_size));
     const sock = try ctxTcpSocket(ctx, role.rep);
     const io = try ctxIo(ctx);
     var off: usize = 0;
@@ -2249,7 +2249,7 @@ pub fn http3RegisterCaptureSink(ctx: *WasiP2Ctx, shared_id: u32, cap: *std.Array
     if (pending.side != .writable) return;
     const pw = ctx.pending_writes.get(pending.waitable) orelse return;
     const mem = try ctx.memory();
-    const bytes = try mem.sliceAt(pw.ptr, pw.count * pw.elem_size);
+    const bytes = try mem.sliceAt(pw.ptr, try ctx_mod.streamSpan(pw.count, pw.elem_size));
     cap.appendSlice(ctx.alloc, bytes) catch return WasiP2Error.OutOfMemory;
     const writer = try ctx.streams.get(pending.waitable);
     writer.state = .idle;
