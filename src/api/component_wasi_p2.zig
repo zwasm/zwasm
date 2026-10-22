@@ -318,7 +318,7 @@ fn fileStreamRead(ctx: *WasiP2Ctx, mem: Memory, rep: u32, len: u64, retptr: u32)
 }
 
 fn ctxFileStream(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*WasiP2Ctx.FileStream {
-    if (rep >= ctx.file_streams.items.len) return WasiP2Error.InvalidHandle;
+    if (rep >= ctx.file_streams.items.len or ctx.file_streams.items[rep].dropped) return WasiP2Error.InvalidHandle;
     return &ctx.file_streams.items[rep];
 }
 
@@ -428,13 +428,17 @@ fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
     // fd-backed resources (stdio/descriptor streams) close their fd; a pollable
     // carries no host fd and a directory-entry-stream or file stream borrows
     // its descriptor's fd (rep = a `dir_streams` / `file_streams` index), so
-    // those only release the handle slot.
+    // those close no fd.
     if (try ctx.resources.dropAny(self_handle)) |h| {
         switch (h.rt) {
-            // Pollables / dir-entry-streams / file streams / networks /
+            // Pollables / dir-entry-streams / networks /
             // socket streams / terminals carry no exclusively-owned host fd —
             // only the handle slot is released.
-            WasiP2Ctx.POLLABLE_RT, WasiP2Ctx.DIR_STREAM_RT, WasiP2Ctx.FILE_INPUT_STREAM_RT, WasiP2Ctx.FILE_OUTPUT_STREAM_RT, WasiP2Ctx.NETWORK_RT, WasiP2Ctx.SOCK_POLLABLE_RT, WasiP2Ctx.SOCK_INPUT_STREAM_RT, WasiP2Ctx.SOCK_OUTPUT_STREAM_RT, WasiP2Ctx.TERMINAL_RT, WasiP2Ctx.STDIN_POLLABLE_RT => {},
+            WasiP2Ctx.POLLABLE_RT, WasiP2Ctx.DIR_STREAM_RT, WasiP2Ctx.NETWORK_RT, WasiP2Ctx.SOCK_POLLABLE_RT, WasiP2Ctx.SOCK_INPUT_STREAM_RT, WasiP2Ctx.SOCK_OUTPUT_STREAM_RT, WasiP2Ctx.TERMINAL_RT, WasiP2Ctx.STDIN_POLLABLE_RT => {},
+            // A file stream's entry is free for the next mint.
+            WasiP2Ctx.FILE_INPUT_STREAM_RT, WasiP2Ctx.FILE_OUTPUT_STREAM_RT => {
+                if (h.rep < ctx.file_streams.items.len) ctx.file_streams.items[h.rep].dropped = true;
+            },
             // The tcp-socket handle owns the OS socket.
             WasiP2Ctx.TCP_SOCKET_RT => {
                 const sock = ctxTcpSocket(ctx, h.rep) catch return; // slot already gone
@@ -603,6 +607,28 @@ test "0.2 descriptor.write / write-via-stream: an offset past the i64 range is i
     try p2OutStreamWrite(&caller, std.mem.readInt(u32, mem[36..40], .little), 0, 1, 40);
     try testing.expectEqual(@as(u8, 1), mem[40]); // err
     try testing.expectEqual(@as(u8, 1), mem[44]); // stream-error::closed
+}
+
+test "0.2 via-stream: a dropped file stream's entry serves the next mint" {
+    const Runtime = @import("../runtime/runtime.zig").Runtime;
+    const testing = std.testing;
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var rt = Runtime.init(testing.allocator);
+    defer rt.deinit();
+    rt.memory = try testing.allocator.alloc(u8, 16);
+    var caller: Caller = .{ .rt = &rt, .host_data = &ctx };
+    const desc = try ctx.resources.new(WasiP2Ctx.DESCRIPTOR_RT, 3);
+
+    try p2DescriptorReadViaStream(&caller, desc, 0, 0);
+    const first = std.mem.readInt(u32, rt.memory[4..8], .little);
+    try p2ResourceDrop(&caller, first);
+    try testing.expectError(WasiP2Error.InvalidHandle, ctxFileStream(&ctx, 0));
+    try p2DescriptorWriteViaStream(&caller, desc, 0, 0);
+    try testing.expectEqual(@as(usize, 1), ctx.file_streams.items.len);
+    _ = try ctxFileStream(&ctx, 0);
 }
 
 /// True if `inst` exports a function named `name`.
@@ -942,8 +968,15 @@ fn p2DescriptorAppendViaStream(caller: *Caller, self_handle: u32, retptr: u32) W
 }
 
 fn mintFileStream(ctx: *WasiP2Ctx, mem: Memory, rt: u32, stream: WasiP2Ctx.FileStream, retptr: u32) WasiP2Error!void {
-    const index: u32 = @intCast(ctx.file_streams.items.len);
-    ctx.file_streams.append(ctx.alloc, stream) catch return WasiP2Error.OutOfMemory;
+    const index: u32 = for (ctx.file_streams.items, 0..) |s, i| {
+        if (s.dropped) {
+            ctx.file_streams.items[i] = stream;
+            break @intCast(i);
+        }
+    } else blk: {
+        ctx.file_streams.append(ctx.alloc, stream) catch return WasiP2Error.OutOfMemory;
+        break :blk @intCast(ctx.file_streams.items.len - 1);
+    };
     const handle = try ctx.resources.new(rt, index);
     try mem.write(retptr, @as(u8, 0)); // result disc: ok
     try mem.write(retptr + 4, handle);

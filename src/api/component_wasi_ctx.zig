@@ -308,8 +308,9 @@ pub const WasiP2Ctx = struct {
 
     /// One live 0.2 file via-stream: the descriptor's P1 fd + the position
     /// the next pread / pwrite uses. An `append` stream ignores `pos` and
-    /// writes at the file's end as of each write.
-    pub const FileStream = struct { fd: wasi_p1.Fd, pos: u64, append: bool = false };
+    /// writes at the file's end as of each write. A `dropped` entry is free
+    /// for the next mint.
+    pub const FileStream = struct { fd: wasi_p1.Fd, pos: u64, append: bool = false, dropped: bool = false };
 
     /// A WASI-0.3 file via-stream peer: the P1 fd + the tracked byte position
     /// the next pread/pwrite uses (advanced per completed copy). An `append`
