@@ -367,6 +367,10 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Security
 
+- **WASI 0.1 `fd_seek` answers `inval` for a result past the u64 range**, and
+  `fd_read` / `fd_write` at a cursor past the i64 range answer `inval`, as
+  wasmtime does.
+
 - **A positional file read or write past the i64 offset range answers
   `invalid`**: WASI 0.1 `fd_pread` / `fd_pwrite`, 0.2 `descriptor.read` /
   `write`, and the 0.2 / 0.3 file via-streams. It failed as an I/O error.

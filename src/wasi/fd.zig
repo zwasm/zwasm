@@ -213,6 +213,7 @@ pub fn writeSlice(host: *Host, fd: p1.Fd, bytes: []const u8) p1.Errno {
             (f.stat(io_opt.?) catch return .io).size
         else
             slot.pos;
+        if (!positionalInRange(at, bytes.len)) return .inval;
         f.writePositionalAll(io_opt.?, bytes, at) catch return .io;
         slot.pos = at + bytes.len;
     };
@@ -351,6 +352,10 @@ fn fdReadFile(host: *Host, mem: []u8, slot: *host_mod.OpenFd, iovec_ptr: u32, io
         // Positional read at the slot's logical cursor (std.Io.File is
         // positional-only — no OS-cursor seek). EOF returns 0 (NOT
         // error.EndOfStream, cf. fd_pread); WASI reports it as nread=0, success.
+        if (!positionalInRange(slot.pos, dst.len)) {
+            if (total == 0) return .inval;
+            break;
+        }
         const n: usize = file.readPositional(io, &[_][]u8{dst}, slot.pos) catch return .io;
         if (n == 0) break; // EOF
         total += @intCast(n);
@@ -401,8 +406,9 @@ pub fn fdRenumber(host: *Host, from: p1.Fd, to: p1.Fd) p1.Errno {
 
 /// `fd_seek(fd, offset, whence, *new_pos_out) → errno`. Moves the `.file`
 /// slot's logical cursor (`slot.pos`) per `whence` (set/cur/end) and writes the
-/// resulting absolute offset. Stdio/pipes are not seekable → `spipe`; a negative
-/// resulting offset or an unknown `whence` → `inval`. `end` reads the host file
+/// resulting absolute offset. Stdio/pipes are not seekable → `spipe`; a
+/// resulting offset outside u64 or an unknown `whence` → `inval` (wasmtime's
+/// range: a cursor past i64 is held, and a read or write there is `inval`). `end` reads the host file
 /// size via `File.stat`. (std.Io.File is positional-only; the cursor lives in
 /// the slot, see `OpenFd.pos`.)
 pub fn fdSeek(
@@ -443,7 +449,7 @@ pub fn fdSeek(
         _ => return .inval,
     };
     const new_pos: i128 = base + offset;
-    if (new_pos < 0) return .inval;
+    if (new_pos < 0 or new_pos > std.math.maxInt(u64)) return .inval;
     slot.pos = @intCast(new_pos);
     return writeU64LE(mem, new_pos_ptr, @intCast(new_pos));
 }
@@ -2057,7 +2063,7 @@ test "fd_seek + fd_tell move + report the file cursor (set/cur/end whence)" {
 
     var mem: [128]u8 = @splat(0);
     @memcpy(mem[16..24], "seek.txt");
-    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 16, 8, 0, p1.RIGHTS_FD_READ | p1.RIGHTS_FD_SEEK | p1.RIGHTS_FD_TELL, 0, 0, 100));
+    try testing.expectEqual(p1.Errno.success, pathOpen(&h, &mem, dirfd, 0, 16, 8, 0, p1.RIGHTS_FD_READ | p1.RIGHTS_FD_WRITE | p1.RIGHTS_FD_SEEK | p1.RIGHTS_FD_TELL, 0, 0, 100));
     const fd = std.mem.readInt(u32, mem[100..104], .little);
     const slot = h.translateFd(fd).?;
     defer {
@@ -2097,6 +2103,14 @@ test "fd_seek + fd_tell move + report the file cursor (set/cur/end whence)" {
 
     // a negative resulting offset is invalid
     try testing.expectEqual(p1.Errno.inval, fdSeek(&h, &mem, fd, -1, @intFromEnum(p1.Whence.cur), 116));
+
+    // so is one past u64; a cursor past i64 is held, but reads and writes
+    // there are invalid
+    try testing.expectEqual(p1.Errno.success, fdSeek(&h, &mem, fd, std.math.maxInt(i64), @intFromEnum(p1.Whence.set), 116));
+    try testing.expectEqual(p1.Errno.success, fdSeek(&h, &mem, fd, std.math.maxInt(i64), @intFromEnum(p1.Whence.cur), 116));
+    try testing.expectEqual(p1.Errno.inval, fdSeek(&h, &mem, fd, std.math.maxInt(i64), @intFromEnum(p1.Whence.cur), 116));
+    try testing.expectEqual(p1.Errno.inval, fdRead(&h, &mem, fd, 32, 1, 104));
+    try testing.expectEqual(p1.Errno.inval, fdWrite(&h, &mem, fd, 32, 1, 104));
 }
 
 test "fdFdstatSetFlags: persists allowed bits + masks unknown ones" {
