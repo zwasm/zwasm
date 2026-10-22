@@ -630,10 +630,9 @@ pub fn fdPwrite(
     return writeU32LE(mem, nwritten_ptr, total);
 }
 
-/// Positionally write one contiguous byte range to a file `fd` at `offset`
-/// (no cursor move). The slice-level analogue of `fdPwrite`'s ciovec loop —
-/// used by the WASI-P2 `descriptor.write` trampoline, where `list<u8>` is a
-/// flat `(ptr, len)`. File fds only (stdio → `spipe`, dir → `isdir`).
+/// Positionally write all of one contiguous byte range to a file `fd` at
+/// `offset` (no cursor move), or fail: every caller reports the whole range
+/// written on success. File fds only (stdio → `spipe`, dir → `isdir`).
 pub fn pwriteSlice(host: *Host, fd: p1.Fd, bytes: []const u8, offset: u64) p1.Errno {
     const slot = host.translateFd(fd) orelse return .badf;
     switch (slot.kind) {
@@ -646,8 +645,7 @@ pub fn pwriteSlice(host: *Host, fd: p1.Fd, bytes: []const u8, offset: u64) p1.Er
     const handle = slot.host_handle orelse return .badf;
     const io = host.io orelse return .nosys;
     const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
-    if (bytes.len == 0) return .success;
-    _ = file.writePositional(io, &[_][]const u8{bytes}, offset) catch return .io;
+    file.writePositionalAll(io, bytes, offset) catch return .io;
     return .success;
 }
 

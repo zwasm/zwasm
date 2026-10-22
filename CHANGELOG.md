@@ -59,6 +59,9 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A 0.2 `descriptor.write` or file output-stream write completes or fails**
+  (#617). A short write was reported as the whole list written.
+
 - **A 0.2 or 0.3 `append-via-stream` writes at the file's end as of each
   write** (#617, #627). It wrote at the size read when the stream was opened,
   so a second append stream on the file, or a write through another
