@@ -560,7 +560,7 @@ test "D-335 typed marshalling: a stream<u32>.write of 2 elements transfers 8 byt
     try testing.expectEqualSlices(u8, &.{ 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55 }, capture.items);
 }
 
-test "a stream<u32>.write whose byte span does not fit in u32 traps as the access to that span" {
+test "a stream write whose byte span does not fit in u32 traps as the access to that span" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();

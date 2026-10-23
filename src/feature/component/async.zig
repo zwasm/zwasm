@@ -21,6 +21,10 @@ const Allocator = std.mem.Allocator;
 /// tagging (shared with the resource handle table).
 pub const MAX_LENGTH: u32 = (1 << 28) - 1;
 
+/// Spec `Buffer.MAX_LENGTH` — the most elements one `stream.read`/`write`
+/// moves, so a `ReturnCode` count always fits its 28 bits.
+pub const BUFFER_MAX_LENGTH: u32 = (1 << 28) - 1;
+
 pub const Error = error{
     /// Handle index out of bounds, the reserved 0 sentinel, or a freed
     /// (tombstoned) slot — covers use-after-drop / double-drop.
@@ -43,6 +47,9 @@ pub const Error = error{
     /// a second concurrent copy, or a copy on a DONE end (spec `stream_copy`/
     /// `future_copy` `trap_if(e.state != CopyState.IDLE)`).
     CopyNotIdle,
+    /// `stream.read`/`write` of more than `BUFFER_MAX_LENGTH` elements (spec
+    /// `GuestBuffer` `trap_if(length > Buffer.MAX_LENGTH)`).
+    BufferTooLong,
 };
 
 /// Copy-state of a stream/future end (`CanonicalABI.md` §Stream State). The

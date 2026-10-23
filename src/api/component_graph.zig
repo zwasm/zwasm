@@ -1258,6 +1258,7 @@ fn graphStreamNew(caller: *Caller) BoundaryError!u64 {
 /// them. A `count * elem_size` exceeding the inline buffer is a typed deferral.
 fn graphStreamWrite(caller: *Caller, handle: u32, ptr: u32, count: u32) BoundaryError!u32 {
     const ctx = caller.data(GraphFutureCtx);
+    if (count > async_mod.BUFFER_MAX_LENGTH) return error.BufferTooLong;
     try checkOwner(ctx, handle);
     const end = try ctx.as.streams.get(handle);
     const sh = try ctx.as.shared.get(end.shared);
@@ -1303,6 +1304,7 @@ fn graphStreamWrite(caller: *Caller, handle: u32, ptr: u32, count: u32) Boundary
 /// BLOCKED loudly (the pollSet path is d-c-2), never a silent 0.
 fn graphStreamRead(caller: *Caller, handle: u32, ptr: u32, count: u32) BoundaryError!u32 {
     const ctx = caller.data(GraphFutureCtx);
+    if (count > async_mod.BUFFER_MAX_LENGTH) return error.BufferTooLong;
     try checkOwner(ctx, handle);
     const end = try ctx.as.streams.get(handle);
     const sh = try ctx.as.shared.get(end.shared);
@@ -1891,4 +1893,16 @@ fn nthCoreModule(decoded: *const decode.Component, n: u32) ?[]const u8 {
         i += 1;
     }
     return null;
+}
+
+test "a graph stream copy of more than 2^28-1 elements traps" {
+    const testing = std.testing;
+    var as = try GraphAsync.init(testing.allocator);
+    defer as.deinit();
+    var fctx: GraphFutureCtx = .{ .as = &as, .elem_size = 1 };
+    // The count is refused before any memory is read.
+    var caller: Caller = .{ .rt = undefined, .host_data = &fctx };
+    const pair = try graphStreamNew(&caller);
+    try testing.expectError(error.BufferTooLong, graphStreamWrite(&caller, @intCast(pair >> 32), 0, async_mod.BUFFER_MAX_LENGTH + 1));
+    try testing.expectError(error.BufferTooLong, graphStreamRead(&caller, @truncate(pair), 0, async_mod.BUFFER_MAX_LENGTH + 1));
 }

@@ -769,6 +769,27 @@ test "reallocGuestArray: the largest list byte size u32 holds reaches the alloca
     try testing.expectError(error.OutOfBoundsStore, ctx.reallocGuestArray(std.math.maxInt(usize), 18, 2));
 }
 
+test "a stream copy of more than 2^28-1 elements traps, and one at the limit packs its count" {
+    const testing = std.testing;
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    const pair = try async_mod.newStreamPair(&ctx.streams, &ctx.shared, null);
+    var abc: AsyncBuiltinCtx = .{ .ctx = &ctx, .type_index = 0 };
+    // A guest-to-guest rendezvous reads no memory.
+    var caller: Caller = .{ .rt = undefined, .host_data = &abc };
+    const max = async_mod.BUFFER_MAX_LENGTH;
+
+    try testing.expectError(error.BufferTooLong, p2StreamFutureCopy(&caller, pair.readable, 0, max + 1));
+    try testing.expectEqual(@as(u32, 0xffff_ffff), try p2StreamFutureCopy(&caller, pair.readable, 0, max));
+    try testing.expectError(error.BufferTooLong, p2StreamFutureCopy(&caller, pair.writable, 0, max + 1));
+    // The write meets the parked read; moving the elements is past this host.
+    try testing.expectError(error.UnsupportedAsyncBuiltin, p2StreamFutureCopy(&caller, pair.writable, 0, max));
+    const reader = try ctx.streams.get(pair.readable);
+    try testing.expectEqual((async_mod.ReturnCode{ .completed = max }).encode(), reader.pending_event.?.payload);
+}
+
 /// `tcp.local-address` (self, retptr) -> result<ip-socket-address, error-code>.
 pub const AsyncBuiltinCtx = struct { ctx: *WasiP2Ctx, type_index: u32, elem_size: u32 = 1 };
 
@@ -1073,6 +1094,7 @@ pub fn p2FutureCopy(caller: *Caller, handle: u32, ptr: u32) WasiP2Error!u32 {
 }
 
 pub fn p2StreamFutureCopy(caller: *Caller, handle: u32, ptr: u32, count: u32) WasiP2Error!u32 {
+    if (count > async_mod.BUFFER_MAX_LENGTH) return error.BufferTooLong;
     const r = try p2StreamFutureCopyInner(caller, handle, ptr, count);
     if (dbg.on("async.host")) std.debug.print("[host] copy -> 0x{x}\n", .{r});
     return r;
