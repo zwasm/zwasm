@@ -1833,7 +1833,7 @@ fn instantiateWithId(store: *Store, module: *const Module, builder_state: anytyp
     // EXEMPT-FALLBACK: D-174 — live_instances append OOM degrades to pre-fix behaviour; full ENOMEM propagation would require redesigning wasm_instance_new's allocator contract.
     store.live_instances.append(alloc, @ptrCast(inst)) catch {};
 
-    instantiate.instantiateRuntime(bytes, inst, inst_rt, bindings) catch {
+    instantiate.instantiateRuntime(bytes, inst, inst_rt, bindings, dispatchTable()) catch {
         // Per ADR-0014 §2.1 / 6.K.2 sub-change 4: park the failed
         // instance's runtime + arena (committed cross-module writes
         // would UAF if the arena were destroyed). D-174: drops the

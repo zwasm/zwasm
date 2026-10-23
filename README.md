@@ -118,7 +118,7 @@ adversarial use-after-free test on aarch64 + x86_64.
 zwasm                                  # print version + build options
 zwasm run [options] <file.wasm|.cwasm> [args...] # run a module (WASI _start / main)
     [--invoke <name>[=a,b,…]]          #   run a named export; =args prints typed results
-    [--engine <interp|jit>]            #   default: auto (prefers JIT, interp fallback); interp|jit force one (both full WASI; jit adds SIMD)
+    [--engine <interp|jit>]            #   default: auto (prefers JIT, interp fallback); interp|jit force one (both full WASI; jit adds SIMD, interp refuses a SIMD module at instantiate)
     [--dir <host>[:<guest>]]           #   preopen a host directory for WASI
     [--env <KEY=VAL>]                  #   set a WASI env var (repeatable)
     [--fuel <N>]                       #   trap after a deterministic budget (error.OutOfFuel)

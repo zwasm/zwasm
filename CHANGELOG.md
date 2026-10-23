@@ -59,6 +59,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **The interpreter refuses a module holding an op it does not execute, at
+  instantiation** (#597). A SIMD op trapped as the guest's own `unreachable`,
+  and the default engine sent a SIMD module the JIT declined there. The failure
+  now names the op, and under the default engine the JIT's reason too.
+
 - **A v128 `select` whose second operand spills compiles** (#596). Both JIT
   backends read that operand only from a register, so seven v128 values live
   at one select (more on aarch64) declined the module on the JIT and in AOT.

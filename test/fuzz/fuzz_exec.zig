@@ -274,15 +274,10 @@ fn processModule(
         if (io_out == .fuel or jo_auto == .fuel or expl_fuel) return;
 
         // SIMD execution is JIT-ONLY by design (the SIMD spec suite runs on
-        // the JIT runner; the interp has no SIMD handlers). The interp traps
-        // `unreachable_` at the first op it doesn't implement — SIMD etc. —
-        // via the dispatch null-slot. A GENUINE `unreachable` instruction
-        // traps on BOTH engines, so an interp `unreachable_` that the JIT
-        // does NOT mirror means the interp bailed on an unimplemented op, not
-        // a JIT miscompile → incomparable; and the interp bailed MID-BODY, so
-        // its state diverged from the JIT lanes' → skip the module's rest too.
-        // This is sound: a real JIT failure-to-trap-unreachable can't hide here
-        // (the JIT implements `unreachable`).
+        // the JIT runner; the interp has no SIMD handlers): a module holding
+        // an op the interp binds no handler for fails `instantiate` above and
+        // is skipped whole (#597). An interp `unreachable_` the JIT does NOT
+        // mirror is still skipped as incomparable, with the module's rest.
         if (io_out == .trap and io_out.trap != null and io_out.trap.? == .unreachable_) {
             const jit_unreachable = jo_auto == .trap and jo_auto.trap != null and jo_auto.trap.? == .unreachable_;
             if (!jit_unreachable) return;

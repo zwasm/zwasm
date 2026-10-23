@@ -1364,8 +1364,10 @@ pub fn build(b: *std.Build) void {
 
     // `zig build test-cli-usage` — issues #236 / #232: an unknown `run`
     // option is a usage error (exit 2), `--` ends the options, and a known
-    // option after the module path stays the guest's argv. Subprocess for the
-    // same reason as above: only `main.zig` parses `run`'s options.
+    // option after the module path stays the guest's argv; a SIMD module the
+    // interpreter cannot run fails at instantiate with each engine's reason
+    // (#597). Subprocess for the same reason as above: only `main.zig` parses
+    // `run`'s options.
     const cli_usage_mod = createSanitizedModule(b, sanitize_opts, .{
         .root_source_file = b.path("test/runners/cli_usage_runner.zig"),
         .target = target,
@@ -1380,8 +1382,11 @@ pub fn build(b: *std.Build) void {
     run_cli_usage.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
     run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/default_entry/start_void.wasm"));
     run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/cli_usage/argv_echo.wasm"));
+    run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/engine_refusal/simd_op.wasm"));
+    run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/engine_refusal/simd_jit_decline.wasm"));
+    run_cli_usage.addArg(b.pathFromRoot("test/edge_cases/p17/simd_select_spill/select_v128_spilled_val2.wasm"));
     run_cli_usage.has_side_effects = true;
-    const test_cli_usage_step = b.step("test-cli-usage", "Run `zwasm run` with unknown, misplaced and value-swallowing options and require a usage error (exit 2), and `--` and post-path options to reach the module (issues #236, #232)");
+    const test_cli_usage_step = b.step("test-cli-usage", "Run `zwasm run` with unknown, misplaced and value-swallowing options and require a usage error (exit 2), and `--` and post-path options to reach the module (issues #236, #232); a SIMD module the interpreter cannot run fails with each engine's reason (#597)");
     test_cli_usage_step.dependOn(&run_cli_usage.step);
 
     // `zig build test-wasi-p1-official` — the OFFICIAL wasi-testsuite

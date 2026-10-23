@@ -77,8 +77,9 @@ WASI / sandbox / `--invoke` behaviour to running the source `.wasm`
   back to the interpreter when the JIT *declines* the module; a module the JIT
   judges *invalid* fails with the reason, on every engine — #233);
   `--engine auto` spells the default explicitly.
-  `--engine interp` forces the interpreter; `--engine jit` forces the JIT
-  (full WASI, plus SIMD execution).
+  `--engine interp` forces the interpreter, which refuses a SIMD module at
+  instantiate — as `auto` does one the JIT declines, naming both reasons;
+  `--engine jit` forces the JIT (full WASI, plus SIMD execution).
 - `--cache` affects `.wasm` runs only (a `.cwasm` input IS the artifact;
   components have no artifact format) and is bypassed under
   `--engine interp`.

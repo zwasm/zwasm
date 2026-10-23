@@ -3,9 +3,11 @@
 //! precede the module path, so an unknown one is a usage error (exit 2) — not
 //! a module path that cannot be read (exit 1) — and `--` ends them. Anything
 //! after the path is the guest's argv, even when it spells a known option.
+//! And which engine runs a SIMD module, said where the run fails (#597).
 //!
 //! Usage: `zig build test-cli-usage` /
-//!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>`
+//!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>
+//!         <simd_op.wasm> <simd_jit_decline.wasm> <select_v128_spilled_val2.wasm>`
 
 const std = @import("std");
 const spawned_cli = @import("spawned_cli");
@@ -31,10 +33,15 @@ const Row = struct {
     stderr: Match = .any,
 };
 
-/// Stand-ins for the two module paths: a `_start` that does nothing, and one
-/// that echoes argv[1..] a line each.
+/// Stand-ins for the module paths, in argument order: a `_start` that does
+/// nothing, one that echoes argv[1..] a line each, one SIMD op, a SIMD module
+/// the JIT declines, and #596's select.
 const M = "<module>";
 const E = "<argv_echo>";
+const S = "<simd_op>";
+const D = "<simd_jit_decline>";
+const V = "<select_spill>";
+const placeholders = [_][]const u8{ M, E, S, D, V };
 
 const rows = [_]Row{
     .{ .args = &.{ "run", "--bogus", M }, .exit = 2, .stderr = .{ .has = "unknown option '--bogus'" } },
@@ -45,6 +52,9 @@ const rows = [_]Row{
     .{ .args = &.{ "run", "--", M }, .exit = 0 },
     .{ .args = &.{ "run", E, "--engine", "jit" }, .exit = 0, .stdout = .{ .is = "--engine\njit\n" }, .stderr = .{ .is = "" } },
     .{ .args = &.{"--help"}, .exit = 0, .stdout = .{ .has = "run [options]" } },
+    .{ .args = &.{ "run", "--engine", "interp", S }, .exit = 1, .stderr = .{ .has = "the interpreter does not execute `v128.const`" } },
+    .{ .args = &.{ "run", D }, .exit = 1, .stderr = .{ .has = "`return_call` with a 3-result callee\nthe interpreter does not execute `v128.const`" } },
+    .{ .args = &.{ "run", "--invoke", "test", V }, .exit = 0, .stdout = .{ .is = "63\n" } },
 };
 
 pub fn main(init: std.process.Init) !u8 {
@@ -54,8 +64,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer arg_it.deinit();
     _ = arg_it.next().?;
     const cli = arg_it.next() orelse return error.MissingCliPath;
-    const module = arg_it.next() orelse return error.MissingModulePath;
-    const argv_echo = arg_it.next() orelse return error.MissingArgvEchoPath;
+    var paths: [placeholders.len][]const u8 = undefined;
+    for (&paths) |*p| p.* = arg_it.next() orelse return error.MissingModulePath;
     try spawned_cli.assertRunnerBuildMode(gpa, io, cli);
 
     var failed: u32 = 0;
@@ -63,7 +73,12 @@ pub fn main(init: std.process.Init) !u8 {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
         try argv.append(gpa, cli);
-        for (row.args) |a| try argv.append(gpa, if (std.mem.eql(u8, a, M)) module else if (std.mem.eql(u8, a, E)) argv_echo else a);
+        for (row.args) |a| {
+            const path = for (placeholders, paths) |ph, p| {
+                if (std.mem.eql(u8, a, ph)) break p;
+            } else a;
+            try argv.append(gpa, path);
+        }
 
         const result = try std.process.run(gpa, io, .{ .argv = argv.items });
         defer gpa.free(result.stdout);

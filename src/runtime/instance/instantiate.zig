@@ -38,6 +38,7 @@ const sections = @import("../../parse/sections.zig");
 const validator = @import("../../validate/validator.zig");
 const gc_subtype = @import("../../validate/gc_subtype.zig");
 const zir = @import("../../ir/zir.zig");
+const dispatch_table = @import("../../ir/dispatch_table.zig");
 const leb128 = @import("../../support/leb128.zig");
 const testing = std.testing;
 const import_mod = @import("import.zig");
@@ -1003,11 +1004,17 @@ pub fn buildExportTypes(
 /// values before calling here. This file is therefore unaware
 /// of `Extern`, `wasi.lookupWasiThunk`, or `cross_module.CallCtx`,
 /// and the runtime-side type-match check is a pure data compare.
+///
+/// `table` is the one the interpreter will run the bodies with. A body
+/// holding an op it binds no handler for is refused here, before any data
+/// or element segment is written: run, that op would surface as the guest's
+/// own `unreachable` trap (#597).
 pub fn instantiateRuntime(
     bytes: []const u8,
     inst: *Instance,
     rt: *Runtime,
     bindings: ?[]const ImportBinding,
+    table: *const dispatch_table.DispatchTable,
 ) !void {
     const a = (inst.arena orelse return error.InvalidModule).allocator();
 
@@ -1130,6 +1137,12 @@ pub fn instantiateRuntime(
             funcs[i] = zir.ZirFunc.init(@intCast(imp_func_count + i), types.items[type_idx], code.locals);
             funcs[i].src_base = code.decls_len;
             try lower.lowerFunctionBody(a, code.body, &funcs[i], types.items, &.{});
+            for (funcs[i].instrs.items) |ins| {
+                if (table.interp[@intFromEnum(ins.op)] == null) {
+                    diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the interpreter does not execute `{s}`", .{@tagName(ins.op)});
+                    return error.UnsupportedOp;
+                }
+            }
             // `code.body` is a slice of `bytes`, so its distance from the start is its module offset.
             std.debug.assert(@intFromPtr(code.body.ptr) >= @intFromPtr(bytes.ptr) + code.decls_len and
                 @intFromPtr(code.body.ptr) + code.body.len <= @intFromPtr(bytes.ptr) + bytes.len);

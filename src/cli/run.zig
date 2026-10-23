@@ -309,11 +309,31 @@ pub fn runWasmJitCaptured(
 /// `unsupported` mirroring the one #431 added to `trap_surface.TrapKind` — that
 /// is a migration of all of this file's sites, not one.
 fn reportDecline(note: decline_note.Note) void {
-    const tail = "; the default engine runs this module on the interpreter";
+    setDeclineDiag(note, "; the default engine tries the interpreter");
+}
+
+fn setDeclineDiag(note: decline_note.Note, tail: []const u8) void {
     switch (note.reason) {
-        .overflow_words => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} overflow argument word{s}" ++ tail, .{ note.op, n, if (n == 1) "" else "s" }),
-        .simd_args => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} floating-point or vector arguments — more than the register bank carries" ++ tail, .{ note.op, n }),
-        .memory_class_results => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with a {d}-result callee" ++ tail, .{ note.op, n }),
+        .overflow_words => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} overflow argument word{s}{s}", .{ note.op, n, if (n == 1) "" else "s", tail }),
+        .simd_args => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} floating-point or vector arguments — more than the register bank carries{s}", .{ note.op, n, tail }),
+        .memory_class_results => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with a {d}-result callee{s}", .{ note.op, n, tail }),
+    }
+}
+
+/// #597 — `.auto` reaches the interpreter only after the JIT declined, and a
+/// JIT `Final` arrives as a trap, so a reason in the slot after a trap-less
+/// failure is the interpreter's. Both engines refused: one line each, the
+/// decline first.
+fn reportAutoRefusal() void {
+    const refusal = diagnostic.lastDiagnostic().?.message();
+    var tail_buf: [diagnostic.message_buf_size + 1]u8 = undefined;
+    tail_buf[0] = '\n';
+    @memcpy(tail_buf[1..][0..refusal.len], refusal);
+    const tail = tail_buf[0 .. refusal.len + 1];
+    if (decline_note.take()) |note| {
+        setDeclineDiag(note, tail);
+    } else {
+        diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT declined this module{s}", .{tail});
     }
 }
 
@@ -629,6 +649,7 @@ pub fn runCapturedPrecompiled(
     // Per ADR-0016 phase 1: clear any stale diagnostic from a
     // previous call before populating a fresh one on failure.
     diagnostic.clearDiag();
+    decline_note.clear();
 
     const engine = wasm_c_api.wasm_engine_new() orelse {
         diagnostic.setDiag(.instantiate, .engine_alloc_failed, .unknown, "engine allocation failed", .{});
@@ -712,7 +733,13 @@ pub fn runCapturedPrecompiled(
                 diagnostic.setDiag(.instantiate, .instance_alloc_failed, .unknown, "wasi preopen dir '{s}' open failed: {s}", .{ cfg.pending_preopens.items[0].host_path, @errorName(err) });
                 return err;
             };
-            diagnostic.setDiag(.instantiate, .instance_alloc_failed, .unknown, "instantiation failed (no further detail in phase 1)", .{});
+            // A reason the setup recorded stands, as the interpreter's refusal
+            // of an op it does not execute does (#597).
+            if (diagnostic.lastDiagnostic() == null) {
+                diagnostic.setDiag(.instantiate, .instance_alloc_failed, .unknown, "instantiation failed (no further detail in phase 1)", .{});
+            } else if (limits.engine == .auto) {
+                reportAutoRefusal();
+            }
         }
         return error.InstanceAllocFailed;
     };
@@ -1463,13 +1490,13 @@ test "runCwasmWasi: a WASI fd_write .cwasm writes 'hi\\n' to the captured stdout
     try testing.expectEqualStrings("hi\n", capture.items);
 }
 
-test "runWasmJit: SIMD _start runs via the JIT where the interp traps (ADR-0136 / D-244)" {
-    // Interpreter path: no SIMD execution → the `i32x4.add` dispatch slot is
-    // null → Trap.Unreachable, which the run path maps to a non-zero exit
-    // code (a trap is exit≠0, not a Zig error). D-496: force `.interp` — the
-    // post-flip default `.auto` would run SIMD on the JIT (this leg is the foil).
-    const interp_code = try runWasmCapturedOpts(testing.allocator, testing.io, &simd_start_wasm, &.{}, null, null, &.{}, &.{}, &.{}, null, .{ .engine = .interp });
-    try testing.expect(interp_code != 0);
+test "runWasmJit: SIMD _start runs via the JIT where the interp refuses it (ADR-0136 / D-244)" {
+    // Interpreter path: no SIMD execution → the `v128.const` dispatch slot is
+    // null, so instantiation refuses the module, naming the op (#597). D-496:
+    // force `.interp` — the post-flip default `.auto` would run SIMD on the JIT
+    // (this leg is the foil).
+    try testing.expectError(error.InstanceAllocFailed, runWasmCapturedOpts(testing.allocator, testing.io, &simd_start_wasm, &.{}, null, null, &.{}, &.{}, &.{}, null, .{ .engine = .interp }));
+    try testing.expectEqualStrings("the interpreter does not execute `v128.const`", diagnostic.lastDiagnostic().?.message());
 
     // JIT path: compiles + runs the SIMD `_start` to completion → 0.
     const jit_code = try runWasmJit(testing.allocator, testing.io, &simd_start_wasm, null, &.{}, &.{}, &.{}, &.{}, .{});
