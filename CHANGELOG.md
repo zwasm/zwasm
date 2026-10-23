@@ -59,6 +59,10 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A v128 `select` whose second operand spills compiles** (#596). Both JIT
+  backends read that operand only from a register, so seven v128 values live
+  at one select (more on aarch64) declined the module on the JIT and in AOT.
+
 - **A 0.2 `descriptor.write` or file output-stream write completes or fails**
   (#617). A short write was reported as the whole list written.
 

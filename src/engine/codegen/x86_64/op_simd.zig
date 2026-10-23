@@ -23,11 +23,6 @@
 //!
 //! Out of scope:
 //!
-//! - v128 spill helpers (16-byte stride MOVDQU). The existing
-//!   `gpr.xmmLoadSpilled` / `xmmDefSpilled` use 8-byte MOVSD
-//!   which truncates the upper 64 bits of an XMM. Spilled v128
-//!   vregs therefore return `Error.UnsupportedOp` via
-//!   `gpr.resolveXmm` until the 16-byte spill helpers land.
 //! - v128.const / v128.load / v128.store / splat / extract_lane
 //!   / replace_lane / mul / compare / shuffle / FP arith / FP
 //!   compare / convert. Each of these introduces new encoder
@@ -916,10 +911,9 @@ pub fn emitV128Bitselect(
 ///   MOVAPS dst_xmm, val2_xmm    ; dst = val2 (self-MOV when dst==val2)
 ///   PXOR   dst_xmm, XMM14        ; dst = val2 ^ tmp = cond ? val1 : val2
 ///
-/// val1 loads through stage 1 (XMM15) and val2 via `resolveXmm`
-/// (rejects spilled with `Error.UnsupportedOp`). XMM14 (= fp spill
-/// stage 0) is the scratch tmp, so a spilled result stages through
-/// XMM15 too: val1 is dead after the first MOVAPS. XMM7 is the
+/// XMM14 (= fp spill stage 0) is the scratch tmp, so val1, val2 and
+/// a spilled result all stage through XMM15: val1 is dead after the
+/// first MOVAPS, and val2 is loaded only then (#596). XMM7 is the
 /// project-canonical SIMD scratch, out of the regalloc pool.
 ///
 /// **Aliasing safety**: regalloc's LIFO slot-reuse can give
@@ -961,12 +955,13 @@ pub fn emitV128Select(
     try buf.appendSlice(allocator, inst.encMovqXmmFromR64(xmm_mask, r_mask).slice());
     try buf.appendSlice(allocator, inst.encPshufd(xmm_mask, xmm_mask, 0x00).slice());
 
+    const xmm_tmp: inst.Xmm = abi.fp_spill_stage_xmms[0];
     const val1_x = try gpr.xmmLoadSpilledV128(allocator, buf, alloc, spill_base_off, val1_v, 1);
-    const val2_x = try gpr.resolveXmm(alloc, val2_v);
+    try buf.appendSlice(allocator, inst.encMovapsXmmXmm(xmm_tmp, val1_x).slice());
+    // val1 is dead from here, so a spilled val2 can take its stage.
+    const val2_x = try gpr.xmmLoadSpilledV128(allocator, buf, alloc, spill_base_off, val2_v, 1);
     const dst_x = try gpr.xmmDefSpilledV128(alloc, result_vreg, 1);
 
-    const xmm_tmp: inst.Xmm = abi.fp_spill_stage_xmms[0];
-    try buf.appendSlice(allocator, inst.encMovapsXmmXmm(xmm_tmp, val1_x).slice());
     try buf.appendSlice(allocator, inst.encPxor(xmm_tmp, val2_x).slice());
     try buf.appendSlice(allocator, inst.encPand(xmm_tmp, xmm_mask).slice());
     try buf.appendSlice(allocator, inst.encMovapsXmmXmm(dst_x, val2_x).slice());

@@ -35,6 +35,7 @@ const inst_neon_arith = @import("inst_neon_arith.zig");
 const inst_neon_lane_cmp = @import("inst_neon_lane_cmp.zig");
 const ctx_mod = @import("ctx.zig");
 const gpr = @import("gpr.zig");
+const abi = @import("abi.zig");
 const trace = @import("../../../diagnostic/trace.zig");
 
 const ZirInstr = zir.ZirInstr;
@@ -470,11 +471,9 @@ pub fn emitV128Store64Lane(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
 //                              ;        | (~V<mask> & V<v2>)
 //
 // BSL writes Vd in place; we reuse the result V slot for the
-// mask so no extra V scratch is needed. The 3-source spill
-// staging (mask=dst at stage 0, val1 at stage 1, val2 at
-// stage 2) needs stage_idx=2 — but qLoadSpilled exposes only
-// stages 0/1 today; for the non-spilled MVP path the SPILL-
-// EXEMPT marker keeps direct gpr.resolveFp semantics.
+// mask so no extra V scratch is needed. mask=dst stages at 0
+// and val1 at 1; a spilled val2 takes whichever of stage 0 and
+// V31 the mask and the alias stash below leave free (#596).
 // ============================================================
 
 /// `select` / `select_typed` with v128 operand type (Wasm spec
@@ -488,12 +487,6 @@ pub fn emitV128Select(ctx: *EmitCtx, cond_v: u32, val1_v: u32, val2_v: u32, resu
     // GPR cond_w is dead.
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCsetmX(17, .ne));
 
-    // SPILL-EXEMPT: v128 select needs 3 V regs simultaneously
-    // (mask=dst, val1, val2). qLoadSpilled exposes only stages
-    // 0/1; val2 at stage 2 lifts alongside D-037 spill-stage
-    // extension. For non-spilled SIMD vregs (which fit in
-    // V16-V28) gpr.resolveFp returns the physical V reg directly.
-    //
     // D-083: resolve mask_v / val1 / val2
     // physical regs BEFORE writing DUP. The regalloc's LIFO slot-
     // reuse can place `result_vreg` (= mask_v) at the same physical
@@ -511,7 +504,11 @@ pub fn emitV128Select(ctx: *EmitCtx, cond_v: u32, val1_v: u32, val2_v: u32, resu
     // they cannot share a physical V reg).
     const mask_v = try gpr.qDefSpilled(ctx.alloc, result_vreg, 0);
     const val1_v_phys = try gpr.qLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, val1_v, 1);
-    const val2_v_phys = try gpr.resolveFp(ctx.alloc, val2_v);
+    // A spilled result puts mask_v in stage 0, and then no operand can
+    // alias it, so V31 is free; otherwise stage 0 is free and V31 may
+    // be needed for the stash.
+    const val2_via: inst_neon.Vn = if (mask_v == abi.fp_spill_stage_vregs[0]) simd_scratch_v else abi.fp_spill_stage_vregs[0];
+    const val2_v_phys = try gpr.qLoadSpilledInto(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, val2_v, val2_via);
 
     var val1_for_bsl = val1_v_phys;
     var val2_for_bsl = val2_v_phys;

@@ -400,13 +400,25 @@ pub fn qLoadSpilled(
     vreg: usize,
     stage_idx: u8,
 ) Error!inst.Vn {
+    return qLoadSpilledInto(allocator, buf, alloc, spill_base_off, vreg, abi.fp_spill_stage_vregs[stage_idx]);
+}
+
+/// `qLoadSpilled` with the register a spilled vreg loads into named by
+/// the caller, for an op with more v128 operands than there are stages.
+pub fn qLoadSpilledInto(
+    allocator: Allocator,
+    buf: *std.ArrayList(u8),
+    alloc: regalloc.Allocation,
+    spill_base_off: u32,
+    vreg: usize,
+    stage: inst.Vn,
+) Error!inst.Vn {
     return switch (alloc.slot(vreg, .fpr)) {
         .reg => |id| abi.fpSlotToReg(id) orelse blk: {
             dbg.print("codegen", "arm64/gpr: SlotOverflow qLoadSpilled.reg vreg={d} slot_id={d}\n", .{ vreg, id });
             break :blk Error.SlotOverflow;
         },
         .spill => |off| blk: {
-            const stage = abi.fp_spill_stage_vregs[stage_idx];
             const abs_off = spill_base_off + off;
             // Q-form imm12 scales by 16; max byte offset is 16*4095 = 65520.
             if (abs_off > 65520 or (abs_off & 0xF) != 0) {
