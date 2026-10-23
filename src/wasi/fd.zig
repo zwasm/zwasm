@@ -72,6 +72,12 @@ fn sliceMemConst(mem: []const u8, buf: u32, buf_len: u32) ?[]const u8 {
     return mem[buf..end];
 }
 
+/// Whether `len` more bytes keep a gather/scatter total inside its u32. Iovecs
+/// may alias, so the sum is not bounded by memory: the transfer stops short.
+fn fitsTotal(total: u32, len: usize) bool {
+    return len <= std.math.maxInt(u32) - total;
+}
+
 // ============================================================
 // fd_write
 // ============================================================
@@ -111,6 +117,7 @@ pub fn fdWrite(
             std.debug.print("[wasi.iovec] fd={d} i={d} ciovec_ptr={d} buf={d} len={d}\n", .{ fd, i, ciovec_ptr, buf, buf_len });
         }
         const slice = sliceMemConst(mem, buf, buf_len) orelse return .fault;
+        if (!fitsTotal(total, slice.len)) break;
         const e = writeSlice(host, fd, slice);
         if (e != .success) return e;
         total += buf_len;
@@ -256,6 +263,7 @@ pub fn fdRead(
         const dst = sliceMem(mem, buf, buf_len) orelse return .fault;
 
         if (dst.len == 0) continue; // an empty iovec reads nothing and is not EOF
+        if (!fitsTotal(total, dst.len)) break;
         const n = readStdin(host, dst) catch |e| return switch (e) {
             error.NoHostIo => .nosys,
             error.Io => .io,
@@ -356,6 +364,7 @@ fn fdReadFile(host: *Host, mem: []u8, slot: *host_mod.OpenFd, iovec_ptr: u32, io
             if (total == 0) return .inval;
             break;
         }
+        if (!fitsTotal(total, dst.len)) break;
         const n: usize = file.readPositional(io, &[_][]u8{dst}, slot.pos) catch return .io;
         if (n == 0) break; // EOF
         total += @intCast(n);
@@ -582,6 +591,7 @@ pub fn fdPread(
             if (total == 0) return .inval;
             break;
         }
+        if (!fitsTotal(total, dst.len)) break;
         const n = file.readPositional(io, &[_][]u8{dst}, cur_off) catch return .io;
         if (n == 0) break; // EOF
         total += @intCast(n);
@@ -628,6 +638,7 @@ pub fn fdPwrite(
             if (total == 0) return .inval;
             break;
         }
+        if (!fitsTotal(total, src.len)) break;
         const n = file.writePositional(io, &[_][]const u8{src}, cur_off) catch return .io;
         total += @intCast(n);
         cur_off += n;
@@ -1433,6 +1444,22 @@ test "fdWrite: gather write across multiple ciovecs" {
     try testing.expectEqual(p1.Errno.success, e);
     try testing.expectEqualStrings("hello\n", capture.items);
     try testing.expectEqual(@as(u32, 6), std.mem.readInt(u32, mem[32..36], .little));
+}
+
+test "fdWrite: a gather whose lengths sum past u32 stops short before the iovec that passes it" {
+    try testing.expect(fitsTotal(1, std.math.maxInt(u32) - 1) and !fitsTotal(1, std.math.maxInt(u32)));
+    // Headless stdout drops the bytes, so 4097 iovecs over one 1 MiB cost nothing.
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    const mib = 1 << 20;
+    const mem = try testing.allocator.alloc(u8, mib);
+    defer testing.allocator.free(mem);
+    for (0..4097) |i| {
+        std.mem.writeInt(u32, mem[i * 8 ..][0..4], 0, .little);
+        std.mem.writeInt(u32, mem[i * 8 + 4 ..][0..4], mib, .little);
+    }
+    try testing.expectEqual(p1.Errno.success, fdWrite(&h, mem, 1, 0, 4097, 40000));
+    try testing.expectEqual(@as(u32, 4095 * mib), std.mem.readInt(u32, mem[40000..][0..4], .little));
 }
 
 test "fdWrite: stdin (fd=0) returns notsup" {
