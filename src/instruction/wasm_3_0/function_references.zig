@@ -167,14 +167,14 @@ test "br_on_null: non-null → fall through (ref preserved)" {
     // then verify the non-null case leaves the ref on top and
     // doesn't touch frame.pc.
     const empty_sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
-    var frame: runtime.Frame = .{
+    const frame: runtime.Frame = .{
         .sig = empty_sig,
         .locals = &.{},
         .operand_base = 0,
         .pc = 100,
     };
-    try frame.pushLabel(testing.allocator, .{ .height = 0, .arity = 0, .branch_arity = 0, .target_pc = 999 });
     try rt.pushFrame(frame);
+    try rt.currentFrame().pushLabel(testing.allocator, .{ .height = 0, .arity = 0, .branch_arity = 0, .target_pc = 999 });
     try rt.pushOperand(.{ .ref = 0x1000 });
     try driveOne(&rt, &t, .br_on_null, 0, 0); // depth=0
     try testing.expectEqual(@as(u64, 0x1000), rt.popOperand().ref);
@@ -188,14 +188,14 @@ test "br_on_null: null → branch (ref consumed; pc jumps to target)" {
     var rt = Runtime.init(testing.allocator);
     defer rt.deinit();
     const empty_sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
-    var frame: runtime.Frame = .{
+    const frame: runtime.Frame = .{
         .sig = empty_sig,
         .locals = &.{},
         .operand_base = 0,
         .pc = 100,
     };
-    try frame.pushLabel(testing.allocator, .{ .height = 0, .arity = 0, .branch_arity = 0, .target_pc = 42 });
     try rt.pushFrame(frame);
+    try rt.currentFrame().pushLabel(testing.allocator, .{ .height = 0, .arity = 0, .branch_arity = 0, .target_pc = 42 });
     try rt.pushOperand(.{ .ref = Value.null_ref });
     try driveOne(&rt, &t, .br_on_null, 0, 0); // depth=0 → target_pc=42
     // ref popped; stack restored to height=0.
@@ -210,7 +210,7 @@ test "br_on_non_null: null → fall through (ref consumed; pc unchanged)" {
     var rt = Runtime.init(testing.allocator);
     defer rt.deinit();
     const empty_sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
-    var frame: runtime.Frame = .{
+    const frame: runtime.Frame = .{
         .sig = empty_sig,
         .locals = &.{},
         .operand_base = 0,
@@ -219,8 +219,8 @@ test "br_on_non_null: null → fall through (ref consumed; pc unchanged)" {
     // Label expects [reftype] (branch_arity=1) on branch, but the
     // null path doesn't take it; we just verify the ref is
     // consumed and pc is unchanged.
-    try frame.pushLabel(testing.allocator, .{ .height = 0, .arity = 1, .branch_arity = 1, .target_pc = 999 });
     try rt.pushFrame(frame);
+    try rt.currentFrame().pushLabel(testing.allocator, .{ .height = 0, .arity = 1, .branch_arity = 1, .target_pc = 999 });
     try rt.pushOperand(.{ .ref = Value.null_ref });
     try driveOne(&rt, &t, .br_on_non_null, 0, 0); // depth=0
     // ref consumed (stack empty); pc unchanged (no branch).
@@ -234,7 +234,7 @@ test "br_on_non_null: non-null → branch (ref passed at top; pc jumps)" {
     var rt = Runtime.init(testing.allocator);
     defer rt.deinit();
     const empty_sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
-    var frame: runtime.Frame = .{
+    const frame: runtime.Frame = .{
         .sig = empty_sig,
         .locals = &.{},
         .operand_base = 0,
@@ -242,8 +242,8 @@ test "br_on_non_null: non-null → branch (ref passed at top; pc jumps)" {
     };
     // Label expects [reftype]; branch_arity=1 carries the ref to
     // the branch destination.
-    try frame.pushLabel(testing.allocator, .{ .height = 0, .arity = 1, .branch_arity = 1, .target_pc = 42 });
     try rt.pushFrame(frame);
+    try rt.currentFrame().pushLabel(testing.allocator, .{ .height = 0, .arity = 1, .branch_arity = 1, .target_pc = 42 });
     try rt.pushOperand(.{ .ref = 0x2000 });
     try driveOne(&rt, &t, .br_on_non_null, 0, 0); // depth=0 → target_pc=42
     // ref preserved on top of stack (branch_arity=1 carried it).

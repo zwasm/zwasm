@@ -1388,9 +1388,9 @@ test "compileExpectInvalid: return_call.0.wasm accepted (no false rejection)" {
 // interp's `returnCallOp` invokes the callee via Zig recursion
 // (`invoke(callee)` then `tailReturn` — see mvp.zig:467-482),
 // mirroring Wasm tail-calls onto the host call stack. Each
-// `return_call` adds an interp Frame (max_frame_stack = 256 per
-// `src/runtime/frame.zig:24`); recursion exceeding 256 deep hits
-// `Trap.CallStackExhausted` at `runtime.zig:341`. The 6 failing
+// `return_call` adds an interp Frame and a native host frame; the
+// native-stack check (D-288) or the per-`Runtime` `max_frame_depth`
+// cap (default 16384) traps `Trap.CallStackExhausted`. The 6 failing
 // cases (count/even/odd at 999+ iterations) need millions of
 // tail-iterations and trip the ceiling well before completion.
 // The JIT codegen (10.TC-emit-body bundle) implements
