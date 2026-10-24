@@ -59,6 +59,10 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **On x86_64-windows the JIT refuses a host call with one float param and
+  three results** (#618), as on the other targets. The param was passed in a
+  general-purpose register, so the function read a register nothing wrote.
+
 - **A JIT function with register-homed locals gives its float values every FP
   register** (#600). The homes held the FP registers of the same slot ids, so
   with four homes an x86_64 function had two XMM registers. llama2.c's scalar
