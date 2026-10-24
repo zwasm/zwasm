@@ -64,6 +64,10 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A failed 0.3 outbound HTTP exchange answers `internal-error`** (#643). The
+  host wrote ordinal 37, which is `configuration-error`, so the guest read a
+  misconfigured host where the exchange had failed.
+
 - **On x86_64-windows the JIT refuses a host call with one float param and
   three results** (#618), as on the other targets. The param was passed in a
   general-purpose register, so the function read a register nothing wrote.

@@ -1,4 +1,4 @@
-// FILE-SIZE-EXEMPT: (cap=2650) the complete wasi 0.3 host layer (fs3/sock3/http3 + async-lowered table + hook targets; ADR-0207 (c), M4-measured 2026-08-12); a per-proposal 3-way sub-split would force pub-leak of the hook targets through hooksTable/registerP3Arms, and a sibling test file would force pub-leak of the fs3 entry points its tests drive (ADR-0099 N2), so cohesion wins. 2026-10-24 +50 for the network grant's gate tests; splitting the sock3 / http3 host into its own file waits until after 2.8.0.
+// FILE-SIZE-EXEMPT: (cap=2660) the complete wasi 0.3 host layer (fs3/sock3/http3 + async-lowered table + hook targets; ADR-0207 (c), M4-measured 2026-08-12); a per-proposal 3-way sub-split would force pub-leak of the hook targets through hooksTable/registerP3Arms, and a sibling test file would force pub-leak of the fs3 entry points its tests drive (ADR-0099 N2), so cohesion wins. 2026-10-24 +50 for the network grant's gate tests; 2026-10-25 +10 for the internal-error ordinal test (#643). Splitting the sock3 / http3 host into its own file waits until after 2.8.0.
 //! WASI **0.3** (P3) host layer — fs3 / sock3 / http3 trampolines, the
 //! async-lowered binding table, and the classifier's P3 arm registration
 //! (ADR-0207 (c); file name reserved by ADR-0190). Depends ONLY on the
@@ -2164,8 +2164,8 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
     const req = try ctxHttpRequest(self, pcs.req_rep);
     const fail = struct {
         fn write(m: Memory, retptr: u32, sub: *async_mod.StreamFutureEnd, h: u32) WasiP2Error!void {
-            // error-code `internal-error(option<string>)` = ordinal 37, none.
-            return code(m, retptr, sub, h, 37);
+            // error-code `internal-error(option<string>)` = ordinal 38, none.
+            return code(m, retptr, sub, h, 38);
         }
         fn code(m: Memory, retptr: u32, sub: *async_mod.StreamFutureEnd, h: u32, ordinal: u8) WasiP2Error!void {
             try m.write(retptr, @as(u8, 1));
@@ -2626,4 +2626,34 @@ test "without the network grant, each 0.3 op that reaches the network answers ac
 
     try sock3TcpBind(&caller, tcp, 0, 0, 127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 64);
     try testing.expectEqual(@as(u8, 0), try mem.read(u8, 64));
+}
+
+test "an outbound HTTP exchange that fails answers internal-error, not configuration-error" {
+    const testing = std.testing;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = threaded.io();
+    host.allow_network = true;
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06memory\x02\x00");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+
+    // No authority, so the exchange fails before it reaches the network.
+    try ctx.http_requests.append(testing.allocator, .{ .headers_rep = 0 });
+    _ = try http3ClientSend(&caller, try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, 0), 0);
+    _ = try pollPendingClientSends(&ctx);
+    const mem = try ctx.memory();
+    try testing.expectEqual(@as(u8, 1), try mem.read(u8, 0));
+    try testing.expectEqual(@as(u8, 38), try mem.read(u8, 8));
 }
