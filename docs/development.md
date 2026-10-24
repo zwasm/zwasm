@@ -140,9 +140,14 @@ zig build test-wasi-p1-official            # the blocking step outside the scrip
 Releases are cut by hand, by a maintainer, and never by automation acting on
 its own (ADR-0156). Three manual steps; the rest is the `release` workflow.
 
-1. **Bump `.version` in `build.zig.zon`.** SemVer against the previous tag —
-   `git log v<previous>..main --no-merges` is the input to that call.
-2. **Add the CHANGELOG section** for the new version, dated.
+1. **Dispatch `release_prep`** with the version:
+   `gh workflow run release_prep.yml --repo zwasm/zwasm -f version=X.Y.Z`.
+   SemVer against the previous tag — `git log v<previous>..main --no-merges`
+   is the input to that call. It folds `changelog.d/` into a dated CHANGELOG
+   section, bumps `.version` in `build.zig.zon`, and pushes the commit as
+   `release/vX.Y.Z`; its job summary prints the `gh pr create` line.
+2. **Merge the release PR through the queue.** Edit the section on that
+   branch first if it needs it.
 3. **Push the tag.** `git tag -a vX.Y.Z -m "<one-paragraph summary>" &&
    git push origin vX.Y.Z`. Annotated, on the merge commit of the release
    PR: the message is what `git show vX.Y.Z` prints, and it is the only

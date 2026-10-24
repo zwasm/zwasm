@@ -33,9 +33,11 @@ zwasm v2 is a ground-up redesign of zwasm (v1 git history at commit 517cc5a).
   remain at root.
 - **Release stays user-only (ADR-0156)**: tag / publish / cutover are
   manual. The release line is the latest `v2.x` tag (see CHANGELOG /
-  GitHub Releases — do NOT hardcode it here, it rots). Cut = bump
-  `build.zig.zon` + CHANGELOG section + push the `vX.Y.Z` tag →
-  `release.yml` auto-builds + publishes. See
+  GitHub Releases — do NOT hardcode it here, it rots). Cut = dispatch
+  `release_prep` (folds `changelog.d/` into the CHANGELOG section + bumps
+  `build.zig.zon` on `release/vX.Y.Z`) → merge that PR through the queue →
+  push the `vX.Y.Z` tag → `release.yml` auto-builds + publishes. PRs add
+  entries as `changelog.d/` fragments, never to `CHANGELOG.md`. See
   [`.dev/archive/migration_v1_to_v2.md`](../.dev/archive/migration_v1_to_v2.md).
 - v1 ABI compatibility is out of scope; the C/Zig/CLI surfaces broke v1 on
   purpose (ADR-0156).
