@@ -21,7 +21,19 @@ const Value = value.Value;
 const Trap = trap_mod.Trap;
 
 pub const max_operand_stack: u32 = 4096;
-pub const max_frame_stack: u32 = 256;
+/// Frames held inline in the Runtime (zero-alloc common case; ROADMAP §P3
+/// cold-start). Deeper call chains spill into heap chunks of the same size,
+/// allocated on first use and kept until `Runtime.deinit`.
+pub const frame_chunk_len: u32 = 256;
+/// Default call-depth cap (`Runtime.max_frame_depth`). The interp also recurses
+/// on the host stack per wasm call, so the native-stack check (D-288 /
+/// ADR-0167) usually binds first; this cap is the hard ceiling that keeps
+/// runaway recursion a `CallStackExhausted` trap on any stack size. Language
+/// runtimes nest deeper than the old fixed 256 during their own init, so the
+/// default sits well above it.
+pub const default_max_frame_depth: u32 = 16 * 1024;
+/// The inline frame capacity (kept for callers sized against it).
+pub const max_frame_stack: u32 = frame_chunk_len;
 /// Inline per-frame label capacity (zero-alloc common case). Frames
 /// nesting control deeper than this spill into `Frame.label_overflow`
 /// (D-242) — keeps the common Frame small so per-call copies stay cheap.

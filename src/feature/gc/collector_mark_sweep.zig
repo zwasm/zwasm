@@ -297,7 +297,7 @@ pub const MarkSweepCollector = struct {
         // Per-frame locals.
         var f: u32 = 0;
         while (f < rt.frame_len) : (f += 1) {
-            for (rt.frame_buf[f].locals) |v| {
+            for (rt.frameAt(f).locals) |v| {
                 tryReportRef(v, heap_lo, heap_hi, root_callback, root_ctx);
             }
         }
