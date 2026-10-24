@@ -142,7 +142,7 @@ pub fn compute(allocator: Allocator, func: *const ZirFunc) Error!Allocation {
 pub fn computeWith(
     allocator: Allocator,
     func: *const ZirFunc,
-    force_spill_threshold: u16,
+    pool_threshold: u16,
     scratch_reservations: ?ScratchReservationFn,
     // ADR-0194 — `spill_offsets` is sized and indexed from the same origin
     // `Allocation.slot()` resolves with: `@min(gpr, fp)`, the lowest id any
@@ -290,6 +290,13 @@ pub fn computeWith(
         }
         n_slots = homed_count;
     }
+    // ADR-0060: every id below the threshold is a register for some class.
+    // FP's registers start past the homes (`Allocation.fp_id_base`, #600), so
+    // a function with FP values mints up to there. One without keeps the pool
+    // bound: the band above it would only hand GPR temporaries spill ids. No
+    // classes (a hand-built liveness) counts as having FP.
+    const has_fp = live.classes.len == 0 or std.mem.findAny(zir.RegClass, live.classes, &.{ .fpr, .simd }) != null;
+    const force_spill_threshold: u16 = if (has_fp) @max(pool_threshold, boundaries.fp + homed_count) else pool_threshold;
 
     for (live.ranges, 0..) |r, vreg| {
         // Homed pseudo-vreg: take its pre-reserved low slot (rank = id offset
@@ -428,6 +435,7 @@ pub fn computeWith(
         .spill_offsets = spill_offsets,
         .max_reg_slots_gpr = max_reg_slots_gpr,
         .max_reg_slots_fp = max_reg_slots_fp,
+        .fp_id_base = @intCast(homed_count),
     };
 }
 
@@ -997,4 +1005,36 @@ test "validateRegallocOpScratchReservation: edge case — single-slot reservatio
         t[0] = &.{7};
         validateRegallocOpScratchReservation(t, 8);
     }
+}
+
+test "#600: FP values are not crowded out of the FP registers by register-homed locals" {
+    // The homes take ids 0..K-1 for the whole function. Five f32 values and
+    // the first add's result are six live at once, which the six FP
+    // registers of the x86_64 pool must hold whatever K is.
+    const liveness = @import("../../../ir/analysis/liveness.zig");
+    const n_homes = local_homing.max_homed;
+    const sig: zir.FuncType = .{ .params = &.{}, .results = &.{.f32} };
+    var f = ZirFunc.init(0, sig, &([_]zir.ValType{.i32} ** n_homes));
+    defer f.deinit(testing.allocator);
+    for (0..n_homes) |i| {
+        try f.instrs.append(testing.allocator, .{ .op = .@"i32.const", .payload = @intCast(i) });
+        try f.instrs.append(testing.allocator, .{ .op = .@"local.set", .payload = @intCast(i) });
+    }
+    for (0..5) |_| try f.instrs.append(testing.allocator, .{ .op = .@"f32.const", .payload = 0 });
+    for (0..4) |_| try f.instrs.append(testing.allocator, .{ .op = .@"f32.add" });
+    try f.instrs.append(testing.allocator, .{ .op = .end });
+    f.liveness = try liveness.compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
+    defer if (f.liveness) |lv| liveness.deinit(testing.allocator, lv);
+    const alloc = try computeWith(testing.allocator, &f, 8, null, .{ .gpr = 8, .fp = 6 });
+    defer regalloc.deinit(testing.allocator, alloc);
+
+    try testing.expectEqual(n_homes, local_homing.plan(&f).count);
+    var n_fp: usize = 0;
+    for (f.liveness.?.classes, 0..) |c, v| {
+        if (c != .fpr) continue;
+        n_fp += 1;
+        try testing.expect(alloc.slot(v, .fpr) == .reg);
+    }
+    try testing.expectEqual(@as(usize, 9), n_fp);
+    try regalloc.verify(&f, alloc);
 }

@@ -211,3 +211,11 @@ The threshold is `max(gpr pool, fp pool)` (`compile.zig`): 8 on both arches
 since #503 (x86_64: eight GPRs, six XMMs). The pool lists under Context are
 as of the decision. A last use at the call stays safe on x86_64 because the
 marshal is a parallel move: the pool now holds argument registers.
+
+## Revision 2026-10-23 — FP's ids past the homes (#600)
+
+In a function with FP or v128 values the threshold is
+`max(gpr pool, fp pool + K)`, K being its register-homed local count; one
+without keeps `max(gpr pool, fp pool)`. The homes are GPR and hold ids
+`0 ..< K`, so FP register `i` is id `K + i` (`Allocation.fp_id_base`). Every
+id below the threshold is still a register for some class.

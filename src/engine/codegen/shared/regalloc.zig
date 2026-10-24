@@ -153,9 +153,9 @@ pub const Allocation = struct {
     /// X14/X15 reserved as spill stages, X19 / X23..X28 reserved
     /// as runtime invariants).
     max_reg_slots_gpr: u8 = 8,
-    /// FP-class boundary: slot ids `< max_reg_slots_fp` resolve to
-    /// `Slot.reg` for class `.fpr`; ids `>= max_reg_slots_fp`
-    /// resolve to `Slot.spill`. Default = 13 (ARM64
+    /// FP-class boundary: slot ids `fp_id_base ..< fp_id_base +
+    /// max_reg_slots_fp` resolve to `Slot.reg` for class `.fpr`;
+    /// higher ids resolve to `Slot.spill`. Default = 13 (ARM64
     /// `allocatable_v_regs.len` post-D-037: V16..V28; V29/V30 are
     /// reserved as FP spill stages, V31 reserved for popcnt's
     /// V-register pipeline). Per ADR-0018 amendment
@@ -167,6 +167,10 @@ pub const Allocation = struct {
     /// detection, so a default-default mismatch surfaces as a test
     /// failure rather than silent miscompile.
     max_reg_slots_fp: u8 = 13,
+    /// The function's register-homed local count (ADR-0155). Homes are
+    /// GPR and hold ids `0 ..< fp_id_base` for the whole function, and
+    /// no other vreg is given one, so FP register 0 starts here (#600).
+    fp_id_base: u8 = 0,
     /// Per-vreg shape tags (per ADR-0041 §"Decision" / 2).
     /// `null` means all vregs are `.scalar` (no `.simd` vreg in the
     /// function); a populated slice indexes by vreg id. Length when
@@ -187,8 +191,8 @@ pub const Allocation = struct {
     /// Resolve a vreg's home for the given register class: physical
     /// register slot or spill offset. The class selects which
     /// boundary applies — a slot id ≥ `max_reg_slots_gpr` is spill
-    /// for `.gpr` but may still be a V-register for `.fpr` (id ≤
-    /// `max_reg_slots_fp - 1`).
+    /// for `.gpr` but may still be a V-register for `.fpr` (id <
+    /// `fp_id_base + max_reg_slots_fp`).
     ///
     /// Spill offsets count from `spillOrigin()` for both classes, so
     /// the shared spill frame is class-agnostic; spillBytes() covers
@@ -205,15 +209,17 @@ pub const Allocation = struct {
     /// sufficient.
     pub fn slot(self: Allocation, vreg: usize, class: RegClass) Slot {
         const id = self.slots[vreg];
-        const threshold: u16 = switch (class) {
-            .gpr => self.max_reg_slots_gpr,
-            .fpr => self.max_reg_slots_fp,
-            .simd, .inst_ptr_special, .vm_ptr_special, .simd_base_special => self.max_reg_slots_gpr,
-            _ => self.max_reg_slots_gpr,
-        };
-        // `id < threshold` ⇒ id < pool size (≤ 16 today), so the
-        // u8 narrowing is provably safe.
-        if (id < threshold) return .{ .reg = @intCast(id) };
+        // The register index is < pool size (≤ 16 today), so the u8
+        // narrowing is provably safe.
+        switch (class) {
+            .fpr => {
+                std.debug.assert(id >= self.fp_id_base);
+                if (id - self.fp_id_base < self.max_reg_slots_fp) return .{ .reg = @intCast(id - self.fp_id_base) };
+            },
+            .gpr, .simd, .inst_ptr_special, .vm_ptr_special, .simd_base_special, _ => {
+                if (id < self.max_reg_slots_gpr) return .{ .reg = @intCast(id) };
+            },
+        }
         // ADR-0053 Part 1 + ADR-0110: when
         // `spill_offsets` is populated, consult the per-slot byte
         // offset table (v128-aware: pre-widen this carried 8/16

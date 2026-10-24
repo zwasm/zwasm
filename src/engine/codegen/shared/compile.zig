@@ -243,8 +243,9 @@ pub fn compileOne(
     }
 
     trace.passEnter(func_idx, .regalloc);
-    // ADR-0060: force-spill threshold = max(GPR pool, FP pool) so
-    // that call-crossing vregs of either class land in the spill
+    // ADR-0060: force-spill threshold = max(GPR pool, FP pool), which
+    // computeWith raises past the homes in a function with FP values
+    // (#600), so that call-crossing vregs of either class land in the spill
     // range: a slot id below it is a register for at least one class,
     // and every pool register is clobbered by a call.
     const pools: regalloc.Boundaries = switch (builtin.target.cpu.arch) {

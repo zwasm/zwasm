@@ -90,3 +90,10 @@ derived where it is used rather than stored, and `computeWith` takes both
 thresholds so the Allocation carries them from build time (the FP post-patch
 in `compile.zig` is gone). arm64 and the four-GPR x86_64 resolve to the
 origins they had.
+
+## Revision 2026-10-23 — the mint rises with the homes (#600)
+
+Decision 4's mint is now `max(gpr, fp + K)` in a function with FP values
+(ADR-0060 Revision 2026-10-23); the origin stays `min(gpr, fp)`. FP's ids
+`fp ..< fp + K` are registers, so their cells in `[origin, mint)` go unused,
+as the GPR-held ids there already did.

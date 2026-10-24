@@ -90,3 +90,10 @@ recovering arm64 2.30×→0.97× and collapsing the x86_64 reads-`i`/control dif
 2.4×→1.0×. This ADR's own FP conclusion is unaffected (0% FP spill is real); only the
 sibling-ADR-0149 GPR "~0 headroom" generalisation was the over-reach — see ADR-0149
 Revision + lesson [[2026-06-04-regalloc-headroom-hotloop-not-total-instrs]].
+
+## Revision 2026-10-23 — FP spill on x86_64 with register homes (#600)
+
+The 0% was measured on arm64 before register homing. With four homes holding
+ids 0–3, x86_64 FP values had two of six XMMs, and llama2.c spent 21.6% of its
+hot function's instructions moving XMM values through frame slots. #600 gives
+FP the ids past the homes; the dual pool stays unbuilt.

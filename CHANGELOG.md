@@ -59,6 +59,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A JIT function with register-homed locals gives its float values every FP
+  register** (#600). The homes held the FP registers of the same slot ids, so
+  with four homes an x86_64 function had two XMM registers. llama2.c's scalar
+  build runs 2.3× faster on the JIT and the shootout `heapsort` fixture 14%.
+
 - **`--timeout` fires while the guest sleeps in `poll_oneoff`** (#598). The
   clock wait slept in one call and read no interrupt flag, so a 5 s sleep under
   `--timeout 500` ran 5 s and could exit 0. It now traps `interrupted` within
