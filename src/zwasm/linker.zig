@@ -631,7 +631,13 @@ pub const Linker = struct {
                 // entry first; the host serves only a name with no entry
                 // (#504; the C API's rule since #488).
                 const entry = self.findEntry(it.module, it.name) orelse {
-                    if (!std.mem.eql(u8, it.module, "wasi_snapshot_preview1")) return error.UnknownImport;
+                    if (!std.mem.eql(u8, it.module, "wasi_snapshot_preview1")) {
+                        // Name the import: a bare UnknownImport from a component
+                        // graph (many core modules, synthetic namespaces) does not
+                        // say which instance or field went unresolved.
+                        if (dbg.on("link.trace")) std.debug.print("[link] UnknownImport: {s}::{s}\n", .{ it.module, it.name });
+                        return error.UnknownImport;
+                    }
                     if (it.kind != .func) return error.ImportKindMismatch;
                     const host = self.wasi_host orelse return error.UnknownImport;
                     const thunk = _api_wasi.lookupWasiThunk(it.name) orelse return error.UnsupportedWasiImport;

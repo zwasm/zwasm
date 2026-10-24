@@ -1,0 +1,1 @@
+package hive:lazywal; world lazywal { export call: func(op: string, request: string) -> string; }

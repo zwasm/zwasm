@@ -620,6 +620,12 @@ pub const TypeInfo = struct {
     /// re-export — e.g. wit-bindgen's `$fixup-args` re-exporting the shim's
     /// `$imports` table (ADR-0175).
     core_tables: std.ArrayList(AliasTarget),
+    /// The core-**memory** index space in definition order (same shape as
+    /// `core_tables`: core memories also enter only via `alias core export`).
+    /// A synthetic instance re-exporting a guest memory resolves through it:
+    /// wit-component's `$env` instance hands main's `memory` to the
+    /// wasi_snapshot_preview1 adapter.
+    core_memories: std.ArrayList(AliasTarget),
     /// The component-func index space in definition order (`ComponentFuncDef`) —
     /// lets a `canon lower`'s `func` operand resolve to its origin interface.
     component_funcs: std.ArrayList(ComponentFuncDef),
@@ -671,6 +677,16 @@ pub const TypeInfo = struct {
     /// (`{instance, name}`), or null if out of range / not a core-export alias.
     /// The general instantiation engine uses this to find which built instance
     /// owns a table a synthetic instance re-exports (the shim `$imports` table).
+    /// Resolve a core-**memory** index to the core-instance export it aliases,
+    /// or null if out of range / not a core-export alias.
+    pub fn resolveCoreMemoryExport(self: *const TypeInfo, core_memory_idx: u32) ?CoreExportRef {
+        if (core_memory_idx >= self.core_memories.items.len) return null;
+        return switch (self.core_memories.items[core_memory_idx]) {
+            .core_export => |ce| .{ .instance = ce.instance, .name = ce.name },
+            else => null,
+        };
+    }
+
     pub fn resolveCoreTableExport(self: *const TypeInfo, core_table_idx: u32) ?CoreExportRef {
         if (core_table_idx >= self.core_tables.items.len) return null;
         return switch (self.core_tables.items[core_table_idx]) {
@@ -1716,6 +1732,7 @@ pub fn decodeTypeInfo(parent: Allocator, component: *const decode.Component) Err
     var aliases: std.ArrayList(Alias) = .empty;
     var core_funcs: std.ArrayList(CoreFuncDef) = .empty;
     var core_tables: std.ArrayList(AliasTarget) = .empty;
+    var core_memories: std.ArrayList(AliasTarget) = .empty;
     var component_funcs: std.ArrayList(ComponentFuncDef) = .empty;
     var instance_origins: std.ArrayList(InstanceOrigin) = .empty;
     var type_space: std.ArrayList(TypeSpaceEntry) = .empty;
@@ -1814,7 +1831,10 @@ pub fn decodeTypeInfo(parent: Allocator, component: *const decode.Component) Err
                     .core => |cs| switch (cs) {
                         .func => try core_funcs.append(a, .{ .alias = al.target }),
                         .table => try core_tables.append(a, al.target),
-                        .memory => core_memory_count += 1,
+                        .memory => {
+                            core_memory_count += 1;
+                            try core_memories.append(a, al.target);
+                        },
                         .global => core_global_count += 1,
                         .type => core_type_count += 1,
                         else => {},
@@ -1879,6 +1899,7 @@ pub fn decodeTypeInfo(parent: Allocator, component: *const decode.Component) Err
         .aliases = aliases,
         .core_funcs = core_funcs,
         .core_tables = core_tables,
+        .core_memories = core_memories,
         .component_funcs = component_funcs,
         .instance_origins = instance_origins,
     };
