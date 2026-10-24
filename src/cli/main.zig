@@ -135,6 +135,8 @@ pub fn main(init: std.process.Init) !void {
             defer env_vals.deinit(gpa);
             // ADR-0179 #3a-4 / D-314 — `--fuel` / `--timeout` / `--max-memory`.
             var limits: cli_run.Limits = .{};
+            // `--allow-network`: a component's sockets / HTTP may reach the host's network.
+            var allow_network = false;
             var cache_enabled = false;
             var cache_clear = false;
             var cache_dir_arg: ?[]const u8 = null;
@@ -210,6 +212,9 @@ pub fn main(init: std.process.Init) !void {
                         try env_vals.append(gpa, spec[spec.len..]);
                     }
                     next_arg = arg_it.next();
+                } else if (std.mem.eql(u8, a, "--allow-network")) {
+                    allow_network = true;
+                    next_arg = arg_it.next();
                 } else if (std.mem.eql(u8, a, "--fuel")) {
                     const v = optionValue(&arg_it) orelse {
                         try printlnErr(io, "usage: zwasm run --fuel <N> <path.wasm> [args...]");
@@ -276,7 +281,7 @@ pub fn main(init: std.process.Init) !void {
                 } else break;
             }
             const path_arg = next_arg orelse {
-                try printlnErr(io, "usage: zwasm run [--invoke <name>] [--engine <auto|interp|jit>] [--dir <host>[:<guest>]] [--env KEY=VAL] [--fuel <N>] [--timeout <ms>] [--max-memory <bytes>] [--max-table-elements <N>] [--cache[=DIR]] [--cache-clear] <path.wasm> [args...]");
+                try printlnErr(io, "usage: zwasm run [--invoke <name>] [--engine <auto|interp|jit>] [--dir <host>[:<guest>]] [--env KEY=VAL] [--allow-network] [--fuel <N>] [--timeout <ms>] [--max-memory <bytes>] [--max-table-elements <N>] [--cache[=DIR]] [--cache-clear] <path.wasm> [args...]");
                 std.process.exit(2);
             };
             const path = try gpa.dupe(u8, path_arg);
@@ -365,7 +370,7 @@ pub fn main(init: std.process.Init) !void {
                 }
                 // The guest's fd 0 (#257, #508): both hosts read the process
                 // stdin on demand, so nothing is read before the guest runs.
-                const code = cli_run.runComponentWasi(gpa, io, run_bytes, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, .inherit) catch |err| {
+                const code = cli_run.runComponentWasi(gpa, io, run_bytes, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, allow_network, .inherit) catch |err| {
                     var buf: [256]u8 = undefined;
                     const msg = std.fmt.bufPrint(&buf, "zwasm run: cannot run component '{s}': {s}", .{ path, @errorName(err) }) catch "zwasm run: component run failed";
                     try printlnErr(io, msg);

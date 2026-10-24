@@ -1,4 +1,4 @@
-// FILE-SIZE-EXEMPT: (cap=2600) the complete wasi 0.3 host layer (fs3/sock3/http3 + async-lowered table + hook targets; ADR-0207 (c), M4-measured 2026-08-12); a per-proposal 3-way sub-split would force pub-leak of the hook targets through hooksTable/registerP3Arms, and a sibling test file would force pub-leak of the fs3 entry points its tests drive (ADR-0099 N2), so cohesion wins.
+// FILE-SIZE-EXEMPT: (cap=2650) the complete wasi 0.3 host layer (fs3/sock3/http3 + async-lowered table + hook targets; ADR-0207 (c), M4-measured 2026-08-12); a per-proposal 3-way sub-split would force pub-leak of the hook targets through hooksTable/registerP3Arms, and a sibling test file would force pub-leak of the fs3 entry points its tests drive (ADR-0099 N2), so cohesion wins. 2026-10-24 +50 for the network grant's gate tests; splitting the sock3 / http3 host into its own file waits until after 2.8.0.
 //! WASI **0.3** (P3) host layer — fs3 / sock3 / http3 trampolines, the
 //! async-lowered binding table, and the classifier's P3 arm registration
 //! (ADR-0207 (c); file name reserved by ADR-0190). Depends ONLY on the
@@ -30,6 +30,7 @@ const FilestatResult = ctx_mod.FilestatResult;
 const PendingClientSend = ctx_mod.PendingClientSend;
 const ctxMemory = ctx_mod.ctxMemory;
 const ctxIo = ctx_mod.ctxIo;
+const ctxRequireNetwork = ctx_mod.ctxRequireNetwork;
 const ctxTcpSocket = ctx_mod.ctxTcpSocket;
 const ctxUdpSocket = ctx_mod.ctxUdpSocket;
 const descriptorFilestat = ctx_mod.descriptorFilestat;
@@ -865,6 +866,7 @@ fn sock3IsAnyAddr(addr: std.Io.net.IpAddress) bool {
 fn sock3TcpCreate(caller: *Caller, family: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
+    ctxRequireNetwork(ctx) catch |e| return writeSock3Err(mem, retptr, 4, e);
     if (family > 1) return writeSock3Err(mem, retptr, 4, error.InvalidArgument);
     const idx: u32 = @intCast(ctx.tcp_sockets.items.len);
     ctx.tcp_sockets.append(ctx.alloc, p2sock.TcpSocket.create(@enumFromInt(family))) catch return WasiP2Error.OutOfMemory;
@@ -883,6 +885,7 @@ fn sock3TcpBind(caller: *Caller, self: u32, disc: u32, p0: u32, p1: u32, p2: u32
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
     const sock = try sock3TcpSelf(ctx, self);
+    ctxRequireNetwork(ctx) catch |e| return writeSock3UnitResult(mem, retptr, e);
     const addr = decodeIpSocketAddress(disc, .{ p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10 }) orelse
         return writeSock3UnitResult(mem, retptr, error.InvalidArgument);
     if (sock3IsMulticastOrBroadcast(addr) or sock3IsV4MappedV6(addr))
@@ -912,6 +915,10 @@ fn sock3TcpConnect(caller: *Caller, argsptr: u32, retptr: u32) WasiP2Error!u32 {
         return SUBTASK_RETURNED;
     }
     const sock = try sock3TcpSelf(ctx, self);
+    ctxRequireNetwork(ctx) catch |e| {
+        try writeSock3UnitResult(mem, retptr, e);
+        return SUBTASK_RETURNED;
+    };
     const io = try ctxIo(ctx);
     // Explicitly bound (the 0.3 `bind` → `connect` transition) takes the
     // raw bound-connect composition; everything else the std connect.
@@ -971,6 +978,7 @@ fn sock3TcpListen(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
     const rep = try ctx.resources.rep(WasiP2Ctx.TCP_SOCKET_RT, self);
     {
         const sock = try ctxTcpSocket(ctx, rep);
+        ctxRequireNetwork(ctx) catch |e| return writeSock3Err(mem, retptr, 4, e);
         const io = try ctxIo(ctx);
         sock.listenNow(io) catch |e| return writeSock3Err(mem, retptr, 4, e);
     }
@@ -1277,6 +1285,7 @@ fn sock3TcpSndbufSet(caller: *Caller, self: u32, value_raw: i64, retptr: u32) Wa
 fn sock3UdpCreate(caller: *Caller, family: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
+    ctxRequireNetwork(ctx) catch |e| return writeSock3Err(mem, retptr, 4, e);
     if (family > 1) return writeSock3Err(mem, retptr, 4, error.InvalidArgument);
     const idx: u32 = @intCast(ctx.udp_sockets.items.len);
     ctx.udp_sockets.append(ctx.alloc, p2sock.UdpSocket.create(@enumFromInt(family))) catch return WasiP2Error.OutOfMemory;
@@ -1293,6 +1302,7 @@ fn sock3UdpBind(caller: *Caller, self: u32, disc: u32, p0: u32, p1: u32, p2: u32
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
     const sock = try sock3UdpSelf(ctx, self);
+    ctxRequireNetwork(ctx) catch |e| return writeSock3UnitResult(mem, retptr, e);
     const addr = decodeIpSocketAddress(disc, .{ p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10 }) orelse
         return writeSock3UnitResult(mem, retptr, error.InvalidArgument);
     if (sock3IsMulticastOrBroadcast(addr) or sock3IsV4MappedV6(addr))
@@ -1305,6 +1315,7 @@ fn sock3UdpConnect(caller: *Caller, self: u32, disc: u32, p0: u32, p1: u32, p2: 
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
     const sock = try sock3UdpSelf(ctx, self);
+    ctxRequireNetwork(ctx) catch |e| return writeSock3UnitResult(mem, retptr, e);
     const addr = decodeIpSocketAddress(disc, .{ p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10 }) orelse
         return writeSock3UnitResult(mem, retptr, error.InvalidArgument);
     if (sock3IsMulticastOrBroadcast(addr) or sock3IsAnyAddr(addr) or sock3IsV4MappedV6(addr) or switch (addr) {
@@ -1347,6 +1358,10 @@ fn sock3UdpSend(caller: *Caller, argsptr: u32, retptr: u32) WasiP2Error!u32 {
     const data_len = try mem.read(u32, argsptr + 8);
     const has_remote = (try mem.read(u8, argsptr + 12)) != 0;
     const sock = try sock3UdpSelf(ctx, self);
+    ctxRequireNetwork(ctx) catch |e| {
+        try writeSock3UnitResult(mem, retptr, e);
+        return SUBTASK_RETURNED;
+    };
     const dest: std.Io.net.IpAddress = blk: {
         if (has_remote) {
             const a = (try readSock3AddrVariant(mem, argsptr + 16)) orelse {
@@ -2081,7 +2096,7 @@ fn http3ClientSend(caller: *Caller, request: u32, retptr: u32) WasiP2Error!u32 {
         .subtask_state = .started,
     });
     const pcs = ctx.alloc.create(PendingClientSend) catch return WasiP2Error.OutOfMemory;
-    pcs.* = .{ .req_rep = rep, .retptr = retptr, .subtask = h };
+    pcs.* = .{ .req_rep = rep, .retptr = retptr, .subtask = h, .granted = if (ctxRequireNetwork(ctx)) |_| true else |_| false };
     ctx.pending_client_sends.append(ctx.alloc, pcs) catch {
         ctx.alloc.destroy(pcs);
         return WasiP2Error.OutOfMemory;
@@ -2149,15 +2164,21 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
     const req = try ctxHttpRequest(self, pcs.req_rep);
     const fail = struct {
         fn write(m: Memory, retptr: u32, sub: *async_mod.StreamFutureEnd, h: u32) WasiP2Error!void {
-            try m.write(retptr, @as(u8, 1));
             // error-code `internal-error(option<string>)` = ordinal 37, none.
-            try m.write(retptr + 8, @as(u8, 37));
+            return code(m, retptr, sub, h, 37);
+        }
+        fn code(m: Memory, retptr: u32, sub: *async_mod.StreamFutureEnd, h: u32, ordinal: u8) WasiP2Error!void {
+            try m.write(retptr, @as(u8, 1));
+            try m.write(retptr + 8, ordinal);
             try m.write(retptr + 16, @as(u8, 0));
             sub.subtask_state = .returned;
             sub.setPendingEvent(.{ .code = .subtask, .index = h, .payload = @intFromEnum(async_mod.SubtaskState.returned) });
         }
     };
     const sub = try self.streams.get(pcs.subtask);
+    // Denied here rather than at `client.send`, so the parked body stream
+    // drains and releases as on any failed exchange. `HTTP-request-denied` = 15.
+    if (!pcs.granted) return fail.code(mem, pcs.retptr, sub, pcs.subtask, 15);
     const authority = req.authority orelse return fail.write(mem, pcs.retptr, sub, pcs.subtask);
     const path = req.path_with_query orelse "/";
     const url = std.fmt.allocPrint(self.alloc, "http://{s}{s}", .{ authority, path }) catch return WasiP2Error.OutOfMemory;
@@ -2350,10 +2371,14 @@ fn sock3ResolveAddresses(caller: *Caller, name_ptr: u32, name_len: u32, retptr: 
     const mem = try ctxMemory(caller);
     const name = try mem.sliceAt(name_ptr, name_len);
     var addrs: [32]std.Io.net.IpAddress = undefined;
-    const n = p2sock.resolveAddresses(try ctxIo(ctx), name, &addrs) catch |e| {
+    const n = blk: {
+        ctxRequireNetwork(ctx) catch |e| break :blk e;
+        break :blk p2sock.resolveAddresses(try ctxIo(ctx), name, &addrs);
+    } catch |e| {
         // ip-name-lookup has its OWN error-code variant (ordinals per its
         // WIT declaration order; `other(option<string>)` = 5, none).
         const code: u8 = switch (e) {
+            error.AccessDenied => 0,
             error.InvalidName => 1,
             error.NameUnresolvable => 2,
             error.TemporaryResolverFailure => 3,
@@ -2538,4 +2563,67 @@ test "0.3 append-via-stream: two append sinks on one file each write at the end 
     const got = try tmp.dir.readFileAlloc(io, "log.txt", testing.allocator, .limited(16));
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("abcXY", got);
+}
+
+test "without the network grant, each 0.3 op that reaches the network answers access-denied" {
+    const testing = std.testing;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = threaded.io();
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06memory\x02\x00");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    const mem = try ctx.memory();
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+
+    try sock3TcpCreate(&caller, 0, 32);
+    try sock3UdpCreate(&caller, 0, 48);
+    // The sockets the other ops need are created under a grant, then it is revoked.
+    host.allow_network = true;
+    try sock3TcpCreate(&caller, 0, 0);
+    const tcp = try mem.read(u32, 4);
+    try sock3UdpCreate(&caller, 0, 0);
+    const udp = try mem.read(u32, 4);
+    host.allow_network = false;
+    // 127.0.0.1:9 flat (p0 = port, p1..p4 = octets); one 16-byte result slot per op.
+    try sock3TcpBind(&caller, tcp, 0, 9, 127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 64);
+    try sock3TcpListen(&caller, tcp, 80);
+    try sock3UdpBind(&caller, udp, 0, 9, 127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 96);
+    try sock3UdpConnect(&caller, udp, 0, 9, 127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 112);
+    // Spilled connect args: self@0, ip-socket-address variant@4 (port@8, octets@10).
+    try mem.write(@as(u32, 512), tcp);
+    try mem.write(@as(u32, 520), @as(u16, 9));
+    for ([_]u8{ 127, 0, 0, 1 }, 0..) |b, i| try mem.write(@as(u32, @intCast(522 + i)), b);
+    _ = try sock3TcpConnect(&caller, 512, 128);
+    // Spilled send args: self@0, data ptr@4, len@8, no remote@12.
+    try mem.write(@as(u32, 576), udp);
+    _ = try sock3UdpSend(&caller, 576, 144);
+    @memcpy(mem.slice()[640..649], "localhost");
+    _ = try sock3ResolveAddresses(&caller, 640, 9, 160);
+    var r: u32 = 32;
+    while (r <= 160) : (r += 16) {
+        try testing.expectEqual(@as(u8, 1), try mem.read(u8, r));
+        try testing.expectEqual(@as(u8, 0), try mem.read(u8, r + 4)); // access-denied
+    }
+    // A request sent without the grant stays denied when the grant arrives
+    // before its exchange runs.
+    try ctx.http_requests.append(testing.allocator, .{ .headers_rep = 0 });
+    _ = try http3ClientSend(&caller, try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, 0), 192);
+    host.allow_network = true;
+    _ = try pollPendingClientSends(&ctx);
+    try testing.expectEqual(@as(u8, 1), try mem.read(u8, 192));
+    try testing.expectEqual(@as(u8, 15), try mem.read(u8, 200)); // HTTP-request-denied
+
+    try sock3TcpBind(&caller, tcp, 0, 0, 127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 64);
+    try testing.expectEqual(@as(u8, 0), try mem.read(u8, 64));
 }

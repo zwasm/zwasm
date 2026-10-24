@@ -53,6 +53,7 @@ pub const usage =
     \\    [--engine <auto|interp|jit>]                    Engine: default auto (prefers JIT, interp fallback); interp|jit force one (both full WASI; jit adds SIMD)
     \\    [--dir <host>[:<guest>]]                   Preopen a host directory for WASI
     \\    [--env <KEY=VAL>]                          Set an environment variable for the guest
+    \\    [--allow-network]                          Let a component's sockets / HTTP reach the host network (default: denied)
     \\    [--fuel <N>]                               Trap after a fuel budget (units are engine-specific:
     \\                                               interp = instructions, jit = function entries + loop iterations)
     \\    [--timeout <ms>]                           Interrupt the guest after a wall-clock deadline

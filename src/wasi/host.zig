@@ -168,6 +168,10 @@ pub const Host = struct {
     /// neither problem and lets a terminal work interactively. Needs `io`.
     stdin_inherit: bool = false,
     stdin_pos: usize = 0,
+    /// Lets a component reach the host's network (`--allow-network`). Off, the
+    /// sockets and HTTP hosts answer socket creation, bind / connect / listen /
+    /// send, name lookup and HTTP send with access-denied (`ctxRequireNetwork`).
+    allow_network: bool = false,
     /// `std.Io` value used for filesystem syscalls (`path_open`,
     /// future `fd_read` / `fd_write` over file fds). Set by the
     /// binding at instance setup (§9.4 / 4.7+) from the engine's

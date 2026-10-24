@@ -6,11 +6,13 @@
 //! And which engine runs a SIMD module, said where the run fails (#597).
 //! `--timeout` fires while the guest sleeps in `poll_oneoff` (#598).
 //! An f32 param with three results is refused by the JIT, not misread (#618).
+//! A component reaches the host's network only with `--allow-network`.
 //!
 //! Usage: `zig build test-cli-usage` /
 //!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>
 //!         <simd_op.wasm> <simd_jit_decline.wasm> <select_v128_spilled_val2.wasm>
-//!         <poll_sleep.wasm> <f32_param_three_results.wasm>`
+//!         <poll_sleep.wasm> <f32_param_three_results.wasm>
+//!         <wasi_p2_tcp_rust.wasm>`
 
 const std = @import("std");
 const spawned_cli = @import("spawned_cli");
@@ -38,8 +40,8 @@ const Row = struct {
 
 /// Stand-ins for the module paths, in argument order: a `_start` that does
 /// nothing, one that echoes argv[1..] a line each, one SIMD op, a SIMD module
-/// the JIT declines, #596's select, a 5 s sleep in `poll_oneoff`, and #618's
-/// `(f32) -> (i32 i32 i32)`.
+/// the JIT declines, #596's select, a 5 s sleep in `poll_oneoff`, #618's
+/// `(f32) -> (i32 i32 i32)`, and a Rust wasip2 TCP client.
 const M = "<module>";
 const E = "<argv_echo>";
 const S = "<simd_op>";
@@ -47,7 +49,8 @@ const D = "<simd_jit_decline>";
 const V = "<select_spill>";
 const P = "<poll_sleep>";
 const F = "<f32_three>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F };
+const T = "<tcp_client>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T };
 
 const rows = [_]Row{
     .{ .args = &.{ "run", "--bogus", M }, .exit = 2, .stderr = .{ .has = "unknown option '--bogus'" } },
@@ -66,6 +69,10 @@ const rows = [_]Row{
     .{ .args = &.{ "run", "--engine", "interp", "--invoke", "f=2.5", F }, .exit = 0, .stdout = .{ .is = "7\n250\n2500\n" } },
     .{ .args = &.{ "run", "--engine", "jit", "--invoke", "f=2.5", F }, .exit = 1, .stderr = .{ .has = "unsupported entry signature" } },
     .{ .args = &.{ "run", "--invoke", "f=2.5", F }, .exit = 1, .stderr = .{ .has = "unsupported" } },
+    // Nothing listens on loopback port 1, so a granted connect is refused by
+    // the peer; a listener row would hang on accept once the gate broke.
+    .{ .args = &.{ "run", T, "1" }, .exit = 1, .stderr = .{ .has = "connect failed: Os { code: 2, kind: PermissionDenied" } },
+    .{ .args = &.{ "run", "--allow-network", T, "1" }, .exit = 1, .stderr = .{ .has = "connect failed: Os { code: 14, kind: ConnectionRefused" } },
 };
 
 pub fn main(init: std.process.Init) !u8 {

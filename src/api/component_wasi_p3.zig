@@ -1294,6 +1294,7 @@ fn runOfficialWasip3Test(comptime name: []const u8) !void {
     var host = try wasi_host.Host.init(alloc);
     defer host.deinit();
     host.io = io;
+    host.allow_network = true;
 
     // "root" preopen: copy the vendored tree into a fresh tmp dir (the guest
     // mutates it) and map it as guest "/" (the upstream wasmtime adapter's

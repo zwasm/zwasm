@@ -82,6 +82,8 @@ pub const PendingClientSend = struct {
     req_rep: u32,
     retptr: u32,
     subtask: u32,
+    /// The network grant when `client.send` was called; the exchange runs later.
+    granted: bool,
     body: std.ArrayList(u8) = .empty,
     body_shared: ?u32 = null,
 };
@@ -261,7 +263,7 @@ pub const WasiP2Ctx = struct {
     /// wasi:sockets (ADR-0180): a tcp-socket. Rep indexes `tcp_sockets`
     /// (NOT a P1 fd); its drop closes the OS socket via TcpSocket.deinit.
     pub const TCP_SOCKET_RT: u32 = 6;
-    /// The `wasi:sockets/network` singleton (ambient network; rep unused).
+    /// The `wasi:sockets/network` singleton (rep unused; the grant is `Host.allow_network`).
     pub const NETWORK_RT: u32 = 7;
     /// Socket-backed input/output-streams minted by finish-connect. Rep
     /// indexes `tcp_sockets`; dropping a stream does NOT close the socket
@@ -610,6 +612,13 @@ pub fn ctxTcpSocket(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*p2sock.TcpSocket {
 
 pub fn ctxIo(ctx: *WasiP2Ctx) WasiP2Error!std.Io {
     return ctx.host.io orelse WasiP2Error.NoHostIo;
+}
+
+/// The network grant, checked by socket creation and by every sockets / HTTP
+/// op that reaches the host's network. `instance-network` stays ungated: its
+/// WIT result has no error arm.
+pub fn ctxRequireNetwork(ctx: *WasiP2Ctx) error{AccessDenied}!void {
+    if (!ctx.host.allow_network) return error.AccessDenied;
 }
 
 /// `wasi_fd.readStdin` with its errors in this layer's set.

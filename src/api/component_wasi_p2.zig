@@ -59,6 +59,7 @@ const Memory = ctx_mod.Memory;
 const FilestatResult = ctx_mod.FilestatResult;
 const ctxMemory = ctx_mod.ctxMemory;
 const ctxIo = ctx_mod.ctxIo;
+const ctxRequireNetwork = ctx_mod.ctxRequireNetwork;
 const ctxTcpSocket = ctx_mod.ctxTcpSocket;
 const ctxUdpSocket = ctx_mod.ctxUdpSocket;
 const descriptorFilestat = ctx_mod.descriptorFilestat;
@@ -581,6 +582,45 @@ test "0.2 append-via-stream: two append streams on one file each write at the en
     const got = try tmp.dir.readFileAlloc(io, "log.txt", testing.allocator, .limited(16));
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("abcXY", got);
+}
+
+test "without the network grant, 0.2 create-tcp-socket and start-listen answer access-denied" {
+    const testing = std.testing;
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = testing.io;
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06memory\x02\x00");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    const mem = try ctx.memory();
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+
+    try p2CreateTcpSocket(&caller, 0, 0);
+    try testing.expectEqual(@as(u8, 1), try mem.read(u8, 0));
+    try testing.expectEqual(@intFromEnum(p2sock.ErrorCode.access_denied), try mem.read(u8, 4));
+    host.allow_network = true;
+    try p2CreateTcpSocket(&caller, 0, 0);
+    try testing.expectEqual(@as(u8, 0), try mem.read(u8, 0));
+
+    // start-bind only records the address; the OS bind is start-listen's, so
+    // a grant revoked in between still stops it.
+    const tcp = try mem.read(u32, 4);
+    const net = try p2InstanceNetwork(&caller);
+    try p2TcpStartBind(&caller, tcp, net, 0, 0, 127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 16);
+    try p2TcpFinishBind(&caller, tcp, 16);
+    try testing.expectEqual(@as(u8, 0), try mem.read(u8, 16));
+    host.allow_network = false;
+    try p2TcpStartListen(&caller, tcp, 16);
+    try testing.expectEqual(@as(u8, 1), try mem.read(u8, 16));
+    try testing.expectEqual(@intFromEnum(p2sock.ErrorCode.access_denied), try mem.read(u8, 17));
 }
 
 test "0.2 descriptor.write / write-via-stream: an offset past the i64 range is invalid / closed" {
@@ -1417,8 +1457,8 @@ fn p2CheckWrite(caller: *Caller, self_handle: u32, retptr: u32) WasiP2Error!void
 
 // ---- wasi:sockets (ADR-0180 Phase 1) ----
 
-/// `wasi:sockets/instance-network` `instance-network()` -> the ambient
-/// network singleton resource.
+/// `wasi:sockets/instance-network` `instance-network()` -> the network
+/// singleton resource (minted with or without the grant).
 fn p2InstanceNetwork(caller: *Caller) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     return ctx.resources.new(WasiP2Ctx.NETWORK_RT, 0);
@@ -1430,6 +1470,7 @@ fn p2InstanceNetwork(caller: *Caller) WasiP2Error!u32 {
 fn p2CreateTcpSocket(caller: *Caller, family: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
+    ctxRequireNetwork(ctx) catch |e| return writeSockErr(mem, retptr, 4, e);
     const fam: p2sock.AddressFamily = if (family == 0) .ipv4 else .ipv6;
     const idx: u32 = @intCast(ctx.tcp_sockets.items.len);
     ctx.tcp_sockets.append(ctx.alloc, p2sock.TcpSocket.create(fam)) catch return WasiP2Error.OutOfMemory;
@@ -1459,6 +1500,7 @@ fn p2TcpStartBind(caller: *Caller, self: u32, network: u32, disc: u32, p0: u32, 
     const mem = try ctxMemory(caller);
     _ = try ctx.resources.rep(WasiP2Ctx.NETWORK_RT, network);
     const sock = try ctxTcpSocket(ctx, try ctx.resources.rep(WasiP2Ctx.TCP_SOCKET_RT, self));
+    ctxRequireNetwork(ctx) catch |e| return writeSockUnitResult(mem, retptr, e);
     const addr = decodeIpSocketAddress(disc, .{ p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10 }) orelse
         return writeSockUnitResult(mem, retptr, error.InvalidArgument);
     sock.startBind(try ctxIo(ctx), addr) catch |e| return writeSockUnitResult(mem, retptr, e);
@@ -1480,6 +1522,7 @@ fn p2TcpStartConnect(caller: *Caller, self: u32, network: u32, disc: u32, p0: u3
     const mem = try ctxMemory(caller);
     _ = try ctx.resources.rep(WasiP2Ctx.NETWORK_RT, network);
     const sock = try ctxTcpSocket(ctx, try ctx.resources.rep(WasiP2Ctx.TCP_SOCKET_RT, self));
+    ctxRequireNetwork(ctx) catch |e| return writeSockUnitResult(mem, retptr, e);
     const addr = decodeIpSocketAddress(disc, .{ p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10 }) orelse
         return writeSockUnitResult(mem, retptr, error.InvalidArgument);
     sock.startConnect(try ctxIo(ctx), addr) catch |e| return writeSockUnitResult(mem, retptr, e);
@@ -1537,6 +1580,7 @@ fn p2TcpStartListen(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
     const sock = try ctxTcpSocket(ctx, try ctx.resources.rep(WasiP2Ctx.TCP_SOCKET_RT, self));
+    ctxRequireNetwork(ctx) catch |e| return writeSockUnitResult(mem, retptr, e);
     sock.startListen(try ctxIo(ctx)) catch |e| return writeSockUnitResult(mem, retptr, e);
     try writeSockUnitResult(mem, retptr, null);
 }

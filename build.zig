@@ -1387,8 +1387,9 @@ pub fn build(b: *std.Build) void {
     run_cli_usage.addArg(b.pathFromRoot("test/edge_cases/p17/simd_select_spill/select_v128_spilled_val2.wasm"));
     run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/cli_usage/poll_sleep.wasm"));
     run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/cli_usage/f32_param_three_results.wasm"));
+    run_cli_usage.addArg(b.pathFromRoot("test/component/wasi_p2_tcp_rust.wasm"));
     run_cli_usage.has_side_effects = true;
-    const test_cli_usage_step = b.step("test-cli-usage", "Run `zwasm run` with unknown, misplaced and value-swallowing options and require a usage error (exit 2), and `--` and post-path options to reach the module (issues #236, #232); a SIMD module the interpreter cannot run fails with each engine's reason (#597); `--timeout` fires during a `poll_oneoff` sleep (#598); the JIT refuses an f32 param with three results (#618)");
+    const test_cli_usage_step = b.step("test-cli-usage", "Run `zwasm run` with unknown, misplaced and value-swallowing options and require a usage error (exit 2), and `--` and post-path options to reach the module (issues #236, #232); a SIMD module the interpreter cannot run fails with each engine's reason (#597); `--timeout` fires during a `poll_oneoff` sleep (#598); the JIT refuses an f32 param with three results (#618); a component reaches the network only with --allow-network");
     test_cli_usage_step.dependOn(&run_cli_usage.step);
 
     // `zig build test-wasi-p1-official` — the OFFICIAL wasi-testsuite

@@ -117,3 +117,10 @@ ordinals) — a sibling of the D-307 filesystem errno map.
   probe flag are removed; residual: the stdlib's unmapped
   connection-refused NTSTATUS (D-323). Lesson:
   `2026-06-13-winsock-vs-nt-afd-handles`.
+- **2026-10-24 (network grant)**: Phase 1's ambient network is replaced by a
+  grant, `Host.allow_network` (CLI `--allow-network`), off by default. Every op
+  that creates a socket or reaches the host's network checks it when called
+  (the callers of `ctxRequireNetwork`) and answers `access-denied` without it,
+  in every `-Dwasi` build: a sync export reaches the 0.3 host in the default
+  build. `instance-network` stays ungated, since its WIT result has no error
+  arm. The grant is one bool; per-address policy is not decided.

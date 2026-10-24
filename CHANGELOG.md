@@ -12,6 +12,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Changed
 
+- **A component reaches the host's network only when granted.** `zwasm run`
+  takes `--allow-network`, the Zig API `Host.allow_network`; both are off by
+  default. Without the grant, WASI 0.2 and 0.3 sockets, 0.3 name lookup and
+  0.3 outbound HTTP answer `access-denied`, in the default build too.
+
 - **The x86_64 JIT allocates eight general-purpose registers** (#503). The pool
   was the four callee-saved registers; RSI, RDI, R8 and R9 join it, since every
   value live across a call already goes to a slot (ADR-0060), call arguments now
@@ -395,6 +400,9 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   declaration.
 
 ### Security
+
+- **A component no longer reaches the host's network without a grant**; see
+  `--allow-network` under Changed.
 
 - **WASI 0.1 `fd_seek` answers `inval` for a result past the u64 range**, and
   `fd_read` / `fd_write` at a cursor past the i64 range answer `inval`, as

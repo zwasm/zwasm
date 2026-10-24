@@ -1595,6 +1595,7 @@ test "ADR-0180: a real rust wasip2 TCP client connects + echoes through wasi:soc
     var host = try wasi_host.Host.init(testing.allocator);
     defer host.deinit();
     host.io = io;
+    host.allow_network = true;
     try host.setArgs(&.{ "tcp_echo", port_str });
     var capture: std.ArrayList(u8) = .empty;
     defer capture.deinit(testing.allocator);
@@ -1606,6 +1607,66 @@ test "ADR-0180: a real rust wasip2 TCP client connects + echoes through wasi:soc
     // ADR-0180 Phase-1 existence proof.
     try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
     try testing.expectEqualStrings("got pong-ping\n", capture.items);
+}
+
+test "without the network grant, a rust wasip2 TCP connect is refused with access-denied" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/wasi_p2_tcp_rust.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    // Nothing listens on loopback port 1: a connect that got through would be
+    // refused by the peer, not denied.
+    try host.setArgs(&.{ "tcp_echo", "1" });
+    var stdout_cap: std.ArrayList(u8) = .empty;
+    defer stdout_cap.deinit(testing.allocator);
+    var stderr_cap: std.ArrayList(u8) = .empty;
+    defer stderr_cap.deinit(testing.allocator);
+    host.stdout_buffer = &stdout_cap;
+    host.stderr_buffer = &stderr_cap;
+
+    // Rust maps `error-code::access-denied` to `PermissionDenied`, and the
+    // guest's `expect("connect failed")` panics with it (an `unreachable` trap).
+    try testing.expectError(error.Unreachable, runWasiP2Main(&eng, testing.allocator, bytes, &host, .{}));
+    try testing.expectEqualStrings("", stdout_cap.items);
+    try testing.expect(std.mem.find(u8, stderr_cap.items, "connect failed") != null);
+    try testing.expect(std.mem.find(u8, stderr_cap.items, "PermissionDenied") != null);
+}
+
+test "a default build gates the WASI 0.3 connect and name lookup a sync export reaches" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/wasi_p3_network_sync.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+    const listen_addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
+    var server = try listen_addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
+    defer server.deinit(io);
+    const port = server.socket.address.getPort();
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    var opened = try open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+
+    // Each export answers (disc << 8) | error-code: 0x100 = err(access-denied).
+    for ([_]bool{ false, true }) |granted| {
+        host.allow_network = granted;
+        const want: u32 = if (granted) 0 else 0x100;
+        const connected = (try opened.invokeTyped("connect", &.{.{ .u16 = port }}, testing.allocator)).?;
+        try testing.expectEqual(want, connected.u32);
+        const resolved = (try opened.invokeTyped("resolve", &.{}, testing.allocator)).?;
+        try testing.expectEqual(want, resolved.u32);
+    }
 }
 
 /// Host-side client for the listener e2e: retry-connect to the guest's
@@ -1657,6 +1718,7 @@ test "ADR-0180 Phase 2: a real rust wasip2 TCP listener accepts + echoes through
     var host = try wasi_host.Host.init(testing.allocator);
     defer host.deinit();
     host.io = io;
+    host.allow_network = true;
     try host.setArgs(&.{ "tcp_listen", port_str });
     var capture: std.ArrayList(u8) = .empty;
     defer capture.deinit(testing.allocator);

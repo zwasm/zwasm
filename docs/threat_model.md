@@ -28,7 +28,7 @@ Report what you find through [private vulnerability reporting](https://github.co
 | Guest code | **Untrusted** | The adversary. We assume it is hostile from its first instruction, and that the module bytes are malformed on purpose. |
 | Host functions | Trusted | Embedder code, called from the guest. |
 | `.cwasm` artifacts | Trusted as native code | See [Trust boundaries](#5-artifact--runtime). |
-| WASI host resources | Granted | Directories, environment variables and arguments the embedder passed in. |
+| WASI host resources | Granted | Directories, environment variables, arguments and network access the embedder passed in. |
 | Network peers | **Untrusted** | Whatever a guest's sockets talk to. |
 
 ## Trust boundaries
@@ -57,8 +57,9 @@ anything else is a breach of goal 1 or 2.
 ### 2. Guest ↔ WASI host
 
 The guest's WASI calls cross here, to the resources the embedder granted:
-standard I/O, preopened directories (`--dir`), environment variables (`--env`)
-and arguments. Reaching anything else is a breach of goal 4.
+standard I/O, preopened directories (`--dir`), environment variables (`--env`),
+arguments and the network (`--allow-network`). Reaching anything else is a
+breach of goal 4.
 
 ### 3. Instance ↔ instance
 
@@ -102,6 +103,7 @@ default settings, we treat as a vulnerability unless
 | The C API, and `zwasm_instance_disable_fuel` / `zwasm_instance_clear_memory_pages_limit` | 5 | An instance starts unmetered until a `zwasm_instance_*` setter arms a limit; these two remove one. |
 | `--max-memory` / `zwasm_instance_set_memory_pages_limit` | 5 | Caps `memory.grow`, not the memory a module declares at instantiation (#489). |
 | `--dir`, `--env`, `zwasm_wasi_config_preopen_dir`, `zwasm_wasi_config_set_envs`, `zwasm_wasi_config_inherit_env` | 4 | Each is a grant: the guest reaches what it names. |
+| `--allow-network`, `Host.allow_network` (Zig API) | 4 | A grant: a component reaches any address the host can route, and listens on any port the host can bind. |
 | `--engine` / `zwasm_instance_new_ex` | 3 | The interpreter and the JIT have different known isolation gaps (#536, #578). |
 | `--cache` | — | The cache directory holds native code (boundary 5). |
 

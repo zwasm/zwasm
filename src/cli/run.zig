@@ -460,9 +460,10 @@ pub fn runComponentWasi(
     preopens: []const PreopenDir,
     env_keys: []const []const u8,
     env_vals: []const []const u8,
+    allow_network: bool,
     stdin: StdinSource,
 ) !u8 {
-    return runComponentCaptured(alloc, io, bytes, argv, preopens, env_keys, env_vals, stdin, null);
+    return runComponentCaptured(alloc, io, bytes, argv, preopens, env_keys, env_vals, allow_network, stdin, null);
 }
 
 /// `runComponentWasi` with an optional stdout capture buffer (tests assert on
@@ -475,6 +476,7 @@ pub fn runComponentCaptured(
     preopens: []const PreopenDir,
     env_keys: []const []const u8,
     env_vals: []const []const u8,
+    allow_network: bool,
     stdin: StdinSource,
     stdout_capture: ?*std.ArrayList(u8),
 ) !u8 {
@@ -489,6 +491,7 @@ pub fn runComponentCaptured(
     if (stdout_capture) |b| host.stdout_buffer = b;
     if (argv.len > 0) try host.setArgs(argv);
     if (env_keys.len > 0) try host.setEnvs(env_keys, env_vals); // D-295 P0: --env KEY=VAL
+    host.allow_network = allow_network;
     stdin.applyTo(&host); // the guest's fd 0 source
     // `--dir` preopens feed the P2 host: `get-directories` enumerates them and
     // the descriptor `*-at` methods resolve against their fds.
@@ -987,7 +990,7 @@ test "runComponentWasi: a real WASI-P2 component runs from the CLI path + prints
     defer testing.allocator.free(bytes);
     var capture: std.ArrayList(u8) = .empty;
     defer capture.deinit(testing.allocator);
-    const code = try runComponentCaptured(testing.allocator, testing.io, bytes, &.{}, &.{}, &.{}, &.{}, .none, &capture);
+    const code = try runComponentCaptured(testing.allocator, testing.io, bytes, &.{}, &.{}, &.{}, &.{}, false, .none, &capture);
     try testing.expectEqual(@as(u8, 0), code);
     try testing.expectEqualStrings("hello\n", capture.items);
 }
@@ -999,7 +1002,7 @@ test "runComponentWasi: an ASYNC (WASI-0.3 P3) component runs from the CLI path 
     defer testing.allocator.free(bytes);
     var capture: std.ArrayList(u8) = .empty;
     defer capture.deinit(testing.allocator);
-    const code = try runComponentCaptured(testing.allocator, testing.io, bytes, &.{}, &.{}, &.{}, &.{}, .none, &capture);
+    const code = try runComponentCaptured(testing.allocator, testing.io, bytes, &.{}, &.{}, &.{}, &.{}, false, .none, &capture);
     try testing.expectEqual(@as(u8, 0), code);
     try testing.expectEqualStrings("hi\n", capture.items);
 }
@@ -1874,7 +1877,7 @@ fn fdsLeftOverTenRuns(preopens: []const PreopenDir, expected: anyerror!u8) ![3]i
             const got = switch (runner_kind) {
                 .full => runWasmCapturedFull(testing.allocator, testing.io, &proc_exit_42_wasm, &.{}, null, null, .none, null, preopens, &.{}, &.{}, null, .{}),
                 .jit => runWasmJitCaptured(testing.allocator, testing.io, &proc_exit_42_wasm, null, &.{}, preopens, &.{}, &.{}, .{}, null, null, .none),
-                .component => runComponentCaptured(testing.allocator, testing.io, component_bytes, &.{}, preopens, &.{}, &.{}, .none, &capture),
+                .component => runComponentCaptured(testing.allocator, testing.io, component_bytes, &.{}, preopens, &.{}, &.{}, false, .none, &capture),
             };
             if (expected) |code| {
                 try testing.expectEqual(if (runner_kind == .component) 0 else code, try got);
