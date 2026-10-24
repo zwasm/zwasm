@@ -1,0 +1,66 @@
+# Release prep — fold changelog.d/ into the CHANGELOG section, bump
+# build.zig.zon, and push the commit as release/vX.Y.Z (ADR-0234).
+#
+# TRIGGER: a maintainer's dispatch. It opens no PR — CI's `pull_request` run
+# does not start for a PR that GITHUB_TOKEN opened, and opening it is the
+# maintainer's step; the job summary prints the command. The tag stays a human
+# act too (ADR-0156): this only prepares the commit it will sit on.
+
+name: release_prep
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to prepare, X.Y.Z (no leading v)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+
+      # The script validates VERSION before anything below uses it.
+      - name: Assemble the CHANGELOG section
+        shell: bash
+        run: bash scripts/changelog_assemble.sh "$VERSION" "$(date -u +%F)"
+
+      - name: Bump build.zig.zon
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i -E 's/^([[:space:]]*\.version = ")[^"]*"/\1'"$VERSION"'"/' build.zig.zon
+          [ "$(grep -c "^[[:space:]]*\.version = \"$VERSION\"," build.zig.zon)" = 1 ] \
+            || { echo "::error::build.zig.zon .version was not rewritten to $VERSION"; exit 1; }
+
+      - name: Commit and push release/v${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add CHANGELOG.md build.zig.zon
+          git commit -q -m "release: prepare v$VERSION"
+          git push origin "HEAD:refs/heads/release/v$VERSION"
+
+      - name: Print the PR command
+        shell: bash
+        run: |
+          {
+            echo '### Next: open the release PR'
+            echo
+            echo '```'
+            echo "gh pr create --repo zwasm/zwasm --base main --head release/v$VERSION --draft --title \"release: prepare v$VERSION\" --body-file body.md"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
