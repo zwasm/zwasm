@@ -38,6 +38,7 @@ const zir_mod = @import("../ir/zir.zig");
 const build_options = @import("build_options");
 
 const ctx_mod = @import("component_wasi_ctx.zig");
+const lower_realloc = @import("component_lower_realloc.zig");
 const p3h = @import("component_wasi_p3_host.zig");
 
 // Substrate re-exports (compat surface, ADR-0207 I1) + local aliases so the
@@ -1952,6 +1953,21 @@ fn streamElemByteSize(arena: Allocator, info: *const ctypes.TypeInfo, type_index
     return if (sz == 0) 1 else @intCast(sz);
 }
 
+/// Bind the lowers' realloc (see `component_lower_realloc.zig`) as the
+/// trampolines' result allocator, once every core instance is built. A ref
+/// that does not land on a guest instance is refused, not skipped.
+fn bindLowerRealloc(ctx: *WasiP2Ctx, binding: lower_realloc.Binding, built: []const ?Built) lower_realloc.Error!void {
+    const ref = binding.ref orelse return;
+    if (ref.instance >= built.len) return lower_realloc.Error.UnsupportedLowerRealloc;
+    switch (built[ref.instance] orelse return lower_realloc.Error.UnsupportedLowerRealloc) {
+        .guest => |gi| {
+            ctx.lower_realloc_instance = gi;
+            ctx.lower_realloc_name = ref.name;
+        },
+        .synthetic => return lower_realloc.Error.UnsupportedLowerRealloc,
+    }
+}
+
 const SynthExport = struct { name: []const u8, def: Def };
 const Built = union(enum) { guest: *Instance, synthetic: []const SynthExport };
 
@@ -2279,12 +2295,14 @@ pub fn buildWasiP2Component(engine: *Engine, alloc: Allocator, bytes: []const u8
         self.synth_arena.deinit();
     }
 
+    var lower_binding: lower_realloc.Binding = .{};
     for (cis, 0..) |ci, i| {
         self.built[i] = switch (ci) {
             .inline_exports => |exps| blk: {
                 const list = try self.synth_arena.allocator().alloc(SynthExport, exps.len);
                 var n: usize = 0;
                 for (exps) |ex| {
+                    try lower_binding.record(&self.info, ex);
                     const def = (try synthDef(self.synth_arena.allocator(), &self.info, self.built, ex)) orelse continue;
                     list[n] = .{ .name = ex.name, .def = def };
                     n += 1;
@@ -2327,6 +2345,7 @@ pub fn buildWasiP2Component(engine: *Engine, alloc: Allocator, bytes: []const u8
             },
         };
     }
+    try bindLowerRealloc(ctx, lower_binding, self.built);
 
     // Resolve guest-resource destructors (D-322): a resource deftype's
     // `dtor` is a core-func index — chase it to the exporting guest
