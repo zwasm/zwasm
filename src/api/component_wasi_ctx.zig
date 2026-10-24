@@ -108,6 +108,17 @@ pub const WasiP2Ctx = struct {
     /// `2026-06-07-engine-invoke-is-reentrant-stack-disciplined`.
     realloc_instance: ?*Instance = null,
     realloc_name: []const u8 = "cabi_realloc",
+    /// The realloc a `canon lower` names (`(realloc ...)` canonopt), when it
+    /// differs from the lift one. Host trampolines allocate their list/string
+    /// results through THIS, not `realloc_instance`. A component built with
+    /// the wasi_snapshot_preview1 adapter needs it: its lowers name the
+    /// adapter's `cabi_import_realloc`, which places each result in the
+    /// buffer the preview1 caller supplied (e.g. `random_get`'s `buf`); the
+    /// main module's `cabi_realloc` would put it somewhere else, and the
+    /// adapter asserts on that. Set while the component is built, from the
+    /// first lower that carries a realloc option.
+    lower_realloc_instance: ?*Instance = null,
+    lower_realloc_name: []const u8 = "",
     /// Instance whose linear memory the lowered funcs read/write — the
     /// canon-lower-bound memory (the memory-exporting instance: `$main`, or
     /// `$libc` in the hand-authored fixtures). NOT the immediate caller's: a
@@ -422,10 +433,14 @@ pub const WasiP2Ctx = struct {
     /// Allocate `size` bytes of fresh guest memory via the guest's
     /// `cabi_realloc` (old_ptr=0). Used to build list/string return areas.
     pub fn reallocGuest(self: *WasiP2Ctx, size: u32, alignment: u32) WasiP2Error!u32 {
-        const inst = self.realloc_instance orelse return WasiP2Error.NoRealloc;
+        // A lower's own realloc option wins over the lift-side guess.
+        const inst, const name = if (self.lower_realloc_instance) |li|
+            .{ li, self.lower_realloc_name }
+        else
+            .{ self.realloc_instance orelse return WasiP2Error.NoRealloc, self.realloc_name };
         var args = [_]Value{ .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = @bitCast(alignment) }, .{ .i32 = @bitCast(size) } };
         var res = [_]Value{.{ .i32 = 0 }};
-        inst.invoke(self.realloc_name, &args, &res) catch return WasiP2Error.ReallocFailed;
+        inst.invoke(name, &args, &res) catch return WasiP2Error.ReallocFailed;
         const ptr: u32 = @bitCast(res[0].i32);
         if (ptr == 0 and size != 0) return WasiP2Error.ReallocFailed;
         return ptr;

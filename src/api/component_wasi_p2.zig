@@ -38,6 +38,7 @@ const zir_mod = @import("../ir/zir.zig");
 const build_options = @import("build_options");
 
 const ctx_mod = @import("component_wasi_ctx.zig");
+const lower_realloc = @import("component_lower_realloc.zig");
 const p3h = @import("component_wasi_p3_host.zig");
 
 // Substrate re-exports (compat surface, ADR-0207 I1) + local aliases so the
@@ -1952,6 +1953,21 @@ fn streamElemByteSize(arena: Allocator, info: *const ctypes.TypeInfo, type_index
     return if (sz == 0) 1 else @intCast(sz);
 }
 
+/// Record the first lower-side realloc (see `component_lower_realloc.zig`)
+/// whose instance is already built, as the trampolines' result allocator.
+fn bindLowerRealloc(ctx: *WasiP2Ctx, info: *const ctypes.TypeInfo, built: []const ?Built, ex: ctypes.CoreInlineExport) void {
+    if (ctx.lower_realloc_instance != null) return;
+    const ref = lower_realloc.lowerReallocRef(info, ex) orelse return;
+    if (ref.instance >= built.len) return;
+    switch (built[ref.instance] orelse return) {
+        .guest => |gi| {
+            ctx.lower_realloc_instance = gi;
+            ctx.lower_realloc_name = ref.name;
+        },
+        .synthetic => {},
+    }
+}
+
 const SynthExport = struct { name: []const u8, def: Def };
 const Built = union(enum) { guest: *Instance, synthetic: []const SynthExport };
 
@@ -2285,6 +2301,7 @@ pub fn buildWasiP2Component(engine: *Engine, alloc: Allocator, bytes: []const u8
                 const list = try self.synth_arena.allocator().alloc(SynthExport, exps.len);
                 var n: usize = 0;
                 for (exps) |ex| {
+                    bindLowerRealloc(ctx, &self.info, self.built, ex);
                     const def = (try synthDef(self.synth_arena.allocator(), &self.info, self.built, ex)) orelse continue;
                     list[n] = .{ .name = ex.name, .def = def };
                     n += 1;

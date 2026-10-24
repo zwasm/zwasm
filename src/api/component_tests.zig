@@ -884,6 +884,26 @@ test "D3: a WASI-P2 component calls random.get-random-bytes(16) — list realloc
     try testing.expectEqual(@as(u32, 0), host.exit_code.?);
 }
 
+test "a lowered list result is allocated through the lower's own realloc, not cabi_realloc" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/wasi_p2_lower_realloc.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    // The lower names `cabi_import_realloc` (answers 4096), as the preview1
+    // adapter's lowers do; the component also exports `cabi_realloc` (bump
+    // from 1024). run() exits 0 iff the list landed at 4096.
+    try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
+    try testing.expectEqual(@as(u32, 0), host.exit_code.?);
+}
+
 test "WASI random: a component calls insecure.get-insecure-random-bytes(16) — import resolves → exit 0" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
