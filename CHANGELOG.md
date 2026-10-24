@@ -423,6 +423,9 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   The Zig API reference states which part of the package SemVer covers — the
   facade — and that the internal namespaces the package root also exports
   (`ir`, `runtime`, …) may change in any release.
+- `docs/threat_model.md` names whom zwasm trusts, its trust boundaries, what
+  counts as a vulnerability and how mature the runtime is; `SECURITY.md` points
+  to it and names a second maintainer to mention.
 
 ### Known limitations
 

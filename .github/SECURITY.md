@@ -23,7 +23,7 @@ Report privately via GitHub's **[Private Vulnerability Reporting](https://github
 (the "Report a vulnerability" button under the repository's *Security* tab).
 If that is unavailable to you, open a minimal public Discussion asking a
 maintainer to reach out — **without any exploit detail** — and mention
-`@chaploud`.
+`@chaploud` and `@jtakakura`.
 
 Please include, where possible:
 
@@ -39,18 +39,22 @@ before any public disclosure.
 
 ## Scope
 
-In scope: host memory corruption from a malformed or adversarial module,
-sandbox / WASI-capability escapes, JIT code-generation bugs with a security
-impact, and unbounded resource use that the documented limits (fuel, timeout,
-memory ceiling) fail to contain.
+In scope: host memory corruption or an abort of the host process from a
+malformed or adversarial module, sandbox / WASI-capability escapes, JIT
+code-generation bugs with a security impact, and unbounded resource use that
+the documented limits (fuel, timeout, memory ceiling) fail to contain.
 
 Out of scope: behaviour of untrusted guest code that stays *within* the
 sandbox, and misuse of the embedding API in ways the documentation warns
 against.
 
+For the trust boundaries, the settings that relax them, and how a report is
+classified, see [the threat model](../docs/threat_model.md).
+
 ## Hardening the host
 
 zwasm ships deny-by-default WASI capabilities, fuel metering, a wall-clock
 timeout, a memory ceiling, W^X JIT pages, and signal-handled traps. See
-[`docs/tutorial.md`](../docs/tutorial.md) for how to configure these limits when
-embedding.
+[the README](../README.md#embedding) and
+[the CLI reference](../docs/reference/cli.md#run) for how to configure these
+limits.
