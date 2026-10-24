@@ -43,6 +43,7 @@ const wasi_clocks = @import("clocks.zig");
 const wasi_fd = @import("fd.zig");
 const wasi_proc = @import("proc.zig");
 const wasi_path = @import("path.zig");
+const p1 = @import("preview1.zig");
 const dbg = @import("../support/dbg.zig");
 
 const JitRuntime = jit_abi.JitRuntime;
@@ -89,7 +90,7 @@ pub fn fd_write(
     // and supports file fds, none of which the compute-only stub does.
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
-        const mem = rt.vm_base[0..@intCast(rt.mem_limit)];
+        const mem = memOf(rt);
         return @intCast(@intFromEnum(wasi_fd.fdWrite(host, mem, @bitCast(fd), @bitCast(iovs_ptr), @bitCast(iovs_len), @bitCast(nwritten_ptr))));
     }
     const writer_kind: enum { stdout, stderr, bad } = switch (fd) {
@@ -155,7 +156,7 @@ pub fn fd_read(
     // host's real stdin / file fds; the stub only EOF-stubbed fd 0).
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
-        const mem = rt.vm_base[0..@intCast(rt.mem_limit)];
+        const mem = memOf(rt);
         return @intCast(@intFromEnum(wasi_fd.fdRead(host, mem, @bitCast(fd), @bitCast(iovs_ptr), @bitCast(iovs_len), @bitCast(nread_ptr))));
     }
     if (fd != 0) return @intFromEnum(Errno.badf);
@@ -204,7 +205,7 @@ pub fn clock_time_get(
     // and writes the nanoseconds itself.
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
-        const mem = rt.vm_base[0..@intCast(rt.mem_limit)];
+        const mem = memOf(rt);
         const e = wasi_clocks.clockTimeGet(host, mem, @bitCast(clock_id), @bitCast(precision), @bitCast(time_ptr));
         return @intCast(@intFromEnum(e));
     }
@@ -229,7 +230,7 @@ pub fn random_get(rt: *JitRuntime, buf_ptr: i32, buf_len: i32) callconv(.c) i32 
     // cryptographic entropy (it bounds-checks + fills from host.io).
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
-        const mem = rt.vm_base[0..@intCast(rt.mem_limit)];
+        const mem = memOf(rt);
         return @intCast(@intFromEnum(wasi_clocks.randomGet(host, mem, @bitCast(buf_ptr), @bitCast(buf_len))));
     }
     if (buf_ptr < 0 or buf_len < 0) return @intFromEnum(Errno.inval);
@@ -253,7 +254,7 @@ pub fn args_sizes_get(rt: *JitRuntime, argc_ptr: i32, argv_buf_size_ptr: i32) ca
     dbg.print("mem.cksum", "jit args_sizes_get {x}", .{dbg.fnv1a(memOf(rt))});
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
-        const mem = rt.vm_base[0..@intCast(rt.mem_limit)];
+        const mem = memOf(rt);
         return @intCast(@intFromEnum(wasi_proc.argsSizesGet(host, mem, @bitCast(argc_ptr), @bitCast(argv_buf_size_ptr))));
     }
     if (argc_ptr < 0 or argv_buf_size_ptr < 0) return @intFromEnum(Errno.inval);
@@ -272,7 +273,7 @@ pub fn args_sizes_get(rt: *JitRuntime, argc_ptr: i32, argv_buf_size_ptr: i32) ca
 pub fn args_get(rt: *JitRuntime, argv_ptrs: i32, argv_buf: i32) callconv(.c) i32 {
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
-        const mem = rt.vm_base[0..@intCast(rt.mem_limit)];
+        const mem = memOf(rt);
         return @intCast(@intFromEnum(wasi_proc.argsGet(host, mem, @bitCast(argv_ptrs), @bitCast(argv_buf))));
     }
     // Compute-only fallback: no argv → success no-op.
@@ -284,7 +285,7 @@ pub fn args_get(rt: *JitRuntime, argv_ptrs: i32, argv_buf: i32) callconv(.c) i32
 pub fn environ_sizes_get(rt: *JitRuntime, envc_ptr: i32, envv_buf_size_ptr: i32) callconv(.c) i32 {
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
-        const mem = rt.vm_base[0..@intCast(rt.mem_limit)];
+        const mem = memOf(rt);
         return @intCast(@intFromEnum(wasi_proc.environSizesGet(host, mem, @bitCast(envc_ptr), @bitCast(envv_buf_size_ptr))));
     }
     if (envc_ptr < 0 or envv_buf_size_ptr < 0) return @intFromEnum(Errno.inval);
@@ -302,7 +303,7 @@ pub fn environ_sizes_get(rt: *JitRuntime, envc_ptr: i32, envv_buf_size_ptr: i32)
 pub fn environ_get(rt: *JitRuntime, envv_ptrs: i32, envv_buf: i32) callconv(.c) i32 {
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
-        const mem = rt.vm_base[0..@intCast(rt.mem_limit)];
+        const mem = memOf(rt);
         return @intCast(@intFromEnum(wasi_proc.environGet(host, mem, @bitCast(envv_ptrs), @bitCast(envv_buf))));
     }
     // Compute-only fallback: no environ → success no-op.
@@ -363,7 +364,7 @@ inline fn hostOf(rt: *JitRuntime) ?*wasi_host_mod.Host {
 }
 
 inline fn memOf(rt: *JitRuntime) []u8 {
-    return rt.vm_base[0..@intCast(rt.mem_limit)];
+    return p1.addressable(rt.vm_base[0..@intCast(rt.mem_limit)]);
 }
 
 // --- clock / poll ---

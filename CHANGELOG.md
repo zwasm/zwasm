@@ -399,11 +399,12 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   checked.** When it does not fit in u32 the call traps as the guest's memory
   access (`OutOfBoundsStore`); before, the host process stopped.
 
-- **A count the host sums or multiplies from a guest's values is checked.** A
-  WASI 0.1 gather or scatter stops short before an iovec that would take its
-  u32 total past the range, a `stream.read` / `stream.write` of more than
-  2^28 − 1 elements traps as the spec says, and a component-graph list param
-  whose byte size passes u32 traps as its memory access.
+- **More host arithmetic on a guest's values is checked.** A WASI 0.1 gather
+  or scatter stops short before an iovec that would take its u32 total past
+  the range, a `stream.read` / `stream.write` of more than 2^28 − 1 elements
+  traps as the spec says, a component-graph list param whose byte size passes
+  u32 traps as its memory access, and a WASI 0.1 call sees only the first
+  4 GiB of a 64-bit memory, the part its pointers address.
 
 ### Documentation
 

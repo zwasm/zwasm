@@ -19,7 +19,8 @@ const wasi_fd = @import("../wasi/fd.zig");
 const wasi_proc = @import("../wasi/proc.zig");
 const wasi_clocks = @import("../wasi/clocks.zig");
 const wasi_path = @import("../wasi/path.zig");
-const Errno = @import("../wasi/preview1.zig").Errno;
+const p1 = @import("../wasi/preview1.zig");
+const Errno = p1.Errno;
 
 const testing = std.testing;
 
@@ -180,7 +181,7 @@ fn thunkFdWrite(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const ciovec_count = rt.popOperand().u32;
     const ciovec_ptr = rt.popOperand().u32;
     const fd = rt.popOperand().u32;
-    const errno = wasi_fd.fdWrite(host, rt.memory, fd, ciovec_ptr, ciovec_count, nwritten_ptr);
+    const errno = wasi_fd.fdWrite(host, p1.addressable(rt.memory), fd, ciovec_ptr, ciovec_count, nwritten_ptr);
     try rt.pushOperand(.{ .i32 = @intCast(@intFromEnum(errno)) });
 }
 
@@ -200,25 +201,25 @@ fn thunkArgsSizesGet(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const buf_size_ptr = rt.popOperand().u32;
     const argc_ptr = rt.popOperand().u32;
-    return pushErrno(rt, wasi_proc.argsSizesGet(host, rt.memory, argc_ptr, buf_size_ptr));
+    return pushErrno(rt, wasi_proc.argsSizesGet(host, p1.addressable(rt.memory), argc_ptr, buf_size_ptr));
 }
 fn thunkArgsGet(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const argv_buf_ptr = rt.popOperand().u32;
     const argv_ptr = rt.popOperand().u32;
-    return pushErrno(rt, wasi_proc.argsGet(host, rt.memory, argv_ptr, argv_buf_ptr));
+    return pushErrno(rt, wasi_proc.argsGet(host, p1.addressable(rt.memory), argv_ptr, argv_buf_ptr));
 }
 fn thunkEnvironSizesGet(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const buf_size_ptr = rt.popOperand().u32;
     const count_ptr = rt.popOperand().u32;
-    return pushErrno(rt, wasi_proc.environSizesGet(host, rt.memory, count_ptr, buf_size_ptr));
+    return pushErrno(rt, wasi_proc.environSizesGet(host, p1.addressable(rt.memory), count_ptr, buf_size_ptr));
 }
 fn thunkEnvironGet(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const environ_buf_ptr = rt.popOperand().u32;
     const environ_ptr = rt.popOperand().u32;
-    return pushErrno(rt, wasi_proc.environGet(host, rt.memory, environ_ptr, environ_buf_ptr));
+    return pushErrno(rt, wasi_proc.environGet(host, p1.addressable(rt.memory), environ_ptr, environ_buf_ptr));
 }
 
 // clock / random / poll thunks
@@ -232,19 +233,19 @@ fn thunkClockTimeGet(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const time_ptr = rt.popOperand().u32;
     const precision = rt.popOperand().u64;
     const clock_id = rt.popOperand().u32;
-    return pushErrno(rt, wasi_clocks.clockTimeGet(host, rt.memory, clock_id, precision, time_ptr));
+    return pushErrno(rt, wasi_clocks.clockTimeGet(host, p1.addressable(rt.memory), clock_id, precision, time_ptr));
 }
 fn thunkClockResGet(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const resolution_ptr = rt.popOperand().u32;
     const clock_id = rt.popOperand().u32;
-    return pushErrno(rt, wasi_clocks.clockResGet(host, rt.memory, clock_id, resolution_ptr));
+    return pushErrno(rt, wasi_clocks.clockResGet(host, p1.addressable(rt.memory), clock_id, resolution_ptr));
 }
 fn thunkRandomGet(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const buf_len = rt.popOperand().u32;
     const buf_ptr = rt.popOperand().u32;
-    return pushErrno(rt, wasi_clocks.randomGet(host, rt.memory, buf_ptr, buf_len));
+    return pushErrno(rt, wasi_clocks.randomGet(host, p1.addressable(rt.memory), buf_ptr, buf_len));
 }
 fn thunkPollOneoff(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
@@ -252,7 +253,7 @@ fn thunkPollOneoff(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const nsubscriptions = rt.popOperand().u32;
     const out_ptr = rt.popOperand().u32;
     const in_ptr = rt.popOperand().u32;
-    const errno = wasi_clocks.pollOneoff(host, rt.memory, in_ptr, out_ptr, nsubscriptions, nevents_ptr, rt.interrupt);
+    const errno = wasi_clocks.pollOneoff(host, p1.addressable(rt.memory), in_ptr, out_ptr, nsubscriptions, nevents_ptr, rt.interrupt);
     if (errno == .intr) return runtime.Trap.Interrupted;
     return pushErrno(rt, errno);
 }
@@ -264,7 +265,7 @@ fn thunkFdRead(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const iovec_count = rt.popOperand().u32;
     const iovec_ptr = rt.popOperand().u32;
     const fd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_fd.fdRead(host, rt.memory, fd, iovec_ptr, iovec_count, nread_ptr));
+    return pushErrno(rt, wasi_fd.fdRead(host, p1.addressable(rt.memory), fd, iovec_ptr, iovec_count, nread_ptr));
 }
 fn thunkFdClose(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
@@ -303,7 +304,7 @@ fn thunkFdReaddir(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const buf_len = rt.popOperand().u32;
     const buf_ptr = rt.popOperand().u32;
     const fd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_fd.fdReaddir(host, rt.memory, fd, buf_ptr, buf_len, cookie, bufused_ptr));
+    return pushErrno(rt, wasi_fd.fdReaddir(host, p1.addressable(rt.memory), fd, buf_ptr, buf_len, cookie, bufused_ptr));
 }
 fn thunkFdFilestatSetSize(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
@@ -333,7 +334,7 @@ fn thunkFdPread(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const iovec_count = rt.popOperand().u32;
     const iovec_ptr = rt.popOperand().u32;
     const fd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_fd.fdPread(host, rt.memory, fd, iovec_ptr, iovec_count, offset, nread_ptr));
+    return pushErrno(rt, wasi_fd.fdPread(host, p1.addressable(rt.memory), fd, iovec_ptr, iovec_count, offset, nread_ptr));
 }
 fn thunkFdPwrite(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
@@ -342,7 +343,7 @@ fn thunkFdPwrite(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const ciovec_count = rt.popOperand().u32;
     const ciovec_ptr = rt.popOperand().u32;
     const fd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_fd.fdPwrite(host, rt.memory, fd, ciovec_ptr, ciovec_count, offset, nwritten_ptr));
+    return pushErrno(rt, wasi_fd.fdPwrite(host, p1.addressable(rt.memory), fd, ciovec_ptr, ciovec_count, offset, nwritten_ptr));
 }
 fn thunkSockAccept(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
@@ -388,19 +389,19 @@ fn thunkFdSeek(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const whence: u8 = @intCast(rt.popOperand().u32 & 0xFF);
     const offset = rt.popOperand().i64;
     const fd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_fd.fdSeek(host, rt.memory, fd, offset, whence, new_pos_ptr));
+    return pushErrno(rt, wasi_fd.fdSeek(host, p1.addressable(rt.memory), fd, offset, whence, new_pos_ptr));
 }
 fn thunkFdTell(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const pos_ptr = rt.popOperand().u32;
     const fd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_fd.fdTell(host, rt.memory, fd, pos_ptr));
+    return pushErrno(rt, wasi_fd.fdTell(host, p1.addressable(rt.memory), fd, pos_ptr));
 }
 fn thunkFdFdstatGet(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const fdstat_ptr = rt.popOperand().u32;
     const fd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_fd.fdFdstatGet(host, rt.memory, fd, fdstat_ptr));
+    return pushErrno(rt, wasi_fd.fdFdstatGet(host, p1.addressable(rt.memory), fd, fdstat_ptr));
 }
 fn thunkFdFdstatSetFlags(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
@@ -419,21 +420,21 @@ fn thunkPathOpen(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const path_ptr = rt.popOperand().u32;
     const dirflags = rt.popOperand().u32;
     const dirfd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_fd.pathOpen(host, rt.memory, dirfd, dirflags, path_ptr, path_len, oflags, fs_rights_base, fs_rights_inheriting, fdflags, opened_fd_ptr));
+    return pushErrno(rt, wasi_fd.pathOpen(host, p1.addressable(rt.memory), dirfd, dirflags, path_ptr, path_len, oflags, fs_rights_base, fs_rights_inheriting, fdflags, opened_fd_ptr));
 }
 
 fn thunkFdPrestatGet(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const prestat_ptr = rt.popOperand().u32;
     const fd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_fd.fdPrestatGet(host, rt.memory, fd, prestat_ptr));
+    return pushErrno(rt, wasi_fd.fdPrestatGet(host, p1.addressable(rt.memory), fd, prestat_ptr));
 }
 fn thunkFdPrestatDirName(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const path_len = rt.popOperand().u32;
     const path_ptr = rt.popOperand().u32;
     const fd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_fd.fdPrestatDirName(host, rt.memory, fd, path_ptr, path_len));
+    return pushErrno(rt, wasi_fd.fdPrestatDirName(host, p1.addressable(rt.memory), fd, path_ptr, path_len));
 }
 fn thunkSchedYield(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     _ = ctx;
@@ -443,28 +444,28 @@ fn thunkFdFilestatGet(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const filestat_ptr = rt.popOperand().u32;
     const fd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_fd.fdFilestatGet(host, rt.memory, fd, filestat_ptr));
+    return pushErrno(rt, wasi_fd.fdFilestatGet(host, p1.addressable(rt.memory), fd, filestat_ptr));
 }
 fn thunkPathUnlinkFile(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const path_len = rt.popOperand().u32;
     const path_ptr = rt.popOperand().u32;
     const dirfd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_fd.pathUnlinkFile(host, rt.memory, dirfd, path_ptr, path_len));
+    return pushErrno(rt, wasi_fd.pathUnlinkFile(host, p1.addressable(rt.memory), dirfd, path_ptr, path_len));
 }
 fn thunkPathCreateDirectory(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const path_len = rt.popOperand().u32;
     const path_ptr = rt.popOperand().u32;
     const dirfd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_path.pathCreateDirectory(host, rt.memory, dirfd, path_ptr, path_len));
+    return pushErrno(rt, wasi_path.pathCreateDirectory(host, p1.addressable(rt.memory), dirfd, path_ptr, path_len));
 }
 fn thunkPathRemoveDirectory(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
     const path_len = rt.popOperand().u32;
     const path_ptr = rt.popOperand().u32;
     const dirfd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_path.pathRemoveDirectory(host, rt.memory, dirfd, path_ptr, path_len));
+    return pushErrno(rt, wasi_path.pathRemoveDirectory(host, p1.addressable(rt.memory), dirfd, path_ptr, path_len));
 }
 fn thunkPathRename(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
@@ -474,7 +475,7 @@ fn thunkPathRename(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const old_len = rt.popOperand().u32;
     const old_ptr = rt.popOperand().u32;
     const old_dirfd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_path.pathRename(host, rt.memory, old_dirfd, old_ptr, old_len, new_dirfd, new_ptr, new_len));
+    return pushErrno(rt, wasi_path.pathRename(host, p1.addressable(rt.memory), old_dirfd, old_ptr, old_len, new_dirfd, new_ptr, new_len));
 }
 fn thunkPathLink(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
@@ -485,7 +486,7 @@ fn thunkPathLink(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const old_ptr = rt.popOperand().u32;
     const old_flags = rt.popOperand().u32;
     const old_dirfd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_path.pathLink(host, rt.memory, old_dirfd, old_flags, old_ptr, old_len, new_dirfd, new_ptr, new_len));
+    return pushErrno(rt, wasi_path.pathLink(host, p1.addressable(rt.memory), old_dirfd, old_flags, old_ptr, old_len, new_dirfd, new_ptr, new_len));
 }
 fn thunkPathSymlink(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
@@ -494,7 +495,7 @@ fn thunkPathSymlink(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const dirfd = rt.popOperand().u32;
     const target_len = rt.popOperand().u32;
     const target_ptr = rt.popOperand().u32;
-    return pushErrno(rt, wasi_path.pathSymlink(host, rt.memory, target_ptr, target_len, dirfd, path_ptr, path_len));
+    return pushErrno(rt, wasi_path.pathSymlink(host, p1.addressable(rt.memory), target_ptr, target_len, dirfd, path_ptr, path_len));
 }
 fn thunkPathReadlink(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
@@ -504,7 +505,7 @@ fn thunkPathReadlink(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const path_len = rt.popOperand().u32;
     const path_ptr = rt.popOperand().u32;
     const dirfd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_path.pathReadlink(host, rt.memory, dirfd, path_ptr, path_len, buf_ptr, buf_len, bufused_ptr));
+    return pushErrno(rt, wasi_path.pathReadlink(host, p1.addressable(rt.memory), dirfd, path_ptr, path_len, buf_ptr, buf_len, bufused_ptr));
 }
 fn thunkPathFilestatGet(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
@@ -513,7 +514,7 @@ fn thunkPathFilestatGet(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const path_ptr = rt.popOperand().u32;
     const lookupflags = rt.popOperand().u32;
     const dirfd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_path.pathFilestatGet(host, rt.memory, dirfd, lookupflags, path_ptr, path_len, filestat_ptr));
+    return pushErrno(rt, wasi_path.pathFilestatGet(host, p1.addressable(rt.memory), dirfd, lookupflags, path_ptr, path_len, filestat_ptr));
 }
 fn thunkPathFilestatSetTimes(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const host: *wasi_host.Host = @ptrCast(@alignCast(ctx));
@@ -524,7 +525,7 @@ fn thunkPathFilestatSetTimes(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!voi
     const path_ptr = rt.popOperand().u32;
     const lookupflags = rt.popOperand().u32;
     const dirfd = rt.popOperand().u32;
-    return pushErrno(rt, wasi_path.pathFilestatSetTimes(host, rt.memory, dirfd, lookupflags, path_ptr, path_len, atim, mtim, fst_flags));
+    return pushErrno(rt, wasi_path.pathFilestatSetTimes(host, p1.addressable(rt.memory), dirfd, lookupflags, path_ptr, path_len, atim, mtim, fst_flags));
 }
 
 /// Map a WASI snapshot-1 import name to its host thunk, or

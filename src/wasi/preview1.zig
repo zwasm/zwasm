@@ -418,6 +418,24 @@ pub const Prestat = extern struct {
 
 const testing = std.testing;
 
+/// The part of a guest memory a WASI 0.1 call can address. Its pointers are
+/// u32, so a memory64 past 4 GiB is clipped to the first 2^32 bytes: the
+/// handlers' u32 address arithmetic holds only while `mem.len <= 2^32`.
+pub fn addressable(mem: []u8) []u8 {
+    const limit: u64 = 1 << 32;
+    return if (mem.len > limit) mem[0..@intCast(limit)] else mem;
+}
+
+test "addressable: a memory past 4 GiB is clipped to the 2^32 bytes a u32 pointer reaches" {
+    var small: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 16), addressable(&small).len);
+    // Never dereferenced: only the slice's bounds are under test.
+    const big = @as([*]u8, @ptrFromInt(0x1000))[0 .. (1 << 32) + 1];
+    try std.testing.expectEqual(@as(usize, 1 << 32), addressable(big).len);
+    try std.testing.expectEqual(big.ptr, addressable(big).ptr);
+    try std.testing.expectEqual(@as(usize, 1 << 32), addressable(big[0 .. 1 << 32]).len);
+}
+
 test "Iovec / Ciovec are 8 bytes (u32 buf + u32 len)" {
     try testing.expectEqual(@as(usize, 8), @sizeOf(Iovec));
     try testing.expectEqual(@as(usize, 8), @sizeOf(Ciovec));
