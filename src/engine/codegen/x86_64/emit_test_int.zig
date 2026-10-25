@@ -167,7 +167,7 @@ test "regalloc: every register-homed local sits in a callee-saved slot below 4 (
     if (comptime builtin.target.cpu.arch != .x86_64) return;
     const local_homing = @import("../../../ir/analysis/local_homing.zig");
     const sig: zir.FuncType = .{ .params = &.{}, .results = &.{.i32} };
-    var f = ZirFunc.init(0, sig, &([_]zir.ValType{.i32} ** 10));
+    var f = ZirFunc.init(0, sig, &@as([10]zir.ValType, @splat(.i32)));
     defer f.deinit(testing.allocator);
     for (0..10) |i| {
         try f.instrs.append(testing.allocator, .{ .op = .@"i32.const", .payload = @intCast(i) });
@@ -904,7 +904,7 @@ test "compile: function with 16 locals compiles (lifts the i8 cap)" {
     // Pre-7.10-g this surfaced UnsupportedOp[total_locals>15];
     // the disp32 form widening lifts the cap to ~268M slots.
     const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
-    const sixteen_locals = [_]zir.ValType{.i32} ** 16;
+    const sixteen_locals: [16]zir.ValType = @splat(.i32);
     var f = ZirFunc.init(0, sig, &sixteen_locals);
     defer f.deinit(testing.allocator);
     try f.instrs.append(testing.allocator, .{ .op = .end });
@@ -1893,7 +1893,7 @@ fn prologueFrameImm32(bytes: []const u8) u32 {
 test "compile: #495 — the stack probe compares RSP - frame_bytes, for a frame over the guard headroom" {
     // 2100 i64 locals = 16800 bytes of locals, past the 16 KiB headroom; the
     // self-call gives the function R15 and so the probe.
-    const locals = [_]zir.ValType{.i64} ** 2100;
+    const locals: [2100]zir.ValType = @splat(.i64);
     const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
     var f = ZirFunc.init(0, sig, &locals);
     defer f.deinit(testing.allocator);
@@ -1921,7 +1921,7 @@ test "compile: #495 — a call-free function takes R15 and the probe once its fr
     comptime std.debug.assert(stack_limit.LEAF_FRAME_MAX == 1024 * 8);
     const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
     inline for (.{ 1024, 1026 }) |n| {
-        const locals = [_]zir.ValType{.i64} ** n;
+        const locals: [n]zir.ValType = @splat(.i64);
         var f = ZirFunc.init(0, sig, &locals);
         defer f.deinit(testing.allocator);
         try f.instrs.append(testing.allocator, .{ .op = .end });
@@ -1951,13 +1951,17 @@ fn compileAndDeinit(allocator: Allocator, f: *const ZirFunc) !void {
 
 test "compile: #495 — every allocation failure while a large call-free frame takes R15 frees cleanly" {
     // Covers the failed recompute of the local layout for the R15 base.
-    const locals = [_]zir.ValType{.i64} ** 1026;
+    const locals: [1026]zir.ValType = @splat(.i64);
     const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
     var f = ZirFunc.init(0, sig, &locals);
     defer f.deinit(testing.allocator);
     try f.instrs.append(testing.allocator, .{ .op = .end });
     f.liveness = .{ .ranges = &.{} };
-    try std.testing.checkAllAllocationFailures(testing.allocator, compileAndDeinit, .{&f});
+    // Zig 0.17.0's check lets resizes reach `testing.allocator`, whose in-place growth depends
+    // on earlier runs, so the count it relies on varies (ziglang/zig#37141). Refusing them is
+    // the upstream fix (#37142, in 0.17.1); drop this wrapper when the pin reaches it.
+    var no_resize: std.testing.FailingAllocator = .init(testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), compileAndDeinit, .{&f});
 }
 
 test "compile: try_table emit populates EmitOutput.exception_handlers" {

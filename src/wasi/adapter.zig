@@ -975,7 +975,7 @@ test "classify: cli/environment + terminal + check-write (E2)" {
 test "D-307: errno → P2 filesystem error-code ordinals" {
     // Spec-pinned ordinals (wasi:filesystem/types error-code declaration order).
     try testing.expectEqual(P2ErrorCode.no_entry, errnoToP2ErrorCode(.noent));
-    try testing.expectEqual(@as(u8, 20), @intFromEnum(errnoToP2ErrorCode(.noent)));
+    try testing.expectEqual(@as(u8, 20), @backingInt(errnoToP2ErrorCode(.noent)));
     try testing.expectEqual(P2ErrorCode.access, errnoToP2ErrorCode(.acces));
     try testing.expectEqual(P2ErrorCode.bad_descriptor, errnoToP2ErrorCode(.badf));
     try testing.expectEqual(P2ErrorCode.exist, errnoToP2ErrorCode(.exist));
@@ -984,12 +984,12 @@ test "D-307: errno → P2 filesystem error-code ordinals" {
     // Ordinals from `wasm-tools component wit` on a rustc 1.97 wasm32-wasip2
     // guest (wasi:filesystem/types@0.2.0), spot-checked at the ends and
     // around `no-lock` / `no-tty`, which the P1 map never names.
-    try testing.expectEqual(@as(u8, 0), @intFromEnum(P2ErrorCode.access));
-    try testing.expectEqual(@as(u8, 21), @intFromEnum(P2ErrorCode.no_lock));
-    try testing.expectEqual(@as(u8, 27), @intFromEnum(P2ErrorCode.unsupported));
-    try testing.expectEqual(@as(u8, 28), @intFromEnum(P2ErrorCode.no_tty));
-    try testing.expectEqual(@as(u8, 36), @intFromEnum(P2ErrorCode.cross_device));
-    try testing.expectEqual(37, @typeInfo(P2ErrorCode).@"enum".fields.len);
+    try testing.expectEqual(@as(u8, 0), @backingInt(P2ErrorCode.access));
+    try testing.expectEqual(@as(u8, 21), @backingInt(P2ErrorCode.no_lock));
+    try testing.expectEqual(@as(u8, 27), @backingInt(P2ErrorCode.unsupported));
+    try testing.expectEqual(@as(u8, 28), @backingInt(P2ErrorCode.no_tty));
+    try testing.expectEqual(@as(u8, 36), @backingInt(P2ErrorCode.cross_device));
+    try testing.expectEqual(37, @typeInfo(P2ErrorCode).@"enum".field_names.len);
     // Errnos with no P2 counterpart fall back to `io`.
     try testing.expectEqual(P2ErrorCode.io, errnoToP2ErrorCode(.connreset));
 }

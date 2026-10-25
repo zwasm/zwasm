@@ -117,7 +117,7 @@ fn grow(comptime Slot: type, live: **Table(Slot), empty: Slot) error{OutOfMemory
     @atomicStore(*Table(Slot), live, next, .release);
 }
 
-var rt_gen0_slots: [initial_slots]?*jit_abi.JitRuntime = .{null} ** initial_slots;
+var rt_gen0_slots: [initial_slots]?*jit_abi.JitRuntime = @splat(null);
 var rt_gen0: Table(?*jit_abi.JitRuntime) = .{ .slots = &rt_gen0_slots, .prev = null };
 var rts: *Table(?*jit_abi.JitRuntime) = &rt_gen0;
 
@@ -142,7 +142,7 @@ var rts: *Table(?*jit_abi.JitRuntime) = &rt_gen0;
 /// already sat, and it costs one extra load rather than a retry loop on the
 /// allocation-free unwind path.
 const ThunkRange = struct { seq: usize = 0, start: usize = 0, len: usize = 0 };
-var thunk_gen0_slots: [initial_slots]ThunkRange = .{ThunkRange{}} ** initial_slots;
+var thunk_gen0_slots: [initial_slots]ThunkRange = @splat(ThunkRange{});
 var thunk_gen0: Table(ThunkRange) = .{ .slots = &thunk_gen0_slots, .prev = null };
 var thunk_ranges: *Table(ThunkRange) = &thunk_gen0;
 

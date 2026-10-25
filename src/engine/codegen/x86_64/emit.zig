@@ -58,8 +58,8 @@ const build_options = @import("build_options");
 // dispatch_collector's comptime `enabledByBuild`), so it needs an explicit
 // `if (comptime wasm_v3_plus)` to DCE in `-Dwasm=v1_0` — else the x86_64 v1_0
 // binary retains dead wasm_3_0 codegen (caught by check_build_dce on x86).
-const wasm_v3_plus = @intFromEnum(build_options.wasm_level) >=
-    @intFromEnum(@TypeOf(build_options.wasm_level).v3_0);
+const wasm_v3_plus = @backingInt(build_options.wasm_level) >=
+    @backingInt(@TypeOf(build_options.wasm_level).v3_0);
 const jit_abi = @import("../shared/jit_abi.zig");
 const exception_table = @import("../shared/exception_table.zig");
 const types = @import("types.zig");

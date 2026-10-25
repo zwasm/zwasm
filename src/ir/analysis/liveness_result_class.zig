@@ -81,12 +81,13 @@ const testing = std.testing;
 
 test "ofOpName: every op stackEffect gives a push resolves to a class" {
     const operand_typed = [_]ZirOp{ .@"local.get", .@"global.get", .select, .select_typed, .@"struct.get", .@"array.get" };
-    inline for (@typeInfo(ZirOp).@"enum".fields) |f| {
-        const op: ZirOp = @enumFromInt(f.value);
+    const ti = @typeInfo(ZirOp).@"enum";
+    inline for (ti.field_names, ti.field_values) |f_name, f_value| {
+        const op: ZirOp = @fromBackingInt(@intCast(f_value));
         const pushes = if (stack_effect.stackEffect(op)) |e| e.pushes else 0;
         if (pushes > 0 and std.mem.findScalar(ZirOp, &operand_typed, op) == null) {
             if (ofOpName(op) == null) {
-                std.debug.print("no result class for {s}\n", .{f.name});
+                std.debug.print("no result class for {s}\n", .{f_name});
                 return error.TestUnexpectedResult;
             }
         }

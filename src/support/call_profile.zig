@@ -22,7 +22,7 @@ pub const max_funcs: usize = 16384;
 
 /// Process-global counter array. The JIT prologue emits an absolute-address
 /// `INC qword [&counts + idx*8]`; `@intFromPtr(&counts)` gives that base.
-pub var counts: [max_funcs]u64 = [_]u64{0} ** max_funcs;
+pub var counts: [max_funcs]u64 = @splat(0);
 
 /// Interp-side bump (the JIT bumps via emitted code). Caller guards with
 /// `dbg.on("jit.callcount")` so the common path stays branch-free here.
@@ -52,8 +52,8 @@ pub fn reset() void {
 // JIT run records the FINAL value + total sets of each low global. Diff against
 // the interp's per-set trace (g1: 0→1→0) to see if the asyncify globals diverge.
 pub const max_globals: usize = 8;
-pub var g_last: [max_globals]i64 = [_]i64{0} ** max_globals;
-pub var g_count: [max_globals]u64 = [_]u64{0} ** max_globals;
+pub var g_last: [max_globals]i64 = @splat(0);
+pub var g_count: [max_globals]u64 = @splat(0);
 
 /// Print each touched low global as `[glast] g<N> last=<V> sets=<C>`.
 pub fn gdump() void {

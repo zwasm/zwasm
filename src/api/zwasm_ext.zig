@@ -548,7 +548,7 @@ fn trapKindOfHostCallback(engine: u8) !i32 {
 test "#331: a guest `unreachable` reports unreachable_ on every engine" {
     for (all_engines) |eng| {
         const kind = try trapKindOfExport0(eng, &guest_unreachable_wasm, false, null);
-        try testing.expectEqual(@as(i32, @intFromEnum(TrapKind.unreachable_)), kind);
+        try testing.expectEqual(@as(i32, @backingInt(TrapKind.unreachable_)), kind);
     }
 }
 
@@ -563,10 +563,10 @@ test "#331: proc_exit reports wasi_exit, not unreachable, and exit 0 is treated 
 
         // The case a fix that only chases "exit 3" would drop: a successful
         // exit runs the same path and must classify the same way.
-        try testing.expectEqual(@as(i32, @intFromEnum(TrapKind.wasi_exit)), kind0);
+        try testing.expectEqual(@as(i32, @backingInt(TrapKind.wasi_exit)), kind0);
         try testing.expectEqual(kind0, kind3);
         // Separable from a guest fault — the whole point of the issue.
-        try testing.expect(kind0 != @as(i32, @intFromEnum(TrapKind.unreachable_)));
+        try testing.expect(kind0 != @as(i32, @backingInt(TrapKind.unreachable_)));
         // The kind carries no exit status; #330's accessor still does (both
         // directions, so a 0 status is not confused with "nothing recorded").
         try testing.expectEqual(@as(u32, 0), code0);
@@ -577,8 +577,8 @@ test "#331: proc_exit reports wasi_exit, not unreachable, and exit 0 is treated 
 test "#331: a host callback's trap reports binding_error, not unreachable" {
     for (all_engines) |eng| {
         const kind = try trapKindOfHostCallback(eng);
-        try testing.expectEqual(@as(i32, @intFromEnum(TrapKind.binding_error)), kind);
-        try testing.expect(kind != @as(i32, @intFromEnum(TrapKind.unreachable_)));
+        try testing.expectEqual(@as(i32, @backingInt(TrapKind.binding_error)), kind);
+        try testing.expect(kind != @as(i32, @backingInt(TrapKind.unreachable_)));
     }
 }
 
@@ -701,7 +701,7 @@ test "#216: a cross-store module refusal reports its trap with a null trap_out" 
     // handle's, so it fires anyway.
     try testing.expect(zwasm_instance_new_ex(b, m, null, null, engine_auto) == null);
     try testing.expectEqual(@as(u32, 1), refusal_traps);
-    try testing.expectEqual(@as(i32, @intFromEnum(TrapKind.binding_error)), refusal_kind);
+    try testing.expectEqual(@as(i32, @backingInt(TrapKind.binding_error)), refusal_kind);
 
     // …and exactly once more when the caller DOES want the handle, not twice.
     var trap: ?*trap_surface.Trap = null;

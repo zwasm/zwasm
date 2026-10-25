@@ -29,7 +29,7 @@ const Runtime = runtime.Runtime;
 const Trap = runtime.Trap;
 
 inline fn op(o: ZirOp) usize {
-    return @intFromEnum(o);
+    return @backingInt(o);
 }
 
 pub fn register(table: *DispatchTable) void {

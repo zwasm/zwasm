@@ -316,7 +316,7 @@ fn run(init: std.process.Init) !u8 {
     // Per row, so a row the corpora no longer hold is a finding too: a
     // divergence pinned against a fixture that left cannot be re-measured,
     // and the row would sit here excusing nothing.
-    var hits_buf = [_]u32{0} ** known_table.len;
+    var hits_buf: [known_table.len]u32 = @splat(0);
     const hits: []u32 = &hits_buf;
 
     // Before the corpora, not after: an expired row is a bookkeeping failure

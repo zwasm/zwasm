@@ -562,7 +562,7 @@ test "pathFilestatGet / pathFilestatSetTimes: stat a path + set its mtim" {
     writeGuestPath(&mem, 0, "f.txt");
     const FS = 16; // filestat_ptr
     try testing.expectEqual(p1.Errno.success, pathFilestatGet(&h, &mem, dirfd, p1.LOOKUPFLAGS_SYMLINK_FOLLOW, 0, 5, FS));
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.regular_file)), mem[FS + 16]); // filetype @+16
+    try testing.expectEqual(@as(u8, @backingInt(p1.Filetype.regular_file)), mem[FS + 16]); // filetype @+16
     try testing.expectEqual(@as(u64, 5), std.mem.readInt(u64, mem[FS + 32 ..][0..8], .little)); // size @+32
 
     // Set mtim to 3.0s (whole second) and read it back @+48.

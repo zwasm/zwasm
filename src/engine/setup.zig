@@ -912,7 +912,7 @@ pub fn setupRuntimeLinked(
     // Per-table starting offsets into extra_funcptrs/typeidxs.
     // 16-table cap → fixed stack array; over-cap modules trap.
     if (table_metas.len > 16) return Error.UnsupportedEntrySignature;
-    var extra_offs: [16]usize = [_]usize{0} ** 16;
+    var extra_offs: [16]usize = @splat(0);
     if (table_metas.len > 1) {
         var off: usize = 0;
         for (table_metas[1..], 1..) |tm, k| {

@@ -172,7 +172,7 @@ pub fn driveScheduler(ctx: anytype, table: *TaskTable) !void {
                 .ready => {
                     any_live = true;
                     progressed = true;
-                    const next = try ctx.invokeTaskCallback(task.callback_funcidx, @intFromEnum(EventCode.none), 0, 0);
+                    const next = try ctx.invokeTaskCallback(task.callback_funcidx, @backingInt(EventCode.none), 0, 0);
                     foldResult(task, try unpackCallbackResult(next));
                 },
                 .waiting => {
@@ -180,7 +180,7 @@ pub fn driveScheduler(ctx: anytype, table: *TaskTable) !void {
                     if (try ctx.pollSet(task.set_index)) |ev| {
                         progressed = true;
                         if (@import("../../support/dbg.zig").on("async.sched")) std.debug.print("[sched] deliver code={s} idx={d} payload=0x{x} to task {d}\n", .{ @tagName(ev.code), ev.index, ev.payload, i });
-                        const next = try ctx.invokeTaskCallback(task.callback_funcidx, @intFromEnum(ev.code), ev.index, ev.payload);
+                        const next = try ctx.invokeTaskCallback(task.callback_funcidx, @backingInt(ev.code), ev.index, ev.payload);
                         if (@import("../../support/dbg.zig").on("async.sched")) std.debug.print("[sched] callback -> 0x{x}\n", .{next});
                         foldResult(task, try unpackCallbackResult(next));
                     }
@@ -376,7 +376,7 @@ pub const StreamFutureTable = struct {
             if (dl <= now_ns) {
                 end.deadline_ns = null;
                 end.subtask_state = .returned;
-                end.setPendingEvent(.{ .code = .subtask, .index = @intCast(i), .payload = @intFromEnum(SubtaskState.returned) });
+                end.setPendingEvent(.{ .code = .subtask, .index = @intCast(i), .payload = @backingInt(SubtaskState.returned) });
             } else if (nearest == null or dl < nearest.?) {
                 nearest = dl;
             }
@@ -658,7 +658,7 @@ pub const Subtask = struct {
     /// cannot touch that table).
     pub fn resolve(self: *Subtask, handle: u32, new_state: SubtaskState) []const u32 {
         self.state = new_state;
-        self.pending_event = .{ .code = .subtask, .index = handle, .payload = @intFromEnum(new_state) };
+        self.pending_event = .{ .code = .subtask, .index = handle, .payload = @backingInt(new_state) };
         return self.lenders.items;
     }
 
@@ -1199,7 +1199,7 @@ test "D-335 unit D-ζ: subtask state machine + lender tracking + resolve deliver
     const ev = st.takePendingEvent().?;
     try testing.expectEqual(EventCode.subtask, ev.code);
     try testing.expectEqual(@as(u32, 9), ev.index);
-    try testing.expectEqual(@as(u32, @intFromEnum(SubtaskState.returned)), ev.payload);
+    try testing.expectEqual(@as(u32, @backingInt(SubtaskState.returned)), ev.payload);
 }
 
 test "D-335 unit D-ε: future single-shot rendezvous delivers FUTURE_READ; writer observes reader-drop" {
@@ -1338,7 +1338,7 @@ const SchedCtx = struct {
     }
     fn invokeTaskCallback(self: *SchedCtx, funcidx: u32, event_code: u32, p1: u32, p2: u32) !u32 {
         _ = p2;
-        try self.invoked.append(self.alloc, .{ .code = @enumFromInt(event_code), .index = funcidx, .payload = p1 });
+        try self.invoked.append(self.alloc, .{ .code = @fromBackingInt(@intCast(event_code)), .index = funcidx, .payload = p1 });
         const r = self.cb_returns[self.next];
         self.next += 1;
         return r;
@@ -1517,7 +1517,7 @@ test "ADR-0205 D2: timer subtask fires at its deadline + reports the nearest fut
     const ev = e.pending_event.?;
     try testing.expectEqual(EventCode.subtask, ev.code);
     try testing.expectEqual(early, ev.index);
-    try testing.expectEqual(@as(u32, @intFromEnum(SubtaskState.returned)), ev.payload);
+    try testing.expectEqual(@as(u32, @backingInt(SubtaskState.returned)), ev.payload);
     // A joined set delivers it like any waitable event.
     var ws = WaitableSet.init(testing.allocator);
     defer ws.deinit();
@@ -1541,14 +1541,14 @@ test "ADR-0205 D2: driveScheduler retries a stalled pass when the ctx reports a 
             _ = funcidx;
             _ = p1;
             _ = p2;
-            std.debug.assert(event_code == @intFromEnum(EventCode.subtask));
+            std.debug.assert(event_code == @backingInt(EventCode.subtask));
             return 0; // EXIT
         }
         fn pollSet(self: *@This(), set_index: u32) !?EventTuple {
             std.debug.assert(set_index == 7);
             self.polls += 1;
             if (!self.timer_fired) return null;
-            return .{ .code = .subtask, .index = 3, .payload = @intFromEnum(SubtaskState.returned) };
+            return .{ .code = .subtask, .index = 3, .payload = @backingInt(SubtaskState.returned) };
         }
         fn waitForTimer(self: *@This()) !bool {
             if (self.timer_fired) return false;

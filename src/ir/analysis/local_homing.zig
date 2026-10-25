@@ -283,7 +283,7 @@ test "plan: f32/f64/v128/ref locals stay slot-homed (skipped)" {
 }
 
 test "plan: caps at max_homed" {
-    var f = freshFunc(&([_]ValType{.i32} ** 10));
+    var f = freshFunc(&@as([10]ValType, @splat(.i32)));
     defer f.deinit(testing.allocator);
     try f.instrs.append(testing.allocator, .{ .op = .@"i32.const", .payload = 0 });
     try f.instrs.append(testing.allocator, .{ .op = .end });

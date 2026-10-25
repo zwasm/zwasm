@@ -109,7 +109,7 @@ pub fn encShiftRCl(size: Width, kind: ShiftKind, dst: Gpr) EncodedInsn {
     // so REX.R = 0 and only REX.W + REX.B contribute.
     if (rexForRR(size, .rax, dst)) |rex| enc.push(rex);
     enc.push(0xD3);
-    enc.push(encodeModrm(0b11, @intFromEnum(kind), dst.low3()));
+    enc.push(encodeModrm(0b11, @backingInt(kind), dst.low3()));
     return enc;
 }
 

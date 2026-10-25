@@ -142,8 +142,8 @@ pub fn decode(alloc: Allocator, input: []const u8) Error!Component {
         const body = input[pos .. pos + size_usize];
         pos += size_usize;
 
-        if (id_byte > @intFromEnum(SectionId.value)) return Error.UnknownSectionId;
-        try sections.append(alloc, .{ .id = @enumFromInt(id_byte), .body = body });
+        if (id_byte > @backingInt(SectionId.value)) return Error.UnknownSectionId;
+        try sections.append(alloc, .{ .id = @fromBackingInt(@intCast(id_byte)), .body = body });
     }
 
     return .{ .input = input, .sections = sections };

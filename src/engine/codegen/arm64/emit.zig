@@ -69,8 +69,8 @@ const build_options = @import("build_options");
 /// comptime const keeps the 3.0 `*.emit` symbols out of `-Dwasm=v1_0|v2_0`
 /// binaries (ADR-0073 "absent from binary"; ADR-0130 / D-230 leak fix). The arms
 /// are unreachable in sub-3.0 builds anyway (feature_level_check forbids lowering).
-const wasm_v3_plus = @intFromEnum(build_options.wasm_level) >=
-    @intFromEnum(@TypeOf(build_options.wasm_level).v3_0);
+const wasm_v3_plus = @backingInt(build_options.wasm_level) >=
+    @backingInt(@TypeOf(build_options.wasm_level).v3_0);
 
 const op_throw = @import("ops/wasm_3_0/throw.zig");
 const op_throw_ref = @import("ops/wasm_3_0/throw_ref.zig");
@@ -1921,7 +1921,7 @@ pub fn compile(
                         const new_word: u32 = if ((orig >> 26) == 0b000101)
                             inst.encB(disp_words)
                         else blk: {
-                            const cond: inst.Cond = @enumFromInt(@as(u4, @intCast(orig & 0xF)));
+                            const cond: inst.Cond = @fromBackingInt(@intCast(@as(u4, @intCast(orig & 0xF))));
                             break :blk inst.encBCond(cond, disp_words);
                         };
                         std.mem.writeInt(u32, buf.items[fx_byte..][0..4], new_word, .little);
@@ -1985,7 +1985,7 @@ pub fn compile(
                             const new_word: u32 = if ((orig >> 26) == 0b000101)
                                 inst.encB(disp_words)
                             else blk: {
-                                const cond: inst.Cond = @enumFromInt(@as(u4, @intCast(orig & 0xF)));
+                                const cond: inst.Cond = @fromBackingInt(@intCast(@as(u4, @intCast(orig & 0xF))));
                                 break :blk inst.encBCond(cond, disp_words);
                             };
                             std.mem.writeInt(u32, b.items[fx_byte..][0..4], new_word, .little);

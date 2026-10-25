@@ -332,7 +332,7 @@ const zir = @import("../../../ir/zir.zig");
 const regalloc = @import("../shared/regalloc.zig");
 const jit_abi = @import("../shared/jit_abi.zig");
 
-const zir_op_count = @typeInfo(zir.ZirOp).@"enum".fields.len;
+const zir_op_count = @typeInfo(zir.ZirOp).@"enum".field_names.len;
 
 /// What an op's handler writes outside the value it defines, stated as
 /// registers. The slot ids the regalloc fences follow from the pool, so a
@@ -348,11 +348,11 @@ const OpRegs = struct {
 /// moves its arguments in parallel (`gpr.ParallelMove`) and reserves nothing.
 const op_regs: [zir_op_count]OpRegs = blk: {
     @setEvalBranchQuota(100_000);
-    var t = [_]OpRegs{.{}} ** zir_op_count;
-    t[@intFromEnum(zir.ZirOp.@"memory.init")] = .{ .scratch = &.{ .rdi, .r8, .r9 } };
-    t[@intFromEnum(zir.ZirOp.@"table.set")] = .{ .scratch = &.{.r9} };
+    var t: [zir_op_count]OpRegs = @splat(.{});
+    t[@backingInt(zir.ZirOp.@"memory.init")] = .{ .scratch = &.{ .rdi, .r8, .r9 } };
+    t[@backingInt(zir.ZirOp.@"table.set")] = .{ .scratch = &.{.r9} };
     for ([_]zir.ZirOp{ .@"table.fill", .@"table.copy", .@"table.init" }) |op| {
-        t[@intFromEnum(op)] = .{ .scratch = &.{ .rsi, .rdi, .r8, .r9 }, .operand = &.{.r8} };
+        t[@backingInt(op)] = .{ .scratch = &.{ .rsi, .rdi, .r8, .r9 }, .operand = &.{.r8} };
     }
     // Callouts that route their operands into the argument registers one at a
     // time, so an early argument can land on a later operand.
@@ -360,10 +360,10 @@ const op_regs: [zir_op_count]OpRegs = blk: {
         .@"array.copy", .@"array.fill",     .@"array.init_data", .@"array.init_elem",
         .@"array.new",  .@"array.new_data", .@"array.new_elem",  .@"table.grow",
     }) |op| {
-        t[@intFromEnum(op)] = .{ .operand = &current.arg_gprs };
+        t[@backingInt(op)] = .{ .operand = &current.arg_gprs };
     }
     for (0..zir_op_count) |i| {
-        const op: zir.ZirOp = @enumFromInt(i);
+        const op: zir.ZirOp = @fromBackingInt(@intCast(i));
         if (jit_abi.isAtomicRmw(op) or jit_abi.isAtomicCmpxchg(op) or
             jit_abi.isAtomicNotify(op) or jit_abi.isAtomicWait(op))
         {
@@ -430,7 +430,7 @@ comptime {
 
 /// `shared/regalloc.zig::ScratchReservationFn` for x86_64.
 pub fn opScratchReservation(op: zir.ZirOp) regalloc.Reservation {
-    const i = @intFromEnum(op);
+    const i = @backingInt(op);
     return .{ .scratch = op_scratch_slots[i], .operand = op_operand_slots[i] };
 }
 
@@ -617,7 +617,7 @@ test "poolSlots: a register maps to its pool slot, one outside the pool to nothi
 
 test "opScratchReservation: every fenced slot holds a register its handler writes" {
     for (op_regs, 0..) |e, i| {
-        const res = opScratchReservation(@enumFromInt(i));
+        const res = opScratchReservation(@fromBackingInt(@intCast(i)));
         for (res.scratch) |sid| try testing.expect(std.mem.findScalar(Gpr, e.scratch, allocatable_gprs[sid]) != null);
         for (res.operand) |sid| try testing.expect(std.mem.findScalar(Gpr, e.operand, allocatable_gprs[sid]) != null);
     }
@@ -739,7 +739,7 @@ test "fence: table.grow — operands not in an argument register" {
 fn expectAtomicFamilyFenced(comptime pred: fn (zir.ZirOp) bool) !void {
     var n: usize = 0;
     for (0..zir_op_count) |i| {
-        const op: zir.ZirOp = @enumFromInt(i);
+        const op: zir.ZirOp = @fromBackingInt(@intCast(i));
         if (!pred(op)) continue;
         try expectFenced(op, false, arg_regs_in_pool);
         n += 1;

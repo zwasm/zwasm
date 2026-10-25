@@ -48,7 +48,7 @@ pub const HostErrorMap = *const fn (anyerror) anyerror;
 /// the function pointer compatible with `runtime.HostCall.fn_ptr`.
 pub fn thunkFor(comptime Sig: type) *const fn (*_runtime.Runtime, *anyopaque) anyerror!void {
     const fn_info = @typeInfo(Sig).@"fn";
-    if (fn_info.params.len == 0 or (fn_info.params[0].type orelse return undefined) != *Caller) {
+    if (fn_info.param_types.len == 0 or (fn_info.param_types[0] orelse return undefined) != *Caller) {
         // Caught at comptime when defineFunc validates; this guard
         // keeps the generated thunk well-formed in any path.
         @compileError("host fn must take *Caller as its first parameter");
@@ -61,10 +61,10 @@ pub fn thunkFor(comptime Sig: type) *const fn (*_runtime.Runtime, *anyopaque) an
             // params[0] is *Caller, supplied separately.
             const ArgsT = std.meta.ArgsTuple(Sig);
             var args: ArgsT = undefined;
-            comptime var i: comptime_int = fn_info.params.len;
+            comptime var i: comptime_int = fn_info.param_types.len;
             inline while (i > 1) {
                 i -= 1;
-                const PT = fn_info.params[i].type.?;
+                const PT = fn_info.param_types[i].?;
                 const v = rt.popOperand();
                 args[i] = runtimeToZig(PT, v);
             }
@@ -136,8 +136,8 @@ const HostFnError = _runtime.Trap || error{ProcExit};
 /// on a name it does not know), so any name outside `HostFnError` becomes `HostTrap`
 /// here — what the C `hostFuncThunk` returns for a callback's trap.
 fn hostFnError(err: anyerror) HostFnError {
-    inline for (@typeInfo(HostFnError).error_set.?) |e| {
-        const named = @field(HostFnError, e.name);
+    inline for (@typeInfo(HostFnError).error_set.error_names.?) |e_name| {
+        const named = @field(HostFnError, e_name);
         if (err == named) return named;
     }
     return error.HostTrap;
@@ -147,8 +147,8 @@ fn pushResult(rt: *_runtime.Runtime, comptime Ret: type, ret: Ret) !void {
     if (Ret == void) return;
     switch (@typeInfo(Ret)) {
         .@"struct" => |s| {
-            inline for (s.fields) |f| {
-                try rt.pushOperand(zigToRuntime(f.type, @field(ret, f.name)));
+            inline for (s.field_names, s.field_types) |f_name, f_type| {
+                try rt.pushOperand(zigToRuntime(f_type, @field(ret, f_name)));
             }
         },
         else => try rt.pushOperand(zigToRuntime(Ret, ret)),
@@ -184,11 +184,11 @@ fn zigToRuntime(comptime T: type, v: T) RuntimeValue {
 /// `instantiate` time.
 pub fn signatureOf(comptime Sig: type) struct { params: []const _zir.ValType, results: []const _zir.ValType } {
     const fn_info = @typeInfo(Sig).@"fn";
-    comptime var params_buf: [fn_info.params.len]_zir.ValType = undefined;
+    comptime var params_buf: [fn_info.param_types.len]_zir.ValType = undefined;
     comptime var n_params: usize = 0;
-    inline for (fn_info.params, 0..) |p, idx| {
+    inline for (fn_info.param_types, 0..) |p_type, idx| {
         if (idx == 0) continue; // Skip *Caller.
-        const PT = p.type orelse @compileError("host fn: anytype params unsupported");
+        const PT = p_type orelse @compileError("host fn: anytype params unsupported");
         params_buf[n_params] = zigTypeToValType(PT);
         n_params += 1;
     }
@@ -204,8 +204,8 @@ pub fn signatureOf(comptime Sig: type) struct { params: []const _zir.ValType, re
         break :blk empty;
     } else switch (@typeInfo(RetPayload)) {
         .@"struct" => |s| blk: {
-            var rs: [s.fields.len]_zir.ValType = undefined;
-            for (s.fields, 0..) |f, idx| rs[idx] = zigTypeToValType(f.type);
+            var rs: [s.field_names.len]_zir.ValType = undefined;
+            for (s.field_types, 0..) |f_type, idx| rs[idx] = zigTypeToValType(f_type);
             break :blk rs;
         },
         else => blk: {

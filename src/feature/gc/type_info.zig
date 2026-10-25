@@ -199,7 +199,7 @@ pub fn materialiseGcTypes(alloc: Allocator, types: sections.Types) Error!GcTypeI
     for (entries, 0..) |*entry, i| {
         const kind = types.kinds[i];
         entry.* = .{
-            .supertype_chain = [_]u32{0} ** 8,
+            .supertype_chain = @splat(0),
             .depth = 0,
             .kind = switch (kind) {
                 .func => .func,

@@ -46,8 +46,8 @@ const build_options = @import("build_options");
 /// 3.0-only relaxation; sub-3.0 builds require exact `sigEq`. Gating the
 /// `concreteReaches` arm behind this comptime const keeps the 3.0 symbol out of
 /// `-Dwasm=v1_0|v2_0` binaries (ADR-0073 "absent from binary"; ADR-0129 leak fix).
-const wasm_v3_plus = @intFromEnum(build_options.wasm_level) >=
-    @intFromEnum(@TypeOf(build_options.wasm_level).v3_0);
+const wasm_v3_plus = @backingInt(build_options.wasm_level) >=
+    @backingInt(@TypeOf(build_options.wasm_level).v3_0);
 
 const dispatch = @import("../ir/dispatch_table.zig");
 const dbg = @import("../support/dbg.zig");
@@ -139,7 +139,7 @@ pub fn register(table: *DispatchTable) void {
 }
 
 inline fn op(t: ZirOp) usize {
-    return @intFromEnum(t);
+    return @backingInt(t);
 }
 
 // ============================================================

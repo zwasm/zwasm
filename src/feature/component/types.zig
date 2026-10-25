@@ -989,7 +989,7 @@ pub const Error = error{
 
 fn primFromOpcode(op: u8) Error!PrimValType {
     return switch (op) {
-        0x7f, 0x7e, 0x7d, 0x7c, 0x7b, 0x7a, 0x79, 0x78, 0x77, 0x76, 0x75, 0x74, 0x73, 0x64 => @enumFromInt(op),
+        0x7f, 0x7e, 0x7d, 0x7c, 0x7b, 0x7a, 0x79, 0x78, 0x77, 0x76, 0x75, 0x74, 0x73, 0x64 => @fromBackingInt(@intCast(op)),
         // Compound defvaltype opcodes are valid deftypes but never inline
         // valtypes; in a valtype position they are malformed.
         else => Error.InvalidValType,
@@ -1160,7 +1160,7 @@ fn decodeDefType(arena: Allocator, body: []const u8, pos: *usize) Error!DefType 
     if (v >= 0) return Error.InvalidDefType; // a deftype is never a bare typeidx
     const op: u8 = @intCast(v & 0x7f);
     return switch (op) {
-        0x7f, 0x7e, 0x7d, 0x7c, 0x7b, 0x7a, 0x79, 0x78, 0x77, 0x76, 0x75, 0x74, 0x73, 0x64 => .{ .value = .{ .primitive = @enumFromInt(op) } },
+        0x7f, 0x7e, 0x7d, 0x7c, 0x7b, 0x7a, 0x79, 0x78, 0x77, 0x76, 0x75, 0x74, 0x73, 0x64 => .{ .value = .{ .primitive = @fromBackingInt(@intCast(op)) } },
         0x40 => .{ .func = try decodeFuncType(arena, body, pos, false) },
         0x43 => .{ .func = try decodeFuncType(arena, body, pos, true) },
         0x6d => blk: { // enum: vec(label')
@@ -1296,7 +1296,7 @@ fn decodeSort(body: []const u8, pos: *usize) Error!Sort {
             if (pos.* >= body.len) return Error.Truncated;
             const cs = body[pos.*];
             pos.* += 1;
-            break :blk .{ .core = @enumFromInt(cs) };
+            break :blk .{ .core = @fromBackingInt(@intCast(cs)) };
         },
         0x01 => .func,
         0x02 => .value,
@@ -1606,7 +1606,7 @@ fn decodeCanonSection(arena: Allocator, out: *std.ArrayList(Canon), body: []cons
 
 fn decodeCoreSortIdx(body: []const u8, pos: *usize) Error!struct { sort: CoreSort, index: u32 } {
     if (pos.* >= body.len) return Error.Truncated;
-    const cs: CoreSort = @enumFromInt(body[pos.*]);
+    const cs: CoreSort = @fromBackingInt(@intCast(body[pos.*]));
     pos.* += 1;
     return .{ .sort = cs, .index = try leb128.readUleb128(u32, body, pos) };
 }

@@ -110,7 +110,7 @@ pub fn initFromEnv(value: ?[]const u8) void {
 
 fn enabled(comptime mod: []const u8) bool {
     // ReleaseFast / ReleaseSmall skip the whitelist entirely.
-    if (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall) {
+    if (builtin.mode == .fast or builtin.mode == .small) {
         return false;
     }
     // Pre-init: dbg is a no-op (= release-equivalent default).
@@ -141,7 +141,7 @@ fn enabled(comptime mod: []const u8) bool {
 /// call site evaluates `args` in every mode, so an expensive argument
 /// goes behind `if (on(mod))` (#649).
 pub fn print(comptime mod: []const u8, comptime fmt: []const u8, args: anytype) void {
-    if (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall) {
+    if (builtin.mode == .fast or builtin.mode == .small) {
         return;
     }
     if (!enabled(mod)) return;
@@ -165,7 +165,7 @@ pub fn on(comptime mod: []const u8) bool {
 /// addresses into emitted code, which must never be serialized into a
 /// `.cwasm`. Comptime-false in ReleaseFast / ReleaseSmall, like `on`.
 pub fn anyActive() bool {
-    if (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSmall) {
+    if (builtin.mode == .fast or builtin.mode == .small) {
         return false;
     }
     if (!whitelist_initialised) return false;

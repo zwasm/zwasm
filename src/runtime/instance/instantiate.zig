@@ -1138,7 +1138,7 @@ pub fn instantiateRuntime(
             funcs[i].src_base = code.decls_len;
             try lower.lowerFunctionBody(a, code.body, &funcs[i], types.items, &.{});
             for (funcs[i].instrs.items) |ins| {
-                if (table.interp[@intFromEnum(ins.op)] == null) {
+                if (table.interp[@backingInt(ins.op)] == null) {
                     diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the interpreter does not execute `{s}`", .{@tagName(ins.op)});
                     return error.UnsupportedOp;
                 }

@@ -191,7 +191,7 @@ pub fn dispatchX86_64Ctx(op: ZirOp, ctx_ptr: anytype, ins_ptr: anytype) !bool {
 // ---------------------------------------------------------------------
 
 test "ArchAxis enum has exactly 2 variants per ADR-0074 (Zone 2 arch-axes)" {
-    try std.testing.expectEqual(@as(usize, 2), @typeInfo(ArchAxis).@"enum".fields.len);
+    try std.testing.expectEqual(@as(usize, 2), @typeInfo(ArchAxis).@"enum".field_names.len);
 }
 
 test "migratedArchOpCount tracks collected per-arch tuples (arm64=409, x86_64=0)" {

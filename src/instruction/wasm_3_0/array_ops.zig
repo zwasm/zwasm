@@ -43,7 +43,7 @@ const ArrayInfo = type_info_mod.ArrayInfo;
 const array_header_size: u32 = @sizeOf(ArrayHeader);
 
 inline fn op(o: ZirOp) usize {
-    return @intFromEnum(o);
+    return @backingInt(o);
 }
 
 pub fn register(table: *DispatchTable) void {

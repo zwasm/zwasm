@@ -39,7 +39,7 @@ pub fn step(
     table: *const DispatchTable,
     instr: *const ZirInstr,
 ) anyerror!void {
-    const idx = @intFromEnum(instr.op);
+    const idx = @backingInt(instr.op);
     if (idx >= dispatch_table.N_OPS) return Trap.Unreachable;
     const handler = table.interp[idx] orelse return Trap.Unreachable;
     const saved_pc = if (rt.frame_len > 0) rt.currentFrame().pc else 0;
@@ -132,13 +132,23 @@ pub fn run(
     defer if (prev_trampoline_locals) |l| rt.alloc.free(l);
 
     // ADR-0232 D2: the frame this call owns joins the trap trace as an error
-    // leaves. Declared after the defer above so it runs first, while a tail
+    // leaves. Caught here, before the defers above run, while a tail
     // callee's locals are still allocated. At another depth the frame is not
     // this call's (one `run` pushed for itself, or a tail switch that failed
     // after popping). An exception may yet be caught, so it records nothing.
-    errdefer |err| if (err != error.UncaughtException and entry_depth > 0 and rt.frame_len == entry_depth)
-        trap_trace.record(rt.currentFrame());
+    runTrampoline(rt, table, initial_instrs, &prev_trampoline_locals) catch |err| {
+        if (err != error.UncaughtException and entry_depth > 0 and rt.frame_len == entry_depth)
+            trap_trace.record(rt.currentFrame());
+        return err;
+    };
+}
 
+fn runTrampoline(
+    rt: *Runtime,
+    table: *const DispatchTable,
+    initial_instrs: []const ZirInstr,
+    prev_trampoline_locals: *?[]runtime.Value,
+) anyerror!void {
     var instrs = initial_instrs;
     while (true) {
         const f = rt.currentFrame();
@@ -191,8 +201,8 @@ pub fn run(
         // referenced. The very first switch has nothing to free
         // (the popped frame's locals belong to the caller of
         // dispatch.run, not the trampoline).
-        if (prev_trampoline_locals) |l| rt.alloc.free(l);
-        prev_trampoline_locals = new_locals;
+        if (prev_trampoline_locals.*) |l| rt.alloc.free(l);
+        prev_trampoline_locals.* = new_locals;
 
         // Switch to the callee's instruction stream — without this
         // the outer loop would re-run the caller's instrs against
@@ -221,13 +231,13 @@ const StubHandlers = struct {
 
 fn buildSmokeTable() DispatchTable {
     var t = DispatchTable.init();
-    t.interp[@intFromEnum(ZirOp.nop)] = StubHandlers.nop;
-    t.interp[@intFromEnum(ZirOp.@"i32.const")] = StubHandlers.pushI32Const;
+    t.interp[@backingInt(ZirOp.nop)] = StubHandlers.nop;
+    t.interp[@backingInt(ZirOp.@"i32.const")] = StubHandlers.pushI32Const;
     return t;
 }
 
 test "runFrame stays 64-byte aligned (#541)" {
-    try testing.expectEqual(@as(?usize, 64), @typeInfo(@TypeOf(&runFrame)).pointer.alignment);
+    try testing.expectEqual(@as(?usize, 64), @typeInfo(@TypeOf(&runFrame)).pointer.attrs.@"align");
 }
 
 test "step: unbound op slot returns Trap.Unreachable" {
@@ -323,7 +333,7 @@ test "run: bubbles handler trap and stops iteration" {
     var rt = Runtime.init(testing.allocator);
     defer rt.deinit();
     var t = DispatchTable.init();
-    t.interp[@intFromEnum(ZirOp.@"i32.const")] = StubHandlers.pushI32Const;
+    t.interp[@backingInt(ZirOp.@"i32.const")] = StubHandlers.pushI32Const;
     // .nop slot left null → step returns Trap.Unreachable on the second instr.
 
     const instrs = [_]ZirInstr{

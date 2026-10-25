@@ -245,7 +245,7 @@ comptime {
 
 const testing = std.testing;
 
-const i32s = [_]zir.ValType{.i32} ** 12;
+const i32s: [12]zir.ValType = @splat(.i32);
 const one = [_]zir.ValType{.i32};
 const three = [_]zir.ValType{ .i32, .i32, .i32 };
 
@@ -346,8 +346,8 @@ test "emitThunk: encoding round-trip via helpers" {
 test "emitThunk: saves and restores every abi.reserved_invariant_gprs register, X23 included (#413)" {
     var buf: [thunk_bytes]u8 = undefined;
     emitThunk(&buf, 0, 0, sigOf(&.{}, &one));
-    var saved: [32]bool = .{false} ** 32;
-    var restored: [32]bool = .{false} ** 32;
+    var saved: [32]bool = @splat(false);
+    var restored: [32]bool = @splat(false);
     var i: usize = 0;
     while (i < n_insns) : (i += 1) {
         const w = wordAt(&buf, i);

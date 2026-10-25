@@ -606,7 +606,7 @@ test "without the network grant, 0.2 create-tcp-socket and start-listen answer a
 
     try p2CreateTcpSocket(&caller, 0, 0);
     try testing.expectEqual(@as(u8, 1), try mem.read(u8, 0));
-    try testing.expectEqual(@intFromEnum(p2sock.ErrorCode.access_denied), try mem.read(u8, 4));
+    try testing.expectEqual(@backingInt(p2sock.ErrorCode.access_denied), try mem.read(u8, 4));
     host.allow_network = true;
     try p2CreateTcpSocket(&caller, 0, 0);
     try testing.expectEqual(@as(u8, 0), try mem.read(u8, 0));
@@ -621,7 +621,7 @@ test "without the network grant, 0.2 create-tcp-socket and start-listen answer a
     host.allow_network = false;
     try p2TcpStartListen(&caller, tcp, 16);
     try testing.expectEqual(@as(u8, 1), try mem.read(u8, 16));
-    try testing.expectEqual(@intFromEnum(p2sock.ErrorCode.access_denied), try mem.read(u8, 17));
+    try testing.expectEqual(@backingInt(p2sock.ErrorCode.access_denied), try mem.read(u8, 17));
 }
 
 test "0.2 descriptor.write / write-via-stream: an offset past the i64 range is invalid / closed" {
@@ -649,7 +649,7 @@ test "0.2 descriptor.write / write-via-stream: an offset past the i64 range is i
 
     try p2DescriptorWrite(&caller, desc, 0, 1, std.math.maxInt(u64), 16);
     try testing.expectEqual(@as(u8, 1), mem[16]);
-    try testing.expectEqual(@intFromEnum(adapter.P2ErrorCode.invalid), mem[24]);
+    try testing.expectEqual(@backingInt(adapter.P2ErrorCode.invalid), mem[24]);
     try p2DescriptorWriteViaStream(&caller, desc, std.math.maxInt(u64), 32);
     try p2OutStreamWrite(&caller, std.mem.readInt(u32, mem[36..40], .little), 0, 1, 40);
     try testing.expectEqual(@as(u8, 1), mem[40]); // err
@@ -952,7 +952,7 @@ fn p2DescriptorStatAt(caller: *Caller, self_handle: u32, path_flags: u32, path_p
 /// descriptor methods).
 fn writeP1Err(mem: Memory, retptr: u32, off: u32, errno: wasi_p1.Errno) WasiP2Error!void {
     try mem.write(retptr, @as(u8, 1));
-    try mem.write(retptr + off, @intFromEnum(adapter.errnoToP2ErrorCode(errno)));
+    try mem.write(retptr + off, @backingInt(adapter.errnoToP2ErrorCode(errno)));
 }
 
 /// Store a `result<_, error-code>` at `retptr` — disc@0, error-code payload@1
@@ -1158,7 +1158,7 @@ fn p2DirEntryStreamReadEntry(caller: *Caller, self_handle: u32, retptr: u32) Was
         }
         try mem.write(retptr, @as(u8, 0)); // result disc: ok
         try mem.write(retptr + 4, @as(u8, 1)); // option disc: some
-        try mem.write(retptr + 8, filetypeToDescriptorType(@enumFromInt(d_type)));
+        try mem.write(retptr + 8, filetypeToDescriptorType(@fromBackingInt(@intCast(d_type))));
         try mem.write(retptr + 12, name_ptr); // directory-entry.name ptr
         try mem.write(retptr + 16, d_namlen); // directory-entry.name len
         return;
@@ -1484,7 +1484,7 @@ fn p2CreateTcpSocket(caller: *Caller, family: u32, retptr: u32) WasiP2Error!void
 /// params; ipv4 uses p0..p4, ipv6 all 11) into a host `IpAddress`.
 fn writeSockErr(mem: Memory, retptr: u32, off: u32, e: anyerror) WasiP2Error!void {
     try mem.write(retptr, @as(u8, 1));
-    try mem.write(retptr + off, @intFromEnum(p2sock.errorToCode(e)));
+    try mem.write(retptr + off, @backingInt(p2sock.errorToCode(e)));
 }
 
 /// Store a `result<_, error-code>` for a sockets op at `retptr` (disc@0,
@@ -1655,7 +1655,7 @@ fn p2TcpRemoteAddress(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void 
 fn sockStubWriteErr(caller: *Caller, retptr: u32, comptime off: u32) WasiP2Error!void {
     const mem = try ctxMemory(caller);
     try mem.write(retptr, @as(u8, 1));
-    try mem.write(retptr + off, @intFromEnum(p2sock.ErrorCode.not_supported));
+    try mem.write(retptr + off, @backingInt(p2sock.ErrorCode.not_supported));
 }
 
 fn p2SockStubUnit2(caller: *Caller, _: u32, retptr: u32) WasiP2Error!void {
@@ -1697,7 +1697,7 @@ fn p2SockStubSend(caller: *Caller, _: u32, _: u32, _: u32, retptr: u32) WasiP2Er
 fn p2FsStubGetFlags(caller: *Caller, _: u32, retptr: u32) WasiP2Error!void {
     const mem = try ctxMemory(caller);
     try mem.write(retptr, @as(u8, 1));
-    try mem.write(retptr + 1, @intFromEnum(adapter.P2ErrorCode.unsupported));
+    try mem.write(retptr + 1, @backingInt(adapter.P2ErrorCode.unsupported));
 }
 
 /// Store a `result<metadata-hash-value{lower: u64, upper: u64}, error-code>`

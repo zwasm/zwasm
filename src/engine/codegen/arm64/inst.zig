@@ -436,7 +436,7 @@ pub fn encLdrDImm(vt: Vn, rn: Xn, byte_offset: u15) u32 {
 pub fn encCselW(rd: Xn, rn: Xn, rm: Xn, cond: Cond) u32 {
     return 0x1A800000 |
         (@as(u32, rm) << 16) |
-        (@as(u32, @intFromEnum(cond)) << 12) |
+        (@as(u32, @backingInt(cond)) << 12) |
         (@as(u32, rn) << 5) |
         @as(u32, rd);
 }
@@ -446,7 +446,7 @@ pub fn encCselW(rd: Xn, rn: Xn, rm: Xn, cond: Cond) u32 {
 pub fn encCselX(rd: Xn, rn: Xn, rm: Xn, cond: Cond) u32 {
     return 0x9A800000 |
         (@as(u32, rm) << 16) |
-        (@as(u32, @intFromEnum(cond)) << 12) |
+        (@as(u32, @backingInt(cond)) << 12) |
         (@as(u32, rn) << 5) |
         @as(u32, rd);
 }
@@ -460,7 +460,7 @@ pub fn encCselX(rd: Xn, rn: Xn, rm: Xn, cond: Cond) u32 {
 pub fn encFcselS(vd: Vn, vn: Vn, vm: Vn, cond: Cond) u32 {
     return 0x1E200C00 |
         (@as(u32, vm) << 16) |
-        (@as(u32, @intFromEnum(cond)) << 12) |
+        (@as(u32, @backingInt(cond)) << 12) |
         (@as(u32, vn) << 5) |
         @as(u32, vd);
 }
@@ -471,7 +471,7 @@ pub fn encFcselS(vd: Vn, vn: Vn, vm: Vn, cond: Cond) u32 {
 pub fn encFcselD(vd: Vn, vn: Vn, vm: Vn, cond: Cond) u32 {
     return 0x1E600C00 |
         (@as(u32, vm) << 16) |
-        (@as(u32, @intFromEnum(cond)) << 12) |
+        (@as(u32, @backingInt(cond)) << 12) |
         (@as(u32, vn) << 5) |
         @as(u32, vd);
 }
@@ -678,7 +678,7 @@ pub fn encCbnz(rt: Xn, disp_words: i32) u32 {
 /// Encoding: `01010100 [imm19:19] 0 [cond:4]` = `0x54000000`.
 pub fn encBCond(cond: Cond, disp_words: i32) u32 {
     const masked: u32 = @as(u32, @bitCast(disp_words)) & 0x0007FFFF;
-    return 0x54000000 | (masked << 5) | @as(u32, @intFromEnum(cond));
+    return 0x54000000 | (masked << 5) | @as(u32, @backingInt(cond));
 }
 
 /// `MUL Xd, Xn, Xm` — alias for `MADD Xd, Xn, Xm, XZR`.
@@ -903,7 +903,7 @@ pub const Cond = enum(u4) {
 /// "set if X" and the encoded form for `CSET`/`CSINC` aliases.
 /// `EQ <-> NE`, `LT <-> GE`, `LO <-> HS`, etc.
 pub fn invertCond(c: Cond) Cond {
-    return @enumFromInt(@intFromEnum(c) ^ 1);
+    return @fromBackingInt(@intCast(@backingInt(c) ^ 1));
 }
 
 /// `CSET Wd, cond` — set Wd to 1 if cond holds, else 0. Encoded
@@ -912,7 +912,7 @@ pub fn invertCond(c: Cond) Cond {
 /// = WZR (31). Base = `0x1A9F07E0` | (encoded_cond<<12) | Rd.
 pub fn encCsetW(rd: Xn, set_if: Cond) u32 {
     const enc = invertCond(set_if);
-    return 0x1A9F07E0 | (@as(u32, @intFromEnum(enc)) << 12) | @as(u32, rd);
+    return 0x1A9F07E0 | (@as(u32, @backingInt(enc)) << 12) | @as(u32, rd);
 }
 
 /// `CSETM Xd, cond` — set Xd to all-ones if cond holds, else 0.
@@ -925,7 +925,7 @@ pub fn encCsetW(rd: Xn, set_if: Cond) u32 {
 /// 0055 §C6.2.59 (CSETM alias of CSINV).
 pub fn encCsetmX(rd: Xn, set_if: Cond) u32 {
     const enc = invertCond(set_if);
-    return 0xDA9F03E0 | (@as(u32, @intFromEnum(enc)) << 12) | @as(u32, rd);
+    return 0xDA9F03E0 | (@as(u32, @backingInt(enc)) << 12) | @as(u32, rd);
 }
 
 /// `CLZ Wd, Wn` — count leading zeros (32-bit). The i32.clz

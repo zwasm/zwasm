@@ -298,7 +298,7 @@ pub fn encMovapsXmmXmm(dst: Xmm, src: Xmm) EncodedInsn {
 /// scalar single/double FP load/store with SIB scale=1.
 pub fn encMovssMovsdMemBaseIdx(scalar_kind: SseScalarKind, is_store: bool, xmm: Xmm, base: Gpr, idx: Gpr) EncodedInsn {
     var enc: EncodedInsn = .{};
-    enc.push(@intFromEnum(scalar_kind));
+    enc.push(@backingInt(scalar_kind));
     if (xmm.extBit() != 0 or base.extBit() != 0 or idx.extBit() != 0) {
         enc.push(encodeRex(false, xmm.extBit(), idx.extBit(), base.extBit()));
     }
@@ -316,7 +316,7 @@ pub fn encMovssMovsdMemBaseIdx(scalar_kind: SseScalarKind, is_store: bool, xmm: 
 pub fn encMovssMovsdXmmMemBaseDisp32(scalar_kind: SseScalarKind, is_store: bool, xmm: Xmm, base: Gpr, disp: i32) EncodedInsn {
     std.debug.assert(base.low3() != 4); // SIB escape — unsupported here
     var enc: EncodedInsn = .{};
-    enc.push(@intFromEnum(scalar_kind));
+    enc.push(@backingInt(scalar_kind));
     if (xmm.extBit() != 0 or base.extBit() != 0) {
         enc.push(encodeRex(false, xmm.extBit(), 0, base.extBit()));
     }
@@ -368,7 +368,7 @@ pub fn encMovupsMemBaseIdx(is_store: bool, xmm: Xmm, base: Gpr, idx: Gpr) Encode
 /// float→signed-int conversion.
 pub fn encCvttScalar2Int(scalar_kind: SseScalarKind, dst_is_64: bool, gpr_dst: Gpr, xmm_src: Xmm) EncodedInsn {
     var enc: EncodedInsn = .{};
-    enc.push(@intFromEnum(scalar_kind));
+    enc.push(@backingInt(scalar_kind));
     if (dst_is_64 or gpr_dst.extBit() != 0 or xmm_src.extBit() != 0) {
         enc.push(encodeRex(dst_is_64, gpr_dst.extBit(), 0, xmm_src.extBit()));
     }
@@ -382,7 +382,7 @@ pub fn encCvttScalar2Int(scalar_kind: SseScalarKind, dst_is_64: bool, gpr_dst: G
 /// to scalar float conversion.
 pub fn encCvtsi2Scalar(scalar_kind: SseScalarKind, src_is_64: bool, xmm_dst: Xmm, gpr_src: Gpr) EncodedInsn {
     var enc: EncodedInsn = .{};
-    enc.push(@intFromEnum(scalar_kind));
+    enc.push(@backingInt(scalar_kind));
     if (src_is_64 or xmm_dst.extBit() != 0 or gpr_src.extBit() != 0) {
         enc.push(encodeRex(src_is_64, xmm_dst.extBit(), 0, gpr_src.extBit()));
     }

@@ -52,7 +52,7 @@ pub fn encSetccR(cc: Cond, dst: Gpr) EncodedInsn {
     var enc: EncodedInsn = .{};
     enc.push(encodeRex(false, 0, 0, dst.extBit()));
     enc.push(0x0F);
-    enc.push(0x90 | @as(u8, @intFromEnum(cc)));
+    enc.push(0x90 | @as(u8, @backingInt(cc)));
     enc.push(encodeModrm(0b11, 0, dst.low3()));
     return enc;
 }
@@ -66,7 +66,7 @@ pub fn encCmovccRR(size: Width, cc: Cond, dst: Gpr, src: Gpr) EncodedInsn {
     var enc: EncodedInsn = .{};
     if (rexForRR(size, dst, src)) |rex| enc.push(rex);
     enc.push(0x0F);
-    enc.push(0x40 | @as(u8, @intFromEnum(cc)));
+    enc.push(0x40 | @as(u8, @backingInt(cc)));
     enc.push(encodeModrm(0b11, dst.low3(), src.low3()));
     return enc;
 }
@@ -107,7 +107,7 @@ pub fn encCallReg(target: Gpr) EncodedInsn {
 /// Used by br_table to skip a single 5-byte JMP rel32 (disp = +5).
 pub fn encJccRel8(cc: Cond, disp: i8) EncodedInsn {
     var enc: EncodedInsn = .{};
-    enc.push(0x70 | @as(u8, @intFromEnum(cc)));
+    enc.push(0x70 | @as(u8, @backingInt(cc)));
     enc.push(@bitCast(disp));
     return enc;
 }
@@ -153,7 +153,7 @@ pub fn encJmpRel32(disp: i32) EncodedInsn {
 pub fn encJccRel32(cc: Cond, disp: i32) EncodedInsn {
     var enc: EncodedInsn = .{};
     enc.push(0x0F);
-    enc.push(0x80 | @as(u8, @intFromEnum(cc)));
+    enc.push(0x80 | @as(u8, @backingInt(cc)));
     const u: u32 = @bitCast(disp);
     enc.push(@truncate(u));
     enc.push(@truncate(u >> 8));

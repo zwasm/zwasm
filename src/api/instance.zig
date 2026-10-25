@@ -39,8 +39,8 @@ const trap_trace = @import("../interp/trap_trace.zig");
 const interp_mvp = @import("../interp/mvp.zig");
 const runner = @import("../engine/runner.zig"); // ADR-0200 JIT engine (Zone 2)
 const build_options = @import("build_options");
-const wasm_2_0_enabled = @intFromEnum(build_options.wasm_level) >= @intFromEnum(@as(@TypeOf(build_options.wasm_level), .v2_0));
-const wasm_3_0_enabled = @intFromEnum(build_options.wasm_level) >= @intFromEnum(@as(@TypeOf(build_options.wasm_level), .v3_0));
+const wasm_2_0_enabled = @backingInt(build_options.wasm_level) >= @backingInt(@as(@TypeOf(build_options.wasm_level), .v2_0));
+const wasm_3_0_enabled = @backingInt(build_options.wasm_level) >= @backingInt(@as(@TypeOf(build_options.wasm_level), .v3_0));
 // ADR-0193 P4: this `ext_* = if (wasm_N_enabled) @import(...) else struct{}`
 // block is the deliberate finished-form for Wasm-level feature gating — a
 // file-tier feature manifest (two central comptime predicates above + the
@@ -1188,8 +1188,8 @@ fn hasV128Param(sig: zir.FuncType) bool {
 }
 
 test "hasV128Param: only a v128 parameter is declined; results and every scalar class are not (#390)" {
-    const i32s = [_]zir.ValType{.i32} ** 12;
-    const three = [_]zir.ValType{.i32} ** 3;
+    const i32s: [12]zir.ValType = @splat(.i32);
+    const three: [3]zir.ValType = @splat(.i32);
     try testing.expect(!hasV128Param(.{ .params = &i32s, .results = &three }));
     try testing.expect(!hasV128Param(.{ .params = &.{ .f64, .f32, .i64, .{ .ref = zir.RefType.abs(.func, true) } }, .results = &.{.v128} }));
     try testing.expect(hasV128Param(.{ .params = &.{ .i32, .v128 }, .results = &.{} }));
@@ -1996,7 +1996,7 @@ pub fn dispatchTable() *const dispatch_table_mod.DispatchTable {
 }
 
 test "g_dispatch_table_storage stays page-aligned (#541)" {
-    try testing.expectEqual(@as(?usize, 4096), @typeInfo(@TypeOf(&g_dispatch_table_storage)).pointer.alignment);
+    try testing.expectEqual(@as(?usize, 4096), @typeInfo(@TypeOf(&g_dispatch_table_storage)).pointer.attrs.@"align");
 }
 
 /// `zwasm_instance_get_func` — project-extension helper that
@@ -2196,8 +2196,8 @@ pub fn externSlotOf(inst: *const Instance, name: []const u8, kind: ExternKind) ?
 
 /// `wasm_extern_kind` — return the upstream-numeric tag.
 pub export fn wasm_extern_kind(e: ?*const Extern) callconv(.c) u8 {
-    const handle = e orelse return @intFromEnum(ExternKind.func);
-    return @intFromEnum(handle.kind);
+    const handle = e orelse return @backingInt(ExternKind.func);
+    return @backingInt(handle.kind);
 }
 
 /// `wasm_extern_delete(*Extern)` — free an Extern handle and
@@ -4149,7 +4149,7 @@ test "wasm_instance_exports: surfaces declared exports + dispatches via wasm_ext
 
     try testing.expectEqual(@as(usize, 1), exports.size);
     const ext = exports.data.?[0] orelse return error.MissingExtern;
-    try testing.expectEqual(@as(u8, @intFromEnum(ExternKind.func)), wasm_extern_kind(ext));
+    try testing.expectEqual(@as(u8, @backingInt(ExternKind.func)), wasm_extern_kind(ext));
 
     // wasm_extern_as_func returns a borrowed pointer; dispatch
     // through it without separately freeing.
@@ -4188,7 +4188,7 @@ test "ADR-0200 C-path JIT: wasm_instance_exports + wasm_func_call on a JIT insta
     defer wasm_extern_vec_delete(&exports);
     try testing.expectEqual(@as(usize, 1), exports.size);
     const ext = exports.data.?[0] orelse return error.MissingExtern;
-    try testing.expectEqual(@as(u8, @intFromEnum(ExternKind.func)), wasm_extern_kind(ext));
+    try testing.expectEqual(@as(u8, @backingInt(ExternKind.func)), wasm_extern_kind(ext));
 
     const fc = wasm_extern_as_func(ext) orelse return error.NotFunc;
     var args_data = [_]Val{
@@ -4223,7 +4223,7 @@ test "wasm_instance_exports: empty when no export section" {
 }
 
 test "wasm_extern_*: null-arg discipline" {
-    try testing.expectEqual(@as(u8, @intFromEnum(ExternKind.func)), wasm_extern_kind(null));
+    try testing.expectEqual(@as(u8, @backingInt(ExternKind.func)), wasm_extern_kind(null));
     wasm_extern_delete(null);
     try testing.expect(wasm_extern_as_func(null) == null);
     var out: ExternVec = .{ .size = 0, .data = null };
@@ -4388,10 +4388,10 @@ test "wasm 2.0 mixed-exports c_api walk: func+memory+table+global surface via wa
     // Decoded-order matches `inst.exports_storage`. Inspect each
     // pointed-to Extern's kind tag — c_api hosts read via
     // `wasm_extern_kind`.
-    try testing.expectEqual(@as(u8, @intFromEnum(ExternKind.func)), wasm_extern_kind(data[0]));
-    try testing.expectEqual(@as(u8, @intFromEnum(ExternKind.memory)), wasm_extern_kind(data[1]));
-    try testing.expectEqual(@as(u8, @intFromEnum(ExternKind.table)), wasm_extern_kind(data[2]));
-    try testing.expectEqual(@as(u8, @intFromEnum(ExternKind.global)), wasm_extern_kind(data[3]));
+    try testing.expectEqual(@as(u8, @backingInt(ExternKind.func)), wasm_extern_kind(data[0]));
+    try testing.expectEqual(@as(u8, @backingInt(ExternKind.memory)), wasm_extern_kind(data[1]));
+    try testing.expectEqual(@as(u8, @backingInt(ExternKind.table)), wasm_extern_kind(data[2]));
+    try testing.expectEqual(@as(u8, @backingInt(ExternKind.global)), wasm_extern_kind(data[3]));
 
     // Func extern resolves through `wasm_extern_as_func`; non-func
     // ones return null per upstream wasm.h discipline.
@@ -4432,10 +4432,10 @@ test "D-496 JIT C-path: func+memory+table+global exports all surface via wasm_in
     defer wasm_extern_vec_delete(&exports_vec);
     try testing.expectEqual(@as(usize, 4), exports_vec.size);
     const data = exports_vec.data orelse return error.ExportsDataNull;
-    try testing.expectEqual(@as(u8, @intFromEnum(ExternKind.func)), wasm_extern_kind(data[0]));
-    try testing.expectEqual(@as(u8, @intFromEnum(ExternKind.memory)), wasm_extern_kind(data[1]));
-    try testing.expectEqual(@as(u8, @intFromEnum(ExternKind.table)), wasm_extern_kind(data[2]));
-    try testing.expectEqual(@as(u8, @intFromEnum(ExternKind.global)), wasm_extern_kind(data[3]));
+    try testing.expectEqual(@as(u8, @backingInt(ExternKind.func)), wasm_extern_kind(data[0]));
+    try testing.expectEqual(@as(u8, @backingInt(ExternKind.memory)), wasm_extern_kind(data[1]));
+    try testing.expectEqual(@as(u8, @backingInt(ExternKind.table)), wasm_extern_kind(data[2]));
+    try testing.expectEqual(@as(u8, @backingInt(ExternKind.global)), wasm_extern_kind(data[3]));
     // The fix's observable: non-func externs now resolve on a JIT instance.
     try testing.expect(wasm_extern_as_func(data[0]) != null);
     try testing.expect(wasm_extern_as_memory(data[1]) != null);
@@ -4721,7 +4721,7 @@ test "ADR-0200 JIT C-path: export_types parallel to exports_storage so by-name d
     defer wasm_extern_vec_delete(&exports_vec);
     try testing.expectEqual(@as(usize, 1), exports_vec.size);
     const data = exports_vec.data orelse return error.ExportsDataNull;
-    try testing.expectEqual(@as(u8, @intFromEnum(ExternKind.func)), wasm_extern_kind(data[0]));
+    try testing.expectEqual(@as(u8, @backingInt(ExternKind.func)), wasm_extern_kind(data[0]));
     const func = wasm_extern_as_func(data[0]) orelse return error.ExternNotFunc;
 
     // Invoke the discovered handle through the C path (the exact wast_runtime_runner
@@ -4768,7 +4768,7 @@ test "wasm 2.0 c_api scalar global accessors: read and write mutable i32 via was
 
     // Global extern at idx 3 resolves; the handle records valtype + mutability.
     const g = wasm_extern_as_global(data[3]) orelse return error.GlobalResolveFailed;
-    try testing.expectEqual(@as(u8, @intFromEnum(zir.ValType.i32)), @intFromEnum(g.valtype));
+    try testing.expectEqual(@as(u8, @backingInt(zir.ValType.i32)), @backingInt(g.valtype));
     try testing.expect(g.mutable);
 
     // Read the initial value (7 per fixture's `i32.const 7` init).

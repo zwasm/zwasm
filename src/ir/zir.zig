@@ -932,7 +932,7 @@ test "ZirFunc: instrs grow via per-call allocator" {
     var f = ZirFunc.init(0, sig, &.{});
     defer f.deinit(std.testing.allocator);
 
-    const op0: ZirOp = @enumFromInt(0);
+    const op0: ZirOp = @fromBackingInt(@intCast(0));
     try f.instrs.append(std.testing.allocator, .{ .op = op0, .payload = 42, .extra = 0 });
     try f.instrs.append(std.testing.allocator, .{ .op = op0, .payload = 0, .extra = 7 });
 
@@ -942,16 +942,16 @@ test "ZirFunc: instrs grow via per-call allocator" {
 }
 
 test "ValType / BlockKind: enum tags are stable" {
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(ValType.i32));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(ValType.i64));
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(BlockKind.block));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(BlockKind.loop));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(BlockKind.if_then));
-    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(BlockKind.else_open));
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(ValType.i32));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(ValType.i64));
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(BlockKind.block));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(BlockKind.loop));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(BlockKind.if_then));
+    try std.testing.expectEqual(@as(u8, 3), @backingInt(BlockKind.else_open));
     // Wasm 3.0 EH addition: try_table comes after the pre-existing
     // 4 control-frame kinds (per ADR-0114 EH design; foundation
     // wiring at 10.E-3).
-    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(BlockKind.try_table));
+    try std.testing.expectEqual(@as(u8, 4), @backingInt(BlockKind.try_table));
 }
 
 test "FuncType holds slices without copying" {
@@ -973,7 +973,7 @@ test "ZirOp: MVP opcodes are declared" {
         .@"i64.const",   .@"f32.const", .@"f64.const",  .@"memory.size", .@"memory.grow",
     };
     inline for (mvp) |op| {
-        _ = @intFromEnum(op);
+        _ = @backingInt(op);
     }
 }
 
@@ -992,7 +992,7 @@ test "ZirOp: Wasm 2.0 / SIMD / 3.0 entries declared" {
         .@"__pseudo.frame_setup",
     };
     inline for (v2 ++ simd ++ v3 ++ phase34 ++ pseudo) |op| {
-        _ = @intFromEnum(op);
+        _ = @backingInt(op);
     }
 }
 
@@ -1001,8 +1001,7 @@ test "ZirOp: tag count meets §4.2 baseline" {
     // + Phase 3-4 reserved + JIT pseudo-ops). Treat 250 as a
     // conservative floor — the assertion guards against a future
     // accidental deletion of a swath of tags.
-    const fields = @typeInfo(ZirOp).@"enum".fields;
-    try std.testing.expect(fields.len >= 250);
+    try std.testing.expect(@typeInfo(ZirOp).@"enum".field_names.len >= 250);
 }
 
 test "PassDiagnostics: empty default + deinit no-op + populated free" {

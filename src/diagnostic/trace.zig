@@ -192,7 +192,7 @@ pub inline fn writeBounds(func_idx: u32, byte_offset_in_func: u32) void {
 /// in the per-function slot only). Per ADR-0033.
 inline fn packPass(func_idx: u32, pass: PassId) u24 {
     const fi: u24 = @truncate(@min(func_idx, std.math.maxInt(u20)));
-    const pid_lo4: u24 = @intFromEnum(pass) & 0xF;
+    const pid_lo4: u24 = @backingInt(pass) & 0xF;
     return (fi << 4) | pid_lo4;
 }
 
@@ -204,7 +204,7 @@ pub inline fn passEnter(func_idx: u32, pass: PassId) void {
     if (comptime !enabled) return;
     writeEntry(.{
         .category = .pass,
-        .event = @enumFromInt(@intFromEnum(PassEvent.pass_enter)),
+        .event = @fromBackingInt(@intCast(@backingInt(PassEvent.pass_enter))),
         .payload_a = packPass(func_idx, pass),
         .payload_b = 0,
     });
@@ -217,7 +217,7 @@ pub inline fn passExit(func_idx: u32, pass: PassId, summary: PassSummary) void {
     if (comptime !enabled) return;
     writeEntry(.{
         .category = .pass,
-        .event = @enumFromInt(@intFromEnum(PassEvent.pass_exit)),
+        .event = @fromBackingInt(@intCast(@backingInt(PassEvent.pass_exit))),
         .payload_a = packPass(func_idx, pass),
         .payload_b = summary.digest(),
     });
@@ -354,8 +354,8 @@ pub fn drainPassesToStderr() void {
         if (entry.category != .pass) continue;
         const fi: u32 = @as(u32, entry.payload_a) >> 4;
         const pid_lo4: u4 = @intCast(entry.payload_a & 0xF);
-        const ev_tag: u4 = @intFromEnum(entry.event);
-        const ev_str = if (ev_tag == @intFromEnum(PassEvent.pass_enter)) "enter" else "exit";
+        const ev_tag: u4 = @backingInt(entry.event);
+        const ev_str = if (ev_tag == @backingInt(PassEvent.pass_enter)) "enter" else "exit";
         std.debug.print(
             "  func={d} pass_id_lo4={d} {s} payload_b=0x{x}\n",
             .{ fi, pid_lo4, ev_str, entry.payload_b },
@@ -450,10 +450,10 @@ test "trace: passEnter + passExit captures pair in pipeline order" {
     const n = drain(&buf, 4);
     try testing.expectEqual(@as(usize, 2), n);
     try testing.expectEqual(Category.pass, buf[0].category);
-    try testing.expectEqual(@as(u4, @intFromEnum(PassEvent.pass_enter)), @intFromEnum(buf[0].event));
+    try testing.expectEqual(@as(u4, @backingInt(PassEvent.pass_enter)), @backingInt(buf[0].event));
     try testing.expectEqual(@as(u32, 0), buf[0].payload_b);
     try testing.expectEqual(Category.pass, buf[1].category);
-    try testing.expectEqual(@as(u4, @intFromEnum(PassEvent.pass_exit)), @intFromEnum(buf[1].event));
+    try testing.expectEqual(@as(u4, @backingInt(PassEvent.pass_exit)), @backingInt(buf[1].event));
     // payload_a packing: (func_idx << 4) | (pass_id & 0xF). For
     // func_idx=7, pass=.hoist (=2): (7 << 4) | 2 = 0x72.
     try testing.expectEqual(@as(u24, 0x72), buf[0].payload_a);

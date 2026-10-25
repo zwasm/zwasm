@@ -91,26 +91,26 @@ pub fn fd_write(
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
         const mem = memOf(rt);
-        return @intCast(@intFromEnum(wasi_fd.fdWrite(host, mem, @bitCast(fd), @bitCast(iovs_ptr), @bitCast(iovs_len), @bitCast(nwritten_ptr))));
+        return @intCast(@backingInt(wasi_fd.fdWrite(host, mem, @bitCast(fd), @bitCast(iovs_ptr), @bitCast(iovs_len), @bitCast(nwritten_ptr))));
     }
     const writer_kind: enum { stdout, stderr, bad } = switch (fd) {
         1 => .stdout,
         2 => .stderr,
         else => .bad,
     };
-    if (writer_kind == .bad) return @intFromEnum(Errno.badf);
+    if (writer_kind == .bad) return @backingInt(Errno.badf);
 
     if (iovs_ptr < 0 or iovs_len < 0 or nwritten_ptr < 0) {
-        return @intFromEnum(Errno.inval);
+        return @backingInt(Errno.inval);
     }
     const iovs_off: u64 = @intCast(iovs_ptr);
     const iovs_n: u64 = @intCast(iovs_len);
     const iovs_total_bytes: u64 = iovs_n * 8;
     if (iovs_off + iovs_total_bytes > rt.mem_limit) {
-        return @intFromEnum(Errno.fault);
+        return @backingInt(Errno.fault);
     }
     const nwritten_off: u64 = @intCast(nwritten_ptr);
-    if (nwritten_off + 4 > rt.mem_limit) return @intFromEnum(Errno.fault);
+    if (nwritten_off + 4 > rt.mem_limit) return @backingInt(Errno.fault);
 
     var total_written: u32 = 0;
     var i: u64 = 0;
@@ -120,7 +120,7 @@ pub fn fd_write(
         const buf_len = std.mem.readInt(u32, rt.vm_base[iov_at + 4 ..][0..4], .little);
         const buf_off_u: u64 = buf_off;
         const buf_len_u: u64 = buf_len;
-        if (buf_off_u + buf_len_u > rt.mem_limit) return @intFromEnum(Errno.fault);
+        if (buf_off_u + buf_len_u > rt.mem_limit) return @backingInt(Errno.fault);
         // d-2 MVP: count bytes only — actual stdout / stderr
         // routing needs `std.Io` plumbing through JitRuntime,
         // which lands alongside the run_runner_jit harness in
@@ -132,7 +132,7 @@ pub fn fd_write(
     }
     const nw_at: usize = @intCast(nwritten_off);
     std.mem.writeInt(u32, rt.vm_base[nw_at..][0..4], total_written, .little);
-    return @intFromEnum(Errno.success);
+    return @backingInt(Errno.success);
 }
 
 /// `wasi_snapshot_preview1.fd_read(fd, iovs_ptr, iovs_len,
@@ -157,19 +157,19 @@ pub fn fd_read(
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
         const mem = memOf(rt);
-        return @intCast(@intFromEnum(wasi_fd.fdRead(host, mem, @bitCast(fd), @bitCast(iovs_ptr), @bitCast(iovs_len), @bitCast(nread_ptr))));
+        return @intCast(@backingInt(wasi_fd.fdRead(host, mem, @bitCast(fd), @bitCast(iovs_ptr), @bitCast(iovs_len), @bitCast(nread_ptr))));
     }
-    if (fd != 0) return @intFromEnum(Errno.badf);
+    if (fd != 0) return @backingInt(Errno.badf);
     if (iovs_ptr < 0 or iovs_len < 0 or nread_ptr < 0) {
-        return @intFromEnum(Errno.inval);
+        return @backingInt(Errno.inval);
     }
     const iovs_off: u64 = @intCast(iovs_ptr);
     const iovs_n: u64 = @intCast(iovs_len);
     if (iovs_off + iovs_n * 8 > rt.mem_limit) {
-        return @intFromEnum(Errno.fault);
+        return @backingInt(Errno.fault);
     }
     const nread_off: u64 = @intCast(nread_ptr);
-    if (nread_off + 4 > rt.mem_limit) return @intFromEnum(Errno.fault);
+    if (nread_off + 4 > rt.mem_limit) return @backingInt(Errno.fault);
 
     // Walk every iovec to validate buffer bounds even though we
     // write nothing — guests that hand us a malformed iovec must
@@ -181,12 +181,12 @@ pub fn fd_read(
         const buf_len = std.mem.readInt(u32, rt.vm_base[iov_at + 4 ..][0..4], .little);
         const buf_off_u: u64 = buf_off;
         const buf_len_u: u64 = buf_len;
-        if (buf_off_u + buf_len_u > rt.mem_limit) return @intFromEnum(Errno.fault);
+        if (buf_off_u + buf_len_u > rt.mem_limit) return @backingInt(Errno.fault);
     }
 
     const nw_at: usize = @intCast(nread_off);
     std.mem.writeInt(u32, rt.vm_base[nw_at..][0..4], 0, .little);
-    return @intFromEnum(Errno.success);
+    return @backingInt(Errno.success);
 }
 
 /// `wasi_snapshot_preview1.clock_time_get(clock_id, precision,
@@ -207,18 +207,18 @@ pub fn clock_time_get(
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
         const mem = memOf(rt);
         const e = wasi_clocks.clockTimeGet(host, mem, @bitCast(clock_id), @bitCast(precision), @bitCast(time_ptr));
-        return @intCast(@intFromEnum(e));
+        return @intCast(@backingInt(e));
     }
     // precision is ignored on the fallback path (OS clocks are single-resolution).
-    if (time_ptr < 0) return @intFromEnum(Errno.inval);
+    if (time_ptr < 0) return @backingInt(Errno.inval);
     const off: u64 = @intCast(time_ptr);
-    if (off + 8 > rt.mem_limit) return @intFromEnum(Errno.fault);
-    if (clock_id < 0 or clock_id > 3) return @intFromEnum(Errno.inval);
+    if (off + 8 > rt.mem_limit) return @backingInt(Errno.fault);
+    if (clock_id < 0 or clock_id > 3) return @backingInt(Errno.inval);
     // Compute-only fallback (no host): write 0 nanos (deterministic + safe
     // against missing stdlib clock symbols on locked-down hosts).
     const at: usize = @intCast(off);
     std.mem.writeInt(u64, rt.vm_base[at..][0..8], 0, .little);
-    return @intFromEnum(Errno.success);
+    return @backingInt(Errno.success);
 }
 
 /// `wasi_snapshot_preview1.random_get(buf_ptr, buf_len) -> errno`
@@ -231,20 +231,20 @@ pub fn random_get(rt: *JitRuntime, buf_ptr: i32, buf_len: i32) callconv(.c) i32 
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
         const mem = memOf(rt);
-        return @intCast(@intFromEnum(wasi_clocks.randomGet(host, mem, @bitCast(buf_ptr), @bitCast(buf_len))));
+        return @intCast(@backingInt(wasi_clocks.randomGet(host, mem, @bitCast(buf_ptr), @bitCast(buf_len))));
     }
-    if (buf_ptr < 0 or buf_len < 0) return @intFromEnum(Errno.inval);
+    if (buf_ptr < 0 or buf_len < 0) return @backingInt(Errno.inval);
     const off: u64 = @intCast(buf_ptr);
     const len: u64 = @intCast(buf_len);
-    if (off + len > rt.mem_limit) return @intFromEnum(Errno.fault);
-    if (len == 0) return @intFromEnum(Errno.success);
+    if (off + len > rt.mem_limit) return @backingInt(Errno.fault);
+    if (len == 0) return @backingInt(Errno.success);
     const at: usize = @intCast(off);
     const slice = rt.vm_base[at..][0..@intCast(len)];
     // Compute-only fallback (no host): zero-fill — deterministic + safe,
     // and preferable for the realworld JIT differential corpus (interp ==
     // arm64 == x86_64 §9.7 / 7.11 gate).
     @memset(slice, 0);
-    return @intFromEnum(Errno.success);
+    return @backingInt(Errno.success);
 }
 
 /// `args_sizes_get(argc_ptr, argv_buf_size_ptr) -> errno` —
@@ -255,17 +255,17 @@ pub fn args_sizes_get(rt: *JitRuntime, argc_ptr: i32, argv_buf_size_ptr: i32) ca
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
         const mem = memOf(rt);
-        return @intCast(@intFromEnum(wasi_proc.argsSizesGet(host, mem, @bitCast(argc_ptr), @bitCast(argv_buf_size_ptr))));
+        return @intCast(@backingInt(wasi_proc.argsSizesGet(host, mem, @bitCast(argc_ptr), @bitCast(argv_buf_size_ptr))));
     }
-    if (argc_ptr < 0 or argv_buf_size_ptr < 0) return @intFromEnum(Errno.inval);
+    if (argc_ptr < 0 or argv_buf_size_ptr < 0) return @backingInt(Errno.inval);
     const argc_off: u64 = @intCast(argc_ptr);
     const argv_off: u64 = @intCast(argv_buf_size_ptr);
     if (argc_off + 4 > rt.mem_limit or argv_off + 4 > rt.mem_limit) {
-        return @intFromEnum(Errno.fault);
+        return @backingInt(Errno.fault);
     }
     std.mem.writeInt(u32, rt.vm_base[@intCast(argc_off)..][0..4], 0, .little);
     std.mem.writeInt(u32, rt.vm_base[@intCast(argv_off)..][0..4], 0, .little);
-    return @intFromEnum(Errno.success);
+    return @backingInt(Errno.success);
 }
 
 /// `args_get(argv_ptrs, argv_buf) -> errno` — d-2 stub no-op
@@ -274,10 +274,10 @@ pub fn args_get(rt: *JitRuntime, argv_ptrs: i32, argv_buf: i32) callconv(.c) i32
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
         const mem = memOf(rt);
-        return @intCast(@intFromEnum(wasi_proc.argsGet(host, mem, @bitCast(argv_ptrs), @bitCast(argv_buf))));
+        return @intCast(@backingInt(wasi_proc.argsGet(host, mem, @bitCast(argv_ptrs), @bitCast(argv_buf))));
     }
     // Compute-only fallback: no argv → success no-op.
-    return @intFromEnum(Errno.success);
+    return @backingInt(Errno.success);
 }
 
 /// `environ_sizes_get(envc_ptr, envv_buf_size_ptr) -> errno` —
@@ -286,17 +286,17 @@ pub fn environ_sizes_get(rt: *JitRuntime, envc_ptr: i32, envv_buf_size_ptr: i32)
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
         const mem = memOf(rt);
-        return @intCast(@intFromEnum(wasi_proc.environSizesGet(host, mem, @bitCast(envc_ptr), @bitCast(envv_buf_size_ptr))));
+        return @intCast(@backingInt(wasi_proc.environSizesGet(host, mem, @bitCast(envc_ptr), @bitCast(envv_buf_size_ptr))));
     }
-    if (envc_ptr < 0 or envv_buf_size_ptr < 0) return @intFromEnum(Errno.inval);
+    if (envc_ptr < 0 or envv_buf_size_ptr < 0) return @backingInt(Errno.inval);
     const c_off: u64 = @intCast(envc_ptr);
     const v_off: u64 = @intCast(envv_buf_size_ptr);
     if (c_off + 4 > rt.mem_limit or v_off + 4 > rt.mem_limit) {
-        return @intFromEnum(Errno.fault);
+        return @backingInt(Errno.fault);
     }
     std.mem.writeInt(u32, rt.vm_base[@intCast(c_off)..][0..4], 0, .little);
     std.mem.writeInt(u32, rt.vm_base[@intCast(v_off)..][0..4], 0, .little);
-    return @intFromEnum(Errno.success);
+    return @backingInt(Errno.success);
 }
 
 /// `environ_get(envv_ptrs, envv_buf) -> errno` — d-2 no-op.
@@ -304,10 +304,10 @@ pub fn environ_get(rt: *JitRuntime, envv_ptrs: i32, envv_buf: i32) callconv(.c) 
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
         const mem = memOf(rt);
-        return @intCast(@intFromEnum(wasi_proc.environGet(host, mem, @bitCast(envv_ptrs), @bitCast(envv_buf))));
+        return @intCast(@backingInt(wasi_proc.environGet(host, mem, @bitCast(envv_ptrs), @bitCast(envv_buf))));
     }
     // Compute-only fallback: no environ → success no-op.
-    return @intFromEnum(Errno.success);
+    return @backingInt(Errno.success);
 }
 
 /// `wasi_snapshot_preview1.proc_exit(rval) -> noreturn` — Wasm
@@ -370,21 +370,21 @@ inline fn memOf(rt: *JitRuntime) []u8 {
 // --- clock / poll ---
 
 pub fn clock_res_get(rt: *JitRuntime, clock_id: i32, resolution_ptr: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_clocks.clockResGet(host, memOf(rt), @bitCast(clock_id), @bitCast(resolution_ptr))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_clocks.clockResGet(host, memOf(rt), @bitCast(clock_id), @bitCast(resolution_ptr))));
 }
 
 pub fn poll_oneoff(rt: *JitRuntime, in_ptr: i32, out_ptr: i32, nsubscriptions: i32, nevents_ptr: i32) callconv(.c) i32 {
     if (dbg.on("mem.cksum")) dbg.print("mem.cksum", "jit poll_oneoff {x}", .{dbg.fnv1a(memOf(rt))});
     dbg.print("wasi.jit", "poll_oneoff nsubs={d}", .{nsubscriptions});
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
     const errno = wasi_clocks.pollOneoff(host, memOf(rt), @bitCast(in_ptr), @bitCast(out_ptr), @bitCast(nsubscriptions), @bitCast(nevents_ptr), rt.interrupt_ptr);
     if (errno == .intr) {
         // Unwinds as `proc_exit` does; 16 is the interrupt poll stub's kind.
         rt.trap_kind = 16;
         rt.trap_flag = 1;
     }
-    return @intCast(@intFromEnum(errno));
+    return @intCast(@backingInt(errno));
 }
 
 // --- proc ---
@@ -393,162 +393,162 @@ pub fn poll_oneoff(rt: *JitRuntime, in_ptr: i32, out_ptr: i32, nsubscriptions: i
 pub fn sched_yield(rt: *JitRuntime) callconv(.c) i32 {
     _ = rt;
     dbg.print("wasi.jit", "sched_yield", .{});
-    return @intCast(@intFromEnum(wasi_proc.schedYield()));
+    return @intCast(@backingInt(wasi_proc.schedYield()));
 }
 
 /// `proc_raise(sig)` — takes only `sig` (no host deref); reports notsup.
 pub fn proc_raise(rt: *JitRuntime, sig: i32) callconv(.c) i32 {
     _ = rt;
-    return @intCast(@intFromEnum(wasi_proc.procRaise(@bitCast(sig))));
+    return @intCast(@backingInt(wasi_proc.procRaise(@bitCast(sig))));
 }
 
 // --- fd ---
 
 pub fn fd_close(rt: *JitRuntime, fd: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdClose(host, @bitCast(fd))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdClose(host, @bitCast(fd))));
 }
 
 pub fn fd_seek(rt: *JitRuntime, fd: i32, offset: i64, whence: i32, new_pos_ptr: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdSeek(host, memOf(rt), @bitCast(fd), offset, @intCast(@as(u32, @bitCast(whence)) & 0xFF), @bitCast(new_pos_ptr))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdSeek(host, memOf(rt), @bitCast(fd), offset, @intCast(@as(u32, @bitCast(whence)) & 0xFF), @bitCast(new_pos_ptr))));
 }
 
 pub fn fd_tell(rt: *JitRuntime, fd: i32, pos_ptr: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdTell(host, memOf(rt), @bitCast(fd), @bitCast(pos_ptr))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdTell(host, memOf(rt), @bitCast(fd), @bitCast(pos_ptr))));
 }
 
 pub fn fd_fdstat_get(rt: *JitRuntime, fd: i32, fdstat_ptr: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdFdstatGet(host, memOf(rt), @bitCast(fd), @bitCast(fdstat_ptr))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdFdstatGet(host, memOf(rt), @bitCast(fd), @bitCast(fdstat_ptr))));
 }
 
 pub fn fd_fdstat_set_flags(rt: *JitRuntime, fd: i32, flags: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdFdstatSetFlags(host, @bitCast(fd), @intCast(@as(u32, @bitCast(flags)) & 0xFFFF))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdFdstatSetFlags(host, @bitCast(fd), @intCast(@as(u32, @bitCast(flags)) & 0xFFFF))));
 }
 
 pub fn fd_fdstat_set_rights(rt: *JitRuntime, fd: i32, rights_base: i64, rights_inheriting: i64) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdFdstatSetRights(host, @bitCast(fd), @bitCast(rights_base), @bitCast(rights_inheriting))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdFdstatSetRights(host, @bitCast(fd), @bitCast(rights_base), @bitCast(rights_inheriting))));
 }
 
 pub fn fd_sync(rt: *JitRuntime, fd: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdSync(host, @bitCast(fd))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdSync(host, @bitCast(fd))));
 }
 
 pub fn fd_datasync(rt: *JitRuntime, fd: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdDatasync(host, @bitCast(fd))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdDatasync(host, @bitCast(fd))));
 }
 
 pub fn fd_advise(rt: *JitRuntime, fd: i32, offset: i64, len: i64, advice: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdAdvise(host, @bitCast(fd), @bitCast(offset), @bitCast(len), @intCast(@as(u32, @bitCast(advice)) & 0xFF))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdAdvise(host, @bitCast(fd), @bitCast(offset), @bitCast(len), @intCast(@as(u32, @bitCast(advice)) & 0xFF))));
 }
 
 pub fn fd_allocate(rt: *JitRuntime, fd: i32, offset: i64, len: i64) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdAllocate(host, @bitCast(fd), @bitCast(offset), @bitCast(len))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdAllocate(host, @bitCast(fd), @bitCast(offset), @bitCast(len))));
 }
 
 pub fn fd_pread(rt: *JitRuntime, fd: i32, iovec_ptr: i32, iovec_count: i32, offset: i64, nread_ptr: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdPread(host, memOf(rt), @bitCast(fd), @bitCast(iovec_ptr), @bitCast(iovec_count), @bitCast(offset), @bitCast(nread_ptr))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdPread(host, memOf(rt), @bitCast(fd), @bitCast(iovec_ptr), @bitCast(iovec_count), @bitCast(offset), @bitCast(nread_ptr))));
 }
 
 pub fn fd_pwrite(rt: *JitRuntime, fd: i32, ciovec_ptr: i32, ciovec_count: i32, offset: i64, nwritten_ptr: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdPwrite(host, memOf(rt), @bitCast(fd), @bitCast(ciovec_ptr), @bitCast(ciovec_count), @bitCast(offset), @bitCast(nwritten_ptr))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdPwrite(host, memOf(rt), @bitCast(fd), @bitCast(ciovec_ptr), @bitCast(ciovec_count), @bitCast(offset), @bitCast(nwritten_ptr))));
 }
 
 pub fn fd_renumber(rt: *JitRuntime, from: i32, to: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdRenumber(host, @bitCast(from), @bitCast(to))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdRenumber(host, @bitCast(from), @bitCast(to))));
 }
 
 pub fn fd_readdir(rt: *JitRuntime, fd: i32, buf_ptr: i32, buf_len: i32, cookie: i64, bufused_ptr: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdReaddir(host, memOf(rt), @bitCast(fd), @bitCast(buf_ptr), @bitCast(buf_len), @bitCast(cookie), @bitCast(bufused_ptr))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdReaddir(host, memOf(rt), @bitCast(fd), @bitCast(buf_ptr), @bitCast(buf_len), @bitCast(cookie), @bitCast(bufused_ptr))));
 }
 
 pub fn fd_filestat_get(rt: *JitRuntime, fd: i32, filestat_ptr: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdFilestatGet(host, memOf(rt), @bitCast(fd), @bitCast(filestat_ptr))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdFilestatGet(host, memOf(rt), @bitCast(fd), @bitCast(filestat_ptr))));
 }
 
 pub fn fd_filestat_set_size(rt: *JitRuntime, fd: i32, size: i64) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdFilestatSetSize(host, @bitCast(fd), @bitCast(size))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdFilestatSetSize(host, @bitCast(fd), @bitCast(size))));
 }
 
 pub fn fd_filestat_set_times(rt: *JitRuntime, fd: i32, atim: i64, mtim: i64, fst_flags: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdFilestatSetTimes(host, @bitCast(fd), @bitCast(atim), @bitCast(mtim), @intCast(@as(u32, @bitCast(fst_flags)) & 0xFFFF))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdFilestatSetTimes(host, @bitCast(fd), @bitCast(atim), @bitCast(mtim), @intCast(@as(u32, @bitCast(fst_flags)) & 0xFFFF))));
 }
 
 pub fn fd_prestat_get(rt: *JitRuntime, fd: i32, prestat_ptr: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdPrestatGet(host, memOf(rt), @bitCast(fd), @bitCast(prestat_ptr))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdPrestatGet(host, memOf(rt), @bitCast(fd), @bitCast(prestat_ptr))));
 }
 
 pub fn fd_prestat_dir_name(rt: *JitRuntime, fd: i32, path_ptr: i32, path_len: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.fdPrestatDirName(host, memOf(rt), @bitCast(fd), @bitCast(path_ptr), @bitCast(path_len))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.fdPrestatDirName(host, memOf(rt), @bitCast(fd), @bitCast(path_ptr), @bitCast(path_len))));
 }
 
 // --- path ---
 
 pub fn path_open(rt: *JitRuntime, dirfd: i32, dirflags: i32, path_ptr: i32, path_len: i32, oflags: i32, fs_rights_base: i64, fs_rights_inheriting: i64, fdflags: i32, opened_fd_ptr: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.pathOpen(host, memOf(rt), @bitCast(dirfd), @bitCast(dirflags), @bitCast(path_ptr), @bitCast(path_len), @intCast(@as(u32, @bitCast(oflags)) & 0xFFFF), @bitCast(fs_rights_base), @bitCast(fs_rights_inheriting), @intCast(@as(u32, @bitCast(fdflags)) & 0xFFFF), @bitCast(opened_fd_ptr))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.pathOpen(host, memOf(rt), @bitCast(dirfd), @bitCast(dirflags), @bitCast(path_ptr), @bitCast(path_len), @intCast(@as(u32, @bitCast(oflags)) & 0xFFFF), @bitCast(fs_rights_base), @bitCast(fs_rights_inheriting), @intCast(@as(u32, @bitCast(fdflags)) & 0xFFFF), @bitCast(opened_fd_ptr))));
 }
 
 pub fn path_unlink_file(rt: *JitRuntime, dirfd: i32, path_ptr: i32, path_len: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.pathUnlinkFile(host, memOf(rt), @bitCast(dirfd), @bitCast(path_ptr), @bitCast(path_len))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.pathUnlinkFile(host, memOf(rt), @bitCast(dirfd), @bitCast(path_ptr), @bitCast(path_len))));
 }
 
 pub fn path_create_directory(rt: *JitRuntime, dirfd: i32, path_ptr: i32, path_len: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_path.pathCreateDirectory(host, memOf(rt), @bitCast(dirfd), @bitCast(path_ptr), @bitCast(path_len))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_path.pathCreateDirectory(host, memOf(rt), @bitCast(dirfd), @bitCast(path_ptr), @bitCast(path_len))));
 }
 
 pub fn path_remove_directory(rt: *JitRuntime, dirfd: i32, path_ptr: i32, path_len: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_path.pathRemoveDirectory(host, memOf(rt), @bitCast(dirfd), @bitCast(path_ptr), @bitCast(path_len))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_path.pathRemoveDirectory(host, memOf(rt), @bitCast(dirfd), @bitCast(path_ptr), @bitCast(path_len))));
 }
 
 pub fn path_filestat_get(rt: *JitRuntime, dirfd: i32, lookupflags: i32, path_ptr: i32, path_len: i32, filestat_ptr: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_path.pathFilestatGet(host, memOf(rt), @bitCast(dirfd), @bitCast(lookupflags), @bitCast(path_ptr), @bitCast(path_len), @bitCast(filestat_ptr))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_path.pathFilestatGet(host, memOf(rt), @bitCast(dirfd), @bitCast(lookupflags), @bitCast(path_ptr), @bitCast(path_len), @bitCast(filestat_ptr))));
 }
 
 pub fn path_filestat_set_times(rt: *JitRuntime, dirfd: i32, lookupflags: i32, path_ptr: i32, path_len: i32, atim: i64, mtim: i64, fst_flags: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_path.pathFilestatSetTimes(host, memOf(rt), @bitCast(dirfd), @bitCast(lookupflags), @bitCast(path_ptr), @bitCast(path_len), @bitCast(atim), @bitCast(mtim), @intCast(@as(u32, @bitCast(fst_flags)) & 0xFFFF))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_path.pathFilestatSetTimes(host, memOf(rt), @bitCast(dirfd), @bitCast(lookupflags), @bitCast(path_ptr), @bitCast(path_len), @bitCast(atim), @bitCast(mtim), @intCast(@as(u32, @bitCast(fst_flags)) & 0xFFFF))));
 }
 
 pub fn path_symlink(rt: *JitRuntime, target_ptr: i32, target_len: i32, dirfd: i32, path_ptr: i32, path_len: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_path.pathSymlink(host, memOf(rt), @bitCast(target_ptr), @bitCast(target_len), @bitCast(dirfd), @bitCast(path_ptr), @bitCast(path_len))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_path.pathSymlink(host, memOf(rt), @bitCast(target_ptr), @bitCast(target_len), @bitCast(dirfd), @bitCast(path_ptr), @bitCast(path_len))));
 }
 
 pub fn path_readlink(rt: *JitRuntime, dirfd: i32, path_ptr: i32, path_len: i32, buf_ptr: i32, buf_len: i32, bufused_ptr: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_path.pathReadlink(host, memOf(rt), @bitCast(dirfd), @bitCast(path_ptr), @bitCast(path_len), @bitCast(buf_ptr), @bitCast(buf_len), @bitCast(bufused_ptr))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_path.pathReadlink(host, memOf(rt), @bitCast(dirfd), @bitCast(path_ptr), @bitCast(path_len), @bitCast(buf_ptr), @bitCast(buf_len), @bitCast(bufused_ptr))));
 }
 
 pub fn path_rename(rt: *JitRuntime, old_dirfd: i32, old_ptr: i32, old_len: i32, new_dirfd: i32, new_ptr: i32, new_len: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_path.pathRename(host, memOf(rt), @bitCast(old_dirfd), @bitCast(old_ptr), @bitCast(old_len), @bitCast(new_dirfd), @bitCast(new_ptr), @bitCast(new_len))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_path.pathRename(host, memOf(rt), @bitCast(old_dirfd), @bitCast(old_ptr), @bitCast(old_len), @bitCast(new_dirfd), @bitCast(new_ptr), @bitCast(new_len))));
 }
 
 pub fn path_link(rt: *JitRuntime, old_dirfd: i32, old_flags: i32, old_ptr: i32, old_len: i32, new_dirfd: i32, new_ptr: i32, new_len: i32) callconv(.c) i32 {
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_path.pathLink(host, memOf(rt), @bitCast(old_dirfd), @bitCast(old_flags), @bitCast(old_ptr), @bitCast(old_len), @bitCast(new_dirfd), @bitCast(new_ptr), @bitCast(new_len))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_path.pathLink(host, memOf(rt), @bitCast(old_dirfd), @bitCast(old_flags), @bitCast(old_ptr), @bitCast(old_len), @bitCast(new_dirfd), @bitCast(new_ptr), @bitCast(new_len))));
 }
 
 // --- sock (each handler takes only fd; the other ABI args are unused) ---
@@ -556,8 +556,8 @@ pub fn path_link(rt: *JitRuntime, old_dirfd: i32, old_flags: i32, old_ptr: i32, 
 pub fn sock_accept(rt: *JitRuntime, fd: i32, fdflags: i32, new_fd_ptr: i32) callconv(.c) i32 {
     _ = fdflags;
     _ = new_fd_ptr;
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.sockAccept(host, @bitCast(fd))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.sockAccept(host, @bitCast(fd))));
 }
 
 pub fn sock_recv(rt: *JitRuntime, fd: i32, ri_data_ptr: i32, ri_data_len: i32, ri_flags: i32, ro_datalen_ptr: i32, ro_flags_ptr: i32) callconv(.c) i32 {
@@ -566,8 +566,8 @@ pub fn sock_recv(rt: *JitRuntime, fd: i32, ri_data_ptr: i32, ri_data_len: i32, r
     _ = ri_flags;
     _ = ro_datalen_ptr;
     _ = ro_flags_ptr;
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.sockRecv(host, @bitCast(fd))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.sockRecv(host, @bitCast(fd))));
 }
 
 pub fn sock_send(rt: *JitRuntime, fd: i32, si_data_ptr: i32, si_data_len: i32, si_flags: i32, so_datalen_ptr: i32) callconv(.c) i32 {
@@ -575,14 +575,14 @@ pub fn sock_send(rt: *JitRuntime, fd: i32, si_data_ptr: i32, si_data_len: i32, s
     _ = si_data_len;
     _ = si_flags;
     _ = so_datalen_ptr;
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.sockSend(host, @bitCast(fd))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.sockSend(host, @bitCast(fd))));
 }
 
 pub fn sock_shutdown(rt: *JitRuntime, fd: i32, how: i32) callconv(.c) i32 {
     _ = how;
-    const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
-    return @intCast(@intFromEnum(wasi_fd.sockShutdown(host, @bitCast(fd))));
+    const host = hostOf(rt) orelse return @backingInt(Errno.nosys);
+    return @intCast(@backingInt(wasi_fd.sockShutdown(host, @bitCast(fd))));
 }
 
 /// Match an import (`module`, `name`) tuple against the known
@@ -705,7 +705,7 @@ test "fd_write: bad fd returns EBADF" {
         .host_dispatch_count = 0,
     };
     const errno = fd_write(&rt, 99, 0, 0, 0);
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.badf)), errno);
+    try testing.expectEqual(@as(i32, @backingInt(Errno.badf)), errno);
     _ = builtin.os.tag; // touch builtin to silence unused-import warning
 }
 
@@ -728,13 +728,13 @@ test "clock_time_get: host-attached → REAL nonzero time; no host → 0 stub (D
         .wasi_host = &h,
     };
     // realtime clock → the shared interp handler writes real nanoseconds.
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.success)), clock_time_get(&rt, 0, 0, 0));
+    try testing.expectEqual(@as(i32, @backingInt(Errno.success)), clock_time_get(&rt, 0, 0, 0));
     try testing.expect(std.mem.readInt(u64, memory[0..8], .little) > 0);
 
     // Compute-only fallback (no host): deterministic 0.
     rt.wasi_host = null;
     @memset(&memory, 0xFF);
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.success)), clock_time_get(&rt, 0, 0, 0));
+    try testing.expectEqual(@as(i32, @backingInt(Errno.success)), clock_time_get(&rt, 0, 0, 0));
     try testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, memory[0..8], .little));
 }
 
@@ -756,7 +756,7 @@ test "random_get: host-attached → real entropy; no host → zero-fill (D-244)"
         .host_dispatch_count = 0,
         .wasi_host = &h,
     };
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.success)), random_get(&rt, 0, 32));
+    try testing.expectEqual(@as(i32, @backingInt(Errno.success)), random_get(&rt, 0, 32));
     var any_nonzero = false;
     for (memory) |b| {
         if (b != 0) any_nonzero = true;
@@ -766,7 +766,7 @@ test "random_get: host-attached → real entropy; no host → zero-fill (D-244)"
     // No host → deterministic zero-fill.
     rt.wasi_host = null;
     @memset(&memory, 0xAB);
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.success)), random_get(&rt, 0, 32));
+    try testing.expectEqual(@as(i32, @backingInt(Errno.success)), random_get(&rt, 0, 32));
     for (memory) |b| try testing.expectEqual(@as(u8, 0), b);
 }
 
@@ -796,7 +796,7 @@ test "fd_write: host-attached routes to the shared handler (real stdout capture)
         .wasi_host = &h,
     };
     // fd=1 stdout, 1 ciovec at 16, nwritten at 40.
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.success)), fd_write(&rt, 1, 16, 1, 40));
+    try testing.expectEqual(@as(i32, @backingInt(Errno.success)), fd_write(&rt, 1, 16, 1, 40));
     try testing.expectEqualStrings("HELLO", capture.items);
     try testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, memory[40..44], .little));
 }
@@ -824,7 +824,7 @@ test "fd_read: host-attached reads from real stdin; no host → EOF stub (D-244)
         .wasi_host = &h,
     };
     // fd=0 stdin, 1 iovec at 16, nread at 40.
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.success)), fd_read(&rt, 0, 16, 1, 40));
+    try testing.expectEqual(@as(i32, @backingInt(Errno.success)), fd_read(&rt, 0, 16, 1, 40));
     try testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, memory[40..44], .little));
     try testing.expectEqualStrings("ab", memory[24..26]);
 }
@@ -849,11 +849,11 @@ test "fd_read: bad fd returns EBADF" {
         .host_dispatch_count = 0,
     };
     const errno = fd_read(&rt, 99, 0, 0, 0);
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.badf)), errno);
+    try testing.expectEqual(@as(i32, @backingInt(Errno.badf)), errno);
 }
 
 test "fd_read: fd 0 stdin EOF writes 0 to nread and returns success" {
-    var memory: [32]u8 = .{0xAA} ** 32;
+    var memory: [32]u8 = @splat(0xAA);
     var rt: JitRuntime = .{
         .vm_base = &memory,
         .mem_limit = memory.len,
@@ -870,7 +870,7 @@ test "fd_read: fd 0 stdin EOF writes 0 to nread and returns success" {
     std.mem.writeInt(u32, memory[0..4], 16, .little);
     std.mem.writeInt(u32, memory[4..8], 8, .little);
     const errno = fd_read(&rt, 0, 0, 1, 24);
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.success)), errno);
+    try testing.expectEqual(@as(i32, @backingInt(Errno.success)), errno);
     try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, memory[24..28], .little));
 }
 
@@ -890,7 +890,7 @@ test "fd_read: out-of-bounds iovs_ptr returns EFAULT" {
     };
     // iovs_ptr=12 + 1 iovec (8 bytes) overflows 16-byte memory.
     const errno = fd_read(&rt, 0, 12, 1, 0);
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.fault)), errno);
+    try testing.expectEqual(@as(i32, @backingInt(Errno.fault)), errno);
 }
 
 test "args_sizes_get: writes 0 + 0 to memory" {
@@ -945,7 +945,7 @@ test "D-244 clock_res_get: host → success, resolution > 0" {
     defer h.deinit();
     h.io = testing.io;
     var rt = jitRtWithHost(&memory, &h);
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.success)), clock_res_get(&rt, 0, 0));
+    try testing.expectEqual(@as(i32, @backingInt(Errno.success)), clock_res_get(&rt, 0, 0));
     try testing.expect(std.mem.readInt(u64, memory[0..8], .little) > 0);
 }
 
@@ -963,7 +963,7 @@ test "D-244 clock_res_get: no host → nosys" {
         .host_dispatch_base = undefined,
         .host_dispatch_count = 0,
     };
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.nosys)), clock_res_get(&rt, 0, 0));
+    try testing.expectEqual(@as(i32, @backingInt(Errno.nosys)), clock_res_get(&rt, 0, 0));
 }
 
 test "D-244 sched_yield: success (no host needed)" {
@@ -980,7 +980,7 @@ test "D-244 sched_yield: success (no host needed)" {
         .host_dispatch_base = undefined,
         .host_dispatch_count = 0,
     };
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.success)), sched_yield(&rt));
+    try testing.expectEqual(@as(i32, @backingInt(Errno.success)), sched_yield(&rt));
 }
 
 test "D-244 proc_raise: notsup (deliberate design boundary)" {
@@ -1007,7 +1007,7 @@ test "D-244 fd_close: stdio fd → success" {
     h.io = testing.io;
     var rt = jitRtWithHost(&memory, &h);
     // fd 1 (stdout) is a stdio slot → close is a success no-op.
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.success)), fd_close(&rt, 1));
+    try testing.expectEqual(@as(i32, @backingInt(Errno.success)), fd_close(&rt, 1));
 }
 
 test "D-244 fd_seek: stdio → spipe" {
@@ -1027,7 +1027,7 @@ test "D-244 fd_prestat_get: bad fd → badf" {
     h.io = testing.io;
     var rt = jitRtWithHost(&memory, &h);
     // fd 1 (stdout, not a preopen dir) → badf (8).
-    try testing.expectEqual(@as(i32, @intFromEnum(Errno.badf)), fd_prestat_get(&rt, 1, 0));
+    try testing.expectEqual(@as(i32, @backingInt(Errno.badf)), fd_prestat_get(&rt, 1, 0));
 }
 
 test "D-244 sock_recv: stdio fd → notsock" {

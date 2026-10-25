@@ -286,7 +286,7 @@ pub fn deserializeToCompiledWasm(allocator: Allocator, cwasm_bytes: []const u8) 
                 .pc_end = e.pc_end,
                 .tag_idx = if (e.tag_idx == format.eh_tag_none) null else e.tag_idx,
                 .landing_pad_pc = e.landing_pad_pc,
-                .kind = @enumFromInt(e.kind),
+                .kind = @fromBackingInt(@intCast(e.kind)),
             };
         }
         break :blk out;
@@ -499,7 +499,7 @@ test "v0.5 round-trip: produce → deserialize → fromCompiled → invoke == fr
 // funcs: fn0 [0, 6) + 2 bytes of padding, fn1 [8, 12), fn2 [12, 17).
 const serialise = @import("serialise.zig");
 
-const layout_test_funcs = [_][]const u8{ &([_]u8{0xAA} ** 6), &([_]u8{0xBB} ** 4), &([_]u8{0xCC} ** 5) };
+const layout_test_funcs = [_][]const u8{ &@as([6]u8, @splat(0xAA)), &@as([4]u8, @splat(0xBB)), &@as([5]u8, @splat(0xCC)) };
 
 fn layoutTestArtifact(relocs: []const format.CwasmReloc, owners: []const u32) ![]u8 {
     return serialise.produceCwasm(testing.allocator, .{

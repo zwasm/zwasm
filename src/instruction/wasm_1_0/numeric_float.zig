@@ -25,7 +25,7 @@ const Value = runtime.Value;
 const Trap = runtime.Trap;
 
 inline fn op(t: ZirOp) usize {
-    return @intFromEnum(t);
+    return @backingInt(t);
 }
 
 inline fn pushBool(rt: *Runtime, b: bool) anyerror!void {

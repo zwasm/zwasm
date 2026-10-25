@@ -394,7 +394,7 @@ pub const Filestat = extern struct {
     dev: Device,
     ino: Inode,
     filetype: Filetype,
-    _pad: [7]u8 = .{0} ** 7,
+    _pad: [7]u8 = @splat(0),
     nlink: Linkcount,
     size: Filesize,
     atim: Timestamp,
@@ -408,7 +408,7 @@ pub const Filestat = extern struct {
 /// the name itself. Size: 1 + 3 pad + 4 = 8 bytes.
 pub const Prestat = extern struct {
     pr_type: PreopenType,
-    _pad: [3]u8 = .{0} ** 3,
+    _pad: [3]u8 = @splat(0),
     pr_name_len: Size,
 };
 
@@ -442,28 +442,28 @@ test "Iovec / Ciovec are 8 bytes (u32 buf + u32 len)" {
 }
 
 test "Errno: spec-conformant values for the load-bearing tags" {
-    try testing.expectEqual(@as(u16, 0), @intFromEnum(Errno.success));
-    try testing.expectEqual(@as(u16, 8), @intFromEnum(Errno.badf));
-    try testing.expectEqual(@as(u16, 28), @intFromEnum(Errno.inval));
-    try testing.expectEqual(@as(u16, 44), @intFromEnum(Errno.noent));
-    try testing.expectEqual(@as(u16, 52), @intFromEnum(Errno.nosys));
-    try testing.expectEqual(@as(u16, 54), @intFromEnum(Errno.notdir));
-    try testing.expectEqual(@as(u16, 76), @intFromEnum(Errno.notcapable));
+    try testing.expectEqual(@as(u16, 0), @backingInt(Errno.success));
+    try testing.expectEqual(@as(u16, 8), @backingInt(Errno.badf));
+    try testing.expectEqual(@as(u16, 28), @backingInt(Errno.inval));
+    try testing.expectEqual(@as(u16, 44), @backingInt(Errno.noent));
+    try testing.expectEqual(@as(u16, 52), @backingInt(Errno.nosys));
+    try testing.expectEqual(@as(u16, 54), @backingInt(Errno.notdir));
+    try testing.expectEqual(@as(u16, 76), @backingInt(Errno.notcapable));
 }
 
 test "Filetype: spec values" {
-    try testing.expectEqual(@as(u8, 0), @intFromEnum(Filetype.unknown));
-    try testing.expectEqual(@as(u8, 3), @intFromEnum(Filetype.directory));
-    try testing.expectEqual(@as(u8, 4), @intFromEnum(Filetype.regular_file));
-    try testing.expectEqual(@as(u8, 7), @intFromEnum(Filetype.symbolic_link));
+    try testing.expectEqual(@as(u8, 0), @backingInt(Filetype.unknown));
+    try testing.expectEqual(@as(u8, 3), @backingInt(Filetype.directory));
+    try testing.expectEqual(@as(u8, 4), @backingInt(Filetype.regular_file));
+    try testing.expectEqual(@as(u8, 7), @backingInt(Filetype.symbolic_link));
 }
 
 test "Whence: spec values + Clockid: spec values" {
-    try testing.expectEqual(@as(u8, 0), @intFromEnum(Whence.set));
-    try testing.expectEqual(@as(u8, 1), @intFromEnum(Whence.cur));
-    try testing.expectEqual(@as(u8, 2), @intFromEnum(Whence.end));
-    try testing.expectEqual(@as(u32, 0), @intFromEnum(Clockid.realtime));
-    try testing.expectEqual(@as(u32, 1), @intFromEnum(Clockid.monotonic));
+    try testing.expectEqual(@as(u8, 0), @backingInt(Whence.set));
+    try testing.expectEqual(@as(u8, 1), @backingInt(Whence.cur));
+    try testing.expectEqual(@as(u8, 2), @backingInt(Whence.end));
+    try testing.expectEqual(@as(u32, 0), @backingInt(Clockid.realtime));
+    try testing.expectEqual(@as(u32, 1), @backingInt(Clockid.monotonic));
 }
 
 test "Fdflags / Oflags / Rights: spec bit values" {

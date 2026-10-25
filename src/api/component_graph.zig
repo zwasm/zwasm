@@ -913,7 +913,7 @@ fn installBoundaryTrampoline(
 /// Canonical ABI (`CanonicalABI.md` `Subtask.State`). RETURNED=2 means the
 /// callee resolved within the call (a synchronous completion); the minimal c-2b
 /// fixture's callee EXITs immediately, so the lowered call returns RETURNED.
-const SUBTASK_RETURNED: u32 = @intFromEnum(async_mod.SubtaskState.returned);
+const SUBTASK_RETURNED: u32 = @backingInt(async_mod.SubtaskState.returned);
 
 /// The async boundary trampoline's flattened core signature for a NO-RESULT
 /// async import (`canon lower … async` of `func()`): `() -> i32`, returning the
@@ -1466,7 +1466,7 @@ fn canonIsByValueBlob(t: canon.CanonType) bool {
 /// to `defineFuncRaw`. Every flat-scalar/string/list boundary flattens to all-i32
 /// core words, so one static all-i32 array serves them all — no per-boundary
 /// allocation (D-305). Sized to the linker's raw-arity cap.
-const boundary_core_i32: [marshal.raw_max_words]zir.ValType = .{.i32} ** marshal.raw_max_words;
+const boundary_core_i32: [marshal.raw_max_words]zir.ValType = @splat(.i32);
 
 /// The resolved boundary shape: whether the func flattens to the all-i32 core
 /// signature the generic trampoline marshals, and its flattened param word count.

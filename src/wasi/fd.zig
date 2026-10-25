@@ -441,14 +441,14 @@ pub fn fdSeek(
     // witx: FD_TELL covers the offset-preserving form (`cur` + 0); anything
     // that can move the cursor needs FD_SEEK. FD_SEEK "implies FD_TELL", so it
     // satisfies the offset-preserving form on its own.
-    const preserves_offset = whence == @intFromEnum(p1.Whence.cur) and offset == 0;
+    const preserves_offset = whence == @backingInt(p1.Whence.cur) and offset == 0;
     const may_seek = slot.has(p1.RIGHTS_FD_SEEK) or
         (preserves_offset and slot.has(p1.RIGHTS_FD_TELL));
     if (!may_seek) return .notcapable;
     const handle = slot.host_handle orelse return .badf;
     const io = host.io orelse return .nosys;
     const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
-    const base: i128 = switch (@as(p1.Whence, @enumFromInt(whence))) {
+    const base: i128 = switch (@as(p1.Whence, @fromBackingInt(@intCast(whence)))) {
         .set => 0,
         .cur => @intCast(slot.pos),
         .end => blk: {
@@ -756,7 +756,7 @@ pub fn fdFdstatGet(
 
     const dst = mem[fdstat_ptr..][0..24];
     @memset(dst, 0);
-    dst[0] = @intFromEnum(filetypeFor(host, slot));
+    dst[0] = @backingInt(filetypeFor(host, slot));
     std.mem.writeInt(u16, dst[2..4], slot.fs_flags, .little);
     std.mem.writeInt(u64, dst[8..16], slot.rights_base, .little);
     std.mem.writeInt(u64, dst[16..24], slot.rights_inheriting, .little);
@@ -968,7 +968,7 @@ fn writeDirent(buf: []u8, written: *usize, d_next: u64, d_ino: u64, d_type: p1.F
     std.mem.writeInt(u64, hdr[0..8], d_next, .little);
     std.mem.writeInt(u64, hdr[8..16], d_ino, .little);
     std.mem.writeInt(u32, hdr[16..20], @intCast(name.len), .little);
-    hdr[20] = @intFromEnum(d_type);
+    hdr[20] = @backingInt(d_type);
 
     const hdr_n = @min(hdr.len, buf.len - written.*);
     @memcpy(buf[written.* .. written.* + hdr_n], hdr[0..hdr_n]);
@@ -1547,7 +1547,7 @@ test "fdFdstatGet: stdout writes 24-byte block (unknown filetype without io, the
     const e = fdFdstatGet(&h, &mem, 1, 0);
     try testing.expectEqual(p1.Errno.success, e);
     // filetype = unknown (0): no io, so no host fd to ask (#494)
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.unknown)), mem[0]);
+    try testing.expectEqual(@as(u8, @backingInt(p1.Filetype.unknown)), mem[0]);
     // reserved byte zeroed
     try testing.expectEqual(@as(u8, 0), mem[1]);
     // fs_flags = 0
@@ -1574,13 +1574,13 @@ test "fdFdstatGet: a stdio fd backed by a capture buffer or a byte slice is not 
     h.stdin_inherit = true;
     var mem: [32]u8 = @splat(0xAB);
     try testing.expectEqual(p1.Errno.success, fdFdstatGet(&h, &mem, 1, 0));
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.unknown)), mem[0]);
+    try testing.expectEqual(@as(u8, @backingInt(p1.Filetype.unknown)), mem[0]);
     try testing.expectEqual(p1.Errno.success, fdFdstatGet(&h, &mem, 0, 0));
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.unknown)), mem[0]);
+    try testing.expectEqual(@as(u8, @backingInt(p1.Filetype.unknown)), mem[0]);
     // `fd_filestat_get` answers the same way (#494).
     var fs: [64]u8 = @splat(0xAA);
     try testing.expectEqual(p1.Errno.success, fdFilestatGet(&h, &fs, 1, 0));
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.unknown)), fs[16]);
+    try testing.expectEqual(@as(u8, @backingInt(p1.Filetype.unknown)), fs[16]);
 }
 
 test "readStdin: a byte slice is served at stdin_pos, no source is EOF, inheriting without io is NoHostIo (#508)" {
@@ -1797,7 +1797,7 @@ test "fdReaddir: enumerates '.', '..', real entries; cookie resumes past them" {
             found[1] = true;
         } else if (std.mem.eql(u8, name, "f1")) {
             found[2] = true;
-            try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.regular_file)), dtype);
+            try testing.expectEqual(@as(u8, @backingInt(p1.Filetype.regular_file)), dtype);
         } else if (std.mem.eql(u8, name, "f2")) {
             found[3] = true;
         }
@@ -2112,30 +2112,30 @@ test "fd_seek + fd_tell move + report the file cursor (set/cur/end whence)" {
     try testing.expectEqual(@as(u64, 5), std.mem.readInt(u64, mem[116..124], .little));
 
     // seek SET 2 → new_pos 2; read 3 → "234"
-    try testing.expectEqual(p1.Errno.success, fdSeek(&h, &mem, fd, 2, @intFromEnum(p1.Whence.set), 116));
+    try testing.expectEqual(p1.Errno.success, fdSeek(&h, &mem, fd, 2, @backingInt(p1.Whence.set), 116));
     try testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, mem[116..124], .little));
     std.mem.writeInt(u32, mem[36..40], 3, .little);
     try testing.expectEqual(p1.Errno.success, fdRead(&h, &mem, fd, 32, 1, 104));
     try testing.expectEqualStrings("234", mem[64..67]);
 
     // seek END -3 (size 10) → 7; read 3 → "789" (cursor now 10)
-    try testing.expectEqual(p1.Errno.success, fdSeek(&h, &mem, fd, -3, @intFromEnum(p1.Whence.end), 116));
+    try testing.expectEqual(p1.Errno.success, fdSeek(&h, &mem, fd, -3, @backingInt(p1.Whence.end), 116));
     try testing.expectEqual(@as(u64, 7), std.mem.readInt(u64, mem[116..124], .little));
     try testing.expectEqual(p1.Errno.success, fdRead(&h, &mem, fd, 32, 1, 104));
     try testing.expectEqualStrings("789", mem[64..67]);
 
     // seek CUR -10 (from 10) → 0
-    try testing.expectEqual(p1.Errno.success, fdSeek(&h, &mem, fd, -10, @intFromEnum(p1.Whence.cur), 116));
+    try testing.expectEqual(p1.Errno.success, fdSeek(&h, &mem, fd, -10, @backingInt(p1.Whence.cur), 116));
     try testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, mem[116..124], .little));
 
     // a negative resulting offset is invalid
-    try testing.expectEqual(p1.Errno.inval, fdSeek(&h, &mem, fd, -1, @intFromEnum(p1.Whence.cur), 116));
+    try testing.expectEqual(p1.Errno.inval, fdSeek(&h, &mem, fd, -1, @backingInt(p1.Whence.cur), 116));
 
     // so is one past u64; a cursor past i64 is held, but reads and writes
     // there are invalid
-    try testing.expectEqual(p1.Errno.success, fdSeek(&h, &mem, fd, std.math.maxInt(i64), @intFromEnum(p1.Whence.set), 116));
-    try testing.expectEqual(p1.Errno.success, fdSeek(&h, &mem, fd, std.math.maxInt(i64), @intFromEnum(p1.Whence.cur), 116));
-    try testing.expectEqual(p1.Errno.inval, fdSeek(&h, &mem, fd, std.math.maxInt(i64), @intFromEnum(p1.Whence.cur), 116));
+    try testing.expectEqual(p1.Errno.success, fdSeek(&h, &mem, fd, std.math.maxInt(i64), @backingInt(p1.Whence.set), 116));
+    try testing.expectEqual(p1.Errno.success, fdSeek(&h, &mem, fd, std.math.maxInt(i64), @backingInt(p1.Whence.cur), 116));
+    try testing.expectEqual(p1.Errno.inval, fdSeek(&h, &mem, fd, std.math.maxInt(i64), @backingInt(p1.Whence.cur), 116));
     try testing.expectEqual(p1.Errno.inval, fdRead(&h, &mem, fd, 32, 1, 104));
     try testing.expectEqual(p1.Errno.inval, fdWrite(&h, &mem, fd, 32, 1, 104));
 }
@@ -2194,14 +2194,14 @@ test "fdFilestatGet: stdout reports unknown without io; bad fd is badf" {
     var mem: [64]u8 = @splat(0xAA);
     try testing.expectEqual(p1.Errno.success, fdFilestatGet(&h, &mem, 1, 0));
     // Filestat.filetype is at offset 16 (dev u64 @0, ino u64 @8, filetype @16).
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.Filetype.unknown)), mem[16]);
+    try testing.expectEqual(@as(u8, @backingInt(p1.Filetype.unknown)), mem[16]);
     try testing.expectEqual(p1.Errno.badf, fdFilestatGet(&h, &mem, 99, 0));
 }
 
 test "pathUnlinkFile: non-preopen dirfd is notdir; bad fd is badf; .. escape is notcapable" {
     var h = try Host.init(testing.allocator);
     defer h.deinit();
-    var mem = [_]u8{ 'a', '.', 't', 'x', 't' } ++ [_]u8{0} ** 16;
+    var mem = [_]u8{ 'a', '.', 't', 'x', 't' } ++ @as([16]u8, @splat(0));
     // fd 1 (stdout) is not a .dir → notdir.
     try testing.expectEqual(p1.Errno.notdir, pathUnlinkFile(&h, &mem, 1, 0, 5));
     // out-of-range fd → badf.
@@ -2390,17 +2390,17 @@ test "rights gate: fd_seek implies fd_tell, and only fd_seek moves the cursor" {
     // FD_TELL alone: the offset-preserving form clears the gate (it reaches
     // the missing handle and reports badf); a real seek does not.
     const tell_only = try pushRightsOnlyFile(&h, p1.RIGHTS_FD_TELL);
-    try testing.expectEqual(p1.Errno.badf, fdSeek(&h, &mem, tell_only, 0, @intFromEnum(p1.Whence.cur), 32));
-    try testing.expectEqual(p1.Errno.notcapable, fdSeek(&h, &mem, tell_only, 1, @intFromEnum(p1.Whence.set), 32));
+    try testing.expectEqual(p1.Errno.badf, fdSeek(&h, &mem, tell_only, 0, @backingInt(p1.Whence.cur), 32));
+    try testing.expectEqual(p1.Errno.notcapable, fdSeek(&h, &mem, tell_only, 1, @backingInt(p1.Whence.set), 32));
 
     // FD_SEEK alone: witx says it implies FD_TELL, so both forms clear.
     const seek_only = try pushRightsOnlyFile(&h, p1.RIGHTS_FD_SEEK);
-    try testing.expectEqual(p1.Errno.badf, fdSeek(&h, &mem, seek_only, 0, @intFromEnum(p1.Whence.cur), 32));
+    try testing.expectEqual(p1.Errno.badf, fdSeek(&h, &mem, seek_only, 0, @backingInt(p1.Whence.cur), 32));
     try testing.expectEqual(p1.Errno.success, fdTell(&h, &mem, seek_only, 32));
 
     // Neither bit: both forms are notcapable.
     const bare = try pushRightsOnlyFile(&h, 0);
-    try testing.expectEqual(p1.Errno.notcapable, fdSeek(&h, &mem, bare, 0, @intFromEnum(p1.Whence.cur), 32));
+    try testing.expectEqual(p1.Errno.notcapable, fdSeek(&h, &mem, bare, 0, @backingInt(p1.Whence.cur), 32));
     try testing.expectEqual(p1.Errno.notcapable, fdTell(&h, &mem, bare, 32));
 }
 

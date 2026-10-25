@@ -746,7 +746,7 @@ fn fs3DirStreamRead(ctx: *WasiP2Ctx, state_index: u32, end: *async_mod.StreamFut
             @memcpy(dest, src);
         }
         const rec = ptr + filled * 24;
-        const p1_ft: wasi_p1.Filetype = @enumFromInt(d_type);
+        const p1_ft: wasi_p1.Filetype = @fromBackingInt(@intCast(d_type));
         try writeFs3DescriptorType(mem, rec, p1_ft);
         try mem.write(rec + 16, name_ptr);
         try mem.write(rec + 20, d_namlen);
@@ -867,7 +867,7 @@ fn sock3TcpCreate(caller: *Caller, family: u32, retptr: u32) WasiP2Error!void {
     ctxRequireNetwork(ctx) catch |e| return writeSock3Err(mem, retptr, 4, e);
     if (family > 1) return writeSock3Err(mem, retptr, 4, error.InvalidArgument);
     const idx: u32 = @intCast(ctx.tcp_sockets.items.len);
-    ctx.tcp_sockets.append(ctx.alloc, p2sock.TcpSocket.create(@enumFromInt(family))) catch return WasiP2Error.OutOfMemory;
+    ctx.tcp_sockets.append(ctx.alloc, p2sock.TcpSocket.create(@fromBackingInt(@intCast(family)))) catch return WasiP2Error.OutOfMemory;
     const handle = try ctx.resources.new(WasiP2Ctx.TCP_SOCKET_RT, idx);
     try mem.write(retptr, @as(u8, 0));
     try mem.write(retptr + 4, handle);
@@ -1145,7 +1145,7 @@ fn sock3TcpIsListening(caller: *Caller, self: u32) WasiP2Error!u32 {
 fn sock3TcpFamily(caller: *Caller, self: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const sock = try sock3TcpSelf(ctx, self);
-    return @intFromEnum(sock.family);
+    return @backingInt(sock.family);
 }
 
 fn sock3TcpSetBacklog(caller: *Caller, self: u32, value: u64, retptr: u32) WasiP2Error!void {
@@ -1286,7 +1286,7 @@ fn sock3UdpCreate(caller: *Caller, family: u32, retptr: u32) WasiP2Error!void {
     ctxRequireNetwork(ctx) catch |e| return writeSock3Err(mem, retptr, 4, e);
     if (family > 1) return writeSock3Err(mem, retptr, 4, error.InvalidArgument);
     const idx: u32 = @intCast(ctx.udp_sockets.items.len);
-    ctx.udp_sockets.append(ctx.alloc, p2sock.UdpSocket.create(@enumFromInt(family))) catch return WasiP2Error.OutOfMemory;
+    ctx.udp_sockets.append(ctx.alloc, p2sock.UdpSocket.create(@fromBackingInt(@intCast(family)))) catch return WasiP2Error.OutOfMemory;
     const handle = try ctx.resources.new(WasiP2Ctx.UDP_SOCKET3_RT, idx);
     try mem.write(retptr, @as(u8, 0));
     try mem.write(retptr + 4, handle);
@@ -1432,7 +1432,7 @@ fn sock3UdpReceive(caller: *Caller, self: u32, retptr: u32) WasiP2Error!u32 {
         .subtask_state = .started,
     });
     try ctx.blocked_udp_receives.put(ctx.alloc, h, .{ .rep = rep, .retptr = retptr });
-    return @intFromEnum(async_mod.SubtaskState.started) | (h << 4);
+    return @backingInt(async_mod.SubtaskState.started) | (h << 4);
 }
 
 /// The receive proper: recvfrom into a fresh guest buffer + marshal the
@@ -1742,7 +1742,7 @@ fn http3RequestGetMethod(caller: *Caller, self: u32, retptr: u32) WasiP2Error!vo
             try mem.write(retptr + 4, p);
             try mem.write(retptr + 8, @as(u32, @intCast(s.len)));
         },
-        else => try mem.write(retptr, @as(u8, @intFromEnum(std.meta.activeTag(req.method)))),
+        else => try mem.write(retptr, @as(u8, @backingInt(std.meta.activeTag(req.method)))),
     }
 }
 
@@ -2111,7 +2111,7 @@ fn http3ClientSend(caller: *Caller, request: u32, retptr: u32) WasiP2Error!u32 {
     // so the transferred-end release must be explicit.
     http3DropTransferredEnd(ctx, req.trailers_future);
     req.trailers_future = 0;
-    return @intFromEnum(async_mod.SubtaskState.started) | (h << 4);
+    return @backingInt(async_mod.SubtaskState.started) | (h << 4);
 }
 
 fn ctxHttpRequest(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*p3http.HttpRequest {
@@ -2170,7 +2170,7 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
             try m.write(retptr + 8, ordinal);
             try m.write(retptr + 16, @as(u8, 0));
             sub.subtask_state = .returned;
-            sub.setPendingEvent(.{ .code = .subtask, .index = h, .payload = @intFromEnum(async_mod.SubtaskState.returned) });
+            sub.setPendingEvent(.{ .code = .subtask, .index = h, .payload = @backingInt(async_mod.SubtaskState.returned) });
         }
     };
     const sub = try self.streams.get(pcs.subtask);
@@ -2244,7 +2244,7 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
     }
     const resp_idx: u32 = @intCast(self.http_responses.items.len);
     self.http_responses.append(self.alloc, .{
-        .status = @intFromEnum(hresp.head.status),
+        .status = @backingInt(hresp.head.status),
         .headers_rep = fields_idx,
         .contents_stream = contents,
     }) catch return WasiP2Error.OutOfMemory;
@@ -2255,7 +2255,7 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
     // streams table, dangling the `sub` pointer taken at entry.
     const sub2 = try self.streams.get(pcs.subtask);
     sub2.subtask_state = .returned;
-    sub2.setPendingEvent(.{ .code = .subtask, .index = pcs.subtask, .payload = @intFromEnum(async_mod.SubtaskState.returned) });
+    sub2.setPendingEvent(.{ .code = .subtask, .index = pcs.subtask, .payload = @backingInt(async_mod.SubtaskState.returned) });
 }
 
 /// Register a harness capture sink for `shared_id`, draining a write that
@@ -2314,7 +2314,7 @@ fn sock3UdpRemoteAddress(caller: *Caller, self: u32, retptr: u32) WasiP2Error!vo
 fn sock3UdpFamily(caller: *Caller, self: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const sock = try sock3UdpSelf(ctx, self);
-    return @intFromEnum(sock.family);
+    return @backingInt(sock.family);
 }
 
 fn sock3UdpHopGet(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {

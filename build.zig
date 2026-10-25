@@ -93,7 +93,7 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(WasmLevel, "wasm_level", wasm_level);
     options.addOption(WasiLevel, "wasi_level", wasi_level);
-    const runner_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseSafe else optimize;
+    const runner_optimize: std.builtin.OptimizeMode = if (optimize == .debug) .safe else optimize;
     options.addOption(EngineMode, "engine_mode", engine_mode);
     // ADR-0209 — the mode `core_rs` is built with, which is not the mode the
     // caller asked for: `runner_optimize` floors Debug at ReleaseSafe for
@@ -230,7 +230,7 @@ pub fn build(b: *std.Build) void {
     // `zig build run -- <args>` runs the CLI.
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run the zwasm executable");
     run_step.dependOn(&run_cmd.step);
 
@@ -347,9 +347,9 @@ pub fn build(b: *std.Build) void {
         .root_module = spec_runner_mod,
     });
     const run_spec_smoke = b.addRunArtifact(spec_runner_exe);
-    run_spec_smoke.addArg(b.pathFromRoot("test/spec/smoke"));
+    run_spec_smoke.addArg(pathFromRoot(b, "test/spec/smoke"));
     const run_spec_mvp = b.addRunArtifact(spec_runner_exe);
-    run_spec_mvp.addArg(b.pathFromRoot("test/spec/wasm-1.0"));
+    run_spec_mvp.addArg(pathFromRoot(b, "test/spec/wasm-1.0"));
     // ADR-0210 — `zig build test-spec` did not print what it ran: three
     // consecutive runs each showed 8 `PASS` lines while the two summaries
     // claimed 3 + 9 = 12, one line spliced mid-token. The cause was NOT
@@ -390,23 +390,23 @@ pub fn build(b: *std.Build) void {
     // diagnosis that put these lines here was wrong, and `run_oob_trap` is
     // the one step in this file where both conditions actually hold.
     const run_edge_p7 = b.addRunArtifact(edge_runner_exe);
-    run_edge_p7.addArg(b.pathFromRoot("test/edge_cases/p7"));
+    run_edge_p7.addArg(pathFromRoot(b, "test/edge_cases/p7"));
     run_edge_p7.has_side_effects = true;
     const run_edge_p9 = b.addRunArtifact(edge_runner_exe);
-    run_edge_p9.addArg(b.pathFromRoot("test/edge_cases/p9"));
+    run_edge_p9.addArg(pathFromRoot(b, "test/edge_cases/p9"));
     run_edge_p9.has_side_effects = true;
     const run_edge_p10 = b.addRunArtifact(edge_runner_exe);
-    run_edge_p10.addArg(b.pathFromRoot("test/edge_cases/p10"));
+    run_edge_p10.addArg(pathFromRoot(b, "test/edge_cases/p10"));
     run_edge_p10.has_side_effects = true;
     const run_edge_p17 = b.addRunArtifact(edge_runner_exe);
-    run_edge_p17.addArg(b.pathFromRoot("test/edge_cases/p17"));
+    run_edge_p17.addArg(pathFromRoot(b, "test/edge_cases/p17"));
     run_edge_p17.has_side_effects = true;
     // Realworld p10 result-check (10.TC-JIT IT-5): the same JIT
     // edge-runner walks `test/realworld/p10/**`, result-checking any
     // toolchain-compiled `.wasm` with a sibling `.expect`
     // (clang_musttail → return_call D-205; clang_wasm64 → memory64 D-209).
     const run_edge_realworld_p10 = b.addRunArtifact(edge_runner_exe);
-    run_edge_realworld_p10.addArg(b.pathFromRoot("test/realworld/p10"));
+    run_edge_realworld_p10.addArg(pathFromRoot(b, "test/realworld/p10"));
     run_edge_realworld_p10.has_side_effects = true;
     const test_edge_step = b.step("test-edge-cases", "Run edge-case fixture runner (all hosts post §9.9 / 9.9-j-2b)");
     test_edge_step.dependOn(&run_edge_p7.step);
@@ -431,8 +431,8 @@ pub fn build(b: *std.Build) void {
         .root_module = jit_compile_runner_mod,
     });
     const run_jit_compile = b.addRunArtifact(jit_compile_runner_exe);
-    run_jit_compile.addArg(b.pathFromRoot("test/spec/smoke"));
-    run_jit_compile.addArg(b.pathFromRoot("test/spec/wasm-1.0"));
+    run_jit_compile.addArg(pathFromRoot(b, "test/spec/smoke"));
+    run_jit_compile.addArg(pathFromRoot(b, "test/spec/wasm-1.0"));
     const test_jit_compile_step = b.step("test-spec-jit-compile", "JIT-compile spec corpus (Mac aarch64 only; §9.7 / 7.5)");
     test_jit_compile_step.dependOn(&run_jit_compile.step);
 
@@ -455,7 +455,7 @@ pub fn build(b: *std.Build) void {
         .root_module = spec_assert_runner_mod,
     });
     const run_spec_assert = b.addRunArtifact(spec_assert_runner_exe);
-    run_spec_assert.addArg(b.pathFromRoot("test/spec/wasm-1.0-assert"));
+    run_spec_assert.addArg(pathFromRoot(b, "test/spec/wasm-1.0-assert"));
     const test_spec_assert_step = b.step("test-spec-assert", "Run JIT spec assertion runner (all hosts; gate-green at §9.7 / 7.8 close)");
     test_spec_assert_step.dependOn(&run_spec_assert.step);
 
@@ -508,7 +508,7 @@ pub fn build(b: *std.Build) void {
         .root_module = comp_spec_runner_mod,
     });
     const run_comp_spec_assert = b.addRunArtifact(comp_spec_runner_exe);
-    run_comp_spec_assert.addArg(b.pathFromRoot("test/spec/component-model-assert"));
+    run_comp_spec_assert.addArg(pathFromRoot(b, "test/spec/component-model-assert"));
     const test_comp_spec_step = b.step("test-component-spec", "Run the Component Model spec corpus runner (E1; ADR-0170)");
     test_comp_spec_step.dependOn(&run_comp_spec_assert.step);
 
@@ -575,7 +575,7 @@ pub fn build(b: *std.Build) void {
         .root_module = simd_assert_runner_mod,
     });
     const run_simd_assert = b.addRunArtifact(simd_assert_runner_exe);
-    run_simd_assert.addArg(b.pathFromRoot("test/spec/wasm-2.0-simd-assert"));
+    run_simd_assert.addArg(pathFromRoot(b, "test/spec/wasm-2.0-simd-assert"));
     const test_spec_simd_step = b.step("test-spec-simd", "Run SIMD spec assertion runner (§9.9 per ADR-0045; foundation: 0 manifests until §9.9-b)");
     test_spec_simd_step.dependOn(&run_simd_assert.step);
 
@@ -635,14 +635,14 @@ pub fn build(b: *std.Build) void {
     // instead of hunting for the latest .zig-cache/o/*/*.exe hash.
     b.installArtifact(non_simd_assert_runner_exe);
     const run_non_simd_assert = b.addRunArtifact(non_simd_assert_runner_exe);
-    run_non_simd_assert.addArg(b.pathFromRoot("test/spec/wasm-2.0-assert"));
+    run_non_simd_assert.addArg(pathFromRoot(b, "test/spec/wasm-2.0-assert"));
     // Pinned per lane, for the reason given on the wasm-3.0 interp run below.
     run_non_simd_assert.setEnvironmentVariable("ZWASM_SPEC_ENGINE", "jit");
     // #655 — the same corpus on the interpreter. Until this run the value
     // asserts ran on the JIT only, so interp handlers that disagreed with
     // the spec (nearest, min, max) passed every gate.
     const run_non_simd_assert_interp = b.addRunArtifact(non_simd_assert_runner_exe);
-    run_non_simd_assert_interp.addArg(b.pathFromRoot("test/spec/wasm-2.0-assert"));
+    run_non_simd_assert_interp.addArg(pathFromRoot(b, "test/spec/wasm-2.0-assert"));
     run_non_simd_assert_interp.setEnvironmentVariable("ZWASM_SPEC_ENGINE", "interp");
     const test_spec_wasm_2_0_assert_step = b.step("test-spec-wasm-2.0-assert", "Run Wasm 2.0 non-SIMD scalar spec assertion runner (§9.9 / 9.9-l-1b per ADR-0057; corpus lands at k-1)");
     test_spec_wasm_2_0_assert_step.dependOn(&run_non_simd_assert.step);
@@ -654,7 +654,7 @@ pub fn build(b: *std.Build) void {
     // §17.4 D-301 — official atomics (threads proposal) conformance corpus,
     // run by the same non_simd scalar runner (atomics are pure-int scalar).
     const run_threads_assert = b.addRunArtifact(non_simd_assert_runner_exe);
-    run_threads_assert.addArg(b.pathFromRoot("test/spec/threads-assert"));
+    run_threads_assert.addArg(pathFromRoot(b, "test/spec/threads-assert"));
     run_threads_assert.setEnvironmentVariable("ZWASM_SPEC_ENGINE", "jit");
     const test_spec_threads_assert_step = b.step("test-spec-threads-assert", "Run atomics (threads) official spec assertion corpus via the non-SIMD scalar runner (§17.4 / D-301)");
     test_spec_threads_assert_step.dependOn(&run_threads_assert.step);
@@ -680,7 +680,7 @@ pub fn build(b: *std.Build) void {
     // buckets through the GC/typed-ref-capable native engine runner.
     b.installArtifact(wasm_3_0_assert_runner_exe);
     const run_wasm_3_0_assert = b.addRunArtifact(wasm_3_0_assert_runner_exe);
-    run_wasm_3_0_assert.addArg(b.pathFromRoot("test/spec/wasm-3.0-assert"));
+    run_wasm_3_0_assert.addArg(pathFromRoot(b, "test/spec/wasm-3.0-assert"));
     // Pinned, not left to the ambient environment. A Run step with no env_map
     // inherits the caller's, so with ZWASM_SPEC_ENGINE=jit exported this run
     // is ALSO the jit lane and the interp lane silently stops existing —
@@ -698,7 +698,7 @@ pub fn build(b: *std.Build) void {
     // an exact match, so this run is red on a regression AND on a fix that
     // nobody wrote down.
     const run_wasm_3_0_assert_jit = b.addRunArtifact(wasm_3_0_assert_runner_exe);
-    run_wasm_3_0_assert_jit.addArg(b.pathFromRoot("test/spec/wasm-3.0-assert"));
+    run_wasm_3_0_assert_jit.addArg(pathFromRoot(b, "test/spec/wasm-3.0-assert"));
     run_wasm_3_0_assert_jit.setEnvironmentVariable("ZWASM_SPEC_ENGINE", "jit");
     const test_spec_wasm_3_0_assert_step = b.step("test-spec-wasm-3.0-assert", "Run Wasm 3.0 spec assertion runner on both engines (§10 / 10.T-2b; 6 sub-corpora enumerated)");
     test_spec_wasm_3_0_assert_step.dependOn(&run_wasm_3_0_assert.step);
@@ -716,7 +716,7 @@ pub fn build(b: *std.Build) void {
     // unit tests fail by design
     // (`.dev/lessons/2026-08-24-measurement-scaffolding-hid-the-product-gate.md`).
     const run_wasm_3_0_assert_lv = b.addRunArtifact(wasm_3_0_assert_runner_exe);
-    run_wasm_3_0_assert_lv.addArg(b.pathFromRoot("test/spec/wasm-3.0-assert"));
+    run_wasm_3_0_assert_lv.addArg(pathFromRoot(b, "test/spec/wasm-3.0-assert"));
     run_wasm_3_0_assert_lv.setEnvironmentVariable("ZWASM_SPEC_ENGINE", "jit");
     run_wasm_3_0_assert_lv.setEnvironmentVariable("ZWASM_DEBUG", "liveverify");
     const test_spec_wasm_3_0_lv_step = b.step("test-spec-wasm-3.0-assert-liveverify", "Run the wasm-3.0 JIT lane with the liveness parity check on; gates on liveverifyKnown() (ADR-0226)");
@@ -744,7 +744,7 @@ pub fn build(b: *std.Build) void {
     // wasm-1.0 `spec_assert_runner`. These negative runs pin that on EVERY
     // host (incl. the Windows host) — a runner that silently skips its corpus
     // turns this build RED.
-    const absent_corpus = b.pathFromRoot("test/spec/__absent_corpus_negative_test__");
+    const absent_corpus = pathFromRoot(b, "test/spec/__absent_corpus_negative_test__");
     const run_simd_absent = b.addRunArtifact(simd_assert_runner_exe);
     run_simd_absent.addArg(absent_corpus);
     run_simd_absent.expectExitCode(1);
@@ -811,7 +811,7 @@ pub fn build(b: *std.Build) void {
         .root_module = wast_runner_mod,
     });
     const run_wast_2_0 = b.addRunArtifact(wast_runner_exe);
-    run_wast_2_0.addArg(b.pathFromRoot("test/spec/wasm-2.0"));
+    run_wast_2_0.addArg(pathFromRoot(b, "test/spec/wasm-2.0"));
     const test_spec_2_0_step = b.step("test-spec-wasm-2.0", "Run the Wasm 2.0 wast-directive runner");
     test_spec_2_0_step.dependOn(&run_wast_2_0.step);
 
@@ -824,7 +824,7 @@ pub fn build(b: *std.Build) void {
     // when 6.D re-drives the same corpus through the
     // wast_runtime_runner.
     const run_wasmtime_misc_basic = b.addRunArtifact(wast_runner_exe);
-    run_wasmtime_misc_basic.addArg(b.pathFromRoot("test/wasmtime_misc/wast"));
+    run_wasmtime_misc_basic.addArg(pathFromRoot(b, "test/wasmtime_misc/wast"));
     const test_wasmtime_misc_basic_step = b.step("test-wasmtime-misc-basic", "Run the wasmtime misc_testsuite BATCH1 corpus (parse + validate)");
     test_wasmtime_misc_basic_step.dependOn(&run_wasmtime_misc_basic.step);
 
@@ -848,7 +848,7 @@ pub fn build(b: *std.Build) void {
     // can invoke it on an arbitrary generated corpus dir.
     b.installArtifact(wast_runtime_runner_exe);
     const run_wast_runtime_smoke = b.addRunArtifact(wast_runtime_runner_exe);
-    run_wast_runtime_smoke.addArg(b.pathFromRoot("test/runners/fixtures"));
+    run_wast_runtime_smoke.addArg(pathFromRoot(b, "test/runners/fixtures"));
     const test_runtime_runner_smoke_step = b.step("test-runtime-runner-smoke", "Run the runtime-asserting WAST runner against the smoke fixture");
     test_runtime_runner_smoke_step.dependOn(&run_wast_runtime_smoke.step);
 
@@ -861,7 +861,7 @@ pub fn build(b: *std.Build) void {
     // parse runner cannot see. Run standalone for triage:
     //   zig build test-wasmtime-misc-runtime
     const run_wasmtime_misc_runtime = b.addRunArtifact(wast_runtime_runner_exe);
-    run_wasmtime_misc_runtime.addArg(b.pathFromRoot("test/wasmtime_misc/wast"));
+    run_wasmtime_misc_runtime.addArg(pathFromRoot(b, "test/wasmtime_misc/wast"));
     const test_wasmtime_misc_runtime_step = b.step("test-wasmtime-misc-runtime", "Run the runtime-asserting WAST runner against the wasmtime_misc corpus (also in test-all)");
     test_wasmtime_misc_runtime_step.dependOn(&run_wasmtime_misc_runtime.step);
 
@@ -878,7 +878,7 @@ pub fn build(b: *std.Build) void {
         .root_module = realworld_runner_mod,
     });
     const run_realworld = b.addRunArtifact(realworld_runner_exe);
-    run_realworld.addArg(b.pathFromRoot("test/realworld/wasm"));
+    run_realworld.addArg(pathFromRoot(b, "test/realworld/wasm"));
     // has_side_effects: redundant here, same as the run_edge_* steps above —
     // an untracked `addArg` corpus dir alone does not make a step cacheable.
     // Kept as a statement of intent. See D-592.
@@ -942,7 +942,7 @@ pub fn build(b: *std.Build) void {
         .root_module = fuzz_loader_mod,
     });
     const run_fuzz = b.addRunArtifact(fuzz_loader_exe);
-    run_fuzz.addArg(b.pathFromRoot("test/fuzz/corpus/seed"));
+    run_fuzz.addArg(pathFromRoot(b, "test/fuzz/corpus/seed"));
     // has_side_effects: redundant, same as run_realworld above (see that
     // comment and D-592). Kept as a statement of intent.
     run_fuzz.has_side_effects = true;
@@ -955,7 +955,7 @@ pub fn build(b: *std.Build) void {
     // `wasm-tools`). NOT in test-all (the campaign dir is absent on a
     // normal checkout).
     const run_fuzz_campaign = b.addRunArtifact(fuzz_loader_exe);
-    run_fuzz_campaign.addArg(b.pathFromRoot("test/fuzz/corpus/campaign"));
+    run_fuzz_campaign.addArg(pathFromRoot(b, "test/fuzz/corpus/campaign"));
     run_fuzz_campaign.has_side_effects = true;
     const fuzz_campaign_step = b.step("fuzz-campaign", "Run the fuzz loader over the gitignored campaign corpus (on-demand, D-593)");
     fuzz_campaign_step.dependOn(&run_fuzz_campaign.step);
@@ -981,11 +981,11 @@ pub fn build(b: *std.Build) void {
     // the smith seed exports nothing comparable, so this dedicated corpus is what
     // makes the committed gate actually compare functions. The wide campaign run
     // (122 funcs) rides `zwasm-fuzz-exec test/fuzz/corpus/campaign` directly.
-    run_fuzz_exec.addArg(b.pathFromRoot("test/fuzz/corpus/exec_seed"));
+    run_fuzz_exec.addArg(pathFromRoot(b, "test/fuzz/corpus/exec_seed"));
     // D-510 — committed regression corpus (wazero-fuzzcases-style): minimised
     // past differential findings + hand-written memory-state / guard-boundary
     // exercisers, replayed on every run.
-    run_fuzz_exec.addArg(b.pathFromRoot("test/fuzz/corpus/regression"));
+    run_fuzz_exec.addArg(pathFromRoot(b, "test/fuzz/corpus/regression"));
     run_fuzz_exec.has_side_effects = true;
     const test_fuzz_exec_step = b.step("test-fuzz-exec", "Interp-vs-JIT execution differential fuzz (D-469)");
     test_fuzz_exec_step.dependOn(&run_fuzz_exec.step);
@@ -1029,8 +1029,8 @@ pub fn build(b: *std.Build) void {
     });
     const run_aot_diff = b.addRunArtifact(aot_diff_exe);
     run_aot_diff.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
-    run_aot_diff.addArg(b.pathFromRoot("test/realworld/wasm"));
-    run_aot_diff.addArg(b.pathFromRoot("test/aot/corpus"));
+    run_aot_diff.addArg(pathFromRoot(b, "test/realworld/wasm"));
+    run_aot_diff.addArg(pathFromRoot(b, "test/aot/corpus"));
     run_aot_diff.has_side_effects = true;
     const test_aot_diff_step = b.step("test-aot-diff", "Cross-process .wasm-vs-.cwasm differential (AOT campaign Phase II)");
     test_aot_diff_step.dependOn(&run_aot_diff.step);
@@ -1066,7 +1066,7 @@ pub fn build(b: *std.Build) void {
         .root_module = realworld_run_runner_mod,
     });
     const run_realworld_run = b.addRunArtifact(realworld_run_runner_exe);
-    run_realworld_run.addArg(b.pathFromRoot("test/realworld/wasm"));
+    run_realworld_run.addArg(pathFromRoot(b, "test/realworld/wasm"));
     run_realworld_run.has_side_effects = true; // fixture-only changes must re-run (cyc216 gap)
     const test_realworld_run_step = b.step("test-realworld-run", "Run each realworld fixture end-to-end via cli_run.runWasm");
     test_realworld_run_step.dependOn(&run_realworld_run.step);
@@ -1090,7 +1090,7 @@ pub fn build(b: *std.Build) void {
         .root_module = realworld_run_jit_mod,
     });
     const run_realworld_run_jit = b.addRunArtifact(realworld_run_jit_exe);
-    run_realworld_run_jit.addArg(b.pathFromRoot("test/realworld/wasm"));
+    run_realworld_run_jit.addArg(pathFromRoot(b, "test/realworld/wasm"));
     run_realworld_run_jit.has_side_effects = true; // fixture-only changes must re-run (cyc216 gap)
     const test_realworld_run_jit_step = b.step("test-realworld-run-jit", "JIT-compile each realworld fixture (§9.7 / 7.9 baseline)");
     test_realworld_run_jit_step.dependOn(&run_realworld_run_jit.step);
@@ -1146,9 +1146,9 @@ pub fn build(b: *std.Build) void {
         .root_module = realworld_diff_runner_mod,
     });
     const run_realworld_diff = b.addRunArtifact(realworld_diff_runner_exe);
-    run_realworld_diff.addArg(b.pathFromRoot("test/realworld/wasm"));
+    run_realworld_diff.addArg(pathFromRoot(b, "test/realworld/wasm"));
     // The pinned oracle version the run annotates itself against (issue #213).
-    run_realworld_diff.addArgs(&.{ "--versions-lock", b.pathFromRoot(".github/versions.lock") });
+    run_realworld_diff.addArgs(&.{ "--versions-lock", pathFromRoot(b, ".github/versions.lock") });
     run_realworld_diff.has_side_effects = true; // fixture-only changes must re-run (cyc216 gap)
     // Nothing in the build graph depends on this step any more — `test-all`
     // takes `test-realworld-diff-jit`, which is the same runner plus `--jit`.
@@ -1165,8 +1165,8 @@ pub fn build(b: *std.Build) void {
     // every fixture (slow) + runs native AOT code in-process. Report-only for
     // now (triages AOT-WASI corpus coverage); a follow-up gates it once clean.
     const run_realworld_diff_aot = b.addRunArtifact(realworld_diff_runner_exe);
-    run_realworld_diff_aot.addArg(b.pathFromRoot("test/realworld/wasm"));
-    run_realworld_diff_aot.addArgs(&.{ "--versions-lock", b.pathFromRoot(".github/versions.lock") });
+    run_realworld_diff_aot.addArg(pathFromRoot(b, "test/realworld/wasm"));
+    run_realworld_diff_aot.addArgs(&.{ "--versions-lock", pathFromRoot(b, ".github/versions.lock") });
     run_realworld_diff_aot.addArg("--aot");
     run_realworld_diff_aot.has_side_effects = true;
     const test_realworld_diff_aot_step = b.step("test-realworld-diff-aot", "Realworld differential incl. the opt-in AOT lane (D-283)");
@@ -1197,8 +1197,8 @@ pub fn build(b: *std.Build) void {
     // divergence a single-reference gate misses). Report-only; Mac-only
     // (wasmer is not in the x86_64 dev shells), graceful skip off-Mac.
     const run_realworld_diff_wasmer = b.addRunArtifact(realworld_diff_runner_exe);
-    run_realworld_diff_wasmer.addArg(b.pathFromRoot("test/realworld/wasm"));
-    run_realworld_diff_wasmer.addArgs(&.{ "--versions-lock", b.pathFromRoot(".github/versions.lock") });
+    run_realworld_diff_wasmer.addArg(pathFromRoot(b, "test/realworld/wasm"));
+    run_realworld_diff_wasmer.addArgs(&.{ "--versions-lock", pathFromRoot(b, ".github/versions.lock") });
     run_realworld_diff_wasmer.addArg("--wasmer");
     run_realworld_diff_wasmer.has_side_effects = true;
     const test_realworld_diff_wasmer_step = b.step("test-realworld-diff-wasmer", "Realworld differential incl. the opt-in wasmer second-oracle lane (§9.6 A3)");
@@ -1221,8 +1221,8 @@ pub fn build(b: *std.Build) void {
     // x86_64-linux Debug 2026-08-21 — the lane's own +34s stays in the JIT
     // lane's cost class). Full-corpus coverage: `test-realworld-diff-interp`.
     const run_realworld_diff_jit = b.addRunArtifact(realworld_diff_runner_exe);
-    run_realworld_diff_jit.addArg(b.pathFromRoot("test/realworld/wasm"));
-    run_realworld_diff_jit.addArgs(&.{ "--versions-lock", b.pathFromRoot(".github/versions.lock") });
+    run_realworld_diff_jit.addArg(pathFromRoot(b, "test/realworld/wasm"));
+    run_realworld_diff_jit.addArgs(&.{ "--versions-lock", pathFromRoot(b, ".github/versions.lock") });
     run_realworld_diff_jit.addArg("--jit");
     run_realworld_diff_jit.addArg("--interp");
     run_realworld_diff_jit.has_side_effects = true;
@@ -1235,8 +1235,8 @@ pub fn build(b: *std.Build) void {
     // `test-all` — the 4 enumerated fixtures alone are ~82s on x86_64-linux
     // Debug. One command re-derives interp-vs-wasmtime for all 56.
     const run_realworld_diff_interp = b.addRunArtifact(realworld_diff_runner_exe);
-    run_realworld_diff_interp.addArg(b.pathFromRoot("test/realworld/wasm"));
-    run_realworld_diff_interp.addArgs(&.{ "--versions-lock", b.pathFromRoot(".github/versions.lock") });
+    run_realworld_diff_interp.addArg(pathFromRoot(b, "test/realworld/wasm"));
+    run_realworld_diff_interp.addArgs(&.{ "--versions-lock", pathFromRoot(b, ".github/versions.lock") });
     run_realworld_diff_interp.addArg("--interp-all");
     run_realworld_diff_interp.has_side_effects = true;
     const test_realworld_diff_interp_step = b.step("test-realworld-diff-interp", "Full-corpus forced-interp differential incl. the enumerated-slow fixtures (manual; not in test-all)");
@@ -1260,7 +1260,7 @@ pub fn build(b: *std.Build) void {
         .root_module = zig_facade_runner_mod,
     });
     const run_zig_facade = b.addRunArtifact(zig_facade_runner_exe);
-    run_zig_facade.addArg(b.pathFromRoot("test/realworld/wasm"));
+    run_zig_facade.addArg(pathFromRoot(b, "test/realworld/wasm"));
     const test_api_zig_facade_step = b.step("test-api-zig-facade", "Run each realworld fixture through the native Zig API (Engine/Module/Instance)");
     test_api_zig_facade_step.dependOn(&run_zig_facade.step);
 
@@ -1280,7 +1280,7 @@ pub fn build(b: *std.Build) void {
         .root_module = wasi_runner_mod,
     });
     const run_wasi_p1 = b.addRunArtifact(wasi_runner_exe);
-    run_wasi_p1.addArg(b.pathFromRoot("test/wasi"));
+    run_wasi_p1.addArg(pathFromRoot(b, "test/wasi"));
     const test_wasi_p1_step = b.step("test-wasi-p1", "Run the WASI 0.1 fixture suite");
     test_wasi_p1_step.dependOn(&run_wasi_p1.step);
 
@@ -1301,11 +1301,11 @@ pub fn build(b: *std.Build) void {
     });
     const run_cli_stdin = b.addRunArtifact(cli_stdin_exe);
     run_cli_stdin.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
-    run_cli_stdin.addArg(b.pathFromRoot("test/wasi/stdin_echo.wasm"));
-    run_cli_stdin.addArg(b.pathFromRoot("test/wasi/fdstat_stdio.wasm"));
-    run_cli_stdin.addArg(b.pathFromRoot("test/component/stdin_echo_p2.wasm"));
-    run_cli_stdin.addArg(b.pathFromRoot("test/component/stdin_read_p2.wasm"));
-    run_cli_stdin.addArg(b.pathFromRoot("test/component/stdin_poll_p2.wasm"));
+    run_cli_stdin.addArg(pathFromRoot(b, "test/wasi/stdin_echo.wasm"));
+    run_cli_stdin.addArg(pathFromRoot(b, "test/wasi/fdstat_stdio.wasm"));
+    run_cli_stdin.addArg(pathFromRoot(b, "test/component/stdin_echo_p2.wasm"));
+    run_cli_stdin.addArg(pathFromRoot(b, "test/component/stdin_read_p2.wasm"));
+    run_cli_stdin.addArg(pathFromRoot(b, "test/component/stdin_poll_p2.wasm"));
     run_cli_stdin.has_side_effects = true;
     const test_cli_stdin_step = b.step("test-cli-stdin", "Pipe bytes through `zwasm run` and check a core module (issue #257) and a component (issue #508) read them on fd 0 and do not see a tty (issue #494), and a component's stdin pollable waits for them (issue #512)");
     test_cli_stdin_step.dependOn(&run_cli_stdin.step);
@@ -1326,7 +1326,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_cli_argv0 = b.addRunArtifact(cli_argv0_exe);
     run_cli_argv0.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
-    run_cli_argv0.addArg(b.pathFromRoot("test/wasi/argv0_echo.wasm"));
+    run_cli_argv0.addArg(pathFromRoot(b, "test/wasi/argv0_echo.wasm"));
     run_cli_argv0.has_side_effects = true;
     const test_cli_argv0_step = b.step("test-cli-argv0", "Run `zwasm run` on a path with a directory component and check the guest's argv[0] is the base name (issue #256)");
     test_cli_argv0_step.dependOn(&run_cli_argv0.step);
@@ -1348,7 +1348,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_cli_default_entry = b.addRunArtifact(cli_default_entry_exe);
     run_cli_default_entry.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
-    run_cli_default_entry.addArg(b.pathFromRoot("test/runners/fixtures/default_entry"));
+    run_cli_default_entry.addArg(pathFromRoot(b, "test/runners/fixtures/default_entry"));
     run_cli_default_entry.has_side_effects = true;
     const test_cli_default_entry_step = b.step("test-cli-default-entry", "Run each default-entry fixture as .wasm, --engine=jit and .cwasm and require the same exit code, stdout and stderr (issue #220)");
     test_cli_default_entry_step.dependOn(&run_cli_default_entry.step);
@@ -1370,7 +1370,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_cli_invalid_module = b.addRunArtifact(cli_invalid_module_exe);
     run_cli_invalid_module.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
-    run_cli_invalid_module.addArg(b.pathFromRoot("test/runners/fixtures/invalid_module"));
+    run_cli_invalid_module.addArg(pathFromRoot(b, "test/runners/fixtures/invalid_module"));
     run_cli_invalid_module.has_side_effects = true;
     const test_cli_invalid_module_step = b.step("test-cli-invalid-module", "Run each invalid-module fixture through `zwasm run`, `zwasm run --engine=jit` and `zwasm compile` and require exit 1 with the reason on stderr from all three (issue #233)");
     test_cli_invalid_module_step.dependOn(&run_cli_invalid_module.step);
@@ -1393,14 +1393,14 @@ pub fn build(b: *std.Build) void {
     });
     const run_cli_usage = b.addRunArtifact(cli_usage_exe);
     run_cli_usage.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
-    run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/default_entry/start_void.wasm"));
-    run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/cli_usage/argv_echo.wasm"));
-    run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/engine_refusal/simd_op.wasm"));
-    run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/engine_refusal/simd_jit_decline.wasm"));
-    run_cli_usage.addArg(b.pathFromRoot("test/edge_cases/p17/simd_select_spill/select_v128_spilled_val2.wasm"));
-    run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/cli_usage/poll_sleep.wasm"));
-    run_cli_usage.addArg(b.pathFromRoot("test/runners/fixtures/cli_usage/f32_param_three_results.wasm"));
-    run_cli_usage.addArg(b.pathFromRoot("test/component/wasi_p2_tcp_rust.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/default_entry/start_void.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/argv_echo.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/engine_refusal/simd_op.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/engine_refusal/simd_jit_decline.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/edge_cases/p17/simd_select_spill/select_v128_spilled_val2.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/poll_sleep.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/f32_param_three_results.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/component/wasi_p2_tcp_rust.wasm"));
     run_cli_usage.has_side_effects = true;
     const test_cli_usage_step = b.step("test-cli-usage", "Run `zwasm run` with unknown, misplaced and value-swallowing options and require a usage error (exit 2), and `--` and post-path options to reach the module (issues #236, #232); a SIMD module the interpreter cannot run fails with each engine's reason (#597); `--timeout` fires during a `poll_oneoff` sleep (#598); the JIT refuses an f32 param with three results (#618); a component reaches the network only with --allow-network");
     test_cli_usage_step.dependOn(&run_cli_usage.step);
@@ -1429,10 +1429,10 @@ pub fn build(b: *std.Build) void {
         .root_module = wasi_official_mod,
     });
     const run_wasi_official_interp = b.addRunArtifact(wasi_official_exe);
-    run_wasi_official_interp.addArg(b.pathFromRoot("test/wasi/wasip1_official"));
+    run_wasi_official_interp.addArg(pathFromRoot(b, "test/wasi/wasip1_official"));
     run_wasi_official_interp.addArg("interp");
     const run_wasi_official_jit = b.addRunArtifact(wasi_official_exe);
-    run_wasi_official_jit.addArg(b.pathFromRoot("test/wasi/wasip1_official"));
+    run_wasi_official_jit.addArg(pathFromRoot(b, "test/wasi/wasip1_official"));
     run_wasi_official_jit.addArg("jit");
     const test_wasi_p1_official_step = b.step("test-wasi-p1-official", "Run the official wasi-testsuite wasm32-wasip1 corpus on both engines (D-582)");
     test_wasi_p1_official_step.dependOn(&run_wasi_official_interp.step);
@@ -1458,7 +1458,7 @@ pub fn build(b: *std.Build) void {
     });
     c_host_mod.addCSourceFile(.{
         .file = b.path("docs/examples/c_host/hello.c"),
-        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+        .flags = strict_c_flags,
     });
     c_host_mod.addIncludePath(b.path("include"));
     c_host_mod.linkLibrary(c_api_lib);
@@ -1558,7 +1558,7 @@ pub fn build(b: *std.Build) void {
         });
         cmod.addCSourceFile(.{
             .file = b.path(c.src),
-            .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+            .flags = strict_c_flags,
         });
         cmod.addIncludePath(b.path("include"));
         cmod.linkLibrary(c_api_lib);
@@ -1885,7 +1885,7 @@ pub fn build(b: *std.Build) void {
     // would make the lint tool a hard prerequisite of every step, including
     // `static-lib`, which C and Rust consumers build (#235). Mac-host gate;
     // not part of test-all. Run with `--max-warnings 0` for strict CI
-    // semantics — extra args reach the linter through `b.args`.
+    // semantics — extra args reach the linter as passthru args.
     //
     // Re-measured on zig 0.16.0 + the pinned zlinter 2026-08-22, reversing
     // D-274: `.lazy = true` alone still cannot fix it (an unfetched lazy dep
@@ -1898,7 +1898,7 @@ pub fn build(b: *std.Build) void {
         b.graph.zig_exe,
         "build",
         "--build-file",
-        b.pathFromRoot("tools/lint/build.zig"),
+        pathFromRoot(b, "tools/lint/build.zig"),
         "lint",
     });
     // zlinter spawns the linter with the sub-build's root as its cwd but
@@ -1907,12 +1907,20 @@ pub fn build(b: *std.Build) void {
     lint_run.setCwd(b.path("tools/lint"));
     // `--` so the sub-build hands them to zlinter instead of parsing them
     // itself, keeping `zig build lint -- --max-warnings 0` working.
-    if (b.args) |args| {
-        lint_run.addArg("--");
-        lint_run.addArgs(args);
-    }
+    lint_run.addArg("--");
+    lint_run.addPassthruArgs();
     lint_run.stdio = .inherit;
     lint_step.dependOn(&lint_run.step);
+}
+
+/// `-Wno-gcc-install-dir-libstdcxx`: Zig 0.17's clang warns when an older
+/// GCC on the host has libstdc++ headers and the newest does not (gcc-14
+/// next to g++-13 only), and `-Werror` would fail C that includes no C++.
+const strict_c_flags: []const []const u8 = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-gcc-install-dir-libstdcxx" };
+
+/// Zig 0.16's `b.pathFromRoot`, removed in 0.17 along with `b.build_root`.
+fn pathFromRoot(b: *std.Build, sub_path: []const u8) []u8 {
+    return b.pathResolve(&.{b.root.joinString(b.allocator, sub_path) catch @panic("OOM")});
 }
 
 pub const WasmLevel = enum { v1_0, v2_0, v3_0 };
