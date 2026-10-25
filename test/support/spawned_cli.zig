@@ -45,9 +45,9 @@ fn saysMode(version_output: []const u8, want: []const u8) bool {
 
 test "saysMode: reads the mode field, and a prefix of a longer mode is not it" {
     const t = std.testing;
-    try t.expect(saysMode("zwasm v2.7.0 (wasm: wasm_3_0, wasi: p2, engine: both, mode: ReleaseSafe)\n", "ReleaseSafe"));
-    try t.expect(!saysMode("zwasm v2.7.0 (wasm: wasm_3_0, wasi: p2, engine: both, mode: Debug)\n", "ReleaseSafe"));
-    try t.expect(!saysMode("zwasm v2.7.0 (wasm: wasm_3_0, wasi: p2, engine: both, mode: ReleaseSafe)\n", "Release"));
+    try t.expect(saysMode("zwasm v2.7.0 (wasm: v3_0, wasi: p2, engine: both, mode: safe)\n", "safe"));
+    try t.expect(!saysMode("zwasm v2.7.0 (wasm: v3_0, wasi: p2, engine: both, mode: debug)\n", "safe"));
+    try t.expect(!saysMode("zwasm v2.7.0 (wasm: v3_0, wasi: p2, engine: both, mode: safe)\n", "saf"));
     // A CLI from before the field existed answers the question with a no.
-    try t.expect(!saysMode("zwasm v2.7.0 (wasm: wasm_3_0, wasi: p2, engine: both)\n", "ReleaseSafe"));
+    try t.expect(!saysMode("zwasm v2.7.0 (wasm: v3_0, wasi: p2, engine: both)\n", "safe"));
 }
