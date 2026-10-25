@@ -1,4 +1,4 @@
-// FILE-SIZE-EXEMPT: (cap=2660) the complete wasi 0.3 host layer (fs3/sock3/http3 + async-lowered table + hook targets; ADR-0207 (c), M4-measured 2026-08-12); a per-proposal 3-way sub-split would force pub-leak of the hook targets through hooksTable/registerP3Arms, and a sibling test file would force pub-leak of the fs3 entry points its tests drive (ADR-0099 N2), so cohesion wins. 2026-10-24 +50 for the network grant's gate tests; 2026-10-25 +10 for the internal-error ordinal test (#643). Splitting the sock3 / http3 host into its own file waits until after 2.8.0.
+// FILE-SIZE-EXEMPT: (cap=2700) the complete wasi 0.3 host layer (fs3/sock3/http3 + async-lowered table + hook targets; ADR-0207 (c), M4-measured 2026-08-12); a per-proposal 3-way sub-split would force pub-leak of the hook targets through hooksTable/registerP3Arms, and a sibling test file would force pub-leak of the fs3 entry points its tests drive (ADR-0099 N2), so cohesion wins. 2026-10-24 +50 for the network grant's gate tests; 2026-10-25 +10 for the internal-error ordinal test (#643); 2026-10-25 +40 for the parked append-write test (#627). Splitting the sock3 / http3 host into its own file waits until after 2.8.0.
 //! WASI **0.3** (P3) host layer — fs3 / sock3 / http3 trampolines, the
 //! async-lowered binding table, and the classifier's P3 arm registration
 //! (ADR-0207 (c); file name reserved by ADR-0190). Depends ONLY on the
@@ -536,18 +536,13 @@ fn fs3WriteViaStream(caller: *Caller, self_handle: u32, data_handle: u32, offset
     return fs3RegisterFileSink(ctx, .{ .fd = fd, .pos = @bitCast(offset_raw) }, data_handle);
 }
 
-/// `append-via-stream` (self, data) → future handle: each copy writes at the
-/// file's end as of that copy. The size read here places only a write the
-/// guest parked before the sink existed, drained in `fs3RegisterFileSink`.
+/// `append-via-stream` (self, data) → future handle: each copy, including a
+/// write the guest parked before the sink existed, writes at the file's end
+/// as of that copy, so an append role never reads its `pos`.
 fn fs3AppendViaStream(caller: *Caller, self_handle: u32, data_handle: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
-    const mem = try ctxMemory(caller);
     const fd = try fs3Fd(ctx, self_handle);
-    const size: u64 = switch (try descriptorFilestat(ctx, mem, fd)) {
-        .ok => |fs| fs.size,
-        .err => 0,
-    };
-    return fs3RegisterFileSink(ctx, .{ .fd = fd, .pos = size, .append = true }, data_handle);
+    return fs3RegisterFileSink(ctx, .{ .fd = fd, .pos = 0, .append = true }, data_handle);
 }
 
 fn fs3RegisterFileSink(ctx: *WasiP2Ctx, sink: WasiP2Ctx.FileStreamRole, data_handle: u32) WasiP2Error!u32 {
@@ -581,7 +576,10 @@ fn fs3DrainParkedWrite(ctx: *WasiP2Ctx, shared_id: u32) WasiP2Error!void {
     const role = ctx.host_file_streams.getPtr(shared_id) orelse return;
     const mem = try ctx.memory();
     const bytes = try mem.sliceAt(pw.ptr, try ctx_mod.streamSpan(pw.count, pw.elem_size));
-    const errno = wasi_fd.pwriteSlice(ctx.host, role.fd, bytes, role.pos);
+    const errno = if (role.append)
+        wasi_fd.appendSlice(ctx.host, role.fd, bytes)
+    else
+        wasi_fd.pwriteSlice(ctx.host, role.fd, bytes, role.pos);
     const writer = try ctx.streams.get(pending.waitable);
     if (errno != .success) {
         _ = try fs3FailFileStream(ctx, writer, role, errno);
@@ -2563,6 +2561,49 @@ test "0.3 append-via-stream: two append sinks on one file each write at the end 
     const got = try tmp.dir.readFileAlloc(io, "log.txt", testing.allocator, .limited(16));
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("abcXY", got);
+}
+
+test "0.3 append-via-stream: a write parked before the sink registers lands at the file's end" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try tmp.dir.writeFile(io, .{ .sub_path = "log.txt", .data = "abc" });
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    const dirfd = try host.addPreopen(tmp.dir.handle, "/w");
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x01\x09\x01\x60\x04\x7f\x7f\x7f\x7f\x01\x7f\x03\x02\x01\x00\x05\x03\x01\x00\x01\x06\x07\x01\x7f\x01\x41\x80\x08\x0b\x07\x19\x02\x06memory\x02\x00\x0ccabi_realloc\x00\x00\x0a\x0d\x01\x0b\x00\x23\x00\x23\x00\x20\x03j\x24\x00\x0b");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    ctx.realloc_instance = &inst;
+    const bytes = (try ctx.memory()).slice();
+
+    @memcpy(bytes[0..7], "log.txt");
+    try testing.expectEqual(wasi_p1.Errno.success, wasi_fd.pathOpen(&host, bytes, dirfd, 0, 0, 7, 0, wasi_p1.RIGHTS_FD_WRITE | wasi_p1.RIGHTS_FD_SEEK | wasi_p1.RIGHTS_FD_FILESTAT_GET, 0, 0, 8));
+    const desc = try ctx.resources.new(WasiP2Ctx.DESCRIPTOR_RT, std.mem.readInt(u32, bytes[8..12], .little));
+    const pair = try async_mod.newStreamPair(&ctx.streams, &ctx.shared, null);
+
+    var abc: ctx_mod.AsyncBuiltinCtx = .{ .ctx = &ctx, .type_index = 0 };
+    var copy_caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &abc };
+    bytes[16] = 'X';
+    try testing.expectEqual((async_mod.ReturnCode{ .blocked = {} }).encode(), try ctx_mod.p2StreamFutureCopy(&copy_caller, pair.writable, 16, 1));
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+    _ = try fs3AppendViaStream(&caller, desc, pair.readable);
+    const got = try tmp.dir.readFileAlloc(io, "log.txt", testing.allocator, .limited(16));
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("abcX", got);
 }
 
 test "without the network grant, each 0.3 op that reaches the network answers access-denied" {
