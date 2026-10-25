@@ -2,11 +2,11 @@
     .name = .zwasm_lint,
     .version = "0.0.0",
     .fingerprint = 0xc32bb62e48245125,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zlinter = .{
-            .url = "git+https://github.com/kurtwagner/zlinter?ref=0.16.x#9b4d67b9725e7137ac876cc628fe5dd2ca5a2681",
-            .hash = "zlinter-0.0.1-OjQ08c7oCwDIwhlde7eDKMACNTsqAhGXy5vB7GdfGobG",
+            .url = "git+https://github.com/kurtwagner/zlinter?ref=0.17.x#c8c6dabf9ac6a58449f97b9b5afbd348bf166a20",
+            .hash = "zlinter-0.0.1-OjQ08Y3fFQCkzNbrGEZMYdsKnreIoI7IkVxcKh_iAUf4",
         },
     },
     .paths = .{

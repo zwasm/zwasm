@@ -41,25 +41,25 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - name: Cache Zig 0.16.0
+      - name: Cache Zig 0.17.0
         id: cache-zig
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.local/zig-0.16.0
-          key: zig-0.16.0-aarch64-macos
+          path: ~/.local/zig-0.17.0
+          key: zig-0.17.0-aarch64-macos
 
-      - name: Install Zig 0.16.0
+      - name: Install Zig 0.17.0
         if: steps.cache-zig.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           mkdir -p ~/.local
-          curl -fsSL https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz \
+          curl -fsSL https://ziglang.org/download/0.17.0/zig-aarch64-macos-0.17.0.tar.xz \
             -o /tmp/zig.tar.xz
           tar -xJf /tmp/zig.tar.xz -C ~/.local
-          mv ~/.local/zig-aarch64-macos-0.16.0 ~/.local/zig-0.16.0
+          mv ~/.local/zig-aarch64-macos-0.17.0 ~/.local/zig-0.17.0
 
       - name: Add Zig to PATH
-        run: echo "$HOME/.local/zig-0.16.0" >> "$GITHUB_PATH"
+        run: echo "$HOME/.local/zig-0.17.0" >> "$GITHUB_PATH"
 
       # Build-time dependency, not a bench tool: the DEFAULT `zig build` that
       # run_bench.sh performs pulls in the spec-assert exes, whose
@@ -130,25 +130,25 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - name: Cache Zig 0.16.0
+      - name: Cache Zig 0.17.0
         id: cache-zig
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.local/zig-0.16.0
-          key: zig-0.16.0-x86_64-linux
+          path: ~/.local/zig-0.17.0
+          key: zig-0.17.0-x86_64-linux
 
-      - name: Install Zig 0.16.0
+      - name: Install Zig 0.17.0
         if: steps.cache-zig.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           mkdir -p ~/.local
-          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz \
+          curl -fsSL https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz \
             -o /tmp/zig.tar.xz
           tar -xJf /tmp/zig.tar.xz -C ~/.local
-          mv ~/.local/zig-x86_64-linux-0.16.0 ~/.local/zig-0.16.0
+          mv ~/.local/zig-x86_64-linux-0.17.0 ~/.local/zig-0.17.0
 
       - name: Add Zig to PATH
-        run: echo "$HOME/.local/zig-0.16.0" >> "$GITHUB_PATH"
+        run: echo "$HOME/.local/zig-0.17.0" >> "$GITHUB_PATH"
 
       # Build-time dependency, not a bench tool: the DEFAULT `zig build` that
       # run_bench.sh performs pulls in the spec-assert exes, whose

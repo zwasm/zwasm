@@ -58,7 +58,7 @@ Set-StrictMode -Version Latest
 # --- Pinned versions (mirror flake.nix; bumped manually) ---
 
 $versions = @{
-    'zig'        = '0.16.0'      # PINNED — never bump; the whole project targets Zig 0.16.0
+    'zig'        = '0.17.0'      # PINNED — never bump; the whole project targets Zig 0.17.0
     'hyperfine'  = '1.20.0'
     'wasm-tools' = '1.251.0'
     'wasmtime'   = '45.0.0'
