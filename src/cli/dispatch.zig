@@ -89,12 +89,12 @@ test "classify: null is banner, unknown token is unknown" {
 
 test "versionLine: carries version + wasm/wasi/engine/mode build identity" {
     var buf: [192]u8 = undefined;
-    const line = versionLine(&buf, "9.9.9", "wasm_3_0", "wasi_0_2", "interp_only", "ReleaseSafe");
+    const line = versionLine(&buf, "9.9.9", "wasm_3_0", "wasi_0_2", "interp_only", "safe");
     try std.testing.expect(std.mem.find(u8, line, "zwasm v9.9.9") != null);
     try std.testing.expect(std.mem.find(u8, line, "wasm: wasm_3_0") != null);
     try std.testing.expect(std.mem.find(u8, line, "wasi: wasi_0_2") != null);
     try std.testing.expect(std.mem.find(u8, line, "engine: interp_only") != null);
-    try std.testing.expect(std.mem.find(u8, line, "mode: ReleaseSafe") != null);
+    try std.testing.expect(std.mem.find(u8, line, "mode: safe") != null);
 }
 
 test "usage text names both shipped subcommands + every run flag main.zig parses" {
