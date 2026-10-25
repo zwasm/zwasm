@@ -27,8 +27,6 @@
 //! Zone 3 (`src/api/`): touches `HostFuncPayload` + the `wasm_val_t` ABI. Only
 //! the planted fn-ptr (an opaque `usize`) crosses into Zone 2 setup.
 
-const std = @import("std");
-
 const jit_abi = @import("../engine/codegen/shared/jit_abi.zig");
 const handles = @import("handles.zig");
 const vec = @import("vec.zig");

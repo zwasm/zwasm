@@ -66,17 +66,17 @@ pub fn main(init: std.process.Init) !u8 {
     var tag_bytes: [8]u8 = undefined;
     io.random(&tag_bytes);
     var tag_buf: [16]u8 = undefined;
-    const tag = try std.fmt.bufPrint(&tag_buf, "{x:0>16}", .{std.mem.readInt(u64, &tag_bytes, .little)});
-    const tmp_dir = try std.fmt.allocPrint(gpa, ".zig-cache/invalid-module-tmp-{s}", .{tag});
+    const tag = try std.mem.print(&tag_buf, "{x:0>16}", .{std.mem.readInt(u64, &tag_bytes, .little)});
+    const tmp_dir = try gpa.print(".zig-cache/invalid-module-tmp-{s}", .{tag});
     defer gpa.free(tmp_dir);
     try cwd.createDirPath(io, tmp_dir);
     defer cwd.deleteTree(io, tmp_dir) catch {};
-    const cwasm_path = try std.fmt.allocPrint(gpa, "{s}/out.cwasm", .{tmp_dir});
+    const cwasm_path = try gpa.print("{s}/out.cwasm", .{tmp_dir});
     defer gpa.free(cwasm_path);
 
     var failed: u32 = 0;
     for (fixtures) |fx| {
-        const wasm_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ fixture_dir, fx.file });
+        const wasm_path = try gpa.print("{s}/{s}", .{ fixture_dir, fx.file });
         defer gpa.free(wasm_path);
         if (!try check(gpa, io, "run", &.{ cli, "run", wasm_path }, fx)) failed += 1;
         if (!try check(gpa, io, "run --engine=jit", &.{ cli, "run", "--engine=jit", wasm_path }, fx)) failed += 1;

@@ -42,13 +42,10 @@ const ctx_mod = @import("ctx.zig");
 const gpr = @import("gpr.zig");
 const abi = @import("abi.zig");
 const jit_abi = @import("../shared/jit_abi.zig");
-const label_mod = @import("label.zig");
 
 const ZirInstr = zir.ZirInstr;
 const EmitCtx = ctx_mod.EmitCtx;
 const Error = ctx_mod.Error;
-const Label = label_mod.Label;
-const Allocator = std.mem.Allocator;
 
 /// Mirror of `Label.merge_top_vregs.len` — comptime-knowable cap
 /// on Wasm 2.0 multi-value if/else result arity. Wasm spec
@@ -60,7 +57,6 @@ const merge_top_vregs_cap: u8 = 8;
 // `op_control_merge_mov.zig` per ADR-0093. Cross-file references
 // use `merge_mov.X` syntax.
 const merge_mov = @import("op_control_merge_mov.zig");
-const ParallelMove = merge_mov.ParallelMove;
 
 /// `block` — push a forward-resolving label frame.
 pub fn emitBlock(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {

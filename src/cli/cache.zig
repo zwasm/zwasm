@@ -44,7 +44,7 @@ const limits = @import("limits.zig");
 /// subdirectory. Bounds mode is the one codegen knob not implied by the
 /// binary itself (`--engine`-independent; process-global, ADR-0202).
 pub fn subdirName(buf: []u8) ![]u8 {
-    return std.fmt.bufPrint(buf, "zwasm-{s}-{s}-{s}-{s}", .{
+    return std.mem.print(buf, "zwasm-{s}-{s}-{s}-{s}", .{
         zwasm.version,
         @tagName(builtin.target.cpu.arch),
         @tagName(builtin.target.os.tag),
@@ -73,7 +73,7 @@ pub fn lookupOrProduce(
     var sub_buf: [96]u8 = undefined;
     const sub = try subdirName(&sub_buf);
     const key = keyHex(wasm_bytes);
-    const path = try std.fmt.allocPrint(gpa, "{s}/{s}/{s}.cwasm", .{ root, sub, &key });
+    const path = try gpa.print("{s}/{s}/{s}.cwasm", .{ root, sub, &key });
     defer gpa.free(path);
     const cwd = std.Io.Dir.cwd();
 
@@ -152,7 +152,7 @@ fn store(
     cwasm: []const u8,
 ) !void {
     const cwd = std.Io.Dir.cwd();
-    const dir_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ root, sub });
+    const dir_path = try gpa.print("{s}/{s}", .{ root, sub });
     defer gpa.free(dir_path);
     try cwd.createDirPath(io, dir_path);
     // Unique temp name per writer: with a SHARED temp path, P1's atomic
@@ -161,11 +161,11 @@ fn store(
     // and concurrent finals carry identical content (key = content hash).
     var rnd: [8]u8 = undefined;
     io.random(&rnd);
-    const tmp_path = try std.fmt.allocPrint(gpa, "{s}/{s}.{x:0>16}.tmp", .{
+    const tmp_path = try gpa.print("{s}/{s}.{x:0>16}.tmp", .{
         dir_path, key, std.mem.readInt(u64, &rnd, .little),
     });
     defer gpa.free(tmp_path);
-    const final_path = try std.fmt.allocPrint(gpa, "{s}/{s}.cwasm", .{ dir_path, key });
+    const final_path = try gpa.print("{s}/{s}.cwasm", .{ dir_path, key });
     defer gpa.free(final_path);
     try cwd.writeFile(io, .{ .sub_path = tmp_path, .data = cwasm });
     errdefer cwd.deleteFile(io, tmp_path) catch {
@@ -180,7 +180,7 @@ fn store(
 pub fn clear(gpa: std.mem.Allocator, io: std.Io, root: []const u8) !void {
     var sub_buf: [96]u8 = undefined;
     const sub = try subdirName(&sub_buf);
-    const dir_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ root, sub });
+    const dir_path = try gpa.print("{s}/{s}", .{ root, sub });
     defer gpa.free(dir_path);
     std.Io.Dir.cwd().deleteTree(io, dir_path) catch {
         // EXEMPT-FALLBACK: nothing to clear / already gone is success for
@@ -237,7 +237,7 @@ test "cache: miss produces + stores; hit returns identical artifact bytes; corru
     var sub_buf: [96]u8 = undefined;
     const sub = try subdirName(&sub_buf);
     const key = keyHex(&wasm);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}/{s}.cwasm", .{ root, sub, &key });
+    const path = try testing.allocator.print("{s}/{s}/{s}.cwasm", .{ root, sub, &key });
     defer testing.allocator.free(path);
     const stored = try cwd.readFileAlloc(io, path, testing.allocator, .limited(1 << 20));
     defer testing.allocator.free(stored);

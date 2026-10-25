@@ -132,6 +132,7 @@ var fp_seed: f64 = 0;
 /// clobber lists cover the whole range lives in `entry.zig`'s coverage tests,
 /// not here.
 fn probeFpOnce() !void {
+    // zlinter-disable-next-line no_deprecated - deprecated in Zig 0.17; SafeAllocator never reuses memory, so the move gets its own PR
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
@@ -183,6 +184,7 @@ fn probeFpOnce() !void {
 }
 
 pub fn main() !void {
+    // zlinter-disable-next-line no_deprecated - deprecated in Zig 0.17; SafeAllocator never reuses memory, so the move gets its own PR
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();

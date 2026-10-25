@@ -19,10 +19,8 @@ const emit = @import("emit.zig");
 const compile = emit.compile;
 const deinit = emit.deinit;
 const Error = emit.Error;
-const localDisp = emit.localDisp;
 
 const ZirFunc = zir.ZirFunc;
-const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 test "compile: f32.const — MOV EAX,bits + MOVD XMM8,EAX" {

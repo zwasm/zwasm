@@ -93,7 +93,7 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(WasmLevel, "wasm_level", wasm_level);
     options.addOption(WasiLevel, "wasi_level", wasi_level);
-    const runner_optimize: std.builtin.OptimizeMode = if (optimize == .debug) .safe else optimize;
+    const runner_optimize: std.lang.Optimize = if (optimize == .debug) .safe else optimize;
     options.addOption(EngineMode, "engine_mode", engine_mode);
     // ADR-0209 — the mode `core_rs` is built with, which is not the mode the
     // caller asked for: `runner_optimize` floors Debug at ReleaseSafe for
@@ -102,7 +102,7 @@ pub fn build(b: *std.Build) void {
     // Named for the twin it describes, not "engine_optimize": this same
     // `build_options` module is shared by `core` and `exe_mod`, which are built
     // with the raw `-Doptimize`, and a bare name would be wrong for them.
-    options.addOption(std.builtin.OptimizeMode, "runner_engine_optimize", runner_optimize);
+    options.addOption(std.lang.Optimize, "runner_engine_optimize", runner_optimize);
     options.addOption(bool, "trace_ringbuffer", trace_ringbuffer);
     options.addOption(bool, "trace_stackprobe", trace_stackprobe);
     options.addOption(bool, "enable_component", enable_component);
@@ -251,7 +251,7 @@ pub fn build(b: *std.Build) void {
     // name contains it — the way to prove one test ran on a given host
     // instead of reading a total.
     const test_filter = b.option([]const u8, "test-filter", "run only tests whose name contains this string");
-    const test_filters: []const []const u8 = if (test_filter) |f| b.dupeStrings(&.{f}) else &.{};
+    const test_filters: []const []const u8 = if (test_filter) |f| b.graph.dupeStrings(&.{f}) else &.{};
     const core_tests = b.addTest(.{ .root_module = core, .filters = test_filters });
     const run_core_tests = b.addRunArtifact(core_tests);
     const cli_tests = b.addTest(.{ .root_module = exe_mod, .filters = test_filters });

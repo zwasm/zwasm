@@ -619,7 +619,7 @@ fn renderValue(a: std.mem.Allocator, out: *std.ArrayList(u8), v: ComponentValue)
     switch (v) {
         .bool => |b| try out.appendSlice(a, if (b) "true" else "false"),
         inline .s8, .u8, .s16, .u16, .s32, .u32, .s64, .u64, .f32, .f64 => |x| {
-            try out.appendSlice(a, try std.fmt.allocPrint(a, "{d}", .{x}));
+            try out.appendSlice(a, try a.print("{d}", .{x}));
         },
         .char => |cp| {
             try out.append(a, '\'');
@@ -669,14 +669,14 @@ fn renderValue(a: std.mem.Allocator, out: *std.ArrayList(u8), v: ComponentValue)
         // `ComponentValue` carries case ORDINALS only (names live in the
         // type); option/result re-specialize so their names are structural.
         .variant => |vr| {
-            try out.appendSlice(a, try std.fmt.allocPrint(a, "variant<{d}>", .{vr.case}));
+            try out.appendSlice(a, try a.print("variant<{d}>", .{vr.case}));
             if (vr.payload) |p| {
                 try out.append(a, '(');
                 try renderValue(a, out, p.*);
                 try out.append(a, ')');
             }
         },
-        .@"enum" => |c| try out.appendSlice(a, try std.fmt.allocPrint(a, "enum<{d}>", .{c.index})),
+        .@"enum" => |c| try out.appendSlice(a, try a.print("enum<{d}>", .{c.index})),
         .option => |opt| {
             if (opt) |p| {
                 try out.appendSlice(a, "some(");
@@ -694,9 +694,9 @@ fn renderValue(a: std.mem.Allocator, out: *std.ArrayList(u8), v: ComponentValue)
                 try out.append(a, ')');
             }
         },
-        .flags => |f| try out.appendSlice(a, try std.fmt.allocPrint(a, "flags<0x{x}>", .{f.bits})),
-        .own => |h| try out.appendSlice(a, try std.fmt.allocPrint(a, "own<{d}>", .{h})),
-        .borrow => |h| try out.appendSlice(a, try std.fmt.allocPrint(a, "borrow<{d}>", .{h})),
+        .flags => |f| try out.appendSlice(a, try a.print("flags<0x{x}>", .{f.bits})),
+        .own => |h| try out.appendSlice(a, try a.print("own<{d}>", .{h})),
+        .borrow => |h| try out.appendSlice(a, try a.print("borrow<{d}>", .{h})),
     }
 }
 

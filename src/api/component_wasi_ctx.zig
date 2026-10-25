@@ -26,10 +26,7 @@ const async_mod = @import("../feature/component/async.zig");
 const Caller = @import("../zwasm/caller.zig").Caller;
 
 const Allocator = std.mem.Allocator;
-const Engine = @import("../zwasm/engine.zig").Engine;
-const Module = @import("../zwasm/module.zig").Module;
 const Instance = @import("../zwasm/instance.zig").Instance;
-const Linker = @import("../zwasm/linker.zig").Linker;
 const Value = @import("../zwasm.zig").Value;
 const rt_value = @import("../runtime/value.zig");
 

@@ -2179,7 +2179,7 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
     if (!pcs.granted) return fail.code(mem, pcs.retptr, sub, pcs.subtask, 15);
     const authority = req.authority orelse return fail.write(mem, pcs.retptr, sub, pcs.subtask);
     const path = req.path_with_query orelse "/";
-    const url = std.fmt.allocPrint(self.alloc, "http://{s}{s}", .{ authority, path }) catch return WasiP2Error.OutOfMemory;
+    const url = self.alloc.print("http://{s}{s}", .{ authority, path }) catch return WasiP2Error.OutOfMemory;
     defer self.alloc.free(url);
     const uri = std.Uri.parse(url) catch return fail.write(mem, pcs.retptr, sub, pcs.subtask);
     const method: std.http.Method = switch (req.method) {

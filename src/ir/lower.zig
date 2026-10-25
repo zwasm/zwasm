@@ -44,12 +44,9 @@ const dispatch_collector = @import("dispatch_collector.zig");
 const wasm_byte_map = @import("wasm_byte_map.zig");
 
 const Allocator = std.mem.Allocator;
-const ValType = zir.ValType;
 const FuncType = zir.FuncType;
 const BlockKind = zir.BlockKind;
-const BlockInfo = zir.BlockInfo;
 const ZirFunc = zir.ZirFunc;
-const ZirInstr = zir.ZirInstr;
 const ZirOp = zir.ZirOp;
 
 pub const Error = error{

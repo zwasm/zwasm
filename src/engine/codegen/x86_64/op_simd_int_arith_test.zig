@@ -15,8 +15,6 @@ const abi = @import("abi.zig");
 const types = @import("types.zig");
 const op_simd_int_arith = @import("op_simd_int_arith.zig");
 
-const Error = types.Error;
-
 test "emitI32x4Add: three fresh XMM slots — MOVAPS xmm10, xmm8 + PADDD xmm10, xmm9" {
     // Synthetic regalloc state: 3 v128 vregs at slot ids 0/1/2 →
     // XMM8/XMM9/XMM10 via abi.fpSlotToReg. Push lhs (vreg 0) +

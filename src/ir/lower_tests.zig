@@ -17,9 +17,7 @@ const Error = lowerer.Error;
 const ValType = zir.ValType;
 const FuncType = zir.FuncType;
 const BlockKind = zir.BlockKind;
-const BlockInfo = zir.BlockInfo;
 const ZirFunc = zir.ZirFunc;
-const ZirInstr = zir.ZirInstr;
 const ZirOp = zir.ZirOp;
 
 const testing = std.testing;

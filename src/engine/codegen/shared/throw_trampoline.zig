@@ -58,7 +58,7 @@ const eh_registry = @import("eh_registry.zig");
 // x86_64-windows-gnu).
 
 const arm64_clobbers = if (builtin.target.cpu.arch == .aarch64)
-    std.builtin.assembly.Clobbers{
+    std.lang.assembly.Clobbers{
         // We MOV into x0..x3 to marshal trampolineCore args. BLR
         // clobbers x30. trampolineCore itself (Zig fn, callconv(.c))
         // clobbers the standard AAPCS64 caller-saved cohort; we
@@ -76,7 +76,7 @@ else {
 };
 
 const x86_64_clobbers = if (builtin.target.cpu.arch == .x86_64)
-    std.builtin.assembly.Clobbers{ .memory = true }
+    std.lang.assembly.Clobbers{ .memory = true }
 else {
     // non-x86_64 hosts skip the x86_64 branch; void collapses.
 };
@@ -616,7 +616,7 @@ fn invokeTrampolineWith(rt: *jit_abi.JitRuntime, tag_idx: u32) void {
 }
 
 const aarch64_invoke_clobbers = if (builtin.target.cpu.arch == .aarch64)
-    std.builtin.assembly.Clobbers{
+    std.lang.assembly.Clobbers{
         // BLR clobbers the AAPCS64 caller-saved set (X0..X17, X30, V0..V7).
         // X19 + X29 are saved/restored via STP/LDP within the asm body.
         .x0 = true,
@@ -632,7 +632,7 @@ else {
 };
 
 const x86_64_invoke_clobbers = if (builtin.target.cpu.arch == .x86_64)
-    std.builtin.assembly.Clobbers{
+    std.lang.assembly.Clobbers{
         // SysV caller-saved set touched by the CALL into trampolineCore.
         // R12 is written (used as R15 save slot); RBP is saved/restored
         // on the stack within the asm body.

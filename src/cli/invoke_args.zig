@@ -72,11 +72,11 @@ pub fn parseArg(kind: wasm.ValKind, text: []const u8) ArgError!wasm.Val {
 /// (a host reference has no meaningful textual value).
 pub fn formatScalar(buf: []u8, val: wasm.Val) ![]const u8 {
     return switch (val.kind) {
-        .i32 => std.fmt.bufPrint(buf, "{d}", .{val.of.i32}),
-        .i64 => std.fmt.bufPrint(buf, "{d}", .{val.of.i64}),
-        .f32 => std.fmt.bufPrint(buf, "{d}", .{val.of.f32}),
-        .f64 => std.fmt.bufPrint(buf, "{d}", .{val.of.f64}),
-        .anyref, .funcref => std.fmt.bufPrint(buf, "{s}", .{if (val.of.ref == null) "null" else "ref"}),
+        .i32 => std.mem.print(buf, "{d}", .{val.of.i32}),
+        .i64 => std.mem.print(buf, "{d}", .{val.of.i64}),
+        .f32 => std.mem.print(buf, "{d}", .{val.of.f32}),
+        .f64 => std.mem.print(buf, "{d}", .{val.of.f64}),
+        .anyref, .funcref => std.mem.print(buf, "{s}", .{if (val.of.ref == null) "null" else "ref"}),
     };
 }
 

@@ -24,7 +24,6 @@ const std = @import("std");
 const inst_neon = @import("inst_neon.zig");
 
 const Vn = inst_neon.Vn;
-const Xn = inst_neon.Xn;
 
 // =====================================================================
 // Integer arithmetic (i32x4)

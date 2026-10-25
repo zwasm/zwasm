@@ -12,13 +12,6 @@
 //!
 //! Zone 2 (`src/engine/codegen/`).
 
-const zir = @import("../../ir/zir.zig");
-const ir_collector = @import("../../ir/dispatch_collector.zig");
-
-const ZirOp = zir.ZirOp;
-const WasmLevel = ir_collector.WasmLevel;
-const WasiLevel = ir_collector.WasiLevel;
-
 const arm64_i32_add = @import("arm64/ops/wasm_1_0/i32_add.zig");
 const arm64_i32_sub = @import("arm64/ops/wasm_1_0/i32_sub.zig");
 const arm64_i32_mul = @import("arm64/ops/wasm_1_0/i32_mul.zig");

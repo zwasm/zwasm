@@ -36,7 +36,7 @@ inline fn eq(a: []const u8, b: []const u8) bool {
 /// produced it (D-598). All of them are passed in as `@tagName` strings to
 /// keep this pure (no build_options coupling) and unit-testable.
 pub fn versionLine(buf: []u8, version: []const u8, wasm_level: []const u8, wasi_level: []const u8, engine: []const u8, mode: []const u8) []const u8 {
-    return std.fmt.bufPrint(
+    return std.mem.print(
         buf,
         "zwasm v{s} (wasm: {s}, wasi: {s}, engine: {s}, mode: {s})\n",
         .{ version, wasm_level, wasi_level, engine, mode },

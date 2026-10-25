@@ -14,10 +14,7 @@ const testing = std.testing;
 const regalloc = @import("../shared/regalloc.zig");
 const inst = @import("inst.zig");
 const abi = @import("abi.zig");
-const types = @import("types.zig");
 const op_simd = @import("op_simd.zig");
-
-const Error = types.Error;
 
 test "emitV128Not: 3-instr unary synthesis (MOVAPS + PCMPEQB + PXOR)" {
     var slot_ids = [_]u16{ 0, 1 };

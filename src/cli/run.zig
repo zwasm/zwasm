@@ -293,7 +293,7 @@ pub fn runWasmJitCaptured(
         // v128 is outside the C-ABI `Val` set — render the 16 bytes as a
         // little-endian u128 decimal (matches wasmtime's `--invoke` output).
         const bare = if (sr == .v128)
-            try std.fmt.bufPrint(b[0 .. b.len - 1], "{d}", .{@as(u128, @bitCast(sr.v128))})
+            try std.mem.print(b[0 .. b.len - 1], "{d}", .{@as(u128, @bitCast(sr.v128))})
         else
             try invoke_args_mod.formatScalar(b[0 .. b.len - 1], scalarToVal(sr));
         b[bare.len] = '\n';

@@ -15,7 +15,6 @@ const reg_class = @import("reg_class.zig");
 const Gpr = reg_class.Gpr;
 const Width = reg_class.Width;
 const EncodedInsn = inst.EncodedInsn;
-const Cond = inst.Cond;
 const ShiftKind = inst.ShiftKind;
 const encodeRex = inst.encodeRex;
 const encodeModrm = inst.encodeModrm;

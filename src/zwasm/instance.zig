@@ -12,7 +12,6 @@
 //! Zig callers can branch on the specific spec condition.
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 
 const _api_instance = @import("../api/instance.zig");
 const _runtime_value = @import("../runtime/value.zig");

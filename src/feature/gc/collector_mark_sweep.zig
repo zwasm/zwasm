@@ -56,7 +56,6 @@ const GcRef = heap_mod.GcRef;
 const Collector = iface.Collector;
 const RootCallback = iface.RootCallback;
 const ObjectHeader = type_info_mod.ObjectHeader;
-const ObjectKind = type_info_mod.ObjectKind;
 const ArrayHeader = type_info_mod.ArrayHeader;
 const GcTypeInfos = type_info_mod.GcTypeInfos;
 

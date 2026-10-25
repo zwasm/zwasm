@@ -18,8 +18,6 @@ const runtime = @import("../runtime/runtime.zig");
 const mvp = @import("mvp.zig");
 const dispatch_loop = @import("dispatch.zig");
 
-const ZirOp = zir.ZirOp;
-const ZirInstr = zir.ZirInstr;
 const DispatchTable = dispatch.DispatchTable;
 const Runtime = runtime.Runtime;
 const Trap = runtime.Trap;

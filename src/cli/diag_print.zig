@@ -20,7 +20,6 @@ const std = @import("std");
 const diagnostic = @import("../diagnostic/diagnostic.zig");
 
 const Info = diagnostic.Info;
-const Kind = diagnostic.Kind;
 const Phase = diagnostic.Phase;
 
 /// `Source` is the per-render context — filename for the message

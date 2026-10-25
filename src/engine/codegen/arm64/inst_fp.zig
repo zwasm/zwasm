@@ -20,7 +20,6 @@ const testing = std.testing;
 const inst = @import("inst.zig");
 const Xn = inst.Xn;
 const Vn = inst.Vn;
-const Cond = inst.Cond;
 
 /// `SCVTF Sd, Wn` — single-prec from signed 32-bit int.
 /// Encoding base 0x1E220000.

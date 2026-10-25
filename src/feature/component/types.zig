@@ -928,7 +928,7 @@ pub const TypeInfo = struct {
         iface: []const u8,
         fname: []const u8,
     ) Allocator.Error!void {
-        const path = try std.fmt.allocPrint(alloc, "{s}#{s}", .{ iface, fname });
+        const path = try alloc.print("{s}#{s}", .{ iface, fname });
         const ft = self.resolveFuncType(path) orelse {
             alloc.free(path);
             return;

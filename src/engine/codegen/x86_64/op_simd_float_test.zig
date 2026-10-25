@@ -13,10 +13,7 @@ const testing = std.testing;
 const regalloc = @import("../shared/regalloc.zig");
 const inst = @import("inst.zig");
 const abi = @import("abi.zig");
-const types = @import("types.zig");
 const op_simd_float = @import("op_simd_float.zig");
-
-const Error = types.Error;
 
 test "emitF32x4Eq: direct CMPPS imm=0x00 (no swap)" {
     var slot_ids = [_]u16{ 0, 1, 2 };

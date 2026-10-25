@@ -163,7 +163,7 @@ pub fn setDiag(
         .message_buf = undefined,
         .message_len = 0,
     };
-    const written = std.fmt.bufPrint(&info.message_buf, fmt, args) catch blk: {
+    const written = std.mem.print(&info.message_buf, fmt, args) catch blk: {
         // Silent truncation per ADR — write what fit, leave the
         // rest. The buffer's full capacity has been written; we
         // just cap message_len at the buffer size.

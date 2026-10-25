@@ -33,7 +33,7 @@ const entry_buffer_write = @import("entry_buffer_write.zig");
 /// specific register (e.g. `={x0}`) are still listed here — Zig's
 /// asm machinery accepts the overlap silently. Factored to one
 /// const to avoid repeating ~30 lines per helper.
-const aarch64_blr_clobbers: if (builtin.target.cpu.arch == .aarch64) std.builtin.assembly.Clobbers else void =
+const aarch64_blr_clobbers: if (builtin.target.cpu.arch == .aarch64) std.lang.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .aarch64) .{
         .x0 = true,
         .x1 = true,
@@ -75,7 +75,7 @@ const aarch64_blr_clobbers: if (builtin.target.cpu.arch == .aarch64) std.builtin
 /// so the helper performs the CALL in inline-asm and captures XMM0 /
 /// XMM1 directly. Lists every SysV caller-saved GPR + the full XMM
 /// register bank.
-const x86_64_sysv_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag != .windows) std.builtin.assembly.Clobbers else void =
+const x86_64_sysv_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag != .windows) std.lang.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag != .windows) .{
         .rax = true,
         .rcx = true,
@@ -125,7 +125,7 @@ const x86_64_sysv_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and buil
 /// `jitTrampoline`, so they need their own copy.
 /// Built on any x86_64 host so the coverage test can assert it there; the asm
 /// sites that consume it are inside Windows-only branches.
-const x86_64_win64_call_clobbers_all: if (builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
+const x86_64_win64_call_clobbers_all: if (builtin.target.cpu.arch == .x86_64) std.lang.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .x86_64) .{
         .rax = true,
         .rcx = true,
@@ -158,7 +158,7 @@ const x86_64_win64_call_clobbers_all: if (builtin.target.cpu.arch == .x86_64) st
         // void: this constant has no value on other targets
     };
 
-const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) std.builtin.assembly.Clobbers else void =
+const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows) std.lang.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .x86_64 and builtin.target.os.tag == .windows)
         x86_64_win64_call_clobbers_all
     else {
@@ -185,7 +185,7 @@ const x86_64_win64_call_clobbers: if (builtin.target.cpu.arch == .x86_64 and bui
 /// built — and asserted — from any x86_64 host. Without that, the Win64 arm is
 /// only checkable on Windows, which is how the FP half of this cohort went
 /// unnoticed while its GPR half was under test (#287 vs #286).
-const x86_64_win64_jit_cohort: if (builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
+const x86_64_win64_jit_cohort: if (builtin.target.cpu.arch == .x86_64) std.lang.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .x86_64) .{
         .rbx = true,
         .r12 = true,
@@ -213,7 +213,7 @@ const x86_64_win64_jit_cohort: if (builtin.target.cpu.arch == .x86_64) std.built
         // void: this constant has no value on other targets
     };
 
-const x86_64_sysv_jit_cohort: if (builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
+const x86_64_sysv_jit_cohort: if (builtin.target.cpu.arch == .x86_64) std.lang.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .x86_64) .{
         .rbx = true,
         .r12 = true,
@@ -225,7 +225,7 @@ const x86_64_sysv_jit_cohort: if (builtin.target.cpu.arch == .x86_64) std.builti
         // void: this constant has no value on other targets
     };
 
-pub const jit_cohort_clobbers: if (builtin.target.cpu.arch == .aarch64 or builtin.target.cpu.arch == .x86_64) std.builtin.assembly.Clobbers else void =
+pub const jit_cohort_clobbers: if (builtin.target.cpu.arch == .aarch64 or builtin.target.cpu.arch == .x86_64) std.lang.assembly.Clobbers else void =
     if (builtin.target.cpu.arch == .aarch64) .{
         .x19 = true,
         .x20 = true,

@@ -34,7 +34,6 @@ const zir = @import("zir.zig");
 const collector = @import("dispatch_collector.zig");
 
 const ZirOp = zir.ZirOp;
-const WasmLevel = collector.WasmLevel;
 
 /// Canonical list of ZirOp tags that belong to Wasm 3.0 features
 /// (GC, EH, tail-call, typed function references). When a new

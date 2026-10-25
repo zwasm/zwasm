@@ -13,8 +13,6 @@ const inst = @import("inst.zig");
 const reg_class = @import("reg_class.zig");
 
 const Gpr = reg_class.Gpr;
-const Xmm = reg_class.Xmm;
-const Width = reg_class.Width;
 const EncodedInsn = inst.EncodedInsn;
 const encodeRex = inst.encodeRex;
 const encodeModrm = inst.encodeModrm;

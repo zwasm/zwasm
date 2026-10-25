@@ -402,8 +402,8 @@ pub fn readLaneIdx(self: *Validator, lane_count: u8) Error!void {
 /// validator in sync with the lowerer's `emitMemarg` and
 /// `emitMemargLane` shape.
 ///
-/// §9.12-E / B134: SIMD-only enforcement; non-SIMD opLoad /
-/// opStore still uses skipMemarg (separate workstream).
+/// §9.12-E / B134. Non-SIMD opLoad / opStore read theirs with
+/// `readMemargCheckAlign`.
 pub fn readSimdMemarg(self: *Validator, max_align_log2: u8) Error!u32 {
     const raw_align = try leb128.readUleb128(u32, self.body, &self.pos);
     const has_memidx = (raw_align & 0x40) != 0;

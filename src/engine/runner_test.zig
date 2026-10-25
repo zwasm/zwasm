@@ -27,9 +27,6 @@ const CompiledWasm = runner.CompiledWasm;
 const findExportFunc = runner.findExportFunc;
 const runI32Export = runner.runI32Export;
 const runI64Export = runner.runI64Export;
-const runF32Export = runner.runF32Export;
-const runF64Export = runner.runF64Export;
-const runVoidExport = runner.runVoidExport;
 const runScalar1Export = runner.runScalar1Export;
 const JitInstance = runner.JitInstance;
 

@@ -44,7 +44,6 @@ const std = @import("std");
 const zir = @import("zir.zig");
 
 const ZirFunc = zir.ZirFunc;
-const ZirOp = zir.ZirOp;
 
 pub const Error = error{
     LoopInfoLengthMismatch,

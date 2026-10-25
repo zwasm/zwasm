@@ -888,7 +888,7 @@ test "parsePayload: f32 round-trip via @bitCast (corpus-style payload)" {
     // (decimal-stringified) → parsePayload → same f32.
     const bits: u32 = @bitCast(@as(f32, 3.14));
     var buf: [16]u8 = undefined;
-    const s = try std.fmt.bufPrint(&buf, "{d}", .{bits});
+    const s = try std.mem.print(&buf, "{d}", .{bits});
     const v = try parsePayload(.{ .ty = "f32", .payload = s });
     try testing.expectEqual(@as(f32, 3.14), v.f32);
 }
@@ -1106,7 +1106,7 @@ test "D-189 partial: align64 invalid fixtures rejected (memarg natural-align rul
     // not be larger than natural" (Wasm spec §3.4.7). They
     // exercise the per-op natural-alignment cap (load8≤1,
     // load16≤2, load≤4, i64.load≤8, etc.). Before the fix
-    // `skipMemarg` consumed the align byte without validating
+    // the validator consumed the align byte without validating
     // it → all 37 fixtures incorrectly compiled. After the fix
     // each fixture's align-too-large memarg triggers
     // `Error.AlignmentTooLarge` (or maps via the c_api boundary

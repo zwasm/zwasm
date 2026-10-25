@@ -39,7 +39,7 @@ pub fn assertRunnerBuildMode(gpa: std.mem.Allocator, io: std.Io, exe_path: []con
 /// longer one it is a prefix of.
 fn saysMode(version_output: []const u8, want: []const u8) bool {
     var buf: [64]u8 = undefined;
-    const needle = std.fmt.bufPrint(&buf, "mode: {s})", .{want}) catch return false;
+    const needle = std.mem.print(&buf, "mode: {s})", .{want}) catch return false;
     return std.mem.find(u8, version_output, needle) != null;
 }
 
