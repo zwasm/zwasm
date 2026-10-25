@@ -11,8 +11,6 @@ const testing = std.testing;
 
 const runner = @import("runner.zig");
 const runI32Export = runner.runI32Export;
-const runF32Export = runner.runF32Export;
-const JitInstance = runner.JitInstance;
 
 // ============================================================
 // 10.G GC-on-JIT — i31 op family e2e (ref.i31 / i31.get_s /

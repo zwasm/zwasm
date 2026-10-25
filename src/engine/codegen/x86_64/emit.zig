@@ -92,13 +92,9 @@ const rbpLoadR32 = rbp_disp.rbpLoadR32;
 const rbpStoreR64 = rbp_disp.rbpStoreR64;
 const rbpLoadR64 = rbp_disp.rbpLoadR64;
 const rbpStoreXmmF32 = rbp_disp.rbpStoreXmmF32;
-const rbpLoadXmmF32 = rbp_disp.rbpLoadXmmF32;
 const rbpStoreXmmF64 = rbp_disp.rbpStoreXmmF64;
-const rbpLoadXmmF64 = rbp_disp.rbpLoadXmmF64;
 const rbpStoreXmmV128 = rbp_disp.rbpStoreXmmV128;
-const rbpLoadXmmV128 = rbp_disp.rbpLoadXmmV128;
 const rspSub = rbp_disp.rspSub;
-const rspAdd = rbp_disp.rspAdd;
 
 const Allocator = std.mem.Allocator;
 const ZirFunc = zir.ZirFunc;
@@ -114,8 +110,6 @@ pub const deinit = types.deinit;
 
 // Internal types from `label.zig` (D-030 chunk-a). Aliased so the
 // dispatch loop body keeps reading like the pre-split code.
-const LabelKind = label_mod.LabelKind;
-const Fixup = label_mod.Fixup;
 const Label = label_mod.Label;
 
 // Setup-phase helpers extracted to `emit_setup.zig` per ADR-0081
@@ -126,7 +120,6 @@ const setup = @import("emit_setup.zig");
 const stack_limit = @import("../../../platform/stack_limit.zig");
 const computeOutgoingMaxBytes = setup.computeOutgoingMaxBytes;
 const computeLocalLayout = setup.computeLocalLayout;
-const LocalLayout = setup.LocalLayout;
 
 // `win64V128ScratchBase` helper lives in `op_call.zig` (used by
 // the caller-side marshal).

@@ -355,7 +355,7 @@ fn onGetAction(
         return false;
     };
     var tok_buf: [64]u8 = undefined;
-    const tok = try std.fmt.bufPrint(&tok_buf, "{s}:{s}", .{ type_str, value_str });
+    const tok = try std.mem.print(&tok_buf, "{s}:{s}", .{ type_str, value_str });
     if (try resultMatches(tok, global.get())) return true;
     try stdout.print("FAIL  {s}: get-action({s}) → {any}, expected {s}\n", .{ name, field, global.get(), tok });
     return false;

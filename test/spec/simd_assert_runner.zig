@@ -426,11 +426,6 @@ const scratch_table_capacity = 1024;
 var scratch_funcptrs: [scratch_table_capacity]u64 = undefined;
 var scratch_typeidxs: [scratch_table_capacity]u32 = undefined;
 
-// §9.9 / 9.9-l-1a stage 5 — parseArgToken moved to base. Alias
-// retained so runAssertReturn / runAssertTrap (and any later
-// helpers) read the local name.
-const parseArgToken = base.parseArgToken;
-
 /// Split `<fn> <args>` where `<fn>` may be a bare token OR a
 // splitFnAndArgs moved to spec_assert_runner_base.zig per ADR-0057.
 // Re-exported here as a local alias.

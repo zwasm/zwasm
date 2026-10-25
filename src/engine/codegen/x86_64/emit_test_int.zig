@@ -21,7 +21,6 @@ const emit = @import("emit.zig");
 const compile = emit.compile;
 const deinit = emit.deinit;
 const Error = emit.Error;
-const localDisp = emit.localDisp;
 
 const ZirFunc = zir.ZirFunc;
 const Allocator = std.mem.Allocator;

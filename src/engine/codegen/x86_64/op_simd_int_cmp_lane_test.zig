@@ -16,8 +16,6 @@ const abi = @import("abi.zig");
 const types = @import("types.zig");
 const op_simd_int_cmp_lane = @import("op_simd_int_cmp_lane.zig");
 
-const Error = types.Error;
-
 test "emitI32x4GtS: direct PCMPGT (no NOT, no swap) — MOVAPS + PCMPGTD" {
     var slot_ids = [_]u16{ 0, 1, 2 };
     const alloc: regalloc.Allocation = .{

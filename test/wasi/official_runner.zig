@@ -260,7 +260,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Scratch space for the per-test preopen copies. Keyed by engine so the
     // two lanes can run concurrently without colliding.
-    const scratch_root = try std.fmt.allocPrint(gpa, ".zig-cache/wasip1-scratch-{t}", .{engine});
+    const scratch_root = try gpa.print(".zig-cache/wasip1-scratch-{t}", .{engine});
     defer gpa.free(scratch_root);
     discardAbsent(cwd.deleteTree(io, scratch_root));
     try cwd.createDirPath(io, scratch_root);
@@ -536,7 +536,7 @@ fn runOne(
     const wasm_bytes = try suite_dir.readFileAlloc(io, wasm_name, gpa, .limited(64 << 20));
     defer gpa.free(wasm_bytes);
 
-    const manifest_name = try std.fmt.allocPrint(gpa, "{s}.json", .{stem});
+    const manifest_name = try gpa.print("{s}.json", .{stem});
     defer gpa.free(manifest_name);
 
     var expect: Expect = .{};

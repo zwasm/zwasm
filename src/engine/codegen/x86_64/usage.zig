@@ -10,7 +10,6 @@
 const zir = @import("../../../ir/zir.zig");
 const jit_abi = @import("../shared/jit_abi.zig");
 
-const ZirOp = zir.ZirOp;
 const ZirFunc = zir.ZirFunc;
 
 /// INVARIANT: this enum IS the truth that the x86_64 prologue

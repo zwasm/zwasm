@@ -3080,23 +3080,6 @@ pub const Validator = struct {
         try self.pushType(t);
     }
 
-    /// Wasm 3.0 §5.4.6 — memarg align uleb bit 6 (0x40) signals
-    /// an explicit memidx LEB follows. Mirrors `lower.zig::emitMemarg`
-    /// byte consumption so validator + lowerer stay in sync; without
-    /// this the validator's position desyncs on bit-6-set memargs
-    /// and subsequent opcodes parse from wrong offsets. Returns the
-    /// memarg's memidx (0 when bit 6 unset) so callers can type the
-    /// address operand per memory (D-324).
-    fn skipMemarg(self: *Validator) Error!u32 {
-        const raw_align = try leb128.readUleb128(u32, self.body, &self.pos);
-        var memidx: u32 = 0;
-        if ((raw_align & 0x40) != 0) {
-            memidx = try leb128.readUleb128(u32, self.body, &self.pos);
-        }
-        try self.skipMemargOffset(memidx);
-        return memidx;
-    }
-
     /// Wasm 3.0 §5.4.6: an i64-indexed (memory64) memory's memarg
     /// offset is a u64 (LEB128 ≤ 10 bytes); a legacy i32 memory's is a
     /// u32 (≤ 5 bytes). clang/lld emit width-padded offset LEBs for
@@ -3116,7 +3099,7 @@ pub const Validator = struct {
     /// align uleb (mask off bit 6 multi-memory flag), validate
     /// the actual alignExp ≤ `max_align_log2` (the op's natural
     /// alignment exponent). Then consume the optional memidx +
-    /// offset uleb just like `skipMemarg`. Rejects with
+    /// offset uleb. Rejects with
     /// `Error.InvalidAlignment` on out-of-range align. Returns the
     /// memidx (0 when bit 6 unset) for per-memory address typing.
     fn readMemargCheckAlign(self: *Validator, max_align_log2: u32) Error!u32 {
@@ -3129,17 +3112,6 @@ pub const Validator = struct {
         }
         try self.skipMemargOffset(memidx);
         return memidx;
-    }
-
-    /// Address operand type for memory ops per Wasm 3.0 §3.4.7 —
-    /// `.i32` for legacy i32-indexed memory; `.i64` for memory64.
-    /// Determined by `self.memory0_idx_type`; per-memidx ops use
-    /// `memIdxTypeAt` (D-324) which falls back here.
-    fn memAddrType(self: *const Validator) ValType {
-        return switch (self.memory0_idx_type) {
-            .i32 => .i32,
-            .i64 => .i64,
-        };
     }
 
     /// D-324 — raw idx_type of a SPECIFIC memidx, falling back to

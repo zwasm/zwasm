@@ -346,7 +346,7 @@ pub fn main(init: std.process.Init) !void {
         if (!std.mem.endsWith(u8, entry.name, ".wasm")) continue;
         total += 1;
 
-        const fixture_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ corpus_dir, entry.name });
+        const fixture_path = try gpa.print("{s}/{s}", .{ corpus_dir, entry.name });
         defer gpa.free(fixture_path);
 
         // Enumerated slow-skip check for the gating `--interp` lane — BEFORE
@@ -869,7 +869,7 @@ fn wasmerCompare(
     // passed so the relative host scratch still resolves.
     // wasmer preopen syntax is `--mapdir <GUEST_DIR:HOST_DIR>` (single colon),
     // vs wasmtime's `--dir <HOST::GUEST>`.
-    const fixture_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ corpus_dir, name });
+    const fixture_path = try gpa.print("{s}/{s}", .{ corpus_dir, name });
     defer gpa.free(fixture_path);
     const wm_argv: []const []const u8 = if (needs_preopen)
         &.{ wasmer_path, "run", "--mapdir", "." ++ ":" ++ preopen_scratch, fixture_path }

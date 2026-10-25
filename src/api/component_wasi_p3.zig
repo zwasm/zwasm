@@ -1112,7 +1112,7 @@ const EchoEndpoint = struct {
         }
         const body = buf[head_end..n];
         var out: [66000]u8 = undefined;
-        const resp = std.fmt.bufPrint(&out, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ body.len, body }) catch return;
+        const resp = std.mem.print(&out, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ body.len, body }) catch return;
         const data = [_][]const u8{resp};
         _ = p2_sockets.netWrite(io, conn.socket.handle, &data) catch return;
     }
@@ -1260,7 +1260,7 @@ fn runServiceRequest(built: *wasi_p2.BuiltComponent, rop: HttpReqOp) !void {
 ///
 /// `@src().fn_name` inside a test block is `test.<the block's name>`; several
 /// blocks append a parenthesised note, which is not part of the file stem.
-fn officialCorpusName(comptime src: std.builtin.SourceLocation) []const u8 {
+fn officialCorpusName(comptime src: std.lang.SourceLocation) []const u8 {
     const marker = "test.wasip3-official: ";
     const at = std.mem.find(u8, src.fn_name, marker) orelse
         @compileError("official corpus test must be named `wasip3-official: <corpus stem>`");
@@ -1303,7 +1303,7 @@ fn runOfficialWasip3Test(comptime name: []const u8) !void {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     if (expect.root) |root_name| {
-        const src_path = try std.fmt.allocPrint(alloc, "test/component/wasip3_official/{s}", .{root_name});
+        const src_path = try alloc.print("test/component/wasip3_official/{s}", .{root_name});
         defer alloc.free(src_path);
         var src_dir = try std.Io.Dir.cwd().openDir(io, src_path, .{ .iterate = true });
         defer src_dir.close(io);
@@ -1341,7 +1341,7 @@ fn runOfficialWasip3Test(comptime name: []const u8) !void {
         var endpoint_buf: [32]u8 = undefined;
         if (expect.has_endpoints) {
             endpoint = try EchoEndpoint.start(io);
-            const ep_addr = try std.fmt.bufPrint(&endpoint_buf, "127.0.0.1:{d}", .{endpoint.?.port});
+            const ep_addr = try std.mem.print(&endpoint_buf, "127.0.0.1:{d}", .{endpoint.?.port});
             try host.setEnvs(&.{"HTTP_ENDPOINT"}, &.{ep_addr});
         }
         var built = try wasi_p2.buildWasiP2Component(&eng, alloc, bytes, &host, .{});
@@ -1618,7 +1618,7 @@ test "wasip3_official corpus: every vendored binary has a block that runs it" {
 
     var absent: u32 = 0;
     for (covered.items) |c| {
-        const rel = try std.fmt.allocPrint(alloc, "{s}.wasm", .{c});
+        const rel = try alloc.print("{s}.wasm", .{c});
         defer alloc.free(rel);
         root.access(io, rel, .{}) catch {
             absent += 1;

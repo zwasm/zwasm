@@ -6,7 +6,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
-const Allocator = std.mem.Allocator;
 
 const component = @import("component.zig");
 const cwasi = @import("component_wasi_p2.zig");
@@ -23,7 +22,6 @@ const PrimValType = ctypes.PrimValType;
 const WasiP2Ctx = cwasi.WasiP2Ctx;
 const Engine = @import("../zwasm/engine.zig").Engine;
 const Module = @import("../zwasm/module.zig").Module;
-const Instance = @import("../zwasm/instance.zig").Instance;
 const Value = @import("../zwasm.zig").Value;
 const Caller = @import("../zwasm/caller.zig").Caller;
 
@@ -33,16 +31,10 @@ const instantiateGraph = component.instantiateGraph;
 const invokeTypedBuilt = component.invokeTypedBuilt;
 const runWasiP2Main = component.runWasiP2Main;
 const buildWasiP2Component = component.buildWasiP2Component;
-const BuiltComponent = component.BuiltComponent;
-const ComponentInstance = component.ComponentInstance;
-const ComponentGraph = component.ComponentGraph;
 const ComponentValue = component.ComponentValue;
 const WitType = component.WitType;
-const FuncSig = component.FuncSig;
 const InvokeTypedError = component.InvokeTypedError;
 const Error = component.Error;
-const MAX_FLAT_PARAMS = component.MAX_FLAT_PARAMS;
-const Opened = component.Opened;
 const open = component.open;
 const componentNeedsWasi = component.componentNeedsWasi;
 
@@ -1194,7 +1186,7 @@ test "E2: get-terminal-stderr is some on a pty, and the handle drops (#507)" {
     var ptn: c_uint = 0;
     _ = try linuxOk(linux.ioctl(master, linux.T.IOCGPTN, @intFromPtr(&ptn)));
     var path_buf: [32]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/dev/pts/{d}", .{ptn}, 0);
+    const path = try std.mem.printSentinel(&path_buf, "/dev/pts/{d}", .{ptn}, 0);
     const slave: i32 = @intCast(try linuxOk(linux.open(path, .{ .ACCMODE = .RDWR, .NOCTTY = true }, 0)));
     defer _ = linux.close(slave);
     const saved_stderr: i32 = @intCast(try linuxOk(linux.dup(2)));
@@ -1609,7 +1601,7 @@ fn tcpEchoServerOnce(io: std.Io, server: *std.Io.net.Server) void {
     var bufs = [_][]u8{&buf};
     const n = p2_sockets.netRead(io, conn.socket.handle, &bufs) catch return;
     var reply_buf: [32]u8 = undefined;
-    const reply = std.fmt.bufPrint(&reply_buf, "pong-{s}", .{buf[0..n]}) catch return;
+    const reply = std.mem.print(&reply_buf, "pong-{s}", .{buf[0..n]}) catch return;
     const data = [_][]const u8{reply};
     _ = p2_sockets.netWrite(io, conn.socket.handle, &data) catch return;
 }
@@ -1627,7 +1619,7 @@ test "ADR-0180: a real rust wasip2 TCP client connects + echoes through wasi:soc
     var server = try listen_addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
     defer server.deinit(io);
     var port_buf: [8]u8 = undefined;
-    const port_str = try std.fmt.bufPrint(&port_buf, "{d}", .{server.socket.address.getPort()});
+    const port_str = try std.mem.print(&port_buf, "{d}", .{server.socket.address.getPort()});
     var server_fut = try io.concurrent(tcpEchoServerOnce, .{ io, &server });
     defer server_fut.cancel(io);
 
@@ -1749,7 +1741,7 @@ test "ADR-0180 Phase 2: a real rust wasip2 TCP listener accepts + echoes through
     const port = probe.socket.address.getPort();
     probe.deinit(io);
     var port_buf: [8]u8 = undefined;
-    const port_str = try std.fmt.bufPrint(&port_buf, "{d}", .{port});
+    const port_str = try std.mem.print(&port_buf, "{d}", .{port});
 
     var client_fut = try io.concurrent(tcpClientOnce, .{ io, port });
     defer client_fut.cancel(io);
@@ -1771,7 +1763,7 @@ test "ADR-0180 Phase 2: a real rust wasip2 TCP listener accepts + echoes through
     // -> echo "ping"+"-ack" — the ADR-0180 Phase-2 existence proof.
     try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
     var expect_buf: [48]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expect_buf, "served ping on {d}\n", .{port});
+    const expected = try std.mem.print(&expect_buf, "served ping on {d}\n", .{port});
     try testing.expectEqualStrings(expected, capture.items);
 }
 

@@ -175,17 +175,17 @@ pub fn main(init: std.process.Init) !u8 {
     var tag_bytes: [8]u8 = undefined;
     io.random(&tag_bytes);
     var tag_buf: [16]u8 = undefined;
-    const tag = try std.fmt.bufPrint(&tag_buf, "{x:0>16}", .{std.mem.readInt(u64, &tag_bytes, .little)});
-    const tmp_dir = try std.fmt.allocPrint(gpa, ".zig-cache/default-entry-tmp-{s}", .{tag});
+    const tag = try std.mem.print(&tag_buf, "{x:0>16}", .{std.mem.readInt(u64, &tag_bytes, .little)});
+    const tmp_dir = try gpa.print(".zig-cache/default-entry-tmp-{s}", .{tag});
     defer gpa.free(tmp_dir);
     try cwd.createDirPath(io, tmp_dir);
     defer cwd.deleteTree(io, tmp_dir) catch {};
 
     var failed: u32 = 0;
     for (rows) |row| {
-        const wasm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.wasm", .{ fixture_dir, row.fixture });
+        const wasm_path = try gpa.print("{s}/{s}.wasm", .{ fixture_dir, row.fixture });
         defer gpa.free(wasm_path);
-        const cwasm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.cwasm", .{ tmp_dir, row.fixture });
+        const cwasm_path = try gpa.print("{s}/{s}.cwasm", .{ tmp_dir, row.fixture });
         defer gpa.free(cwasm_path);
         const compiled = try std.process.run(gpa, io, .{ .argv = &.{ cli, "compile", wasm_path, "-o", cwasm_path } });
         defer gpa.free(compiled.stdout);
@@ -200,7 +200,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     // C1's escape hatch: the export the chain no longer reaches runs by name,
     // on both drivers.
-    const only_f = try std.fmt.allocPrint(gpa, "{s}/only_f.wasm", .{fixture_dir});
+    const only_f = try gpa.print("{s}/only_f.wasm", .{fixture_dir});
     defer gpa.free(only_f);
     for ([_][]const []const u8{
         &.{ cli, "run", "--invoke", "f", only_f },

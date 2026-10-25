@@ -281,24 +281,24 @@ fn run(init: std.process.Init) !u8 {
     var tag_bytes: [8]u8 = undefined;
     io.random(&tag_bytes);
     var tag_buf: [16]u8 = undefined;
-    const tag = try std.fmt.bufPrint(&tag_buf, "{x:0>16}", .{std.mem.readInt(u64, &tag_bytes, .little)});
+    const tag = try std.mem.print(&tag_buf, "{x:0>16}", .{std.mem.readInt(u64, &tag_bytes, .little)});
 
-    const tmp_dir = try std.fmt.allocPrint(gpa, ".zig-cache/aot-diff-tmp-{s}", .{tag});
+    const tmp_dir = try gpa.print(".zig-cache/aot-diff-tmp-{s}", .{tag});
     defer gpa.free(tmp_dir);
     try cwd.createDirPath(io, tmp_dir);
     defer cwd.deleteTree(io, tmp_dir) catch {};
-    const preopen_scratch = try std.fmt.allocPrint(gpa, ".zig-cache/aot-diff-preopen-{s}", .{tag});
+    const preopen_scratch = try gpa.print(".zig-cache/aot-diff-preopen-{s}", .{tag});
     defer gpa.free(preopen_scratch);
     // Cache-lane scratch (ADR-0203 D6 stage-5 ratchet): one root shared
     // across fixtures so hits exercise a real multi-entry directory;
     // absolutized because the lanes run with per-fixture cwds.
-    const cache_root_rel = try std.fmt.allocPrint(gpa, ".zig-cache/aot-diff-cache-{s}", .{tag});
+    const cache_root_rel = try gpa.print(".zig-cache/aot-diff-cache-{s}", .{tag});
     defer gpa.free(cache_root_rel);
     try cwd.createDirPath(io, cache_root_rel);
     defer cwd.deleteTree(io, cache_root_rel) catch {};
     const cache_root = try cwd.realPathFileAlloc(io, cache_root_rel, gpa);
     defer gpa.free(cache_root);
-    const cache_flag = try std.fmt.allocPrint(gpa, "--cache={s}", .{cache_root});
+    const cache_flag = try gpa.print("--cache={s}", .{cache_root});
     defer gpa.free(cache_flag);
 
     var total: u32 = 0;
@@ -355,9 +355,9 @@ fn run(init: std.process.Init) !u8 {
             if (!std.mem.endsWith(u8, entry.name, ".wasm")) continue;
             total += 1;
 
-            const fixture_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ corpus_dir, entry.name });
+            const fixture_path = try gpa.print("{s}/{s}", .{ corpus_dir, entry.name });
             defer gpa.free(fixture_path);
-            const artifact_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ tmp_dir, entry.name });
+            const artifact_path = try gpa.print("{s}/{s}", .{ tmp_dir, entry.name });
             defer gpa.free(artifact_path);
 
             const needs_preopen = fixtureNeedsPreopen(entry.name);
@@ -480,13 +480,13 @@ fn run(init: std.process.Init) !u8 {
             // explicit interp choice wins; the artifact is JIT code). Probe
             // once: interp+cache == plain interp, and NOTHING is stored.
             if (std.mem.eql(u8, entry.name, "compute_add.wasm")) {
-                const iroot_rel = try std.fmt.allocPrint(gpa, ".zig-cache/aot-diff-cache-interp-{s}", .{tag});
+                const iroot_rel = try gpa.print(".zig-cache/aot-diff-cache-interp-{s}", .{tag});
                 defer gpa.free(iroot_rel);
                 try cwd.createDirPath(io, iroot_rel);
                 defer cwd.deleteTree(io, iroot_rel) catch {};
                 const iroot_abs = try cwd.realPathFileAlloc(io, iroot_rel, gpa);
                 defer gpa.free(iroot_abs);
-                const iflag = try std.fmt.allocPrint(gpa, "--cache={s}", .{iroot_abs});
+                const iflag = try gpa.print("--cache={s}", .{iroot_abs});
                 defer gpa.free(iflag);
                 var interp_ref = try runLane(gpa, io, &.{ cli, "run", "--engine", "interp", entry.name }, corpus_dir);
                 defer interp_ref.deinit(gpa);

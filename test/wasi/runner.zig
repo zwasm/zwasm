@@ -62,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Locate matching .expected_exit file.
         const stem_len = entry.name.len - ".wasm".len;
-        const expected_name = try std.fmt.allocPrint(gpa, "{s}.expected_exit", .{entry.name[0..stem_len]});
+        const expected_name = try gpa.print("{s}.expected_exit", .{entry.name[0..stem_len]});
         defer gpa.free(expected_name);
 
         const expected_bytes = dir.readFileAlloc(io, expected_name, gpa, .limited(16)) catch |err| {
@@ -82,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
         // Optional `.expected_stdout` companion: when present,
         // capture guest stdout and byte-compare. When absent,
         // exit-code-only assertion is fine.
-        const expected_stdout_name = try std.fmt.allocPrint(gpa, "{s}.expected_stdout", .{entry.name[0..stem_len]});
+        const expected_stdout_name = try gpa.print("{s}.expected_stdout", .{entry.name[0..stem_len]});
         defer gpa.free(expected_stdout_name);
 
         const expected_stdout_opt: ?[]u8 = dir.readFileAlloc(io, expected_stdout_name, gpa, .limited(64 * 1024)) catch null;
@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
         // Optional `.env` sidecar (KEY=VAL lines) exercises the CLI `--env`
         // path: parse it + thread env_keys/vals through runWasmCapturedOpts →
         // host.setEnvs → environ_get (D-295 P0).
-        const env_name = try std.fmt.allocPrint(gpa, "{s}.env", .{entry.name[0..stem_len]});
+        const env_name = try gpa.print("{s}.env", .{entry.name[0..stem_len]});
         defer gpa.free(env_name);
         const env_bytes_opt: ?[]u8 = dir.readFileAlloc(io, env_name, gpa, .limited(16 * 1024)) catch null;
         defer if (env_bytes_opt) |e| gpa.free(e);

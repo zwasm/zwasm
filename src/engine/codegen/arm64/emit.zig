@@ -57,7 +57,6 @@ const regalloc = @import("../shared/regalloc.zig");
 const setup = @import("emit_setup.zig");
 const computeOutgoingMaxBytes = setup.computeOutgoingMaxBytes;
 const computeLocalLayout = setup.computeLocalLayout;
-const LocalLayout = setup.LocalLayout;
 const jit_abi = @import("../shared/jit_abi.zig");
 const exception_table = @import("../shared/exception_table.zig");
 const trap_registry = @import("../../../platform/trap_registry.zig"); // ADR-0202 D3
@@ -95,15 +94,9 @@ const op_simd_int_cmp_lane = @import("op_simd_int_cmp_lane.zig");
 const op_simd_float = @import("op_simd_float.zig");
 
 const Label = label_mod.Label;
-const LabelKind = label_mod.LabelKind;
-const Fixup = label_mod.Fixup;
-const FixupKind = label_mod.FixupKind;
 
 const Allocator = std.mem.Allocator;
 const ZirFunc = zir.ZirFunc;
-const ZirInstr = zir.ZirInstr;
-const ZirOp = zir.ZirOp;
-const Xn = inst.Xn;
 const EmitCtx = ctx_mod.EmitCtx;
 
 /// Re-export from `ctx.zig`. The error set lives there so

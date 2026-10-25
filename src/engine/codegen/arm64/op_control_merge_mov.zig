@@ -14,7 +14,6 @@
 //! Zone 2 (`src/engine/codegen/arm64/`).
 
 const ctx_mod = @import("ctx.zig");
-const label_mod = @import("label.zig");
 const abi = @import("abi.zig");
 const inst = @import("inst.zig");
 const inst_fp = @import("inst_fp.zig");
@@ -24,7 +23,6 @@ const regalloc = @import("../shared/regalloc.zig");
 
 const EmitCtx = ctx_mod.EmitCtx;
 const Error = ctx_mod.Error;
-const Label = label_mod.Label;
 
 const merge_top_vregs_cap: u8 = 8;
 

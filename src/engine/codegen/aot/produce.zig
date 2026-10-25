@@ -33,7 +33,6 @@ const runner_validate = @import("../../runner_validate.zig");
 const canonical_type = @import("../shared/canonical_type.zig");
 
 const Allocator = std.mem.Allocator;
-const FuncType = zir.FuncType;
 
 pub const Error = serialise.Error || error{
     ParamCountTooLarge,

@@ -104,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
         },
         .unknown => {
             var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "zwasm: unknown subcommand '{s}' — run 'zwasm --help' for usage", .{subcmd_opt.?}) catch "zwasm: unknown subcommand";
+            const msg = std.mem.print(&buf, "zwasm: unknown subcommand '{s}' — run 'zwasm --help' for usage", .{subcmd_opt.?}) catch "zwasm: unknown subcommand";
             try printlnErr(io, msg);
             std.process.exit(2);
         },
@@ -275,7 +275,7 @@ pub fn main(init: std.process.Init) !void {
                     break;
                 } else if (isOption(a)) {
                     var buf: [256]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&buf, "zwasm run: unknown option '{s}' — run 'zwasm --help' for usage", .{a}) catch "zwasm run: unknown option";
+                    const msg = std.mem.print(&buf, "zwasm run: unknown option '{s}' — run 'zwasm --help' for usage", .{a}) catch "zwasm run: unknown option";
                     try printlnErr(io, msg);
                     std.process.exit(2);
                 } else break;
@@ -372,7 +372,7 @@ pub fn main(init: std.process.Init) !void {
                 // stdin on demand, so nothing is read before the guest runs.
                 const code = cli_run.runComponentWasi(gpa, io, run_bytes, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, allow_network, .inherit) catch |err| {
                     var buf: [256]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&buf, "zwasm run: cannot run component '{s}': {s}", .{ path, @errorName(err) }) catch "zwasm run: component run failed";
+                    const msg = std.mem.print(&buf, "zwasm run: cannot run component '{s}': {s}", .{ path, @errorName(err) }) catch "zwasm run: component run failed";
                     try printlnErr(io, msg);
                     std.process.exit(1);
                 };
@@ -400,7 +400,7 @@ pub fn main(init: std.process.Init) !void {
                 // #233 / #530 — the diagnostic or the refusal is already on stderr.
                 if (err == error.InvalidModule or err == error.ArtifactTooLarge) std.process.exit(1);
                 var buf: [256]u8 = undefined;
-                const msg = std.fmt.bufPrint(&buf, "zwasm compile: {s}", .{@errorName(err)}) catch "zwasm compile: failed";
+                const msg = std.mem.print(&buf, "zwasm compile: {s}", .{@errorName(err)}) catch "zwasm compile: failed";
                 // EXEMPT-FALLBACK: ADR-0016 phase 1 — compile-error stderr report is last-resort; the process exits 1 regardless.
                 printlnErr(io, msg) catch {};
                 std.process.exit(1);
@@ -447,18 +447,18 @@ fn defaultCacheRoot(gpa: std.mem.Allocator, init: std.process.Init) ?[]const u8 
     switch (builtin.target.os.tag) {
         .windows => {
             const base = init.environ_map.get("LOCALAPPDATA") orelse return null;
-            return std.fmt.allocPrint(gpa, "{s}\\zwasm", .{base}) catch null;
+            return gpa.print("{s}\\zwasm", .{base}) catch null;
         },
         .macos => {
             const home = init.environ_map.get("HOME") orelse return null;
-            return std.fmt.allocPrint(gpa, "{s}/Library/Caches/zwasm", .{home}) catch null;
+            return gpa.print("{s}/Library/Caches/zwasm", .{home}) catch null;
         },
         else => {
             if (init.environ_map.get("XDG_CACHE_HOME")) |x| {
-                return std.fmt.allocPrint(gpa, "{s}/zwasm", .{x}) catch null;
+                return gpa.print("{s}/zwasm", .{x}) catch null;
             }
             const home = init.environ_map.get("HOME") orelse return null;
-            return std.fmt.allocPrint(gpa, "{s}/.cache/zwasm", .{home}) catch null;
+            return gpa.print("{s}/.cache/zwasm", .{home}) catch null;
         },
     }
 }
@@ -489,9 +489,9 @@ fn exitWithRunFailure(io: std.Io, err: anyerror, path: []const u8, bytes: []cons
 /// rather than `StreamTooLong` (#530).
 fn readFailureMsg(buf: []u8, path: []const u8, err: anyerror) []const u8 {
     return (if (err == error.StreamTooLong)
-        std.fmt.bufPrint(buf, "zwasm run: cannot read '{s}': larger than the {d} MiB cap", .{ path, cli_limits.max_file_bytes >> 20 })
+        std.mem.print(buf, "zwasm run: cannot read '{s}': larger than the {d} MiB cap", .{ path, cli_limits.max_file_bytes >> 20 })
     else
-        std.fmt.bufPrint(buf, "zwasm run: cannot read '{s}': {s}", .{ path, @errorName(err) })) catch "zwasm run: read failed";
+        std.mem.print(buf, "zwasm run: cannot read '{s}': {s}", .{ path, @errorName(err) })) catch "zwasm run: read failed";
 }
 
 fn printlnErr(io: std.Io, msg: []const u8) !void {

@@ -3224,7 +3224,7 @@ pub fn isValidityVerdict(err: runner.Error) bool {
 /// (Refs #353).
 fn verdictTrap(alloc: std.mem.Allocator, store: *Store, inst_id: u64, err: runner.Error, trap_out: ?*?*Trap) void {
     var buf: [96]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "invalid module: {s}", .{@errorName(err)}) catch "invalid module";
+    const msg = std.mem.print(&buf, "invalid module: {s}", .{@errorName(err)}) catch "invalid module";
     reportInstantiateTrapMsg(alloc, store, inst_id, .invalid_module, msg, trap_out);
 }
 

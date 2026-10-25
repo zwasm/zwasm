@@ -15,7 +15,6 @@ const Allocator = std.mem.Allocator;
 const parser = @import("../parse/parser.zig");
 const sections = @import("../parse/sections.zig");
 const zir = @import("../ir/zir.zig");
-const FuncType = zir.FuncType;
 const linker = @import("codegen/shared/linker.zig");
 const canonical_type = @import("codegen/shared/canonical_type.zig");
 const rv = @import("runner_validate.zig");

@@ -12,7 +12,6 @@
 //! `wasm_engine_new`).
 
 const std = @import("std");
-const testing = std.testing;
 
 const instance = @import("instance.zig");
 const Engine = instance.Engine;

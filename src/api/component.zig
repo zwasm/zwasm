@@ -21,7 +21,6 @@ const cvalidate = @import("../feature/component/validate.zig");
 const value_conv = @import("../zwasm/value_conv.zig");
 const zwasm = @import("../zwasm.zig");
 const wasi_host = @import("../wasi/host.zig");
-const Caller = @import("../zwasm/caller.zig").Caller;
 
 const Allocator = std.mem.Allocator;
 const Engine = @import("../zwasm/engine.zig").Engine;

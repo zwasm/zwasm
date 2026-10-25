@@ -36,7 +36,6 @@ const Runtime = runtime.Runtime;
 const Value = runtime.Value;
 const Instance = runtime.Instance;
 
-const ObjectHeader = type_info_mod.ObjectHeader;
 const ObjectKind = type_info_mod.ObjectKind;
 const ArrayHeader = type_info_mod.ArrayHeader;
 const ArrayInfo = type_info_mod.ArrayInfo;

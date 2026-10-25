@@ -18,7 +18,7 @@ pub fn main() void {
     var buf: [64]u8 = undefined;
     var i: u64 = 0;
     while (i < 25) : (i += 1) {
-        const line = std.fmt.bufPrint(&buf, "fib({d}) = {d}\n", .{ i, fib(i) }) catch return;
+        const line = std.mem.print(&buf, "fib({d}) = {d}\n", .{ i, fib(i) }) catch return;
         writeStr(line);
     }
 }
