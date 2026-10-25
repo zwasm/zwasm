@@ -5,7 +5,7 @@
 > re-evaluated when they advance. Phase 4 non-web proposals are the
 > v0.2.0 line.
 
-Last reviewed: **2026-08-10**. WASI release train (ADR-0205 D6): **2026-10-21**.
+Last reviewed: **2026-10-21**. Next WASI release train (ADR-0205 D6): **0.3.3, 2026-12-08**.
 
 > **WASI 0.3.0 RATIFIED 2026-06-11** (Bytecode Alliance; Wasmtime 43+). It
 > rebases WASI onto the **Component Model async primitives** (`async` func,

@@ -4,7 +4,7 @@
 **Keywords**: D-586, comment true locally false globally, grep for the MECHANISM
 not for the absence, patchTableImportFuncptrs existed unfound, one-line fix
 
-**Citing**: `<backfill>`
+**Citing**: `e1e6925ab` (D-586 fix — the one-line funcptr mirror assignment)
 
 ## What happened
 
