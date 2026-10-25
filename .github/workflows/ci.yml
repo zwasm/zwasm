@@ -230,11 +230,11 @@ jobs:
         include:
           - name: aarch64-macos
             runs-on: macos-15
-            zig-dir: zig-aarch64-macos-0.16.0
+            zig-dir: zig-aarch64-macos-0.17.0
             extended: true
           - name: x86_64-linux
             runs-on: ubuntu-22.04
-            zig-dir: zig-x86_64-linux-0.16.0
+            zig-dir: zig-x86_64-linux-0.17.0
             extended: true
             # #347 — the unit tests built ReleaseSafe, on every PR. A row gets
             # this when its leg finishes far enough ahead of aarch64-macos
@@ -243,7 +243,7 @@ jobs:
             releasesafe_unit: true
           - name: aarch64-linux
             runs-on: ubuntu-24.04-arm
-            zig-dir: zig-aarch64-linux-0.16.0
+            zig-dir: zig-aarch64-linux-0.17.0
             # #545 — both ReleaseSafe lanes, measured on run 39030377235: the
             # unit lane adds 6.6 min to an 11-17 min leg (macOS: 22-31), and
             # the JIT smoke 4.5 min to the push run, where macOS takes ~90.
@@ -252,7 +252,7 @@ jobs:
             releasesafe_unit: true
           - name: x86_64-windows
             runs-on: windows-2022
-            zig-dir: zig-x86_64-windows-0.16.0
+            zig-dir: zig-x86_64-windows-0.17.0
             # #303 — not `extended` (~20 cold ReleaseSafe builds), but the one
             # check in that set whose value is host-specific: nothing else runs
             # the Win64 entry thunks optimised, and Windows is where the JIT is
@@ -285,41 +285,41 @@ jobs:
           restore-keys: |
             zig-pkg-${{ matrix.name }}-
 
-      - name: Cache Zig 0.16.0
+      - name: Cache Zig 0.17.0
         id: cache-zig
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.local/zig-0.16.0
-          key: zig-0.16.0-${{ matrix.name }}
+          path: ~/.local/zig-0.17.0
+          key: zig-0.17.0-${{ matrix.name }}
 
-      - name: Install Zig 0.16.0 (Unix)
+      - name: Install Zig 0.17.0 (Unix)
         if: runner.os != 'Windows' && steps.cache-zig.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p ~/.local
-          curl -fsSL "https://ziglang.org/download/0.16.0/${{ matrix.zig-dir }}.tar.xz" -o /tmp/zig.tar.xz
+          curl -fsSL "https://ziglang.org/download/0.17.0/${{ matrix.zig-dir }}.tar.xz" -o /tmp/zig.tar.xz
           tar -xJf /tmp/zig.tar.xz -C ~/.local
-          mv "$HOME/.local/${{ matrix.zig-dir }}" "$HOME/.local/zig-0.16.0"
+          mv "$HOME/.local/${{ matrix.zig-dir }}" "$HOME/.local/zig-0.17.0"
 
-      - name: Install Zig 0.16.0 (Windows)
+      - name: Install Zig 0.17.0 (Windows)
         if: runner.os == 'Windows' && steps.cache-zig.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "$HOME\.local" | Out-Null
-          Invoke-WebRequest -Uri "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip" -OutFile "$env:TEMP\zig.zip"
+          Invoke-WebRequest -Uri "https://ziglang.org/download/0.17.0/zig-x86_64-windows-0.17.0.zip" -OutFile "$env:TEMP\zig.zip"
           Expand-Archive -Path "$env:TEMP\zig.zip" -DestinationPath "$HOME\.local" -Force
-          Move-Item -Path "$HOME\.local\zig-x86_64-windows-0.16.0" -Destination "$HOME\.local\zig-0.16.0"
+          Move-Item -Path "$HOME\.local\zig-x86_64-windows-0.17.0" -Destination "$HOME\.local\zig-0.17.0"
 
       - name: Add Zig to PATH (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        run: echo "$HOME/.local/zig-0.16.0" >> "$GITHUB_PATH"
+        run: echo "$HOME/.local/zig-0.17.0" >> "$GITHUB_PATH"
 
       - name: Add Zig to PATH (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Add-Content -Path $env:GITHUB_PATH -Value "$HOME\.local\zig-0.16.0"
+        run: Add-Content -Path $env:GITHUB_PATH -Value "$HOME\.local\zig-0.17.0"
 
       # Reference oracle for the interp-vs-JIT-vs-wasmtime differential.
       # REQUIRED, not best effort (issue #213): the runner degrades to a SKIP

@@ -2,7 +2,7 @@
     .name = .zwasm,
     .version = "2.8.1",
     .fingerprint = 0xfdac0191bf453d15,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     // No dependencies: the zlinter dev-dep lives in tools/lint/build.zig.zon
     // so that building this package — `static-lib` above all, which C and
     // Rust consumers use — needs no network at all (ADR-0214, #235).

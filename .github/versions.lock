@@ -19,7 +19,7 @@
 #   2. If the pin also lives in flake.nix (Zig), update flake.nix too.
 #   3. Run `bash scripts/ci_gate.sh` locally, then let CI confirm on all 3 OSes.
 
-ZIG_VERSION=0.16.0
+ZIG_VERSION=0.17.0
 WASMTIME_VERSION=45.0.0
 WASM_TOOLS_VERSION=1.251.0
 HYPERFINE_VERSION=1.20.0

@@ -7,7 +7,7 @@
     .name = .zwasm_zig_dep_example,
     .version = "0.0.0",
     .fingerprint = 0x1840c09a5ebd7799,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zwasm = .{ .path = "../../.." },
     },

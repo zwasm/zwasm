@@ -23,7 +23,7 @@
         # `default` shell uses plain legacyPackages — unchanged, load-bearing
         # for every host. Do NOT add generation toolchains here.
         pkgs = nixpkgs.legacyPackages.${system};
-        zig = zig-overlay.packages.${system}."0.16.0";
+        zig = zig-overlay.packages.${system}."0.17.0";
 
         # `gen` shell uses a rust-overlay-enabled package set. Separate
         # binding so the overlay never perturbs `default`.

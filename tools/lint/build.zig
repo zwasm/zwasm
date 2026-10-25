@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
         builder.addRule(.{ .builtin = .no_empty_block }, .{});
         builder.addRule(.{ .builtin = .require_exhaustive_enum_switch }, .{});
         builder.addRule(.{ .builtin = .no_unused }, .{});
-        builder.addPaths(.{ .include = &.{.{ .cwd_relative = repo_root }} });
+        builder.addPaths(.{ .include_dirs = &.{.{ .cwd_relative = repo_root }} });
         break :blk builder.build();
     });
 }

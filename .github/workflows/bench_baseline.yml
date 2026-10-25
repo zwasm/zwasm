@@ -43,31 +43,31 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - name: Cache Zig 0.16.0
+      - name: Cache Zig 0.17.0
         id: cache-zig
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.local/zig-0.16.0
-          key: zig-0.16.0-${{ matrix.name }}
+          path: ~/.local/zig-0.17.0
+          key: zig-0.17.0-${{ matrix.name }}
 
-      - name: Install Zig 0.16.0
+      - name: Install Zig 0.17.0
         if: steps.cache-zig.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p ~/.local
           case "${{ matrix.name }}" in
-            aarch64-macos) dir=zig-aarch64-macos-0.16.0 ;;
-            x86_64-linux)  dir=zig-x86_64-linux-0.16.0 ;;
+            aarch64-macos) dir=zig-aarch64-macos-0.17.0 ;;
+            x86_64-linux)  dir=zig-x86_64-linux-0.17.0 ;;
             *) echo "unexpected matrix name ${{ matrix.name }}" >&2; exit 1 ;;
           esac
-          curl -fsSL "https://ziglang.org/download/0.16.0/${dir}.tar.xz" -o /tmp/zig.tar.xz
+          curl -fsSL "https://ziglang.org/download/0.17.0/${dir}.tar.xz" -o /tmp/zig.tar.xz
           tar -xJf /tmp/zig.tar.xz -C ~/.local
-          mv "$HOME/.local/${dir}" "$HOME/.local/zig-0.16.0"
+          mv "$HOME/.local/${dir}" "$HOME/.local/zig-0.17.0"
 
       - name: Add Zig to PATH
         shell: bash
-        run: echo "$HOME/.local/zig-0.16.0" >> "$GITHUB_PATH"
+        run: echo "$HOME/.local/zig-0.17.0" >> "$GITHUB_PATH"
 
       - name: Install hyperfine (macOS)
         if: runner.os == 'macOS'
