@@ -67,7 +67,7 @@ WASM_API_EXTERN void                 zwasm_wasi_config_delete(zwasm_wasi_config_
  * three stdio fds), kept for API parity.
  *
  * Process argv inheritance (`inherit_argv`) is not provided:
- * Zig 0.16 offers no library-side cross-platform process-args
+ * Zig 0.17 offers no library-side cross-platform process-args
  * read. Use the explicit `set_args` below instead.
  */
 WASM_API_EXTERN void zwasm_wasi_config_inherit_stdio(zwasm_wasi_config_t*);

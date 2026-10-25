@@ -52,7 +52,7 @@ directly over SSH. The `devShells.default` tool set is mirrored by **native**
 installs from [`scripts/windows/install_tools.ps1`](../scripts/windows/install_tools.ps1)
 (the SSOT; pinned versions mirror `flake.nix`). Tools land in
 `%LOCALAPPDATA%\zwasm-tools\<name>-<version>\` and are wired into the **User**
-PATH. Current pins (2026-06-14, kept current per user directive): zig **0.16.0**
+PATH. Current pins (2026-06-14, kept current per user directive): zig **0.17.0**
 (PINNED — never bump), wasmtime **45.0.0**, wasm-tools **1.251.0**, wasmer
 **7.1.0** (the §9.6 A3 second oracle), hyperfine **1.20.0** (latest), rustc
 **1.96.0** (latest stable, winget/rustup). Update = bump the `$versions` pins +

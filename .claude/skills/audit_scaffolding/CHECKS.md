@@ -479,7 +479,7 @@ report, and grades:
   yes (`wasmtime 42.0.1 (...)`). **If this starts failing**, a
   windowsmini-side regression occurred — flag `block`.
 - `ssh ubuntunote 'command -v nix && bash -lc "nix develop --command zig version"'`
-  — Linux x86_64 host reachable + Nix dev shell + zig 0.16.0
+  — Linux x86_64 host reachable + Nix dev shell + zig 0.17.0
   present. Per ADR-0067, this replaces the prior OrbStack
   invocation (D-134 retired the Rosetta path).
 - `ssh ubuntunote 'whoami; sudo -n true && echo sudo-ok'` —

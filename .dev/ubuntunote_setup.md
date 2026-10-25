@@ -52,7 +52,7 @@ Verification:
 ssh ubuntunote 'echo ok && zig version'
 ```
 
-Expected: `ok` + `0.16.0` (after Nix flake bootstrap, below).
+Expected: `ok` + `0.17.0` (after Nix flake bootstrap, below).
 
 ## Ubuntu-side setup (one-time)
 
@@ -117,10 +117,10 @@ mkdir -p ~/Documents/MyProducts
 cd ~/Documents/MyProducts
 git clone -b main git@github.com:zwasm/zwasm.git zwasm
 cd zwasm
-nix develop --command zig version   # should print 0.16.0
+nix develop --command zig version   # should print 0.17.0
 ```
 
-The first `nix develop` fetches Zig 0.16.0 + project deps from
+The first `nix develop` fetches Zig 0.17.0 + project deps from
 the flake's pinned inputs (~5 min, one-time per host). The clone path
 must match `ZWASM_REMOTE_DIR` in `scripts/dev_hosts.env` (relative to
 the remote `$HOME`) — that is what the runners `cd` into.
@@ -144,7 +144,7 @@ Expected: clean exit, no Rosetta-style SEGV (D-134 gone).
 | openssh-server, avahi, libnss-mdns | ✓ |           | system-level service; pre-Nix bootstrap |
 | build-essential, xz-utils, curl   | ✓  |           | Nix installer + spike-repro C builds |
 | sudo, ca-certificates, git        | ✓  |           | base bootstrap |
-| Zig 0.16.0                        |     | ✓         | pinned via `flake.nix`; version-locked across hosts |
+| Zig 0.17.0                        |     | ✓         | pinned via `flake.nix`; version-locked across hosts |
 | zlinter (lint gate per ADR-0009)  |     | ✓         | project-pinned dev tool |
 | gdb, strace, qemu-user (debug)    | ✓ (interactive) | ✓ (when reproducible repro needed) | debug-time tools; apt is convenient, Nix gives reproducibility |
 | wasmtime, wasm-tools (diff runner) |    | ✓         | project-pinned spec-test tooling |

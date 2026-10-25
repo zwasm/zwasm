@@ -1,5 +1,5 @@
 {
-  description = "zwasm v2 — a from-scratch WebAssembly runtime in Zig 0.16.0";
+  description = "zwasm v2 — a from-scratch WebAssembly runtime in Zig 0.17.0";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

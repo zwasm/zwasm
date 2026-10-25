@@ -4,7 +4,7 @@ A spec-compliant WebAssembly runtime written in Zig.
 
 [![CI](https://github.com/zwasm/zwasm/actions/workflows/ci.yml/badge.svg)](https://github.com/zwasm/zwasm/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/zwasm/zwasm)](https://github.com/zwasm/zwasm/releases)
-[![Zig](https://img.shields.io/badge/Zig-0.16.0-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
+[![Zig](https://img.shields.io/badge/Zig-0.17.0-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
 [![WebAssembly 3.0](https://img.shields.io/badge/WebAssembly-3.0-654ff0?logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
@@ -231,7 +231,7 @@ zig build -Dtarget=x86_64-windows-gnu
 The link line that goes with `static-lib`, and what each of its flags is for,
 is in [`docs/tutorial.md`](docs/tutorial.md) §5.
 
-**You need Zig 0.16.0 and [`wasm-tools`](https://github.com/bytecodealliance/wasm-tools)**
+**You need Zig 0.17.0 and [`wasm-tools`](https://github.com/bytecodealliance/wasm-tools)**
 (pinned in [`.github/versions.lock`](.github/versions.lock); the build
 generates `test/spec/spectest.wasm` with it). Multi-OS verification is handled
 automatically by CI on every pull request. The full development story
@@ -239,7 +239,7 @@ automatically by CI on every pull request. The full development story
 **[`docs/development.md`](docs/development.md)**; the contribution flow is in
 [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md).
 
-Nix is optional: `nix develop` (or direnv) loads the pinned Zig 0.16.0
+Nix is optional: `nix develop` (or direnv) loads the pinned Zig 0.17.0
 and tool surface (`flake.nix`: hyperfine, wasm-tools, wasmtime, yq-go,
 lldb, nasm).
 
@@ -264,7 +264,7 @@ src/         Zig sources (parse/ validate/ ir/ runtime/ instruction/ feature/
              engine/ interp/ wasi/ api/ cli/ diagnostic/ support/ platform/)
 include/     Public C headers (wasm.h / wasi.h / zwasm.h)
 build.zig    Build script
-flake.nix    Nix dev shell pinned to Zig 0.16.0
+flake.nix    Nix dev shell pinned to Zig 0.17.0
 docs/        Tutorial + API reference + benchmarks
 .dev/        ROADMAP + handover + ADRs + lessons + setup notes
 .claude/     Claude Code settings, skills, rules (auto-loaded)

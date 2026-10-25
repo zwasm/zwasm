@@ -32,7 +32,7 @@
 #
 # Prerequisites (all per-machine, none baked into the repo — see
 # `scripts/dev_hosts.env.example`): `ZWASM_UBUNTU_HOST` naming an SSH
-# alias that resolves without a prompt; Zig 0.16.0 available remotely
+# alias that resolves without a prompt; Zig 0.17.0 available remotely
 # via the project's flake.nix dev shell; this repo cloned at
 # `$ZWASM_REMOTE_DIR` (relative to the remote `$HOME`) with `origin`
 # pointing at `zwasm/zwasm`. Provisioning notes in
@@ -151,7 +151,7 @@ case "$STEP" in
     *)     REMOTE_CMD="zig build $STEP" ;;
 esac
 
-# `nix develop --command` pins Zig 0.16.0 + project deps via
+# `nix develop --command` pins Zig 0.17.0 + project deps via
 # `flake.nix`, guaranteeing bit-identical toolchain with Mac
 # and any other host.
 echo "[run_remote_ubuntu] $REMOTE_CMD ..."
