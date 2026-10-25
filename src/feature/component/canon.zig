@@ -839,7 +839,7 @@ const Bump = struct {
 };
 
 test "round-trip: utf8 string guest↔host via realloc + memory" {
-    var mem = [_]u8{0} ** 256;
+    var mem: [256]u8 = @splat(0);
     var bump = Bump{ .next = 8 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
@@ -852,7 +852,7 @@ test "round-trip: utf8 string guest↔host via realloc + memory" {
 }
 
 test "round-trip: empty string" {
-    var mem = [_]u8{0} ** 16;
+    var mem: [16]u8 = @splat(0);
     var bump = Bump{ .next = 0 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
@@ -864,7 +864,7 @@ test "round-trip: empty string" {
 }
 
 test "lift: out-of-bounds range rejected" {
-    var mem = [_]u8{0} ** 8;
+    var mem: [8]u8 = @splat(0);
     var bump = Bump{ .next = 0 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
@@ -880,7 +880,7 @@ test "lift: invalid utf8 rejected" {
 }
 
 test "lowerString utf16: BMP + supplementary (surrogate pair)" {
-    var mem = [_]u8{0} ** 32;
+    var mem: [32]u8 = @splat(0);
     var bump = Bump{ .next = 0 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc, .string_encoding = .utf16 };
@@ -892,7 +892,7 @@ test "lowerString utf16: BMP + supplementary (surrogate pair)" {
 }
 
 test "lowerString latin1+utf16: all-latin1 stays latin1, mixed flips to tagged utf16" {
-    var mem = [_]u8{0} ** 64;
+    var mem: [64]u8 = @splat(0);
     var bump = Bump{ .next = 0 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc, .string_encoding = .latin1_utf16 };
@@ -907,7 +907,7 @@ test "lowerString latin1+utf16: all-latin1 stays latin1, mixed flips to tagged u
 }
 
 test "round-trip utf16: host↔guest via lower + lift (incl. supplementary)" {
-    var mem = [_]u8{0} ** 64;
+    var mem: [64]u8 = @splat(0);
     var bump = Bump{ .next = 0 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc, .string_encoding = .utf16 };
@@ -919,7 +919,7 @@ test "round-trip utf16: host↔guest via lower + lift (incl. supplementary)" {
 }
 
 test "round-trip latin1+utf16: latin1 path and tagged-utf16 path both survive" {
-    var mem = [_]u8{0} ** 64;
+    var mem: [64]u8 = @splat(0);
     var bump = Bump{ .next = 0 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc, .string_encoding = .latin1_utf16 };
@@ -946,7 +946,7 @@ test "lift utf16: dangling high surrogate rejected" {
 }
 
 test "lift utf16: unaligned ptr rejected" {
-    var mem = [_]u8{0} ** 8;
+    var mem: [8]u8 = @splat(0);
     var bump = Bump{ .next = 0 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc, .string_encoding = .utf16 };
@@ -954,7 +954,7 @@ test "lift utf16: unaligned ptr rejected" {
 }
 
 test "store/load round-trip: list<u32>" {
-    var mem = [_]u8{0} ** 256;
+    var mem: [256]u8 = @splat(0);
     var bump = Bump{ .next = 32 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
@@ -976,7 +976,7 @@ test "store/load round-trip: list<u32>" {
 }
 
 test "list load with an oversized length TRAPS before the eager alloc (amplification guard)" {
-    var mem = [_]u8{0} ** 256;
+    var mem: [256]u8 = @splat(0);
     var bump = Bump{ .next = 32 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
@@ -995,7 +995,7 @@ test "list load with an oversized length TRAPS before the eager alloc (amplifica
 }
 
 test "store/load round-trip: record { a: u8, b: u32, c: bool }" {
-    var mem = [_]u8{0} ** 128;
+    var mem: [128]u8 = @splat(0);
     var bump = Bump{ .next = 16 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
@@ -1022,7 +1022,7 @@ test "store/load round-trip: record { a: u8, b: u32, c: bool }" {
 }
 
 test "store/load round-trip: record with a string field" {
-    var mem = [_]u8{0} ** 256;
+    var mem: [256]u8 = @splat(0);
     var bump = Bump{ .next = 64 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
@@ -1043,7 +1043,7 @@ test "store/load round-trip: record with a string field" {
 }
 
 test "store: value/type mismatch rejected" {
-    var mem = [_]u8{0} ** 16;
+    var mem: [16]u8 = @splat(0);
     var bump = Bump{ .next = 0 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
@@ -1056,7 +1056,7 @@ test "lower: aggregate value has no flat scalar form" {
 }
 
 test "store/load round-trip: variant (option<u32> shape, some case)" {
-    var mem = [_]u8{0} ** 64;
+    var mem: [64]u8 = @splat(0);
     var bump = Bump{ .next = 0 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
@@ -1080,7 +1080,7 @@ test "store/load round-trip: variant (option<u32> shape, some case)" {
 }
 
 test "store/load round-trip: variant none case (no payload)" {
-    var mem = [_]u8{0} ** 16;
+    var mem: [16]u8 = @splat(0);
     var bump = Bump{ .next = 0 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
@@ -1097,7 +1097,7 @@ test "store/load round-trip: variant none case (no payload)" {
 }
 
 test "store/load round-trip: result<u32, string> (err case)" {
-    var mem = [_]u8{0} ** 128;
+    var mem: [128]u8 = @splat(0);
     var bump = Bump{ .next = 16 };
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
@@ -1118,7 +1118,7 @@ test "store/load round-trip: result<u32, string> (err case)" {
 }
 
 test "variant: out-of-range case index on load rejected" {
-    var mem = [_]u8{0} ** 16;
+    var mem: [16]u8 = @splat(0);
     mem[0] = 5; // disc says case 5, but only 2 cases
     var bump = Bump{ .next = 0 };
     var mem_slice: []u8 = &mem;
@@ -1140,7 +1140,7 @@ test "CanonContext.realloc delegates to the injected callback" {
             return new_size;
         }
     };
-    var dummy_mem = [_]u8{0} ** 16;
+    var dummy_mem: [16]u8 = @splat(0);
     var dummy_slice: []u8 = &dummy_mem;
     var sentinel: u8 = 0;
     const ctx = CanonContext{
@@ -1458,7 +1458,7 @@ test "flattenType: record{list,string} = 4 flats; variant joins {f32}|{i64,i32} 
 
 test "lowerFlat/liftFlat round-trip: record{u32, string} + variant payload conversion" {
     var bump = Bump{ .next = 64 };
-    var mem = [_]u8{0} ** 4096;
+    var mem: [4096]u8 = @splat(0);
     var mem_slice: []u8 = &mem;
     const cx = CanonContext{ .memory_ctx = @ptrCast(&mem_slice), .memory_fn = CanonContext.sliceMemoryFn, .realloc_ctx = @ptrCast(&bump), .realloc_fn = Bump.realloc };
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1784,7 +1784,7 @@ test "D-322: own handles flatten/lower/lift as i32 pass-through; borrow lowers t
     defer arena.deinit();
     const a = arena.allocator();
 
-    var mem_buf = [_]u8{0} ** 64;
+    var mem_buf: [64]u8 = @splat(0);
     var mem_slice: []u8 = &mem_buf;
     const Hook = struct {
         fn borrowRep(_: *anyopaque, ti: u32, handle: u32) BorrowRepError!u32 {
@@ -1834,7 +1834,7 @@ test "D-335 unit C: stream/future values flatten/lower/lift as i32 handles" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var mem_buf = [_]u8{0} ** 16;
+    var mem_buf: [16]u8 = @splat(0);
     var mem_slice: []u8 = &mem_buf;
     const Hook = struct {
         fn borrowRep(_: *anyopaque, _: u32, _: u32) BorrowRepError!u32 {

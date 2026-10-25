@@ -269,9 +269,9 @@ fn buildTable(comptime gen: anytype, comptime r: RetKind) Table(@TypeOf(gen(0, r
 /// Raw fn-ptr (as `usize`) for the all-GP arity-`N` thunk of result kind `r` at
 /// slot `idx`. `gen` is the per-arity GP thunk generator (t0..t4).
 fn ptrFor(comptime gen: anytype, r: RetKind, idx: usize) usize {
-    inline for (std.meta.fields(RetKind)) |rf| {
-        if (r == @field(RetKind, rf.name)) {
-            const tab = comptime buildTable(gen, @field(RetKind, rf.name));
+    inline for (@typeInfo(RetKind).@"enum".field_names) |rf_name| {
+        if (r == @field(RetKind, rf_name)) {
+            const tab = comptime buildTable(gen, @field(RetKind, rf_name));
             return @intFromPtr(tab[idx]);
         }
     }
@@ -280,12 +280,12 @@ fn ptrFor(comptime gen: anytype, r: RetKind, idx: usize) usize {
 
 /// FP-path fn-ptr for a 1-arg thunk of arg-kind `k0` + result `r` at slot `idx`.
 fn fpPtr1(k0: Kind, r: RetKind, idx: usize) usize {
-    inline for (std.meta.fields(Kind)) |kf| {
-        if (k0 == @field(Kind, kf.name)) {
-            inline for (std.meta.fields(RetKind)) |rf| {
-                if (r == @field(RetKind, rf.name)) {
-                    const k0c = @field(Kind, kf.name);
-                    const rc = @field(RetKind, rf.name);
+    inline for (@typeInfo(Kind).@"enum".field_names) |kf_name| {
+        if (k0 == @field(Kind, kf_name)) {
+            inline for (@typeInfo(RetKind).@"enum".field_names) |rf_name| {
+                if (r == @field(RetKind, rf_name)) {
+                    const k0c = @field(Kind, kf_name);
+                    const rc = @field(RetKind, rf_name);
                     const tab = comptime blk: {
                         @setEvalBranchQuota(1_000_000);
                         var arr: [MAX_HOST_SLOTS]*const fn (*JitRuntime, PT(k0c)) callconv(.c) RT(rc) = undefined;
@@ -302,15 +302,15 @@ fn fpPtr1(k0: Kind, r: RetKind, idx: usize) usize {
 
 /// FP-path fn-ptr for a 2-arg thunk of arg-kinds `k0`,`k1` + result `r` at slot `idx`.
 fn fpPtr2(k0: Kind, k1: Kind, r: RetKind, idx: usize) usize {
-    inline for (std.meta.fields(Kind)) |kf0| {
-        if (k0 == @field(Kind, kf0.name)) {
-            inline for (std.meta.fields(Kind)) |kf1| {
-                if (k1 == @field(Kind, kf1.name)) {
-                    inline for (std.meta.fields(RetKind)) |rf| {
-                        if (r == @field(RetKind, rf.name)) {
-                            const k0c = @field(Kind, kf0.name);
-                            const k1c = @field(Kind, kf1.name);
-                            const rc = @field(RetKind, rf.name);
+    inline for (@typeInfo(Kind).@"enum".field_names) |kf0_name| {
+        if (k0 == @field(Kind, kf0_name)) {
+            inline for (@typeInfo(Kind).@"enum".field_names) |kf1_name| {
+                if (k1 == @field(Kind, kf1_name)) {
+                    inline for (@typeInfo(RetKind).@"enum".field_names) |rf_name| {
+                        if (r == @field(RetKind, rf_name)) {
+                            const k0c = @field(Kind, kf0_name);
+                            const k1c = @field(Kind, kf1_name);
+                            const rc = @field(RetKind, rf_name);
                             const tab = comptime blk: {
                                 @setEvalBranchQuota(1_000_000);
                                 var arr: [MAX_HOST_SLOTS]*const fn (*JitRuntime, PT(k0c), PT(k1c)) callconv(.c) RT(rc) = undefined;

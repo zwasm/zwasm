@@ -49,7 +49,7 @@ pub const Gpr = enum(u4) {
 
     /// Low 3 bits — the field that fits in ModR/M reg / rm.
     pub fn low3(self: Gpr) u3 {
-        return @truncate(@as(u4, @intFromEnum(self)));
+        return @truncate(@as(u4, @backingInt(self)));
     }
 
     /// REX extension bit — 0 for RAX..RDI, 1 for R8..R15.
@@ -57,7 +57,7 @@ pub const Gpr = enum(u4) {
     /// (REX.R for ModR/M.reg, REX.B for ModR/M.rm or opcode-
     /// embedded reg, REX.X for SIB.index).
     pub fn extBit(self: Gpr) u1 {
-        return @intCast(@intFromEnum(self) >> 3);
+        return @intCast(@backingInt(self) >> 3);
     }
 };
 
@@ -83,11 +83,11 @@ pub const Xmm = enum(u4) {
     xmm15 = 15,
 
     pub fn low3(self: Xmm) u3 {
-        return @truncate(@as(u4, @intFromEnum(self)));
+        return @truncate(@as(u4, @backingInt(self)));
     }
 
     pub fn extBit(self: Xmm) u1 {
-        return @intCast(@intFromEnum(self) >> 3);
+        return @intCast(@backingInt(self) >> 3);
     }
 };
 
@@ -125,8 +125,8 @@ test "Gpr: extBit splits low/high register banks" {
 }
 
 test "Gpr: stack / frame pointer indices match AMD64 encoding" {
-    try testing.expectEqual(@as(u4, 4), @intFromEnum(Gpr.rsp));
-    try testing.expectEqual(@as(u4, 5), @intFromEnum(Gpr.rbp));
+    try testing.expectEqual(@as(u4, 4), @backingInt(Gpr.rsp));
+    try testing.expectEqual(@as(u4, 5), @backingInt(Gpr.rbp));
 }
 
 test "Xmm: low3 + extBit mirror Gpr" {
@@ -139,5 +139,5 @@ test "Xmm: low3 + extBit mirror Gpr" {
 }
 
 test "Width: 4 named variants" {
-    try testing.expectEqual(@as(u8, 4), @typeInfo(Width).@"enum".fields.len);
+    try testing.expectEqual(@as(u8, 4), @typeInfo(Width).@"enum".field_names.len);
 }

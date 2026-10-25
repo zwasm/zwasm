@@ -20,7 +20,7 @@ const invoke = mvp.invoke;
 
 /// Handler-table index of an op (same shape as the impl-side helper).
 inline fn op(t: ZirOp) usize {
-    return @intFromEnum(t);
+    return @backingInt(t);
 }
 
 // ============================================================

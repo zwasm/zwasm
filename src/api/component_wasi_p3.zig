@@ -15,6 +15,7 @@ const std = @import("std");
 const async_mod = @import("../feature/component/async.zig");
 const net = std.Io.net;
 const p3http = @import("../wasi/p3_http.zig");
+const p2_sockets = @import("../wasi/p2_sockets.zig");
 const wasi_host = @import("../wasi/host.zig");
 const wasi_p2 = @import("component_wasi_p2.zig");
 
@@ -1036,7 +1037,7 @@ const ExternalClient = struct {
             .send => {
                 const s = self.stream orelse return false;
                 const data = [_][]const u8{self.ops[self.next].payload};
-                _ = self.io.vtable.netWrite(self.io.userdata, s.socket.handle, "", &data, 1) catch return false;
+                _ = p2_sockets.netWrite(self.io, s.socket.handle, &data) catch return false;
                 self.next += 1;
                 return true;
             },
@@ -1090,7 +1091,7 @@ const EchoEndpoint = struct {
         var head_end: usize = 0;
         while (head_end == 0) {
             var bufs = [_][]u8{buf[n..]};
-            const got = io.vtable.netRead(io.userdata, conn.socket.handle, &bufs) catch return;
+            const got = p2_sockets.netRead(io, conn.socket.handle, &bufs) catch return;
             if (got == 0) return;
             n += got;
             if (std.mem.find(u8, buf[0..n], "\r\n\r\n")) |p| head_end = p + 4;
@@ -1105,7 +1106,7 @@ const EchoEndpoint = struct {
         }
         while (n - head_end < content_len) {
             var bufs = [_][]u8{buf[n..]};
-            const got = io.vtable.netRead(io.userdata, conn.socket.handle, &bufs) catch return;
+            const got = p2_sockets.netRead(io, conn.socket.handle, &bufs) catch return;
             if (got == 0) break;
             n += got;
         }
@@ -1113,7 +1114,7 @@ const EchoEndpoint = struct {
         var out: [66000]u8 = undefined;
         const resp = std.fmt.bufPrint(&out, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ body.len, body }) catch return;
         const data = [_][]const u8{resp};
-        _ = io.vtable.netWrite(io.userdata, conn.socket.handle, "", &data, 1) catch return;
+        _ = p2_sockets.netWrite(io, conn.socket.handle, &data) catch return;
     }
 
     fn stop(self: *EchoEndpoint) void {
@@ -1377,7 +1378,7 @@ fn runOfficialWasip3Test(comptime name: []const u8) !void {
             var got: usize = 0;
             while (got < buf.len) {
                 var bufs = [_][]u8{buf[got..]};
-                const n = try io.vtable.netRead(io.userdata, s.socket.handle, &bufs);
+                const n = try p2_sockets.netRead(io, s.socket.handle, &bufs);
                 if (n == 0) break;
                 got += n;
             }

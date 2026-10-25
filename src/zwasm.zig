@@ -978,7 +978,7 @@ test "zwasm facade T1.13: Linker.defineWasi smoke instantiation" {
 
 test "zwasm facade T1.4-types: Instance.invoke return type carries all 12 Trap variants" {
     const InvokeError = Instance.InvokeError;
-    const info = @typeInfo(InvokeError).error_set orelse @compileError("expected concrete error_set");
+    const info = @typeInfo(InvokeError).error_set.error_names orelse @compileError("expected concrete error_set");
     // Walk every runtime.Trap variant and confirm it is present in InvokeError.
     const required = [_][]const u8{
         "Unreachable",              "DivByZero",
@@ -990,8 +990,8 @@ test "zwasm facade T1.4-types: Instance.invoke return type carries all 12 Trap v
     };
     inline for (required) |name| {
         var found = false;
-        for (info) |e| {
-            if (std.mem.eql(u8, e.name, name)) {
+        for (info) |e_name| {
+            if (std.mem.eql(u8, e_name, name)) {
                 found = true;
                 break;
             }

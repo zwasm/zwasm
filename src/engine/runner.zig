@@ -817,7 +817,7 @@ fn runWasiLenientArgsCore(
     {
         var abuf: [16]u64 = undefined;
         for (args, 0..) |a, j| abuf[j] = a;
-        var rbuf: [16]u64 = [_]u64{0} ** 16;
+        var rbuf: [16]u64 = @splat(0);
         const fnp = compiled.module.entry_buf(idx, buffer_write.BufferWriteFn);
         buffer_write.invokeBufferWrite(&owned.rt, fnp, &abuf, &rbuf) catch |err| {
             if (err == Error.Trap) {

@@ -338,7 +338,7 @@ pub fn main(init: std.process.Init) !void {
     // Which `interp_slow_skips` rows matched a real corpus file this walk —
     // the gate fails on a row that matched none (stale entry), so the table
     // cannot silently outlive a renamed or deleted fixture.
-    var interp_enum_seen = [_]bool{false} ** interp_slow_skips.len;
+    var interp_enum_seen: [interp_slow_skips.len]bool = @splat(false);
 
     var it = dir.iterate();
     while (try it.next(io)) |entry| {

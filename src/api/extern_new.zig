@@ -562,7 +562,7 @@ test "wasm_*_as_extern: entity → borrowed-view Extern round-trips + is cached 
     // returns the identical (cached) pointer.
     const func = instance.wasm_extern_as_func(data[0]) orelse return error.NotFunc;
     const view = wasm_func_as_extern(func) orelse return error.NoView;
-    try testing.expectEqual(@as(u8, @intFromEnum(instance.ExternKind.func)), instance.wasm_extern_kind(view));
+    try testing.expectEqual(@as(u8, @backingInt(instance.ExternKind.func)), instance.wasm_extern_kind(view));
     try testing.expectEqual(func, instance.wasm_extern_as_func(view).?);
     try testing.expectEqual(view, wasm_func_as_extern(func).?); // cached
     // extern_delete on a borrowed view is a no-op: the cached view survives.
@@ -571,11 +571,11 @@ test "wasm_*_as_extern: entity → borrowed-view Extern round-trips + is cached 
 
     // memory / table / global wrap to the matching kind.
     const mem = instance.wasm_extern_as_memory(data[1]) orelse return error.NotMem;
-    try testing.expectEqual(@as(u8, @intFromEnum(instance.ExternKind.memory)), instance.wasm_extern_kind(wasm_memory_as_extern(mem).?));
+    try testing.expectEqual(@as(u8, @backingInt(instance.ExternKind.memory)), instance.wasm_extern_kind(wasm_memory_as_extern(mem).?));
     const tbl = instance.wasm_extern_as_table(data[2]) orelse return error.NotTable;
-    try testing.expectEqual(@as(u8, @intFromEnum(instance.ExternKind.table)), instance.wasm_extern_kind(wasm_table_as_extern(tbl).?));
+    try testing.expectEqual(@as(u8, @backingInt(instance.ExternKind.table)), instance.wasm_extern_kind(wasm_table_as_extern(tbl).?));
     const glb = instance.wasm_extern_as_global(data[3]) orelse return error.NotGlobal;
-    try testing.expectEqual(@as(u8, @intFromEnum(instance.ExternKind.global)), instance.wasm_extern_kind(wasm_global_as_extern(glb).?));
+    try testing.expectEqual(@as(u8, @backingInt(instance.ExternKind.global)), instance.wasm_extern_kind(wasm_global_as_extern(glb).?));
 
     try testing.expect(wasm_func_as_extern(null) == null);
     try testing.expect(wasm_func_as_extern_const(null) == null);
@@ -602,7 +602,7 @@ test "wasm_global_new: standalone host global get/set + immutable rejects set" {
     instance.wasm_global_get(g, &out);
     try testing.expectEqual(@as(i32, 9), out.of.i32);
     // as_extern wraps the standalone global to kind global.
-    try testing.expectEqual(@as(u8, @intFromEnum(instance.ExternKind.global)), instance.wasm_extern_kind(wasm_global_as_extern(g).?));
+    try testing.expectEqual(@as(u8, @backingInt(instance.ExternKind.global)), instance.wasm_extern_kind(wasm_global_as_extern(g).?));
 
     // immutable global: set is a no-op.
     const gt2 = types.wasm_globaltype_new(types.wasm_valtype_new(0), 0) orelse return error.GlobalTypeAllocFailed;
@@ -691,7 +691,7 @@ test "wasm_memory_new: standalone host memory data/size/grow" {
     // grown region is zeroed; original byte preserved.
     try testing.expectEqual(@as(u8, 42), (instance.wasm_memory_data(m).?)[0]);
     // as_extern wraps to kind memory.
-    try testing.expectEqual(@as(u8, @intFromEnum(instance.ExternKind.memory)), instance.wasm_extern_kind(wasm_memory_as_extern(m).?));
+    try testing.expectEqual(@as(u8, @backingInt(instance.ExternKind.memory)), instance.wasm_extern_kind(wasm_memory_as_extern(m).?));
 }
 
 // (module (import "env" "m" (memory 1))
@@ -764,7 +764,7 @@ test "wasm_table_new: standalone host table size/get/set/grow + bounds" {
     try testing.expect(!instance.wasm_table_set(t, 5, null)); // oob set fails
     try testing.expect(instance.wasm_table_grow(t, 1, null));
     try testing.expectEqual(@as(u32, 3), instance.wasm_table_size(t));
-    try testing.expectEqual(@as(u8, @intFromEnum(instance.ExternKind.table)), instance.wasm_extern_kind(wasm_table_as_extern(t).?));
+    try testing.expectEqual(@as(u8, @backingInt(instance.ExternKind.table)), instance.wasm_extern_kind(wasm_table_as_extern(t).?));
 }
 
 // (module (import "env" "t" (table 3 funcref))

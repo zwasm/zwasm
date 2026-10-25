@@ -40,7 +40,7 @@ const liveness = @import("../../../ir/analysis/liveness.zig");
 /// Comptime-dead in the release modes `dbg` is comptime-dead in, so the call
 /// site collapses to nothing there.
 pub const compiled_in: bool =
-    builtin.mode != .ReleaseFast and builtin.mode != .ReleaseSmall;
+    builtin.mode != .fast and builtin.mode != .small;
 
 /// Hoist this out of the emit loop; `dbg.on` is a whitelist walk.
 ///

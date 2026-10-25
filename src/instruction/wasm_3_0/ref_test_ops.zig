@@ -45,7 +45,7 @@ const GcTypeInfos = type_info_mod.GcTypeInfos;
 const Heap = heap_mod.Heap;
 
 inline fn op(o: ZirOp) usize {
-    return @intFromEnum(o);
+    return @backingInt(o);
 }
 
 pub fn register(table: *DispatchTable) void {

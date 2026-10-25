@@ -262,7 +262,7 @@ fn fdReadiness(
 fn writeEvent(mem: []u8, off: usize, userdata: u64, ty: p1.EventType, nbytes: u64, flags: u16) void {
     @memset(mem[off..][0..32], 0);
     std.mem.writeInt(u64, mem[off..][0..8], userdata, .little);
-    mem[off + 10] = @intFromEnum(ty);
+    mem[off + 10] = @backingInt(ty);
     std.mem.writeInt(u64, mem[off + 16 ..][0..8], nbytes, .little);
     std.mem.writeInt(u16, mem[off + 24 ..][0..2], flags, .little);
 }
@@ -329,7 +329,7 @@ pub fn pollOneoff(
         const userdata = std.mem.readInt(u64, mem[base..][0..8], .little);
         const tag = mem[base + 8];
         switch (tag) {
-            @intFromEnum(p1.EventType.clock) => {
+            @backingInt(p1.EventType.clock) => {
                 const clock_id = std.mem.readInt(u32, mem[base + 16 ..][0..4], .little);
                 const timeout_ns = std.mem.readInt(u64, mem[base + 24 ..][0..8], .little);
                 const flags = std.mem.readInt(u16, mem[base + 40 ..][0..2], .little);
@@ -345,8 +345,8 @@ pub fn pollOneoff(
                     best_userdata = userdata;
                 }
             },
-            @intFromEnum(p1.EventType.fd_read), @intFromEnum(p1.EventType.fd_write) => {
-                const want_read = tag == @intFromEnum(p1.EventType.fd_read);
+            @backingInt(p1.EventType.fd_read), @backingInt(p1.EventType.fd_write) => {
+                const want_read = tag == @backingInt(p1.EventType.fd_read);
                 const fd = std.mem.readInt(u32, mem[base + 16 ..][0..4], .little);
                 const r = fdReadiness(host, fd, want_read) catch |err| return switch (err) {
                     error.BadF => .badf,
@@ -531,7 +531,7 @@ test "pollOneoff: a clock subscription fires + writes one event" {
     // 48-byte subscription @0; 32-byte event out @48; nevents @80.
     var mem: [128]u8 = @splat(0);
     std.mem.writeInt(u64, mem[0..8], 0xCAFE, .little); // userdata @0
-    mem[8] = @intFromEnum(p1.EventType.clock); // tag @8 = clock
+    mem[8] = @backingInt(p1.EventType.clock); // tag @8 = clock
     std.mem.writeInt(u32, mem[16..20], 1, .little); // clock_id @16 = monotonic
     std.mem.writeInt(u64, mem[24..32], 0, .little); // timeout @24 = 0 (relative → immediate)
     // flags @40 = 0 (relative)
@@ -540,7 +540,7 @@ test "pollOneoff: a clock subscription fires + writes one event" {
     try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, mem[80..84], .little)); // nevents
     try testing.expectEqual(@as(u64, 0xCAFE), std.mem.readInt(u64, mem[48..56], .little)); // event.userdata
     try testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, mem[56..58], .little)); // event.error = success
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.EventType.clock)), mem[58]); // event.type @ 48+10
+    try testing.expectEqual(@as(u8, @backingInt(p1.EventType.clock)), mem[58]); // event.type @ 48+10
 }
 
 fn raiseAfter(io: std.Io, ms: u64, flag: *std.atomic.Value(u32)) void {
@@ -556,7 +556,7 @@ test "pollOneoff: the host's interrupt ends a clock wait with intr and no event 
     defer h.deinit();
     h.io = io;
     var mem: [128]u8 = @splat(0);
-    mem[8] = @intFromEnum(p1.EventType.clock);
+    mem[8] = @backingInt(p1.EventType.clock);
     std.mem.writeInt(u32, mem[16..20], 1, .little); // monotonic
     std.mem.writeInt(u64, mem[24..32], 5 * std.time.ns_per_s, .little);
 
@@ -580,7 +580,7 @@ test "pollOneoff: the host's interrupt ends a clock wait with intr and no event 
 fn sub(mem: []u8, idx: u32, userdata: u64, ty: p1.EventType, fd: u32) void {
     const base = idx * 48;
     std.mem.writeInt(u64, mem[base..][0..8], userdata, .little);
-    mem[base + 8] = @intFromEnum(ty);
+    mem[base + 8] = @backingInt(ty);
     std.mem.writeInt(u32, mem[base + 16 ..][0..4], fd, .little);
 }
 
@@ -611,7 +611,7 @@ test "pollOneoff: fd_read on stdin with bytes left reports the remaining count" 
     const e = evt(&mem, 48, 0);
     try testing.expectEqual(@as(u64, 0xB0B), e.userdata);
     try testing.expectEqual(@as(u16, 0), e.err);
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.EventType.fd_read)), e.ty);
+    try testing.expectEqual(@as(u8, @backingInt(p1.EventType.fd_read)), e.ty);
     try testing.expectEqual(@as(u64, 3), e.nbytes);
     try testing.expectEqual(@as(u16, 0), e.flags);
 }
@@ -652,11 +652,11 @@ test "pollOneoff: fd_write on stdout and stderr both fire, in subscription order
 
     const e0 = evt(&mem, 96, 0);
     try testing.expectEqual(@as(u64, 0xA), e0.userdata);
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.EventType.fd_write)), e0.ty);
+    try testing.expectEqual(@as(u8, @backingInt(p1.EventType.fd_write)), e0.ty);
     try testing.expectEqual(@as(u16, 0), e0.flags);
     const e1 = evt(&mem, 96, 1);
     try testing.expectEqual(@as(u64, 0xB), e1.userdata);
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.EventType.fd_write)), e1.ty);
+    try testing.expectEqual(@as(u8, @backingInt(p1.EventType.fd_write)), e1.ty);
 }
 
 test "pollOneoff: a ready fd wins over a pending clock — no clock event, no sleep" {
@@ -677,7 +677,7 @@ test "pollOneoff: a ready fd wins over a pending clock — no clock event, no sl
     try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, mem[512..516], .little));
     const e = evt(&mem, 96, 0);
     try testing.expectEqual(@as(u64, 0xFD), e.userdata);
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.EventType.fd_write)), e.ty);
+    try testing.expectEqual(@as(u8, @backingInt(p1.EventType.fd_write)), e.ty);
 }
 
 test "pollOneoff: fd_read on a file reports size minus cursor, and HANGUP at EOF" {
@@ -717,7 +717,7 @@ test "pollOneoff: fd_read on a file reports size minus cursor, and HANGUP at EOF
     h.translateFd(fd).?.rights_base |= p1.RIGHTS_FD_WRITE;
     sub(&mem, 0, 0xF11E, .fd_write, fd);
     try testing.expectEqual(p1.Errno.success, pollOneoff(&h, &mem, 0, 48, 1, 512, null));
-    try testing.expectEqual(@as(u8, @intFromEnum(p1.EventType.fd_write)), evt(&mem, 48, 0).ty);
+    try testing.expectEqual(@as(u8, @backingInt(p1.EventType.fd_write)), evt(&mem, 48, 0).ty);
 
     h.translateFd(fd).?.kind = .closed;
 }

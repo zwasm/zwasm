@@ -65,7 +65,7 @@ fn encSsePd66Binop(opcode: u8, dst: Xmm, src: Xmm) EncodedInsn {
 /// 0x58 (add), 0x5C (sub), 0x59 (mul), 0x5E (div).
 pub fn encSseScalarBinary(kind: SseScalarKind, opcode: u8, dst: Xmm, src: Xmm) EncodedInsn {
     var enc: EncodedInsn = .{};
-    enc.push(@intFromEnum(kind));
+    enc.push(@backingInt(kind));
     if (dst.extBit() != 0 or src.extBit() != 0) {
         enc.push(encodeRex(false, dst.extBit(), 0, src.extBit()));
     }
@@ -79,7 +79,7 @@ pub fn encSseScalarBinary(kind: SseScalarKind, opcode: u8, dst: Xmm, src: Xmm) E
 /// `kind == .f32` skips the 66 prefix (PS form); `kind == .f64` adds it.
 pub fn encSsePackedBinary(kind: SsePackedKind, opcode: u8, dst: Xmm, src: Xmm) EncodedInsn {
     var enc: EncodedInsn = .{};
-    if (kind != .f32) enc.push(@intFromEnum(kind));
+    if (kind != .f32) enc.push(@backingInt(kind));
     if (dst.extBit() != 0 or src.extBit() != 0) {
         enc.push(encodeRex(false, dst.extBit(), 0, src.extBit()));
     }

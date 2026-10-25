@@ -164,8 +164,8 @@ pub fn produceFromCompiledWasm(
         if (ty.results.len > std.math.maxInt(u8)) return Error.ResultCountTooLarge;
         try types_buf.append(allocator, @intCast(ty.params.len));
         try types_buf.append(allocator, @intCast(ty.results.len));
-        for (ty.params) |p| try types_buf.append(allocator, @intFromEnum(p));
-        for (ty.results) |rs| try types_buf.append(allocator, @intFromEnum(rs));
+        for (ty.params) |p| try types_buf.append(allocator, @backingInt(p));
+        for (ty.results) |rs| try types_buf.append(allocator, @backingInt(rs));
     }
 
     // Map the func-export table → the format's export shape (identical
@@ -221,7 +221,7 @@ pub fn produceFromCompiledWasm(
             .pc_end = e.pc_end,
             .tag_idx = e.tag_idx orelse format.eh_tag_none,
             .landing_pad_pc = e.landing_pad_pc,
-            .kind = @intFromEnum(e.kind),
+            .kind = @backingInt(e.kind),
         };
     }
 
@@ -273,7 +273,7 @@ fn collectImports(allocator: Allocator, wasm_bytes: []const u8) Error![]format.C
     const out = try allocator.alloc(format.CwasmImport, imports.items.len);
     errdefer allocator.free(out);
     for (imports.items, 0..) |imp, i| {
-        out[i] = .{ .module = imp.module, .name = imp.name, .kind = @intFromEnum(imp.kind) };
+        out[i] = .{ .module = imp.module, .name = imp.name, .kind = @backingInt(imp.kind) };
     }
     return out;
 }
@@ -527,7 +527,7 @@ test "produceFromCompiledWasm: tiny synthetic wasm round-trips through compileWa
     try testing.expectEqual(@as(usize, 3), types_slice.len);
     try testing.expectEqual(@as(u8, 0), types_slice[0]); // 0 params
     try testing.expectEqual(@as(u8, 1), types_slice[1]); // 1 result
-    try testing.expectEqual(@as(u8, @intFromEnum(zir.ValType.i32)), types_slice[2]);
+    try testing.expectEqual(@as(u8, @backingInt(zir.ValType.i32)), types_slice[2]);
 
     // Code bytes: ARM64 emits a non-empty function body for
     // `(func (result i32) (i32.const 7))`. Just assert

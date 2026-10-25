@@ -47,7 +47,7 @@ const StructInfo = type_info_mod.StructInfo;
 const header_size: u32 = @sizeOf(ObjectHeader);
 
 inline fn op(o: ZirOp) usize {
-    return @intFromEnum(o);
+    return @backingInt(o);
 }
 
 pub fn register(table: *DispatchTable) void {

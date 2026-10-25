@@ -559,7 +559,7 @@ fn emitAarch64(allocator: std.mem.Allocator, params: EmitParams) Error!EmitOutpu
     try writeInsn(allocator, &bytes, 0xA9BF7BE1);
     // Precompute each param's load word + whether its dest is X2 (the args base).
     var load_words: [7]u32 = undefined;
-    var load_is_base: [7]bool = [_]bool{false} ** 7;
+    var load_is_base: [7]bool = @splat(false);
     {
         var gpr_n: u32 = 0;
         var fp_n: u32 = 0;

@@ -417,12 +417,12 @@ test "wasm_c_api: ValKind tag values match wasm.h" {
     // Our `ValKind.anyref` aliases WASM_EXTERNREF (same value);
     // the name divergence is historical (the original wasm-c-api
     // draft used `anyref`).
-    try testing.expectEqual(@as(u8, 0), @intFromEnum(ValKind.i32));
-    try testing.expectEqual(@as(u8, 1), @intFromEnum(ValKind.i64));
-    try testing.expectEqual(@as(u8, 2), @intFromEnum(ValKind.f32));
-    try testing.expectEqual(@as(u8, 3), @intFromEnum(ValKind.f64));
-    try testing.expectEqual(@as(u8, 128), @intFromEnum(ValKind.anyref));
-    try testing.expectEqual(@as(u8, 129), @intFromEnum(ValKind.funcref));
+    try testing.expectEqual(@as(u8, 0), @backingInt(ValKind.i32));
+    try testing.expectEqual(@as(u8, 1), @backingInt(ValKind.i64));
+    try testing.expectEqual(@as(u8, 2), @backingInt(ValKind.f32));
+    try testing.expectEqual(@as(u8, 3), @backingInt(ValKind.f64));
+    try testing.expectEqual(@as(u8, 128), @backingInt(ValKind.anyref));
+    try testing.expectEqual(@as(u8, 129), @backingInt(ValKind.funcref));
 }
 
 test "wasm_c_api: Val tagged-union round-trip" {

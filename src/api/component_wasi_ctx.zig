@@ -570,7 +570,7 @@ pub const WasiP2Ctx = struct {
             const end = self.streams.get(h) catch continue;
             try self.p3().udp_receive_complete(self, pr.rep, pr.retptr);
             end.subtask_state = .returned;
-            end.setPendingEvent(.{ .code = .subtask, .index = h, .payload = @intFromEnum(async_mod.SubtaskState.returned) });
+            end.setPendingEvent(.{ .code = .subtask, .index = h, .payload = @backingInt(async_mod.SubtaskState.returned) });
             _ = self.blocked_udp_receives.remove(h);
             progressed = true;
         }
@@ -955,8 +955,8 @@ pub fn p2WaitableJoin(caller: *Caller, waitable: u32, set_handle: u32) WasiP2Err
 pub fn mapGuestFault(e: anyerror) anyerror {
     if (e == error.OutOfMemory) return e;
     const TableError = resource_table.Error || async_mod.Error;
-    inline for (@typeInfo(TableError).error_set.?) |f| {
-        if (e == @field(TableError, f.name)) return error.Unreachable;
+    inline for (@typeInfo(TableError).error_set.error_names.?) |f_name| {
+        if (e == @field(TableError, f_name)) return error.Unreachable;
     }
     return e;
 }
@@ -964,7 +964,7 @@ pub fn mapGuestFault(e: anyerror) anyerror {
 /// Packed return of an async-lowered import call (`CanonicalABI.md`
 /// `canon_lower`, async case): `state | (subtask_handle << 4)`; an eager
 /// completion returns bare `RETURNED` with no handle minted.
-pub const SUBTASK_RETURNED: u32 = @intFromEnum(async_mod.SubtaskState.returned);
+pub const SUBTASK_RETURNED: u32 = @backingInt(async_mod.SubtaskState.returned);
 
 /// `wasi:clocks/monotonic-clock@0.3.0` `wait-until: async func(when: mark)`
 /// under an async `canon lower` (ADR-0205 phase A). Already-elapsed deadline →
@@ -994,7 +994,7 @@ fn p2WaitDeadlineAsync(ctx: *WasiP2Ctx, deadline_ns: u64) WasiP2Error!u32 {
         .subtask_state = .started,
         .deadline_ns = deadline_ns,
     });
-    return @intFromEnum(async_mod.SubtaskState.started) | (h << 4);
+    return @backingInt(async_mod.SubtaskState.started) | (h << 4);
 }
 
 /// The SYNC-lowered form of the async wait funcs (the Canonical ABI lets a
@@ -1036,7 +1036,7 @@ pub fn p2WaitableSetPoll(caller: *Caller, set_handle: u32, ptr: u32) WasiP2Error
     const mem = try ctxMemory(caller);
     try mem.write(ptr, ev.index);
     try mem.write(ptr + 4, ev.payload);
-    return @intFromEnum(ev.code);
+    return @backingInt(ev.code);
 }
 
 /// `canon waitable-set.drop` — remove the set from the table (tearing down its

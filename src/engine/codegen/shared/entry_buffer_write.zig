@@ -115,7 +115,7 @@ pub fn invokeBufWin64NoArgs(
 ) Error![n_results]u64 {
     const buf_fn = module.entry_buf(func_idx, BufferWriteFn);
     var args_buf: [1]u64 = .{0};
-    var results_buf: [n_results]u64 = [_]u64{0} ** n_results;
+    var results_buf: [n_results]u64 = @splat(0);
     try invokeBufferWrite(rt, buf_fn, &args_buf, &results_buf);
     return results_buf;
 }
@@ -140,7 +140,7 @@ pub fn invokeBufWin64Args(
     comptime n_results: usize,
 ) Error![n_results]u64 {
     const buf_fn = module.entry_buf(func_idx, BufferWriteFn);
-    var results_buf: [n_results]u64 = [_]u64{0} ** n_results;
+    var results_buf: [n_results]u64 = @splat(0);
     try invokeBufferWrite(rt, buf_fn, args.ptr, &results_buf);
     return results_buf;
 }

@@ -105,7 +105,7 @@ pub const StorageType = union(enum) {
     pub fn specByte(self: StorageType) u8 {
         return switch (self) {
             .val => |v| v.specByte(),
-            .packed_ => |p| @intFromEnum(p),
+            .packed_ => |p| @backingInt(p),
         };
     }
 
@@ -689,7 +689,7 @@ pub fn decodeImports(parent_alloc: Allocator, body: []const u8) Error!Imports {
         const k = body[pos];
         pos += 1;
         const kind: ImportKind = switch (k) {
-            0x00, 0x01, 0x02, 0x03, 0x04 => @enumFromInt(k),
+            0x00, 0x01, 0x02, 0x03, 0x04 => @fromBackingInt(@intCast(k)),
             else => return Error.InvalidFunctype,
         };
         const payload: ImportPayload = switch (kind) {
@@ -761,7 +761,7 @@ fn readLimits(body: []const u8, pos: *usize) Error!struct { idx_type: zir.IdxTyp
     const is_i64 = (flag & 0x04) != 0;
     if ((flag & ~@as(u8, 0x05)) != 0) return Error.InvalidFunctype;
     if (is_i64) {
-        if (comptime @intFromEnum(build_options.wasm_level) < @intFromEnum(@TypeOf(build_options.wasm_level).v3_0)) {
+        if (comptime @backingInt(build_options.wasm_level) < @backingInt(@TypeOf(build_options.wasm_level).v3_0)) {
             return Error.Memory64Unsupported;
         }
     }
@@ -960,7 +960,7 @@ fn readMemLimits(body: []const u8, pos: *usize) Error!MemoryEntry {
     if (is_shared and !has_max) return Error.BadValType;
     if ((flag & ~@as(u8, 0x0F)) != 0) return Error.BadValType;
     if (is_i64) {
-        if (comptime @intFromEnum(build_options.wasm_level) < @intFromEnum(@TypeOf(build_options.wasm_level).v3_0)) {
+        if (comptime @backingInt(build_options.wasm_level) < @backingInt(@TypeOf(build_options.wasm_level).v3_0)) {
             return Error.Memory64Unsupported;
         }
     }
@@ -1073,7 +1073,7 @@ pub fn decodeExports(parent_alloc: Allocator, body: []const u8) Error!Exports {
         pos += 1;
         if (kind_byte > 4) return Error.BadValType;
         const idx = try leb128.readUleb128(u32, body, &pos);
-        item.* = .{ .name = name_copy, .kind = @enumFromInt(kind_byte), .idx = idx };
+        item.* = .{ .name = name_copy, .kind = @fromBackingInt(@intCast(kind_byte)), .idx = idx };
     }
     if (pos != body.len) return Error.TrailingBytes;
     return .{ .arena = arena, .items = items };
@@ -1726,7 +1726,7 @@ test "decodeTables: typed-ref (ref null 0) table (function-references)" {
 // Fires only under -Dwasm=v3_0; under v2_0 the comptime gate rejects with
 // Error.Memory64Unsupported (same gate as memory64, ADR-0111 D1).
 test "decodeTables: i64 table min only (table64)" {
-    if (comptime @intFromEnum(build_options.wasm_level) < @intFromEnum(@TypeOf(build_options.wasm_level).v3_0)) return;
+    if (comptime @backingInt(build_options.wasm_level) < @backingInt(@TypeOf(build_options.wasm_level).v3_0)) return;
     // count=1; reftype=0x70 (funcref); flag=0x04 (i64, min only); min=3
     const body = [_]u8{ 0x01, 0x70, 0x04, 0x03 };
     var t = try decodeTables(testing.allocator, &body);
@@ -1737,7 +1737,7 @@ test "decodeTables: i64 table min only (table64)" {
 }
 
 test "decodeTables: i64 table min+max (table64)" {
-    if (comptime @intFromEnum(build_options.wasm_level) < @intFromEnum(@TypeOf(build_options.wasm_level).v3_0)) return;
+    if (comptime @backingInt(build_options.wasm_level) < @backingInt(@TypeOf(build_options.wasm_level).v3_0)) return;
     // count=1; reftype=0x70; flag=0x05 (i64, min+max); min=30, max=30
     const body = [_]u8{ 0x01, 0x70, 0x05, 0x1E, 0x1E };
     var t = try decodeTables(testing.allocator, &body);
@@ -1748,7 +1748,7 @@ test "decodeTables: i64 table min+max (table64)" {
 }
 
 test "decodeTables: i64 table with >u32 max (table64 u64 limits, memory64/raw/table.wast)" {
-    if (comptime @intFromEnum(build_options.wasm_level) < @intFromEnum(@TypeOf(build_options.wasm_level).v3_0)) return;
+    if (comptime @backingInt(build_options.wasm_level) < @backingInt(@TypeOf(build_options.wasm_level).v3_0)) return;
     // `(table i64 0 4294967296 funcref)` — max = 2^32, exceeds u32. flag=0x05
     // (i64, min+max); min=0; max=0x1_0000_0000 (uleb 0x80 0x80 0x80 0x80 0x10).
     const body = [_]u8{ 0x01, 0x70, 0x05, 0x00, 0x80, 0x80, 0x80, 0x80, 0x10 };
@@ -1849,7 +1849,7 @@ test "decodeMemory: custom-page-size rejects invalid page_size_log2 (only 0 or 1
 // ADR-0111 D1; verified via the -Dwasm=v2_0 build path itself, not
 // a runtime test).
 test "decodeMemory: i64 memory min only (Wasm 3.0 §5.4.4)" {
-    if (comptime @intFromEnum(build_options.wasm_level) < @intFromEnum(@TypeOf(build_options.wasm_level).v3_0)) return;
+    if (comptime @backingInt(build_options.wasm_level) < @backingInt(@TypeOf(build_options.wasm_level).v3_0)) return;
     // count=1; flag=0x04 (i64, min only); min=7
     const body = [_]u8{ 0x01, 0x04, 0x07 };
     var m = try decodeMemory(testing.allocator, &body);
@@ -1861,7 +1861,7 @@ test "decodeMemory: i64 memory min only (Wasm 3.0 §5.4.4)" {
 }
 
 test "decodeMemory: i64 memory min+max (Wasm 3.0 §5.4.4)" {
-    if (comptime @intFromEnum(build_options.wasm_level) < @intFromEnum(@TypeOf(build_options.wasm_level).v3_0)) return;
+    if (comptime @backingInt(build_options.wasm_level) < @backingInt(@TypeOf(build_options.wasm_level).v3_0)) return;
     // count=1; flag=0x05 (i64, min+max); min=2, max=8
     const body = [_]u8{ 0x01, 0x05, 0x02, 0x08 };
     var m = try decodeMemory(testing.allocator, &body);
@@ -1882,7 +1882,7 @@ test "decodeMemory: multi-memory parser enable (Wasm 3.0 §5.4.6)" {
         0x05, 0x02, 0x03, // entry 1: i64, min 2, max 3
         0x00, 0x04, // entry 2: i32, min 4
     };
-    if (comptime @intFromEnum(build_options.wasm_level) < @intFromEnum(@TypeOf(build_options.wasm_level).v3_0)) {
+    if (comptime @backingInt(build_options.wasm_level) < @backingInt(@TypeOf(build_options.wasm_level).v3_0)) {
         // v2.0 build rejects entry 1's i64 flag at the parser.
         try testing.expectError(Error.Memory64Unsupported, decodeMemory(testing.allocator, &body));
         return;

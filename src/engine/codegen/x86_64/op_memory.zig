@@ -304,7 +304,7 @@ pub fn emitI32Load(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!void {
     // DCE; v3.0 + idx_type=.i32 takes the byte-identical fast path
     // (existing emit_test_int memory asserts verify); v3.0 +
     // idx_type=.i64 dispatches to emitMemOpI64.
-    if (comptime @intFromEnum(build_options.wasm_level) >= @intFromEnum(@TypeOf(build_options.wasm_level).v3_0)) {
+    if (comptime @backingInt(build_options.wasm_level) >= @backingInt(@TypeOf(build_options.wasm_level).v3_0)) {
         if (ctx.memory0_idx_type == .i64) {
             return emitMemOpI64(ctx, ins);
         }
@@ -581,7 +581,7 @@ pub fn emitMemoryInitCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!
 /// D-324 — is this module's (single, memidx-0) memory i64-indexed?
 /// Comptime-pruned below v3.0; mirrors arm64 op_memory.zig bulkIs64.
 inline fn bulkIs64(ctx: *ctx_mod.EmitCtx) bool {
-    if (comptime @intFromEnum(build_options.wasm_level) >= @intFromEnum(@TypeOf(build_options.wasm_level).v3_0)) {
+    if (comptime @backingInt(build_options.wasm_level) >= @backingInt(@TypeOf(build_options.wasm_level).v3_0)) {
         return ctx.memory0_idx_type == .i64;
     }
     return false;

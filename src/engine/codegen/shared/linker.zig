@@ -994,8 +994,8 @@ test "link: populates code_map entries for each defined function" {
     //
     // Layout: 2 defined functions of 16 + 32 bytes (offsets
     // 0 + 16). num_imports = 1 → wasm-space idx 1 + 2.
-    var body0_bytes = [_]u8{0} ** 16;
-    var body1_bytes = [_]u8{0} ** 32;
+    var body0_bytes: [16]u8 = @splat(0);
+    var body1_bytes: [32]u8 = @splat(0);
     const bodies = [_]FuncBody{
         .{ .bytes = body0_bytes[0..], .call_fixups = &.{} },
         .{ .bytes = body1_bytes[0..], .call_fixups = &.{} },
@@ -1053,8 +1053,8 @@ test "link: frame_bytes round-trips from FuncBody to CodeMap.Entry" {
     // `CodeMap.Entry.frame_bytes`. The EH SP-restore path
     // (sp_restore.emitSpRestoreFull) reads this to recover the
     // handler frame's post-prologue SP boundary.
-    var body0_bytes = [_]u8{0} ** 16;
-    var body1_bytes = [_]u8{0} ** 32;
+    var body0_bytes: [16]u8 = @splat(0);
+    var body1_bytes: [32]u8 = @splat(0);
     const bodies = [_]FuncBody{
         .{ .bytes = body0_bytes[0..], .call_fixups = &.{}, .frame_bytes = 48 },
         .{ .bytes = body1_bytes[0..], .call_fixups = &.{}, .frame_bytes = 96 },

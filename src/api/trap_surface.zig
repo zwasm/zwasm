@@ -244,7 +244,7 @@ pub fn allocTrapWithMessage(alloc: std.mem.Allocator, store: ?*wasm_c_api.Store,
 /// always passes null, which silently cost every start-function trap its
 /// event until this split existed.
 pub fn reportTrap(store: ?*wasm_c_api.Store, inst_id: u64, kind: TrapKind, msg: []const u8) void {
-    hooks.emitTrap(engineOf(store), inst_id, @intCast(@intFromEnum(kind)), msg);
+    hooks.emitTrap(engineOf(store), inst_id, @intCast(@backingInt(kind)), msg);
 }
 
 /// Build the handle without reporting — for a caller that has already called
@@ -308,7 +308,7 @@ pub export fn wasm_trap_new(s: ?*wasm_c_api.Store, message: ?*const wasm_c_api.B
 /// Values = the `TrapKind` enum (documented in zwasm.h); -1 on null.
 pub export fn zwasm_trap_kind(t: ?*const Trap) callconv(.c) i32 {
     const trap = t orelse return -1;
-    return @intCast(@intFromEnum(trap.kind));
+    return @intCast(@backingInt(trap.kind));
 }
 
 /// `wasm_trap_delete(*Trap)` — free a Trap returned by any path
@@ -660,5 +660,5 @@ fn engineOf(store: ?*wasm_c_api.Store) ?*runtime_engine.Engine {
 test "#216: hooks.fuel_trap_kind is TrapKind.out_of_fuel" {
     // The hook funnel is Zone 1 and spells the kind as a number; this is the
     // one place both names are visible, so it is where they are held together.
-    try testing.expectEqual(@as(i32, @intFromEnum(TrapKind.out_of_fuel)), hooks.fuel_trap_kind);
+    try testing.expectEqual(@as(i32, @backingInt(TrapKind.out_of_fuel)), hooks.fuel_trap_kind);
 }

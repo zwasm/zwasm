@@ -1271,7 +1271,7 @@ pub fn emitI32x4RelaxedDotAdd(allocator: Allocator, buf: *std.ArrayList(u8), all
 }
 
 /// 16-byte 0x0F-per-byte mask used by popcnt's nibble-split path.
-const NIBBLE_MASK_BROADCAST: [16]u8 = [_]u8{0x0F} ** 16;
+const NIBBLE_MASK_BROADCAST: [16]u8 = @splat(0x0F);
 
 /// Wasm spec §4.4.4 (i8x16.popcnt) per-byte popcount LUT used by
 /// popcnt's PSHUFB-LUT path. Byte i = popcount(i) for i in 0..15.

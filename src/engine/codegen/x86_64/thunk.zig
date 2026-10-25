@@ -249,8 +249,8 @@ pub fn emitThunkCc(comptime cc: abi.Cc, buf: []u8, callee_rt: usize, callee_entr
 
 const testing = std.testing;
 
-const i32s = [_]zir.ValType{.i32} ** 12;
-const f64s = [_]zir.ValType{.f64} ** 12;
+const i32s: [12]zir.ValType = @splat(.i32);
+const f64s: [12]zir.ValType = @splat(.f64);
 const one = [_]zir.ValType{.i32};
 const three = [_]zir.ValType{ .i32, .i32, .i32 };
 

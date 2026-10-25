@@ -24,7 +24,7 @@ pub const ZirInstr = zir.ZirInstr;
 /// Compile-time count of declared `ZirOp` tags. Determines the
 /// fixed-array size of every dispatch slot. Adding a tag to
 /// `ZirOp` (a §4 deviation requiring an ADR) grows N_OPS.
-pub const N_OPS: comptime_int = @typeInfo(ZirOp).@"enum".fields.len;
+pub const N_OPS: comptime_int = @typeInfo(ZirOp).@"enum".field_names.len;
 
 pub const ParserCtx = opaque {};
 pub const InterpCtx = opaque {};
@@ -62,7 +62,7 @@ test "DispatchTable.init: every slot is null" {
 }
 
 test "DispatchTable: N_OPS matches ZirOp tag count" {
-    try std.testing.expectEqual(@typeInfo(ZirOp).@"enum".fields.len, N_OPS);
+    try std.testing.expectEqual(@typeInfo(ZirOp).@"enum".field_names.len, N_OPS);
 }
 
 test "DispatchTable: per-op slot can be set and read back" {
@@ -78,7 +78,7 @@ test "DispatchTable: per-op slot can be set and read back" {
         }
     };
     var t = DispatchTable.init();
-    const idx = @intFromEnum(ZirOp.@"i32.add");
+    const idx = @backingInt(ZirOp.@"i32.add");
     t.parsers[idx] = Stub.parse;
     t.interp[idx] = Stub.interp;
     t.jit_arm64[idx] = Stub.emit;
@@ -88,6 +88,6 @@ test "DispatchTable: per-op slot can be set and read back" {
     try std.testing.expect(t.jit_arm64[idx] != null);
     try std.testing.expect(t.jit_x86[idx] != null);
     // A neighbouring slot stays null.
-    const other = @intFromEnum(ZirOp.@"i32.sub");
+    const other = @backingInt(ZirOp.@"i32.sub");
     try std.testing.expect(t.parsers[other] == null);
 }

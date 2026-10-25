@@ -472,7 +472,7 @@ pub const Instance = struct {
         const msg = _api_instance.writeShape(&w, sig) catch
             _trap_surface.trapMessageFor(.unsupported);
         const eng = if (self.handle.store) |st| st.engine else null;
-        _hooks.emitTrap(eng, self.handle.id, @intCast(@intFromEnum(_trap_surface.TrapKind.unsupported)), msg);
+        _hooks.emitTrap(eng, self.handle.id, @intCast(@backingInt(_trap_surface.TrapKind.unsupported)), msg);
         return error.UnsupportedEngineSignature;
     }
 
@@ -590,7 +590,7 @@ fn emitInvokeTrap(self: *Instance, err: Instance.InvokeError) void {
         else => _trap_surface.mapInterpTrap(err),
     };
     const engine = (self.handle.store orelse return).engine;
-    _hooks.emitTrap(engine, self.handle.id, @intCast(@intFromEnum(kind)), _trap_surface.trapMessageFor(kind));
+    _hooks.emitTrap(engine, self.handle.id, @intCast(@backingInt(kind)), _trap_surface.trapMessageFor(kind));
 }
 
 /// ADR-0200 — decode a self-describing JIT `TypedResult` (multi-value path) to a
@@ -1509,7 +1509,7 @@ test "#216: an unsupported JIT call shape is reported NAMING the signature" {
     var inst = try mod.instantiate(.{ .engine = .jit });
     defer inst.deinit();
 
-    const args = [_]_zwasm.Value{.{ .i32 = 0 }} ** 17;
+    const args: [17]_zwasm.Value = @splat(.{ .i32 = 0 });
     try testing.expectError(error.UnsupportedEngineSignature, inst.invoke("f", &args, &.{}));
     try testing.expectEqual(@as(u32, 1), log.traps);
     try testing.expectEqual(@as(i32, 20), log.trap_kind); // ZWASM_TRAP_UNSUPPORTED

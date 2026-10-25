@@ -93,7 +93,7 @@ pub fn parse(alloc: Allocator, input: []const u8) Error!Module {
 
     var pos: usize = 8;
     var last_known_order: u8 = 0;
-    var seen = [_]bool{false} ** 14;
+    var seen: [14]bool = @splat(false);
 
     while (pos < input.len) {
         const section_start = pos;
@@ -143,7 +143,7 @@ pub fn parse(alloc: Allocator, input: []const u8) Error!Module {
         }
         last_known_order = ord;
 
-        try sections.append(alloc, .{ .id = @enumFromInt(id_byte), .body = body });
+        try sections.append(alloc, .{ .id = @fromBackingInt(@intCast(id_byte)), .body = body });
     }
 
     var module = Module{ .input = input, .sections = sections };
@@ -464,10 +464,10 @@ test "Module.find / countCustom on empty module" {
 }
 
 test "SectionId enum tags match Wasm spec ids" {
-    try testing.expectEqual(@as(u8, 0), @intFromEnum(SectionId.custom));
-    try testing.expectEqual(@as(u8, 1), @intFromEnum(SectionId.type));
-    try testing.expectEqual(@as(u8, 7), @intFromEnum(SectionId.@"export"));
-    try testing.expectEqual(@as(u8, 11), @intFromEnum(SectionId.data));
-    try testing.expectEqual(@as(u8, 12), @intFromEnum(SectionId.data_count));
-    try testing.expectEqual(@as(u8, 13), @intFromEnum(SectionId.tag));
+    try testing.expectEqual(@as(u8, 0), @backingInt(SectionId.custom));
+    try testing.expectEqual(@as(u8, 1), @backingInt(SectionId.type));
+    try testing.expectEqual(@as(u8, 7), @backingInt(SectionId.@"export"));
+    try testing.expectEqual(@as(u8, 11), @backingInt(SectionId.data));
+    try testing.expectEqual(@as(u8, 12), @backingInt(SectionId.data_count));
+    try testing.expectEqual(@as(u8, 13), @backingInt(SectionId.tag));
 }

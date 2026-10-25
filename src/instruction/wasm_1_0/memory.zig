@@ -29,7 +29,7 @@ const Runtime = runtime.Runtime;
 const Trap = runtime.Trap;
 
 inline fn op(t: ZirOp) usize {
-    return @intFromEnum(t);
+    return @backingInt(t);
 }
 
 /// 10.M cycle 64 — return the byte slice of the memory targeted by

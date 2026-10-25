@@ -23,19 +23,19 @@ test "every runner.Error name is a verdict or a decline, never neither or both (
     // The point of the walk: a new JIT-side check adds a name to
     // `runner.Error`, and this test refuses to pass until the author has said
     // which of the two it is.
-    inline for (@typeInfo(runner.Error).error_set.?) |e| {
-        const v = inTable(&instance.jit_verdict_names, e.name);
-        const d = inTable(&instance.jit_decline_names, e.name);
+    inline for (@typeInfo(runner.Error).error_set.error_names.?) |e_name| {
+        const v = inTable(&instance.jit_verdict_names, e_name);
+        const d = inTable(&instance.jit_decline_names, e_name);
         if (v == d) {
-            std.debug.print("runner.Error.{s} is {s} (jit_verdict_names / jit_decline_names in api/instance.zig)\n", .{ e.name, if (v) "in both tables" else "in neither table" });
+            std.debug.print("runner.Error.{s} is {s} (jit_verdict_names / jit_decline_names in api/instance.zig)\n", .{ e_name, if (v) "in both tables" else "in neither table" });
             return error.Unclassified;
         }
     }
     // And no table row names an error that no longer exists.
     for (instance.jit_verdict_names ++ instance.jit_decline_names) |row| {
         var found = false;
-        inline for (@typeInfo(runner.Error).error_set.?) |e| {
-            if (std.mem.eql(u8, e.name, row)) found = true;
+        inline for (@typeInfo(runner.Error).error_set.error_names.?) |e_name| {
+            if (std.mem.eql(u8, e_name, row)) found = true;
         }
         if (!found) {
             std.debug.print("table row {s} is not a runner.Error\n", .{row});

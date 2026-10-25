@@ -48,16 +48,16 @@ const local_indexed_ops = [_]ZirOp{
 
 pub fn register(table: *DispatchTable) void {
     inline for (no_immediate_ops) |op| {
-        table.parsers[@intFromEnum(op)] = parseNoImmediate;
+        table.parsers[@backingInt(op)] = parseNoImmediate;
     }
     inline for (local_indexed_ops) |op| {
-        table.parsers[@intFromEnum(op)] = parseLocalIndexed;
+        table.parsers[@backingInt(op)] = parseLocalIndexed;
     }
-    table.parsers[@intFromEnum(ZirOp.@"i32.const")] = parseI32Const;
-    table.parsers[@intFromEnum(ZirOp.@"i64.const")] = parseI64Const;
-    table.parsers[@intFromEnum(ZirOp.@"f32.const")] = parseF32Const;
-    table.parsers[@intFromEnum(ZirOp.@"f64.const")] = parseF64Const;
-    table.parsers[@intFromEnum(ZirOp.br)] = parseBr;
+    table.parsers[@backingInt(ZirOp.@"i32.const")] = parseI32Const;
+    table.parsers[@backingInt(ZirOp.@"i64.const")] = parseI64Const;
+    table.parsers[@backingInt(ZirOp.@"f32.const")] = parseF32Const;
+    table.parsers[@backingInt(ZirOp.@"f64.const")] = parseF64Const;
+    table.parsers[@backingInt(ZirOp.br)] = parseBr;
 }
 
 fn parseNoImmediate(_: *ParserCtx, instr: *ZirInstr) anyerror!void {
@@ -112,7 +112,7 @@ fn parseF64Const(opaque_ctx: *ParserCtx, instr: *ZirInstr) anyerror!void {
 const testing = std.testing;
 
 fn dispatchOp(table: *const DispatchTable, op: ZirOp, body: []const u8) !ZirInstr {
-    const slot = table.parsers[@intFromEnum(op)] orelse return error.NoHandler;
+    const slot = table.parsers[@backingInt(op)] orelse return error.NoHandler;
     var ctx = Ctx.init(body);
     var instr: ZirInstr = .{ .op = op, .payload = 0, .extra = 0 };
     try slot(ctx.opaqueSelf(), &instr);
@@ -123,7 +123,7 @@ test "register: no-immediate ops are populated" {
     var table = DispatchTable.init();
     register(&table);
     inline for (no_immediate_ops) |op| {
-        try testing.expect(table.parsers[@intFromEnum(op)] != null);
+        try testing.expect(table.parsers[@backingInt(op)] != null);
     }
 }
 
@@ -131,27 +131,27 @@ test "register: local-indexed ops are populated" {
     var table = DispatchTable.init();
     register(&table);
     inline for (local_indexed_ops) |op| {
-        try testing.expect(table.parsers[@intFromEnum(op)] != null);
+        try testing.expect(table.parsers[@backingInt(op)] != null);
     }
 }
 
 test "register: const + br ops are populated" {
     var table = DispatchTable.init();
     register(&table);
-    try testing.expect(table.parsers[@intFromEnum(ZirOp.@"i32.const")] != null);
-    try testing.expect(table.parsers[@intFromEnum(ZirOp.@"i64.const")] != null);
-    try testing.expect(table.parsers[@intFromEnum(ZirOp.@"f32.const")] != null);
-    try testing.expect(table.parsers[@intFromEnum(ZirOp.@"f64.const")] != null);
-    try testing.expect(table.parsers[@intFromEnum(ZirOp.br)] != null);
+    try testing.expect(table.parsers[@backingInt(ZirOp.@"i32.const")] != null);
+    try testing.expect(table.parsers[@backingInt(ZirOp.@"i64.const")] != null);
+    try testing.expect(table.parsers[@backingInt(ZirOp.@"f32.const")] != null);
+    try testing.expect(table.parsers[@backingInt(ZirOp.@"f64.const")] != null);
+    try testing.expect(table.parsers[@backingInt(ZirOp.br)] != null);
 }
 
 test "register: untouched slots remain null" {
     var table = DispatchTable.init();
     register(&table);
     // call_indirect is not in MVP scope of 1.7
-    try testing.expect(table.parsers[@intFromEnum(ZirOp.call_indirect)] == null);
-    try testing.expect(table.interp[@intFromEnum(ZirOp.@"i32.add")] == null);
-    try testing.expect(table.jit_arm64[@intFromEnum(ZirOp.@"i32.add")] == null);
+    try testing.expect(table.parsers[@backingInt(ZirOp.call_indirect)] == null);
+    try testing.expect(table.interp[@backingInt(ZirOp.@"i32.add")] == null);
+    try testing.expect(table.jit_arm64[@backingInt(ZirOp.@"i32.add")] == null);
 }
 
 test "dispatch: parseNoImmediate yields zero payload + extra" {

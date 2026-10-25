@@ -182,7 +182,7 @@ fn thunkFdWrite(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
     const ciovec_ptr = rt.popOperand().u32;
     const fd = rt.popOperand().u32;
     const errno = wasi_fd.fdWrite(host, p1.addressable(rt.memory), fd, ciovec_ptr, ciovec_count, nwritten_ptr);
-    try rt.pushOperand(.{ .i32 = @intCast(@intFromEnum(errno)) });
+    try rt.pushOperand(.{ .i32 = @intCast(@backingInt(errno)) });
 }
 
 fn thunkProcExit(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
@@ -193,7 +193,7 @@ fn thunkProcExit(rt: *runtime.Runtime, ctx: *anyopaque) anyerror!void {
 }
 
 fn pushErrno(rt: *runtime.Runtime, errno: Errno) !void {
-    try rt.pushOperand(.{ .i32 = @intCast(@intFromEnum(errno)) });
+    try rt.pushOperand(.{ .i32 = @intCast(@backingInt(errno)) });
 }
 
 // args / environ thunks

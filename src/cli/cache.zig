@@ -253,7 +253,7 @@ test "cache: miss produces + stores; hit returns identical artifact bytes; corru
     // recompiled, byte-identical artifact AND leave a healed entry on disk.
     const corrupt_shapes = [_][]const u8{
         "CWASgarbage", // magic ok, header truncated
-        &([_]u8{0} ** 200), // no magic at all
+        &@as([200]u8, @splat(0)), // no magic at all
         first[0 .. first.len / 2], // valid header, truncated body
     };
     for (corrupt_shapes) |shape| {

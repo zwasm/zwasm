@@ -58,7 +58,7 @@ test "compile: empty function (no instrs, empty liveness) emits prologue+epilogu
 
 test "compile: #495 — the stack probe compares SP - frame_bytes, in the frame allocation's two imm12 steps" {
     // 600 i64 locals = 4800 bytes = 1 << 12 + 704: both SUB steps are needed.
-    const locals = [_]zir.ValType{.i64} ** 600;
+    const locals: [600]zir.ValType = @splat(.i64);
     const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
     var f = ZirFunc.init(0, sig, &locals);
     defer f.deinit(testing.allocator);
@@ -85,7 +85,7 @@ test "compile: #495 — the stack probe compares SP - frame_bytes, in the frame 
 test "compile: #495 — a frame under 4 KiB probes with one SUB, and no frame with ADD X17, SP, #0" {
     const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
     inline for (.{ 0, 3 }) |n| {
-        const locals = [_]zir.ValType{.i64} ** n;
+        const locals: [n]zir.ValType = @splat(.i64);
         var f = ZirFunc.init(0, sig, &locals);
         defer f.deinit(testing.allocator);
         try f.instrs.append(testing.allocator, .{ .op = .end });

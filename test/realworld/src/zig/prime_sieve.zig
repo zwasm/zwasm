@@ -11,7 +11,7 @@ fn writeStr(s: []const u8) void {
 
 pub fn main() void {
     const N = 200;
-    var sieve = [_]bool{true} ** (N + 1);
+    var sieve: [N + 1]bool = @splat(true);
     sieve[0] = false;
     sieve[1] = false;
     var i: usize = 2;

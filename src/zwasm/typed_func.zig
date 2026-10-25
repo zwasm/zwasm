@@ -30,9 +30,9 @@ pub fn TypedFunc(comptime Sig: type) type {
         const Self = @This();
 
         pub fn call(self: Self, args: ArgsT) _zwasm.Instance.InvokeError!Ret {
-            var arg_values: [fn_info.params.len]Value = undefined;
-            inline for (fn_info.params, 0..) |p, i| {
-                const PT = p.type orelse @compileError("TypedFunc: anytype params not supported");
+            var arg_values: [fn_info.param_types.len]Value = undefined;
+            inline for (fn_info.param_types, 0..) |p_type, i| {
+                const PT = p_type orelse @compileError("TypedFunc: anytype params not supported");
                 arg_values[i] = zigToValue(PT, args[i]);
             }
 
@@ -49,7 +49,7 @@ pub fn TypedFunc(comptime Sig: type) type {
 fn resultCount(comptime Ret: type) comptime_int {
     if (Ret == void) return 0;
     return switch (@typeInfo(Ret)) {
-        .@"struct" => |s| s.fields.len,
+        .@"struct" => |s| s.field_names.len,
         else => 1,
     };
 }
@@ -71,8 +71,8 @@ fn marshalResult(comptime Ret: type, results: anytype) Ret {
     switch (@typeInfo(Ret)) {
         .@"struct" => |s| {
             var out: Ret = undefined;
-            inline for (s.fields, 0..) |f, i| {
-                @field(out, f.name) = valueToZig(f.type, results[i]);
+            inline for (s.field_names, s.field_types, 0..) |f_name, f_type, i| {
+                @field(out, f_name) = valueToZig(f_type, results[i]);
             }
             return out;
         },

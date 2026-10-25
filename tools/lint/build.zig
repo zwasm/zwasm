@@ -17,13 +17,13 @@ pub fn build(b: *std.Build) void {
     // zlinter defaults its include set to this build file's own root, which
     // is `tools/lint`, so the tree to lint has to be named explicitly. The
     // linter runs with `tools/lint` as its cwd, hence an absolute path.
-    const repo_root = b.pathFromRoot("../..");
+    const repo_root = b.pathResolve(&.{b.root.joinString(b.allocator, "../..") catch @panic("OOM")});
 
     // Fail closed on a mis-resolved root. Measured: an include root that does
     // not exist panics in zlinter's walk, but one that exists and holds no
     // Zig files reports "No issues!" and exits 0 — a lint gate that passes
     // having linted nothing. This turns that into a build error.
-    b.build_root.handle.access(b.graph.io, "../../src", .{ .read = true }) catch |err|
+    b.root.access(b.graph.io, "../../src", .{ .read = true }) catch |err|
         std.debug.panic(
             "lint root {s} does not contain src/ ({s}) — tools/lint moved?",
             .{ repo_root, @errorName(err) },
