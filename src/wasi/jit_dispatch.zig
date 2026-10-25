@@ -73,7 +73,7 @@ pub fn fd_write(
     nwritten_ptr: i32,
 ) callconv(.c) i32 {
     // D-331A: fingerprint linear memory at the host-call boundary (interp-vs-jit diff).
-    dbg.print("mem.cksum", "jit fd_write {x}", .{dbg.fnv1a(memOf(rt))});
+    if (dbg.on("mem.cksum")) dbg.print("mem.cksum", "jit fd_write {x}", .{dbg.fnv1a(memOf(rt))});
     // D-489 fmtwatch: track the tinygo_json fmt string ("name=%s age=%d city=%s") in
     // guest rodata at each fd_write — the transition intact→corrupted localizes the
     // guest-mem corruption to a specific host-call boundary (rodata = random_get-free).
@@ -199,7 +199,7 @@ pub fn clock_time_get(
     precision: i64,
     time_ptr: i32,
 ) callconv(.c) i32 {
-    dbg.print("mem.cksum", "jit clock_time_get {x}", .{dbg.fnv1a(memOf(rt))});
+    if (dbg.on("mem.cksum")) dbg.print("mem.cksum", "jit clock_time_get {x}", .{dbg.fnv1a(memOf(rt))});
     // D-244: with a host attached (`--engine jit` + WASI), delegate to the
     // shared interp handler for a REAL clock read; the handler bounds-checks
     // and writes the nanoseconds itself.
@@ -225,7 +225,7 @@ pub fn clock_time_get(
 /// — fill `vm_base + buf_ptr` with `buf_len` random bytes via
 /// std.posix.getrandom (unix) / std.crypto.random (fallback).
 pub fn random_get(rt: *JitRuntime, buf_ptr: i32, buf_len: i32) callconv(.c) i32 {
-    dbg.print("mem.cksum", "jit random_get {x}", .{dbg.fnv1a(memOf(rt))});
+    if (dbg.on("mem.cksum")) dbg.print("mem.cksum", "jit random_get {x}", .{dbg.fnv1a(memOf(rt))});
     // D-244: with a host, delegate to the shared interp handler for REAL
     // cryptographic entropy (it bounds-checks + fills from host.io).
     if (rt.wasi_host) |hp| {
@@ -251,7 +251,7 @@ pub fn random_get(rt: *JitRuntime, buf_ptr: i32, buf_len: i32) callconv(.c) i32 
 /// d-2 stub returns 0/0 (no args). Real argv plumbing lands in
 /// d-3 alongside a `WasiContext` JitRuntime tail-extension.
 pub fn args_sizes_get(rt: *JitRuntime, argc_ptr: i32, argv_buf_size_ptr: i32) callconv(.c) i32 {
-    dbg.print("mem.cksum", "jit args_sizes_get {x}", .{dbg.fnv1a(memOf(rt))});
+    if (dbg.on("mem.cksum")) dbg.print("mem.cksum", "jit args_sizes_get {x}", .{dbg.fnv1a(memOf(rt))});
     if (rt.wasi_host) |hp| {
         const host: *wasi_host_mod.Host = @ptrCast(@alignCast(hp));
         const mem = memOf(rt);
@@ -375,7 +375,7 @@ pub fn clock_res_get(rt: *JitRuntime, clock_id: i32, resolution_ptr: i32) callco
 }
 
 pub fn poll_oneoff(rt: *JitRuntime, in_ptr: i32, out_ptr: i32, nsubscriptions: i32, nevents_ptr: i32) callconv(.c) i32 {
-    dbg.print("mem.cksum", "jit poll_oneoff {x}", .{dbg.fnv1a(memOf(rt))});
+    if (dbg.on("mem.cksum")) dbg.print("mem.cksum", "jit poll_oneoff {x}", .{dbg.fnv1a(memOf(rt))});
     dbg.print("wasi.jit", "poll_oneoff nsubs={d}", .{nsubscriptions});
     const host = hostOf(rt) orelse return @intFromEnum(Errno.nosys);
     const errno = wasi_clocks.pollOneoff(host, memOf(rt), @bitCast(in_ptr), @bitCast(out_ptr), @bitCast(nsubscriptions), @bitCast(nevents_ptr), rt.interrupt_ptr);

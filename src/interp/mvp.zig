@@ -396,7 +396,7 @@ fn callOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
         if (rt.host_calls[idx]) |hc| {
             // D-331A: fingerprint linear memory at every host-call boundary so an
             // interp trace can be diffed against the JIT's fd_write/poll_oneoff hooks.
-            dbg.print("mem.cksum", "interp {d} {x}", .{ idx, dbg.fnv1a(rt.memory) });
+            if (dbg.on("mem.cksum")) dbg.print("mem.cksum", "interp {d} {x}", .{ idx, dbg.fnv1a(rt.memory) });
             hc.fn_ptr(rt, hc.ctx) catch |err| {
                 // Cross-module EH (10.E-eh-tail cycle 120): a cross-
                 // module call's thunk transfers an uncaught throw into

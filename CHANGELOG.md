@@ -64,6 +64,11 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ### Fixed
 
+- **A ReleaseSafe build hashes the linear memory at a host call only when
+  `ZWASM_DEBUG=mem.cksum` asks** (#649). It hashed it on every WASI host call,
+  so the released binaries ran llama2.c on the JIT at 9.5 tok/s, a quarter of
+  ReleaseFast's 36.8; they now run it at 36.8.
+
 - **A failed 0.3 outbound HTTP exchange answers `internal-error`** (#643). The
   host wrote ordinal 37, which is `configuration-error`, so the guest read a
   misconfigured host where the exchange had failed.
