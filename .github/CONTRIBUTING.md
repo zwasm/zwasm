@@ -42,7 +42,7 @@ Releases (tags / published artifacts) are cut manually by the maintainer only.
 
 ## Building and testing (for trying it locally / forking)
 
-zwasm targets **Zig 0.16.0** and
+zwasm targets **Zig 0.17.0** and
 [`wasm-tools`](https://github.com/bytecodealliance/wasm-tools), both pinned in
 [`versions.lock`](versions.lock). `zig build` generates `spectest.wasm` from
 `test/spec/spectest.wat` by invoking `wasm-tools`, so even a plain build fails

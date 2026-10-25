@@ -22,7 +22,7 @@
 #
 # Prerequisites (all per-machine, none baked into the repo — see
 # `scripts/dev_hosts.env.example`): `ZWASM_WINDOWS_HOST` naming an SSH
-# alias that resolves without a prompt; Zig 0.16.0 installed remotely;
+# alias that resolves without a prompt; Zig 0.17.0 installed remotely;
 # this repo cloned at `$ZWASM_REMOTE_DIR` (relative to the remote
 # `$HOME`). Provisioning notes in `.dev/windows_ssh_setup.md`.
 

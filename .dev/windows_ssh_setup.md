@@ -92,7 +92,7 @@ Verification:
 ssh <windows-host> "echo ok && zig version"
 ```
 
-Expected output: `ok` + `0.16.0` (or whatever pinned Zig version
+Expected output: `ok` + `0.17.0` (or whatever pinned Zig version
 v2 uses).
 
 ## Bootstrap (one-time, per host)

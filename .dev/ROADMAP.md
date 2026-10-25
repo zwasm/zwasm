@@ -47,7 +47,7 @@
 ### 1.1 Mission
 
 **A from-scratch redesign of zwasm: a standalone WebAssembly runtime
-in Zig 0.16.0 that ships WebAssembly 3.0 conformance, wasm-c-api
+in Zig 0.17.0 that ships WebAssembly 3.0 conformance, wasm-c-api
 ecosystem compatibility, and a dual-backend (interpreter + JIT-arm64
 + JIT-x86) single-pass JIT, with clean architecture from day 1.**
 
@@ -967,7 +967,7 @@ zwasm/
 ├── legal/                      # THIRD_PARTY.md
 ├── .envrc                      # use flake
 ├── .gitignore                  # zig-out, .zig-cache, private/, etc.
-├── flake.nix                   # Zig 0.16.0 + hyperfine + yq + wabt
+├── flake.nix                   # Zig 0.17.0 + hyperfine + yq + wabt
 ├── flake.lock                  # nix lock
 ├── build.zig                   # build script with -Dwasm / -Dwasi / -Dengine flags
 ├── build.zig.zon               # package metadata (real fingerprint)

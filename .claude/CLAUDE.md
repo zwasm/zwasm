@@ -1,6 +1,6 @@
 # zwasm v2
 
-A from-scratch WebAssembly runtime in Zig 0.16.0.
+A from-scratch WebAssembly runtime in Zig 0.17.0.
 
 > Pointers only — detailed plans live in [`.dev/ROADMAP.md`](../.dev/ROADMAP.md),
 > runnable procedures in [`.claude/skills/`](skills/). (The autonomous
@@ -184,7 +184,7 @@ text or code identifiers.
 feature / engine / interp / wasi / api / cli / diagnostic / support /
 platform — shape per ADR-0023 + ADR-0024).
 `include/` public C headers. `build.zig` build script. `flake.nix` Nix
-dev shell pinned to Zig 0.16.0.
+dev shell pinned to Zig 0.17.0.
 `.dev/` ROADMAP + debt + lessons + decisions + phase_log + setup
 docs (+ the frozen handover.md).
 `.claude/` settings, skills, rules, output styles.

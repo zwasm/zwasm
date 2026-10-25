@@ -212,3 +212,42 @@
       jit_ns_min: 479.0
       jit_ns_max: 496.5
       jit_over_interp: 0.027
+
+- date: 2026-10-24T15:00:22Z
+  commit: 5cbd590c7ca25962447304f472a00e8fd358b8e0
+  reason: "#624 baseline: Zig 0.17.0 (interp/jit/aot vs 0.16.0 main in the PR)"
+  arch: x86_64-linux
+  engine_build_mode: fast
+  runner_build_mode: fast
+  samples: 5
+  stack_limit_query_ns: 27618.7
+  stack_limit_query_ns_min: 27414.1
+  stack_limit_query_ns_max: 27664.7
+  calls:
+    - trips: 0
+      wasm_insns: 0
+      interp_ns: 118.7
+      interp_ns_min: 118.4
+      interp_ns_max: 119.4
+      jit_ns: 27937.7
+      jit_ns_min: 27814.3
+      jit_ns_max: 28328.7
+      jit_over_interp: 235.380
+    - trips: 16
+      wasm_insns: 208
+      interp_ns: 948.1
+      interp_ns_min: 947.5
+      interp_ns_max: 951.9
+      jit_ns: 28046.8
+      jit_ns_min: 27921.9
+      jit_ns_max: 28330.1
+      jit_over_interp: 29.584
+    - trips: 512
+      wasm_insns: 6656
+      interp_ns: 26285.0
+      interp_ns_min: 26259.3
+      interp_ns_max: 26380.1
+      jit_ns: 28607.2
+      jit_ns_min: 28513.7
+      jit_ns_max: 28652.5
+      jit_over_interp: 1.088

@@ -6,15 +6,15 @@ zwasm as a library from Zig and C. Reference docs:
 
 ## 1. Build
 
-zwasm pins Zig 0.16.0 via Nix:
+zwasm pins Zig 0.17.0 via Nix:
 
 ```sh
-direnv allow          # loads the flake dev shell (Zig 0.16.0 + tools)
+direnv allow          # loads the flake dev shell (Zig 0.17.0 + tools)
 zig build             # builds the `zwasm` binary into zig-out/bin/
 zig build test        # unit tests
 ```
 
-(Without Nix, install Zig 0.16.0 and `wasm-tools` yourself — the build
+(Without Nix, install Zig 0.17.0 and `wasm-tools` yourself — the build
 generates `spectest.wasm` with the latter; versions are pinned in
 `.github/versions.lock`. The toolchain for generating realworld `.wasm`
 fixtures is Mac-only via `nix develop .#gen`.)

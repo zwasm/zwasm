@@ -35,7 +35,7 @@ cp target/wasm32-wasip1/release/sha256.wasm ../../wasm/rust_sha256.wasm
 
 ## zig/*.zig → wasm/zig_*.wasm
 
-Zig is on PATH in `nix develop .#gen` (same pinned 0.16.0 as the runtime
+Zig is on PATH in `nix develop .#gen` (same pinned 0.17.0 as the runtime
 itself — self-language dogfood-adjacent corpus). Each source compiles
 standalone to wasm32-wasi and writes to stdout via `fd_write` (AssemblyScript
 dropped WASI, so Zig is the lean WASI-stdout generator here; the `asc_`
