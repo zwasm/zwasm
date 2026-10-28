@@ -18,7 +18,9 @@ no external security audit. Fuzzing covers module loading and an
 interpreter-versus-JIT execution differential over small committed corpora
 (`test/fuzz/`); the WASI and component hosts are not fuzzed. Treat hostile
 multi-tenant use — guests you do not trust, sharing one process — as beta.
-Report what you find through [private vulnerability reporting](https://github.com/zwasm/zwasm/security/advisories/new).
+Report what you find through [private vulnerability reporting](https://github.com/zwasm/zwasm/security/advisories/new);
+published advisories are listed at
+[security/advisories](https://github.com/zwasm/zwasm/security/advisories).
 
 ## Actors and trust
 
@@ -125,7 +127,9 @@ Three yeses make a vulnerability. One no makes it a bug. In particular:
   control flow its module declares.
 - Memory unsafety in the host, at compile time or at run time.
 - A crash, panic or abort while executing a guest, where the specification asks
-  for a trap.
+  for a trap. [GHSA-wf5j-gpc8-4xvg](https://github.com/zwasm/zwasm/security/advisories/GHSA-wf5j-gpc8-4xvg)
+  is the worked example: a guest-chosen list length overflowed the host's u32
+  arithmetic and aborted the process.
 
 ## What we do not treat as a vulnerability
 
