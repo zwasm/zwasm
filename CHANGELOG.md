@@ -10,6 +10,8 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-10-28
+
 ### Changed
 
 - **A component reaches the host's network only when granted.** `zwasm run`
@@ -35,6 +37,7 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 - **A WASI 0.3.2 component binds** — the WASI 0.3.1 and 0.3.2 releases change
   only the package version strings; `test-all` now carries a component bound
   to the 0.3.2 names.
+
 - **A WASI command compiled once runs many times: `cli.run_prepared.PreparedWasi`.**
   `runWasmCapturedFull` validates, JIT-compiles and instantiates on every call,
   which for a Go wasip1 guest (5-12 MB) is seconds of compile per run.
@@ -412,6 +415,7 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 - **A component no longer reaches the host's network without a grant**; see
   `--allow-network` under Changed.
+  [GHSA-cp4q-2jww-w63r](https://github.com/zwasm/zwasm/security/advisories/GHSA-cp4q-2jww-w63r).
 
 - **WASI 0.1 `fd_seek` answers `inval` for a result past the u64 range**, and
   `fd_read` / `fd_write` at a cursor past the i64 range answer `inval`, as
@@ -424,6 +428,7 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 - **A size or address the WASI host derives from a guest's values is
   checked.** When it does not fit in u32 the call traps as the guest's memory
   access (`OutOfBoundsStore`); before, the host process stopped.
+  [GHSA-wf5j-gpc8-4xvg](https://github.com/zwasm/zwasm/security/advisories/GHSA-wf5j-gpc8-4xvg).
 
 - **More host arithmetic on a guest's values is checked.** A WASI 0.1 gather
   or scatter stops short before an iovec that would take its u32 total past
