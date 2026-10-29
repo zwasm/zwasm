@@ -66,14 +66,19 @@ pub fn register(table: *DispatchTable) void {
 // Spec §3.3.1.6: "trunc_f32_s" et al. produce InvalidConversionToInt
 // on NaN, IntOverflow on saturating-out-of-range. Wasm 2.0 adds
 // trunc_sat_* variants that don't trap; those land separately.
+//
+// The upper bound is maxInt + 1, a power of two and so exact in both float
+// types. maxInt itself is not exact in f32 (nor in f64 for 64-bit
+// destinations): it rounds up to that power, which `>` would let through to
+// `@intFromFloat`.
 
 fn truncFloatToInt(comptime DstInt: type, x: anytype) !DstInt {
     if (std.math.isNan(x)) return Trap.InvalidConversionToInt;
     if (std.math.isInf(x)) return Trap.IntOverflow;
     const truncated = @trunc(x);
     const min_f = @as(@TypeOf(x), @floatFromInt(std.math.minInt(DstInt)));
-    const max_f = @as(@TypeOf(x), @floatFromInt(std.math.maxInt(DstInt)));
-    if (truncated < min_f or truncated > max_f) return Trap.IntOverflow;
+    const limit_f = @as(@TypeOf(x), @floatFromInt(std.math.maxInt(DstInt) + 1));
+    if (truncated < min_f or truncated >= limit_f) return Trap.IntOverflow;
     return @intFromFloat(truncated);
 }
 
@@ -81,8 +86,8 @@ fn truncFloatToUint(comptime DstUint: type, x: anytype) !DstUint {
     if (std.math.isNan(x)) return Trap.InvalidConversionToInt;
     if (std.math.isInf(x)) return Trap.IntOverflow;
     const truncated = @trunc(x);
-    const max_f = @as(@TypeOf(x), @floatFromInt(std.math.maxInt(DstUint)));
-    if (truncated < 0 or truncated > max_f) return Trap.IntOverflow;
+    const limit_f = @as(@TypeOf(x), @floatFromInt(std.math.maxInt(DstUint) + 1));
+    if (truncated < 0 or truncated >= limit_f) return Trap.IntOverflow;
     return @intFromFloat(truncated);
 }
 
@@ -302,6 +307,55 @@ test "i32.trunc_f32_u: -0.5 truncates to 0" {
     try rt.pushOperand(.{ .f32 = -0.5 });
     try driveOne(&rt, &t, .@"i32.trunc_f32_u", 0, 0);
     try testing.expectEqual(@as(u32, 0), rt.popOperand().u32);
+}
+
+// Where maxInt of the destination is not representable in the source type,
+// the first out-of-range input is the power of two just past it. These pin the
+// interpreter's bounds; test/edge_cases runs the JIT only.
+test "trunc: the power of two just past the destination range traps IntOverflow" {
+    var t = DispatchTable.init();
+    mvp.register(&t);
+    var rt = Runtime.init(testing.allocator);
+    defer rt.deinit();
+    const cases = [_]struct { op: ZirOp, src: Value }{
+        .{ .op = .@"i32.trunc_f32_s", .src = .{ .u32 = 0x4F00_0000 } }, // 2^31
+        .{ .op = .@"i32.trunc_f32_u", .src = .{ .u32 = 0x4F80_0000 } }, // 2^32
+        .{ .op = .@"i64.trunc_f32_s", .src = .{ .u32 = 0x5F00_0000 } }, // 2^63
+        .{ .op = .@"i64.trunc_f32_u", .src = .{ .u32 = 0x5F80_0000 } }, // 2^64
+        .{ .op = .@"i64.trunc_f64_s", .src = .{ .u64 = 0x43E0_0000_0000_0000 } }, // 2^63
+        .{ .op = .@"i64.trunc_f64_u", .src = .{ .u64 = 0x43F0_0000_0000_0000 } }, // 2^64
+        .{ .op = .@"i32.trunc_f64_s", .src = .{ .f64 = 2147483648.0 } },
+        .{ .op = .@"i32.trunc_f64_u", .src = .{ .f64 = 4294967296.0 } },
+    };
+    for (cases) |case| {
+        try rt.pushOperand(case.src);
+        try testing.expectError(Trap.IntOverflow, driveOne(&rt, &t, case.op, 0, 0));
+    }
+}
+
+test "trunc: the largest in-range input converts" {
+    var t = DispatchTable.init();
+    mvp.register(&t);
+    var rt = Runtime.init(testing.allocator);
+    defer rt.deinit();
+    const cases = [_]struct { op: ZirOp, src: Value, want: u64 }{
+        .{ .op = .@"i32.trunc_f32_s", .src = .{ .u32 = 0x4EFF_FFFF }, .want = 0x7FFF_FF80 },
+        .{ .op = .@"i32.trunc_f32_u", .src = .{ .u32 = 0x4F7F_FFFF }, .want = 0xFFFF_FF00 },
+        .{ .op = .@"i64.trunc_f32_s", .src = .{ .u32 = 0x5EFF_FFFF }, .want = 0x7FFF_FF80_0000_0000 },
+        .{ .op = .@"i64.trunc_f32_u", .src = .{ .u32 = 0x5F7F_FFFF }, .want = 0xFFFF_FF00_0000_0000 },
+        .{ .op = .@"i64.trunc_f64_s", .src = .{ .u64 = 0x43DF_FFFF_FFFF_FFFF }, .want = 0x7FFF_FFFF_FFFF_FC00 },
+        .{ .op = .@"i64.trunc_f64_u", .src = .{ .u64 = 0x43EF_FFFF_FFFF_FFFF }, .want = 0xFFFF_FFFF_FFFF_F800 },
+        // maxInt itself is representable here, so it must not trap.
+        .{ .op = .@"i32.trunc_f64_s", .src = .{ .f64 = 2147483647.9 }, .want = 0x7FFF_FFFF },
+        .{ .op = .@"i32.trunc_f64_u", .src = .{ .f64 = 4294967295.9 }, .want = 0xFFFF_FFFF },
+    };
+    for (cases) |case| {
+        try rt.pushOperand(case.src);
+        try driveOne(&rt, &t, case.op, 0, 0);
+        const got = rt.popOperand();
+        const is_i32 = std.mem.startsWith(u8, @tagName(case.op), "i32");
+        try testing.expectEqual(case.want, if (is_i32) got.u32 else got.u64);
+    }
 }
 
 test "f32.demote_f64 + f64.promote_f32 round-trip" {
