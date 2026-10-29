@@ -10,6 +10,14 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+## [2.8.1] - 2026-10-29
+
+### Security
+
+- **On the interpreter, a trapping float-to-int truncation of exactly 2^31,
+  2^32, 2^63 or 2^64 traps** (#656). It traps `integer overflow`, as the JIT
+  does; before, the host process stopped.
+
 ## [2.8.0] - 2026-10-28
 
 ### Changed
