@@ -145,6 +145,10 @@ pub const P2Op = enum {
     clocks_system_now,
     clocks_system_get_resolution,
     clocks_monotonic_get_resolution,
+    // WASI 0.2 `wasi:clocks/wall-clock` `resolution()` -> datetime (retptr).
+    // The 0.2 monotonic-clock `resolution()` returns a plain duration, the
+    // same shape as the 0.3 `get-resolution`, so it shares that op.
+    clocks_wall_resolution,
     // wasi:clocks/monotonic-clock@0.3.0 `wait-until`/`wait-for` — async funcs
     // served by a TIMER subtask waitable on the P3 scheduler (ADR-0205 phase A);
     // bound only under an async `canon lower`.
@@ -333,6 +337,12 @@ pub const P2Op = enum {
     // guest never calls — honest err(unsupported), the FILESYSTEM error-code
     // ordinal (27).
     fs_stub_get_flags,
+    // wasi:filesystem/types `filesystem-error-code(borrow<error>)` ->
+    // option<error-code>. The wasi_snapshot_preview1 adapter imports it to
+    // map a stream `last-operation-failed(error)` back to an errno. This host
+    // never mints an `error` resource (stream failures answer `closed`), so
+    // no error it can be handed carries a filesystem code: always `none`.
+    fs_filesystem_error_code,
     // wasi:filesystem/types metadata-hash + metadata-hash-at — wasi-libc fills
     // st_ino / d_ino from them, so rust-std's fs::metadata, File::metadata and
     // read_dir import BOTH; a world without the `-at` row fails to LINK, not
@@ -446,6 +456,7 @@ pub fn p1Target(op: P2Op) P1Target {
         .clocks_system_now => .{ .clock_time_get = 0 },
         .clocks_system_get_resolution => .{ .clock_res_get = 0 },
         .clocks_monotonic_get_resolution => .{ .clock_res_get = 1 },
+        .clocks_wall_resolution => .{ .clock_res_get = 0 },
         .random_get_bytes => .random_get,
         .fs_descriptor_read => .fd_pread,
         .fs_descriptor_write => .fd_pwrite,
@@ -472,6 +483,7 @@ pub fn p1Target(op: P2Op) P1Target {
         .fs_dir_entry_stream_drop => .noop,
         .io_resource_drop => .noop,
         .fs_stub_get_flags => .noop,
+        .fs_filesystem_error_code => .noop,
         .fs_descriptor_metadata_hash => .fd_filestat_get,
         .fs_descriptor_metadata_hash_at => .path_filestat_get,
         // wasi:sockets — no P1 facility; the host backing is std.Io.net
@@ -665,6 +677,10 @@ const table = [_]Entry{
     .{ .iface = "wasi:clocks/system-clock", .func = "now", .op = .clocks_system_now },
     .{ .iface = "wasi:clocks/system-clock", .func = "get-resolution", .op = .clocks_system_get_resolution },
     .{ .iface = "wasi:clocks/monotonic-clock", .func = "get-resolution", .op = .clocks_monotonic_get_resolution },
+    // WASI 0.2 spelling of the resolution funcs (imported by the
+    // wasi_snapshot_preview1 command/reactor adapters for clock_res_get).
+    .{ .iface = "wasi:clocks/monotonic-clock", .func = "resolution", .op = .clocks_monotonic_get_resolution, .gens = p2_only },
+    .{ .iface = "wasi:clocks/wall-clock", .func = "resolution", .op = .clocks_wall_resolution, .gens = p2_only },
     .{ .iface = "wasi:clocks/monotonic-clock", .func = "wait-until", .op = .clocks_wait_until },
     .{ .iface = "wasi:clocks/monotonic-clock", .func = "wait-for", .op = .clocks_wait_for },
     .{ .iface = "wasi:random/random", .func = "get-random-bytes", .op = .random_get_bytes },
@@ -719,6 +735,7 @@ const table = [_]Entry{
     .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.write-via-stream", .op = .fs_write_via_stream, .gens = p2_only },
     .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.append-via-stream", .op = .fs_append_via_stream, .gens = p2_only },
     .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.get-flags", .op = .fs_stub_get_flags, .gens = p2_only },
+    .{ .iface = "wasi:filesystem/types", .func = "filesystem-error-code", .op = .fs_filesystem_error_code, .gens = p2_only },
     .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.metadata-hash", .op = .fs_descriptor_metadata_hash, .gens = p2_only },
     .{ .iface = "wasi:filesystem/types", .func = "[method]descriptor.metadata-hash-at", .op = .fs_descriptor_metadata_hash_at, .gens = p2_only },
     .{ .iface = "wasi:sockets/instance-network", .func = "instance-network", .op = .sock_instance_network },
@@ -945,6 +962,82 @@ test "classify: official 0.3.0 system-clock + get-resolution (version-stripped i
     try testing.expectEqual(P2Op.clocks_system_now, classifyImport("wasi:clocks/system-clock", "now", .any).?);
     try testing.expectEqual(P2Op.clocks_system_get_resolution, classifyImport("wasi:clocks/system-clock", "get-resolution", .any).?);
     try testing.expectEqual(P2Op.clocks_monotonic_get_resolution, classifyImport("wasi:clocks/monotonic-clock", "get-resolution", .any).?);
+}
+
+test "classify: every wasi:* import of the wasi_snapshot_preview1 adapters resolves" {
+    // The full import set of the wasmtime v30/v36/v50 command + reactor
+    // adapters (`wasm-tools print wasi_snapshot_preview1.*.wasm`, version
+    // suffix stripped). A component built with `component new --adapt`
+    // instantiates the adapter as a core module; one unclassified row here
+    // and the whole component fails to link with UnknownImport.
+    const rows = [_][2][]const u8{
+        .{ "wasi:cli/environment", "get-arguments" },
+        .{ "wasi:cli/environment", "get-environment" },
+        .{ "wasi:cli/exit", "exit" },
+        .{ "wasi:cli/stderr", "get-stderr" },
+        .{ "wasi:cli/stdin", "get-stdin" },
+        .{ "wasi:cli/stdout", "get-stdout" },
+        .{ "wasi:cli/terminal-input", "[resource-drop]terminal-input" },
+        .{ "wasi:cli/terminal-output", "[resource-drop]terminal-output" },
+        .{ "wasi:cli/terminal-stderr", "get-terminal-stderr" },
+        .{ "wasi:cli/terminal-stdin", "get-terminal-stdin" },
+        .{ "wasi:cli/terminal-stdout", "get-terminal-stdout" },
+        .{ "wasi:clocks/monotonic-clock", "now" },
+        .{ "wasi:clocks/monotonic-clock", "resolution" },
+        .{ "wasi:clocks/monotonic-clock", "subscribe-duration" },
+        .{ "wasi:clocks/monotonic-clock", "subscribe-instant" },
+        .{ "wasi:clocks/wall-clock", "now" },
+        .{ "wasi:clocks/wall-clock", "resolution" },
+        .{ "wasi:filesystem/preopens", "get-directories" },
+        .{ "wasi:filesystem/types", "filesystem-error-code" },
+        .{ "wasi:filesystem/types", "[method]descriptor.append-via-stream" },
+        .{ "wasi:filesystem/types", "[method]descriptor.create-directory-at" },
+        .{ "wasi:filesystem/types", "[method]descriptor.get-flags" },
+        .{ "wasi:filesystem/types", "[method]descriptor.get-type" },
+        .{ "wasi:filesystem/types", "[method]descriptor.link-at" },
+        .{ "wasi:filesystem/types", "[method]descriptor.metadata-hash" },
+        .{ "wasi:filesystem/types", "[method]descriptor.metadata-hash-at" },
+        .{ "wasi:filesystem/types", "[method]descriptor.open-at" },
+        .{ "wasi:filesystem/types", "[method]descriptor.read-directory" },
+        .{ "wasi:filesystem/types", "[method]descriptor.read-via-stream" },
+        .{ "wasi:filesystem/types", "[method]descriptor.readlink-at" },
+        .{ "wasi:filesystem/types", "[method]descriptor.remove-directory-at" },
+        .{ "wasi:filesystem/types", "[method]descriptor.rename-at" },
+        .{ "wasi:filesystem/types", "[method]descriptor.stat" },
+        .{ "wasi:filesystem/types", "[method]descriptor.stat-at" },
+        .{ "wasi:filesystem/types", "[method]descriptor.symlink-at" },
+        .{ "wasi:filesystem/types", "[method]descriptor.sync" },
+        .{ "wasi:filesystem/types", "[method]descriptor.sync-data" },
+        .{ "wasi:filesystem/types", "[method]descriptor.unlink-file-at" },
+        .{ "wasi:filesystem/types", "[method]descriptor.write-via-stream" },
+        .{ "wasi:filesystem/types", "[method]directory-entry-stream.read-directory-entry" },
+        .{ "wasi:filesystem/types", "[resource-drop]descriptor" },
+        .{ "wasi:filesystem/types", "[resource-drop]directory-entry-stream" },
+        .{ "wasi:io/error", "[resource-drop]error" },
+        .{ "wasi:io/poll", "poll" },
+        .{ "wasi:io/poll", "[resource-drop]pollable" },
+        .{ "wasi:io/streams", "[method]input-stream.blocking-read" },
+        .{ "wasi:io/streams", "[method]input-stream.read" },
+        .{ "wasi:io/streams", "[method]input-stream.subscribe" },
+        .{ "wasi:io/streams", "[method]output-stream.blocking-flush" },
+        .{ "wasi:io/streams", "[method]output-stream.blocking-write-and-flush" },
+        .{ "wasi:io/streams", "[method]output-stream.check-write" },
+        .{ "wasi:io/streams", "[method]output-stream.subscribe" },
+        .{ "wasi:io/streams", "[method]output-stream.write" },
+        .{ "wasi:io/streams", "[resource-drop]input-stream" },
+        .{ "wasi:io/streams", "[resource-drop]output-stream" },
+        .{ "wasi:random/random", "get-random-bytes" },
+    };
+    for (rows) |r| {
+        if (classifyImport(r[0], r[1], .p2) == null) {
+            std.debug.print("unclassified adapter import: {s} {s}\n", .{ r[0], r[1] });
+            return error.TestUnexpectedResult;
+        }
+    }
+    try testing.expectEqual(P2Op.clocks_wall_resolution, classifyImport("wasi:clocks/wall-clock", "resolution", .p2).?);
+    try testing.expectEqual(P2Op.clocks_monotonic_get_resolution, classifyImport("wasi:clocks/monotonic-clock", "resolution", .p2).?);
+    try testing.expectEqual(P2Op.fs_filesystem_error_code, classifyImport("wasi:filesystem/types", "filesystem-error-code", .p2).?);
+    try testing.expectEqual(@as(u32, 0), p1Target(.clocks_wall_resolution).clock_res_get);
 }
 
 test "classify: wasi:io/poll + subscribe methods" {

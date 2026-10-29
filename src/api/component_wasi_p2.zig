@@ -219,6 +219,16 @@ fn p2MonotonicGetResolution(caller: *Caller) WasiP2Error!i64 {
     return clockGetResolution(caller, 1);
 }
 
+/// `wasi:clocks/wall-clock` `resolution()` (WASI 0.2) -> datetime{seconds:
+/// u64, nanoseconds: u32}: the realtime clock's granularity, written to the
+/// return area at `retptr` in the same layout as `p2WallNow`.
+fn p2WallResolution(caller: *Caller, retptr: u32) WasiP2Error!void {
+    const mem = try ctxMemory(caller);
+    const ns: u64 = @bitCast(try clockGetResolution(caller, 0));
+    try mem.write(retptr, @as(u64, ns / std.time.ns_per_s));
+    try mem.write(retptr + 8, @as(u32, @intCast(ns % std.time.ns_per_s)));
+}
+
 /// `wasi:cli/stdin` `get-stdin` → mint an input-stream handle bound to fd 0.
 fn p2GetStdin(caller: *Caller) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
@@ -1699,6 +1709,18 @@ fn p2FsStubGetFlags(caller: *Caller, _: u32, retptr: u32) WasiP2Error!void {
     try mem.write(retptr + 1, @intFromEnum(adapter.P2ErrorCode.unsupported));
 }
 
+/// `wasi:filesystem/types` `filesystem-error-code(err: borrow<error>)` ->
+/// option<error-code>, lowered as (err_handle, retptr). This host never
+/// creates an `error` resource carrying a filesystem error (stream failures
+/// answer `stream-error::closed`), so the honest answer is `none`: option
+/// discriminant 0 at `retptr`. The wasi_snapshot_preview1 adapter imports
+/// this to translate `last-operation-failed`; without the row an adapted
+/// component does not link at all.
+fn p2FilesystemErrorCode(caller: *Caller, _: u32, retptr: u32) WasiP2Error!void {
+    const mem = try ctxMemory(caller);
+    try mem.write(retptr, @as(u8, 0));
+}
+
 /// Store a `result<metadata-hash-value{lower: u64, upper: u64}, error-code>`
 /// at `retptr` (disc@0, the align-8 record at +8, error-code at +8 on the
 /// err arm). The hash itself is `ctx_mod.metadataHash`, the same derivation
@@ -1771,6 +1793,7 @@ fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: a
         .clocks_system_now => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2SystemNow, mapGuestFault),
         .clocks_system_get_resolution => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!i64, p2SystemGetResolution, mapGuestFault),
         .clocks_monotonic_get_resolution => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!i64, p2MonotonicGetResolution, mapGuestFault),
+        .clocks_wall_resolution => try defineMapped(lk, module, name, ctx, fn (*Caller, u32) WasiP2Error!void, p2WallResolution, mapGuestFault),
         // insecure shares the secure handler: identical signature, and the host's
         // secure fill over-satisfies the insecure contract (no separate RNG state).
         .random_get_bytes, .random_insecure_get_bytes => try defineMapped(lk, module, name, ctx, fn (*Caller, u64, u32) WasiP2Error!void, p2RandomGetBytes, mapGuestFault),
@@ -1818,6 +1841,7 @@ fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: a
         .fs_write_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2DescriptorWriteViaStream, mapGuestFault),
         .fs_append_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorAppendViaStream, mapGuestFault),
         .fs_stub_get_flags => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2FsStubGetFlags, mapGuestFault),
+        .fs_filesystem_error_code => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2FilesystemErrorCode, mapGuestFault),
         .fs_descriptor_metadata_hash => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorMetadataHash, mapGuestFault),
         .fs_descriptor_metadata_hash_at => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32, u32, u32, u32) WasiP2Error!void, p2DescriptorMetadataHashAt, mapGuestFault),
         .sock_instance_network => try defineMapped(lk, module, name, ctx, fn (*Caller) WasiP2Error!u32, p2InstanceNetwork, mapGuestFault),
@@ -1890,6 +1914,9 @@ const Def = union(enum) {
     host_op: adapter.P2Op,
     guest_func: struct { inst: *Instance, name: []const u8 },
     guest_table: struct { inst: *Instance, name: []const u8 },
+    /// A guest memory re-exported by a synthetic instance (wit-component's
+    /// `$env` passes main's `memory` to the preview1 adapter).
+    guest_memory: struct { inst: *Instance, name: []const u8 },
     /// A synthesized `canon resource.new/drop/rep` builtin for a
     /// GUEST-defined resource (D-322); `type_index` keys the handle table.
     resource_builtin: struct { kind: ResourceBuiltinKind, type_index: u32 },
@@ -2043,7 +2070,18 @@ fn synthDef(arena: Allocator, info: *const ctypes.TypeInfo, built: []const ?Buil
                 .synthetic => null,
             };
         },
-        else => return null, // memory/global inline exports: not yet needed
+        .memory => {
+            const ref = info.resolveCoreMemoryExport(ex.index) orelse return null;
+            const prov = built[ref.instance] orelse return error.ImportUnsatisfied;
+            return switch (prov) {
+                .guest => |gi| .{ .guest_memory = .{ .inst = gi, .name = ref.name } },
+                .synthetic => |se| {
+                    for (se) |e| if (std.mem.eql(u8, e.name, ref.name)) return e.def;
+                    return null;
+                },
+            };
+        },
+        else => return null, // global inline exports: not yet needed
     }
 }
 
@@ -2117,6 +2155,18 @@ fn defineSynth(lk: *Linker, ns: []const u8, e: SynthExport, ctx: *WasiP2Ctx) !vo
             }
         },
         .guest_func => |g| try lk.defineCrossModuleFunc(ns, e.name, g.inst, g.name),
+        .guest_memory => |g| {
+            const rt = g.inst.handle.runtime orelse return error.ImportUnsatisfied;
+            for (g.inst.handle.exports_storage) |exp| {
+                if (exp.kind == .memory and std.mem.eql(u8, exp.name, g.name)) {
+                    // D-199: share the exporter's MemoryInstance so the
+                    // importer sees growth.
+                    try lk.defineMemoryInstance(ns, e.name, rt.memories[exp.idx]);
+                    return;
+                }
+            }
+            return error.ImportUnsatisfied;
+        },
         .guest_table => |g| {
             const rt = g.inst.handle.runtime orelse return error.ImportUnsatisfied;
             for (g.inst.handle.exports_storage) |exp| {
