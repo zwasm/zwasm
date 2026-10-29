@@ -17,6 +17,7 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 - **On the interpreter, a trapping float-to-int truncation of exactly 2^31,
   2^32, 2^63 or 2^64 traps** (#656). It traps `integer overflow`, as the JIT
   does; before, the host process stopped.
+  [GHSA-xcf3-8ww5-fwxh](https://github.com/zwasm/zwasm/security/advisories/GHSA-xcf3-8ww5-fwxh).
 
 ## [2.8.0] - 2026-10-28
 
