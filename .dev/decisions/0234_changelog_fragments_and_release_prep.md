@@ -24,7 +24,8 @@ fragments into one section and deletes them.
 
 **D1 — Fragments.** A PR adds one file per entry under `changelog.d/`, named
 `<section>-<slug>.md`, `<section>` one of `added`, `changed`, `deprecated`,
-`removed`, `fixed`, `security`, `documentation` (Keep a Changelog's order).
+`removed`, `fixed`, `security`, `documentation` (Keep a Changelog's order),
+`known-limitations`.
 The file holds the entry in the form `CHANGELOG.md` uses today. No PR edits
 `CHANGELOG.md` during development; the entries already under `[Unreleased]`
 stay and are released with 2.8.0. `changelog.d/README.md` says how to write one.
@@ -63,3 +64,10 @@ stays manual (ADR-0156).
 - Files: `changelog.d/README.md`, `scripts/changelog_assemble.sh`,
   `scripts/check_changelog_assemble.sh`, `.github/workflows/release_prep.yml`,
   `docs/development.md` ("Cutting a release")
+
+## Revision history
+
+| Date       | SHA          | Note |
+|------------|--------------|------|
+| 2026-10-24 | `cac873e5d` | Initial; landed with D1–D3 (#641). |
+| 2026-10-31 | `<backfill>` | D1 gains `known-limitations`; `check_changelog_assemble.sh` runs from `gate_commit.sh` when it or the assemble script is staged. |

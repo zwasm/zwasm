@@ -29,7 +29,8 @@ DATE=$2
 
 # <file-name prefix>:<heading>, in the order the section prints them.
 SECTIONS=(added:Added changed:Changed deprecated:Deprecated removed:Removed
-          fixed:Fixed security:Security documentation:Documentation)
+          fixed:Fixed security:Security documentation:Documentation
+          "known-limitations:Known limitations")
 
 used=()
 for f in changelog.d/*.md; do

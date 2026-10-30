@@ -6,6 +6,7 @@
 #   4. scripts/file_size_check.sh --gate                    — skipped on docs-only.
 #   5. scripts/check_skip_adrs.sh --gate                     — skipped on docs-only.
 #   6. scripts/check_adr_history.sh --gate                   — only when an ADR changed.
+#  6a. scripts/check_changelog_assemble.sh --gate            — only when it or changelog_assemble.sh changed.
 #   7. scripts/check_lesson_citing.sh                        — info only (warn count).
 #   8. scripts/check_libc_boundary.sh (report)              — info; skipped on docs-only.
 #   9. scripts/check_fallback_patterns.sh (report)          — info; skipped on docs-only.
@@ -240,6 +241,13 @@ if [ "$ADR_TOUCHED" -eq 1 ] || [ "$ANY_STAGED" -eq 0 ]; then
     fi
 elif [ "$DOCS_ONLY" -eq 0 ]; then
     echo "[gate_commit] (no ADR changed — skipping check_adr_history)"
+fi
+
+# --- gate: check_changelog_assemble (only when the script or its check changed) ---
+
+if grep -qE '^scripts/(check_)?changelog_assemble\.sh$' <<<"$STAGED" || [ "$ANY_STAGED" -eq 0 ]; then
+    echo "[gate_commit] check_changelog_assemble --gate ..."
+    bash scripts/check_changelog_assemble.sh --gate > /dev/null
 fi
 
 # --- gate: ReleaseSafe runner floor (when build.zig staged; ADR-0177) ---
