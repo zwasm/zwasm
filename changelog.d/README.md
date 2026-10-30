@@ -6,7 +6,7 @@ A PR's CHANGELOG entries live here until a release folds them into
 
 One file per entry, named `<section>-<slug>.md`. `<section>` is one of
 `added`, `changed`, `deprecated`, `removed`, `fixed`, `security`,
-`documentation`; the slug is free (the branch slug or the issue number reads
+`documentation`, `known-limitations`; the slug is free (the branch slug or the issue number reads
 well). A PR with two entries adds two files.
 
 The file holds the entry exactly as the CHANGELOG will show it:

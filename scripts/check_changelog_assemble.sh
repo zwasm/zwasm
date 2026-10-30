@@ -31,13 +31,14 @@ fresh_tree() {
   : > "$T/changelog.d/.gitkeep"
 }
 
-# Two sections, two fragments in one of them, and blank lines a fragment's
-# author left at either end.
+# Three sections, the last one last, two fragments in one of them, and blank
+# lines a fragment's author left at either end.
 cases=$((cases + 1))
 fresh_tree
 printf -- '- **Thing** (#3).\n' > "$T/changelog.d/added-thing.md"
 printf -- '\n- **Zeta** (#2).\n\n\n' > "$T/changelog.d/fixed-zeta.md"
 printf -- '- **Alpha** (#1). Body\n  line two.\n' > "$T/changelog.d/fixed-alpha.md"
+printf -- '- **Limit** (#4).\n' > "$T/changelog.d/known-limitations-limit.md"
 cat > "$TMP/want" <<'EOF'
 ## [9.9.9] - 2026-02-03
 
@@ -51,6 +52,10 @@ cat > "$TMP/want" <<'EOF'
   line two.
 
 - **Zeta** (#2).
+
+### Known limitations
+
+- **Limit** (#4).
 EOF
 before=$(cd "$T" && find . -type f | sort | xargs cksum)
 if ! bash "$T/scripts/changelog_assemble.sh" --dry-run 9.9.9 2026-02-03 > "$TMP/got" 2> "$TMP/err"; then
