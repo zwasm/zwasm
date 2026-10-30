@@ -60,7 +60,8 @@ pub const TraceCallback = trap_mod.TraceCallback;
 pub const Frame = frame_mod.Frame;
 pub const Label = frame_mod.Label;
 pub const max_operand_stack = frame_mod.max_operand_stack;
-pub const max_frame_stack = frame_mod.max_frame_stack;
+pub const frame_chunk_len = frame_mod.frame_chunk_len;
+pub const default_max_frame_depth = frame_mod.default_max_frame_depth;
 pub const max_label_stack = frame_mod.max_label_stack;
 
 pub const Module = @import("module.zig").Module;
@@ -338,7 +339,7 @@ pub const Runtime = struct {
     /// previous shape (returnCallOp → mvp.invoke → dispatch.run
     /// recursion) mirrored Wasm tail-call depth onto the host
     /// call stack and tripped `Trap.CallStackExhausted` at
-    /// `max_frame_stack = 256` for self-recursive count(N≥256).
+    /// the then-fixed 256-frame cap for self-recursive count(N≥256).
     pending_tail_call: ?*const zir.ZirFunc = null,
 
     /// 10.G-foundation cycle 5 (ADR-0115 §1 zero-overhead gate).
@@ -355,14 +356,24 @@ pub const Runtime = struct {
     operand_buf: [max_operand_stack]Value = undefined,
     operand_len: u32 = 0,
 
-    frame_buf: [max_frame_stack]Frame = undefined,
+    /// First `frame_chunk_len` frames, inline. Frames past it live in
+    /// `frame_chunks`; address every frame through `frameAt` (a `*Frame` stays
+    /// valid while the frame is live: chunks never move).
+    frame_buf: [frame_chunk_len]Frame = undefined,
     frame_len: u32 = 0,
+    /// Heap chunks for frames at index >= `frame_chunk_len`, each
+    /// `frame_chunk_len` long, allocated on first use (most runtimes never
+    /// touch them) and freed at `deinit`.
+    frame_chunks: std.ArrayList(*[frame_chunk_len]Frame) = .empty,
+    /// Call-depth cap: pushing frame number `max_frame_depth + 1` traps
+    /// `CallStackExhausted`. Set per `Runtime`.
+    max_frame_depth: u32 = default_max_frame_depth,
 
     /// D-288 / ADR-0167: cached native-stack low limit for the interp's
     /// deep-recursion guard. `null` until lazily computed on the first
     /// `checkNativeStackLimit` (captures the RUNNING thread's stack);
     /// `0` once computed means the platform query is unsupported →
-    /// the check is skipped and `frame_buf[256]` is the only guard.
+    /// the check is skipped and `max_frame_depth` is the only guard.
     native_stack_limit: ?usize = null,
 
     /// ADR-0179 #3a: cooperative interruption flag, host-owned (lives on the
@@ -557,6 +568,8 @@ pub const Runtime = struct {
             }
         }
         if (!memory0_guarded) rawFreeOwned(self.alloc, u8, self.memory);
+        for (self.frame_chunks.items) |c| self.alloc.destroy(c);
+        self.frame_chunks.deinit(self.alloc);
         // D-199 — free the pointer array + the OWNED instance storage.
         // Imported entries point into the exporter's `memory_storage`
         // (freed by the exporter), so freeing our own storage is correct.
@@ -600,20 +613,57 @@ pub const Runtime = struct {
         return self.operand_buf[self.operand_len - 1];
     }
 
-    pub fn pushFrame(self: *Runtime, frame: Frame) Trap!void {
-        if (self.frame_len == max_frame_stack) return Trap.CallStackExhausted;
-        self.frame_buf[self.frame_len] = frame;
+    /// Frame `i` (0 = outermost); `i < frame_len`, or `== frame_len` while
+    /// `pushFrame` fills it.
+    pub fn frameAt(self: *Runtime, i: u32) *Frame {
+        if (i < frame_chunk_len) return &self.frame_buf[i];
+        const rest = i - frame_chunk_len;
+        return &self.frame_chunks.items[rest / frame_chunk_len][rest % frame_chunk_len];
+    }
+
+    /// `inline`, and the header written field by field: a by-value `Frame`
+    /// (~2.6 KiB, mostly `label_buf`, undefined at push) would otherwise be
+    /// built on every caller's native stack, roughly halving the call depth
+    /// the interp reaches before the native-stack check binds. A frame is
+    /// pushed with no labels; push them on `currentFrame()` afterwards.
+    pub inline fn pushFrame(self: *Runtime, frame: Frame) Trap!void {
+        std.debug.assert(frame.label_len == 0);
+        if (self.frame_len >= self.max_frame_depth) return Trap.CallStackExhausted;
+        if (self.frame_len >= frame_chunk_len) try self.growFrameChunks();
+        comptime std.debug.assert(@typeInfo(Frame).@"struct".fields.len == 9); // a new field is copied below
+        const slot = self.frameAt(self.frame_len);
+        slot.sig = frame.sig;
+        slot.locals = frame.locals;
+        slot.operand_base = frame.operand_base;
+        slot.pc = frame.pc;
+        slot.func = frame.func;
+        slot.done = frame.done;
+        slot.label_overflow = frame.label_overflow;
+        slot.label_len = frame.label_len;
         self.frame_len += 1;
+    }
+
+    /// Allocate the heap chunk that frame `frame_len` (>= `frame_chunk_len`)
+    /// falls in, if it is not there yet.
+    fn growFrameChunks(self: *Runtime) Trap!void {
+        const chunk = (self.frame_len - frame_chunk_len) / frame_chunk_len;
+        if (chunk < self.frame_chunks.items.len) return;
+        const c = self.alloc.create([frame_chunk_len]Frame) catch return Trap.CallStackExhausted;
+        self.frame_chunks.append(self.alloc, c) catch {
+            self.alloc.destroy(c);
+            return Trap.CallStackExhausted;
+        };
     }
 
     /// D-288 / ADR-0167: trap `CallStackExhausted` at the real per-OS
     /// native stack limit BEFORE the host stack SEGVs. The interp
-    /// recurses natively per wasm call; on the small (~1 MiB) Windows
-    /// stack the real ceiling sits BELOW the `frame_buf[256]` guard, so
-    /// without this 128–256-deep recursion crashes instead of trapping.
+    /// recurses natively per wasm call; on every default stack (1 MiB
+    /// Windows, 8 MiB Mac/Linux) the real ceiling sits BELOW the
+    /// `max_frame_depth` guard, so without this deep recursion crashes
+    /// instead of trapping.
     /// `sp` is the caller's `@frameAddress()`. The limit is computed
     /// lazily once on the running thread; a `0` (unsupported-platform)
-    /// limit disables the check, leaving `frame_buf[256]` as the guard.
+    /// limit disables the check, leaving `max_frame_depth` as the guard.
     pub fn checkNativeStackLimit(self: *Runtime, sp: usize) Trap!void {
         const limit = self.native_stack_limit orelse blk: {
             const l = stack_limit_mod.computeStackLimit(stack_limit_mod.INTERP_STACK_HEADROOM);
@@ -640,21 +690,22 @@ pub const Runtime = struct {
     pub fn popFrame(self: *Runtime) Frame {
         std.debug.assert(self.frame_len > 0);
         self.frame_len -= 1;
-        const f = self.frame_buf[self.frame_len];
+        const slot = self.frameAt(self.frame_len);
+        const f = slot.*;
         // D-242 — free the frame's lazy label overflow (if any) and clear
         // the slot's pointer so a re-push can't double-free. The returned
         // copy's `label_overflow` is then dangling, but callers never read
         // it post-pop (they consume sig/locals/results only).
         if (f.label_overflow.len > 0) {
             self.alloc.free(f.label_overflow);
-            self.frame_buf[self.frame_len].label_overflow = &.{};
+            slot.label_overflow = &.{};
         }
         return f;
     }
 
     pub fn currentFrame(self: *Runtime) *Frame {
         std.debug.assert(self.frame_len > 0);
-        return &self.frame_buf[self.frame_len - 1];
+        return self.frameAt(self.frame_len - 1);
     }
 
     pub fn toOpaque(self: *Runtime) *InterpCtx {
@@ -821,7 +872,7 @@ test "Runtime: frame-stack overflow trips CallStackExhausted" {
 
     const sig: FuncType = .{ .params = &.{}, .results = &.{} };
     var i: u32 = 0;
-    while (i < max_frame_stack) : (i += 1) {
+    while (i < r.max_frame_depth) : (i += 1) {
         try r.pushFrame(.{ .sig = sig, .locals = &.{}, .operand_base = 0, .pc = 0 });
     }
     try testing.expectError(
@@ -843,7 +894,7 @@ test "Runtime: native stack-limit check traps CallStackExhausted below the limit
     try r.checkNativeStackLimit(0x8000);
 
     // A `0` (unsupported-platform) limit disables the check entirely —
-    // even sp==0 passes, leaving frame_buf[256] as the sole guard.
+    // even sp==0 passes, leaving max_frame_depth as the sole guard.
     r.native_stack_limit = 0;
     try r.checkNativeStackLimit(0);
 }
@@ -907,4 +958,41 @@ test "Trap: error set carries the spec-conformant trap conditions" {
         Trap.IndirectCallTypeMismatch,
     };
     try testing.expectEqual(@as(usize, 9), traps.len);
+}
+
+test "Runtime: call frames past the inline chunk spill to heap chunks with stable addresses" {
+    var r = Runtime.init(testing.allocator);
+    defer r.deinit();
+    const sig: FuncType = .{ .params = &.{}, .results = &.{} };
+    const n: u32 = frame_chunk_len * 3 + 7;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        try r.pushFrame(.{ .sig = sig, .locals = &.{}, .operand_base = i, .pc = 0 });
+    }
+    const deep = r.currentFrame();
+    try testing.expectEqual(n - 1, deep.operand_base);
+    // A frame's address survives pushes that allocate a new chunk.
+    const at_edge = r.frameAt(frame_chunk_len - 1);
+    var j: u32 = 0;
+    while (j < frame_chunk_len) : (j += 1) {
+        try r.pushFrame(.{ .sig = sig, .locals = &.{}, .operand_base = 0, .pc = 0 });
+    }
+    try testing.expectEqual(frame_chunk_len - 1, at_edge.operand_base);
+    try testing.expectEqual(n - 1, deep.operand_base);
+    while (r.frame_len > 0) _ = r.popFrame();
+}
+
+test "Runtime: max_frame_depth is configurable and still traps at the cap" {
+    var r = Runtime.init(testing.allocator);
+    defer r.deinit();
+    r.max_frame_depth = 300;
+    const sig: FuncType = .{ .params = &.{}, .results = &.{} };
+    var i: u32 = 0;
+    while (i < 300) : (i += 1) {
+        try r.pushFrame(.{ .sig = sig, .locals = &.{}, .operand_base = 0, .pc = 0 });
+    }
+    try testing.expectError(
+        Trap.CallStackExhausted,
+        r.pushFrame(.{ .sig = sig, .locals = &.{}, .operand_base = 0, .pc = 0 }),
+    );
 }

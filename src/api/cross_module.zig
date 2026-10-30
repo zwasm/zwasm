@@ -14,7 +14,7 @@
 //! cross-module calls (a module must be fully instantiated
 //! before any other module that imports from it). Re-entry into
 //! a still-running runtime would clobber its inline `operand_buf`
-//! / `frame_buf`. We do not add runtime cycle detection.
+//! and its frame stack. We do not add runtime cycle detection.
 //!
 //! Carved out of `c_api/instance.zig` purely to keep that file
 //! under the §A2 hard cap (2000 lines). Logically the same code

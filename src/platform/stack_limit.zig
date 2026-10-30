@@ -91,9 +91,8 @@ comptime {
 /// (no guard page, no SEH), so it needs only enough margin to cover
 /// the native growth BETWEEN two consecutive `invoke` checks (a few
 /// frames: invoke + dispatch loop + the call handler). 128 KiB is
-/// platform-independent and comfortably exceeds that; on large stacks
-/// (Mac/Linux 8 MiB) the `frame_buf[256]` guard fires first anyway, so
-/// this binds only on the small (~1 MiB) Windows stack.
+/// platform-independent and comfortably exceeds that. On every default
+/// stack this check binds before `Runtime.max_frame_depth` does.
 pub const INTERP_STACK_HEADROOM: usize = 128 * 1024;
 
 /// Sentinel returned when the per-platform query fails OR the
