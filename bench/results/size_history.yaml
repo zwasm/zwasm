@@ -1,6 +1,6 @@
 # Release binary-size history — D-320 (ADR-0181). Append-only (§A9);
 # one row per (commit, variant) via scripts/record_binary_size.sh.
-# variant: "base" = ReleaseFast default (-Dwasi=p2); "lean" = -Dwasi=p1 (ADR-0193; was "component"/-Dcomponent).
+# variant: "base" = ReleaseFast default (-Dwasi=p2 until 2.9.0, -Dwasi=p3 from 2.10.0); "lean" = -Dwasi=p1 (ADR-0193; was "component"/-Dcomponent).
 
 - commit: "5defc84e"
   timestamp: "2026-06-12T15:58:57Z"

@@ -9,8 +9,9 @@
 #
 # Rather than approximate the compiler's discovery rules statically, this
 # guard asks the compiler: `zig build test-list` (a custom list runner over
-# the maximal, p3-forced module) prints every DISCOVERED test name; every
-# named test block present under src/ must appear in that listing.
+# the default module, whose `-Dwasi=p3` is the maximal file set) prints every
+# DISCOVERED test name; every named test block present under src/ must appear
+# in that listing.
 #
 # A file whose tests intentionally live outside the core test module can
 # carry `// TEST-DISCOVERY-EXEMPT: <reason>` on lines 1-5.

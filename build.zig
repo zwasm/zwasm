@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     // registration (ROADMAP §4.5 / A12), not pervasive build-time
     // `if` branches.
     const wasm_level = b.option(WasmLevel, "wasm", "Wasm spec level (default 3.0)") orelse .v3_0;
-    const wasi_level = b.option(WasiLevel, "wasi", "WASI version inclusion: none/p1/p2/p3 ordered tier (default p2; p3=Preview-3 async, ADR-0193)") orelse .p2;
+    const wasi_level = b.option(WasiLevel, "wasi", "WASI version inclusion: none/p1/p2/p3 ordered tier (default p3; p2 = without Preview-3 async, ADR-0193)") orelse .p3;
     const engine_mode = b.option(EngineMode, "engine", "Engine selection (default both)") orelse .both;
     const enable_strip = b.option(bool, "strip", "Strip debug info from the CLI binary") orelse false;
     const strip_opt: ?bool = if (enable_strip) true else null;
@@ -86,8 +86,8 @@ pub fn build(b: *std.Build) void {
     // comptime fences that read `enable_component`.
     const enable_component = @intFromEnum(wasi_level) >= @intFromEnum(WasiLevel.p2);
     // ADR-0193 P3 — the P3/async host (component_wasi_p3.zig + component/async.zig)
-    // compiles only at `wasi_level >= .p3`. At the default `.p2` async is opt-in
-    // (`-Dwasi=p3`) — a p2 build emits zero p3-async symbols (DCE-assertable).
+    // compiles only at `wasi_level >= .p3`, the default. `-Dwasi=p2` opts out of
+    // async — a p2 build emits zero p3-async symbols (DCE-assertable).
     const enable_wasi_p3 = @intFromEnum(wasi_level) >= @intFromEnum(WasiLevel.p3);
 
     const options = b.addOptions();
@@ -512,50 +512,49 @@ pub fn build(b: *std.Build) void {
     const test_comp_spec_step = b.step("test-component-spec", "Run the Component Model spec corpus runner (E1; ADR-0170)");
     test_comp_spec_step.dependOn(&run_comp_spec_assert.step);
 
-    // ADR-0193 P3 — the 28 WASI Preview-3 (async) unit tests live in
-    // `api/component_wasi_p3.zig`, which compiles only at `wasi_level >= .p3`.
-    // The default `.p2` `zig build test` skips them (the file is unimported),
-    // so a dedicated module forced to `.p3` runs them regardless of the
-    // top-level `-Dwasi`. Mirrors `core_comp`'s forced-`.p2` floor above; uses
-    // the Debug `optimize` (like `core_tests`, not `runner_optimize`) since the
-    // async tests are unit-suite shape, not run-time-dominated corpus runners.
-    const p3_options = b.addOptions();
-    p3_options.addOption(WasmLevel, "wasm_level", wasm_level);
-    p3_options.addOption(WasiLevel, "wasi_level", .p3);
-    p3_options.addOption(EngineMode, "engine_mode", engine_mode);
-    p3_options.addOption(bool, "trace_ringbuffer", trace_ringbuffer);
-    p3_options.addOption(bool, "trace_stackprobe", trace_stackprobe);
-    p3_options.addOption(bool, "enable_component", true);
-    p3_options.addOption(bool, "enable_wasi_p3", true);
-    p3_options.addOption([]const u8, "version", zon.version);
-    const p3_options_mod = p3_options.createModule();
-    const core_p3 = b.createModule(.{
+    // ADR-0193 — the default `zig build test` builds at `.p3`, so the
+    // `-Dwasi=p2` opt-out build (no `api/component_wasi_p3.zig`, no async
+    // driver) would otherwise compile in no unit run. A dedicated module forced
+    // to `.p2` runs the unit suite on it regardless of the top-level `-Dwasi`.
+    // Mirrors `core_comp` above; uses the Debug `optimize` (like `core_tests`,
+    // not `runner_optimize`) since this is the unit suite, not a corpus runner.
+    const p2_options = b.addOptions();
+    p2_options.addOption(WasmLevel, "wasm_level", wasm_level);
+    p2_options.addOption(WasiLevel, "wasi_level", .p2);
+    p2_options.addOption(EngineMode, "engine_mode", engine_mode);
+    p2_options.addOption(bool, "trace_ringbuffer", trace_ringbuffer);
+    p2_options.addOption(bool, "trace_stackprobe", trace_stackprobe);
+    p2_options.addOption(bool, "enable_component", true);
+    p2_options.addOption(bool, "enable_wasi_p3", false);
+    p2_options.addOption([]const u8, "version", zon.version);
+    const p2_options_mod = p2_options.createModule();
+    const core_p2 = b.createModule(.{
         .root_source_file = b.path("src/zwasm.zig"),
         .target = target,
         .optimize = optimize,
         .strip = strip_opt,
         .link_libc = true,
     });
-    applySanitize(core_p3, sanitize_opts);
-    core_p3.addImport("build_options", p3_options_mod);
-    core_p3.addIncludePath(b.path("include"));
-    core_p3.addImport("zwasm", core_p3);
+    applySanitize(core_p2, sanitize_opts);
+    core_p2.addImport("build_options", p2_options_mod);
+    core_p2.addIncludePath(b.path("include"));
+    core_p2.addImport("zwasm", core_p2);
     // `zig build test-list` — print every DISCOVERED test name (custom list
-    // runner; sweep S5(c)). Runs on the p3-forced module (the maximal file
-    // set); `scripts/check_test_discovery.sh` diffs this against the named
+    // runner; sweep S5(c)). Runs on `core`, whose default `.p3` is the maximal
+    // file set; `scripts/check_test_discovery.sh` diffs this against the named
     // `test "…"` blocks present in source to catch dead test blocks.
     const list_tests = b.addTest(.{
-        .root_module = core_p3,
+        .root_module = core,
         .test_runner = .{ .path = b.path("src/test_support/list_tests_runner.zig"), .mode = .simple },
     });
     const run_list_tests = b.addRunArtifact(list_tests);
     const test_list_step = b.step("test-list", "List every discovered test name (S5 test-discovery guard input)");
     test_list_step.dependOn(&run_list_tests.step);
 
-    const p3_tests = b.addTest(.{ .root_module = core_p3, .filters = test_filters });
-    const run_p3_tests = b.addRunArtifact(p3_tests);
-    const test_wasi_p3_step = b.step("test-wasi-p3", "Run the WASI Preview-3 (async) unit tests under a forced -Dwasi=p3 module (ADR-0193 P3)");
-    test_wasi_p3_step.dependOn(&run_p3_tests.step);
+    const p2_tests = b.addTest(.{ .root_module = core_p2, .filters = test_filters });
+    const run_p2_tests = b.addRunArtifact(p2_tests);
+    const test_wasi_p2_step = b.step("test-wasi-p2", "Run the unit tests of the -Dwasi=p2 build (ADR-0193)");
+    test_wasi_p2_step.dependOn(&run_p2_tests.step);
 
     // `zig build test-spec-simd` — §9.9 per ADR-0045. SIMD spec
     // assertion runner (parallel to spec_assert_runner). §9.9-a
@@ -1840,7 +1839,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_non_simd_assert_interp.step);
     test_all_step.dependOn(&run_threads_assert.step); // §17.4 D-301 atomics corpus
     test_all_step.dependOn(&run_comp_spec_assert.step); // E1 Component Model spec corpus (ADR-0170)
-    test_all_step.dependOn(&run_p3_tests.step); // ADR-0193 P3 — async unit tests under forced -Dwasi=p3
+    test_all_step.dependOn(&run_p2_tests.step); // ADR-0193 — unit tests of the -Dwasi=p2 build
     // ADR-0174 win-harden-I: assert the resource runners FAIL on a missing
     // corpus root (no silent "0 manifests" skip) on EVERY host incl. the Windows host.
     test_all_step.dependOn(&run_simd_absent.step);

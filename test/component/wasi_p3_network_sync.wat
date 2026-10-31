@@ -1,5 +1,5 @@
-;; WASI 0.3 sockets reached from a sync export, so a default (-Dwasi=p2) build
-;; serves them too. `connect(port)` creates a TCP socket and connects it to
+;; WASI 0.3 sockets reached from a sync export, so a -Dwasi=p2 build serves
+;; them too. `connect(port)` creates a TCP socket and connects it to
 ;; 127.0.0.1:port; `resolve()` resolves "127.0.0.1". Each returns the first
 ;; failing result<_, error-code> as (disc << 8) | error-code: 0 = ok, 0x100 =
 ;; err access-denied. Built from a core module and a world importing

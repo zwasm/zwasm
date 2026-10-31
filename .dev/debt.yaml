@@ -2571,7 +2571,7 @@ entries:
     front: A-diag-tail
   - id: "D-335"
     layer: "code"
-    status: "note"
+    status: "resolved"
     front: D-wasi03
     description: |-
       CURRENT STATE (2026-06-16): **CORE DONE** — the critical path A→D→ζ2→E→F is e2e-proven + CLI-reachable
@@ -2596,9 +2596,7 @@ entries:
       adversarial = future-bucket). Only (2) remains: **(2) broader P3 host interfaces** (sockets/http async = Unit
       E full; http needs the scheduler too) — FUTURE-BUCKET / consumer-gated, NOT `now` (2026-06, superseded by
       ADR-0205 phases C–D, 2026-08-11). Detailed history below.
-      GATES the ADR-0193 default flip: `-Dwasi` default stays `.p2` (async opt-in via `-Dwasi=p3`) until this
-      Unit E/F host breadth settles; when it does, flip the build.zig default `.p2 → .p3` (one line) + the
-      old-default-assuming sites (`check_build_dce` p2-clean assertion becomes p3-base, README/docs default text).
+      DISCHARGED 2026-10-31: the ADR-0193 default flip this row gated landed for 2.10.0 (#673).
       now (§9.0 Front D — WASI 0.3 / Preview 3 implementation campaign). WASI 0.3.0
       RATIFIED 2026-06-11; CM-async-based (`async` func / `stream<T>` / `future<T>`),
       NOT the core stack-switching proposal. Builds on the shipped CM + WASI-0.2
@@ -2713,7 +2711,7 @@ entries:
       WASI sockets/http wit. Use bundle mode per unit; gate `zig build test` +
       `test-spec`-style component corpus; 3-host at campaign milestones.
     first_raised: "2026-06-15"
-    last_reviewed: "2026-06-18"
+    last_reviewed: "2026-10-31"
     refs: |-
       ROADMAP §9.0 Front D + §1.2 floor + .dev/proposal_watch.md; ADR-0186 Rev1;
       ~/Documents/OSS/WASI/ + ~/Documents/OSS/WebAssembly/component-model/ + wasmtime 43+;
