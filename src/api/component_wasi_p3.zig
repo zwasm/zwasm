@@ -1,4 +1,4 @@
-// FILE-SIZE-EXEMPT: the P3 async driver + its official-corpus test suite (ADR-0193; compiles only under the p3-forced module); driver and corpus harness share the run loop — a split duplicates fixtures (N4) (investigated 2026-08-12, per ADR-0099)
+// FILE-SIZE-EXEMPT: the P3 async driver + its official-corpus test suite (ADR-0193; compiles only at -Dwasi>=p3); driver and corpus harness share the run loop — a split duplicates fixtures (N4) (investigated 2026-08-12, per ADR-0099)
 //! WASI **Preview 3** / Component-Model async runner (D-335 unit D-ηB,
 //! ADR-0188). Drives an async-lifted component export through the stackless
 //! callback ABI: instantiate (reusing the P2 general engine — async is a
