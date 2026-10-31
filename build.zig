@@ -636,13 +636,26 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(non_simd_assert_runner_exe);
     const run_non_simd_assert = b.addRunArtifact(non_simd_assert_runner_exe);
     run_non_simd_assert.addArg(b.pathFromRoot("test/spec/wasm-2.0-assert"));
+    // Pinned per lane, for the reason given on the wasm-3.0 interp run below.
+    run_non_simd_assert.setEnvironmentVariable("ZWASM_SPEC_ENGINE", "jit");
+    // #655 — the same corpus on the interpreter. Until this run the value
+    // asserts ran on the JIT only, so interp handlers that disagreed with
+    // the spec (nearest, min, max) passed every gate.
+    const run_non_simd_assert_interp = b.addRunArtifact(non_simd_assert_runner_exe);
+    run_non_simd_assert_interp.addArg(b.pathFromRoot("test/spec/wasm-2.0-assert"));
+    run_non_simd_assert_interp.setEnvironmentVariable("ZWASM_SPEC_ENGINE", "interp");
     const test_spec_wasm_2_0_assert_step = b.step("test-spec-wasm-2.0-assert", "Run Wasm 2.0 non-SIMD scalar spec assertion runner (§9.9 / 9.9-l-1b per ADR-0057; corpus lands at k-1)");
     test_spec_wasm_2_0_assert_step.dependOn(&run_non_simd_assert.step);
+    // A step of its own: `check_skip_impl_ratchet.sh` counts the SKIP lines in
+    // the step above's log, and this lane repeats the engine-independent ones.
+    const test_spec_wasm_2_0_assert_interp_step = b.step("test-spec-wasm-2.0-assert-interp", "Run the Wasm 2.0 non-SIMD scalar spec assertion corpus on the interpreter (#655)");
+    test_spec_wasm_2_0_assert_interp_step.dependOn(&run_non_simd_assert_interp.step);
 
     // §17.4 D-301 — official atomics (threads proposal) conformance corpus,
     // run by the same non_simd scalar runner (atomics are pure-int scalar).
     const run_threads_assert = b.addRunArtifact(non_simd_assert_runner_exe);
     run_threads_assert.addArg(b.pathFromRoot("test/spec/threads-assert"));
+    run_threads_assert.setEnvironmentVariable("ZWASM_SPEC_ENGINE", "jit");
     const test_spec_threads_assert_step = b.step("test-spec-threads-assert", "Run atomics (threads) official spec assertion corpus via the non-SIMD scalar runner (§17.4 / D-301)");
     test_spec_threads_assert_step.dependOn(&run_threads_assert.step);
 
@@ -1824,6 +1837,7 @@ pub fn build(b: *std.Build) void {
     // reports "0 manifests" against the missing directory so this
     // dependOn doesn't break test-all on a clean checkout.
     test_all_step.dependOn(&run_non_simd_assert.step);
+    test_all_step.dependOn(&run_non_simd_assert_interp.step);
     test_all_step.dependOn(&run_threads_assert.step); // §17.4 D-301 atomics corpus
     test_all_step.dependOn(&run_comp_spec_assert.step); // E1 Component Model spec corpus (ADR-0170)
     test_all_step.dependOn(&run_p3_tests.step); // ADR-0193 P3 — async unit tests under forced -Dwasi=p3

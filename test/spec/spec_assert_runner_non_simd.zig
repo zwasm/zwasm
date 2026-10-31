@@ -17,6 +17,9 @@
 //!
 //! Usage:
 //!   spec_assert_runner_non_simd <corpus-root>
+//! `ZWASM_SPEC_ENGINE=interp` runs the assertions on the interpreter
+//! instead (`spec_assert_runner_non_simd_interp.zig`); unset or `jit`
+//! keeps the JIT.
 //! exits non-zero if any `failed > 0`, OR if the corpus root is
 //! missing — the corpus is committed, so a missing root is a real
 //! error (e.g. a host-specific path-resolution failure), not a
@@ -29,6 +32,7 @@ const zwasm = @import("zwasm");
 const runner_mod = zwasm.engine.runner;
 const entry = zwasm.engine.codegen.shared.entry;
 const base = @import("spec_assert_runner_base.zig");
+const interp = @import("spec_assert_runner_non_simd_interp.zig");
 
 const ArgKind = base.ArgKind;
 const ArgValue = base.ArgValue;
@@ -69,6 +73,14 @@ pub fn main(init: std.process.Init) !void {
     // (D-279 H7 — the previously-always-on dump flooded Win64 stdout).
     base.dump_jit_enabled = init.environ_map.get("ZWASM_DUMP_JIT") != null;
 
+    const interp_mode = if (init.environ_map.get("ZWASM_SPEC_ENGINE")) |v| blk: {
+        if (std.mem.eql(u8, v, "interp")) break :blk true;
+        if (std.mem.eql(u8, v, "jit")) break :blk false;
+        std.debug.print("spec_assert_runner_non_simd: ZWASM_SPEC_ENGINE={s} is neither jit nor interp\n", .{v});
+        std.process.exit(2);
+    } else false;
+    const callbacks = if (interp_mode) interp.callbacks else non_simd_callbacks;
+
     var stdout_buf: [1024]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
@@ -97,6 +109,7 @@ pub fn main(init: std.process.Init) !void {
 
     var tally: base.AssertTally = .{};
     var manifest_count: u32 = 0;
+    var excluded_count: u32 = 0;
 
     const cwd = std.Io.Dir.cwd();
     var root = cwd.openDir(io, corpus_root, .{ .iterate = true }) catch |err| {
@@ -114,6 +127,13 @@ pub fn main(init: std.process.Init) !void {
     var iter = root.iterate();
     while (try iter.next(io)) |dir_entry| {
         if (dir_entry.kind != .directory) continue;
+        if (interp_mode) {
+            if (interp.exclusionFor(dir_entry.name)) |issue| {
+                try stdout.print("[interp] {s}: excluded ({s})\n", .{ dir_entry.name, issue });
+                excluded_count += 1;
+                continue;
+            }
+        }
         manifest_count += 1;
         // Per-manifest progress beacon to stderr (async-signal-safe;
         // raw write(2)) so a crash mid-corpus identifies the manifest
@@ -127,7 +147,15 @@ pub fn main(init: std.process.Init) !void {
             _ = base.write(2, dir_entry.name.ptr, dir_entry.name.len);
             _ = base.write(2, "\n", 1);
         }
-        try base.runCorpus(io, gpa, &root, dir_entry.name, stdout, &tally, non_simd_callbacks);
+        if (!interp_mode) {
+            try base.runCorpus(io, gpa, &root, dir_entry.name, stdout, &tally, callbacks);
+        } else {
+            const before = tally;
+            try interp.beginManifest(gpa);
+            defer interp.endManifest(gpa);
+            try base.runCorpus(io, gpa, &root, dir_entry.name, stdout, &tally, callbacks);
+            try stdout.print("[interp] {s}: {d} passed, {d} failed\n", .{ dir_entry.name, tally.passed - before.passed, tally.failed - before.failed });
+        }
         // Per-manifest stdout flush so partial progress survives a
         // crash. Cost: one flush per ~10 manifests; value: identifies
         // the last successfully-completed manifest.
@@ -135,8 +163,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try stdout.print(
-        "\nspec_assert_runner_non_simd: {d} passed, {d} failed, {d} skipped (= {d} skip-impl + {d} runtime-skip + {d} skip-adr) (over {d} manifests)\n",
+        "\nspec_assert_runner_non_simd [{s}]: {d} passed, {d} failed, {d} skipped (= {d} skip-impl + {d} runtime-skip + {d} skip-adr) (over {d} manifests)\n",
         .{
+            if (interp_mode) "interp" else "jit",
             tally.passed,
             tally.failed,
             tally.manifest_skip_impl + tally.runtime_skip + tally.skipped_adr,
@@ -146,6 +175,9 @@ pub fn main(init: std.process.Init) !void {
             manifest_count,
         },
     );
+    if (excluded_count > 0) {
+        try stdout.print("spec_assert_runner_non_simd [interp]: {d} manifests excluded, not read and not in lines= below\n", .{excluded_count});
+    }
     // ADR-0210 — print the enumeration denominator next to the verdict
     // columns. Without it "25539 passed" cannot be checked against the
     // work enumerated: a directive dropped before reaching a column is
