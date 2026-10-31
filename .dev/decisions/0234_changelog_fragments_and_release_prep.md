@@ -70,4 +70,4 @@ stays manual (ADR-0156).
 | Date       | SHA          | Note |
 |------------|--------------|------|
 | 2026-10-24 | `cac873e5d` | Initial; landed with D1–D3 (#641). |
-| 2026-10-31 | `<backfill>` | D1 gains `known-limitations`; `check_changelog_assemble.sh` runs from `gate_commit.sh` when it or the assemble script is staged. |
+| 2026-10-31 | `859e780d6` | D1 gains `known-limitations`; `check_changelog_assemble.sh` runs from `gate_commit.sh` when it or the assemble script is staged. |
