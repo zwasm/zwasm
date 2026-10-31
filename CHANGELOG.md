@@ -10,6 +10,50 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-10-31
+
+### Changed
+
+- **zwasm builds with Zig 0.17.0, and only 0.17.0** (#624). An embedder that
+  depends on the Zig package moves to 0.17.0 with this release; 0.16.0 remains
+  the Zig for 2.8.x (ADR-0235).
+
+- **`zwasm --version` spells the build mode as Zig 0.17 does** (#624):
+  `mode: safe` / `fast` / `small` / `debug` where 2.8 printed `ReleaseSafe` /
+  `ReleaseFast` / `ReleaseSmall` / `Debug`. The bench's `engine_build_mode`
+  and `runner_build_mode` fields change the same way.
+
+- **Interpreter calls are faster** (#624). Against 0.16.0 on one host, the
+  shootout `fib2` fixture takes 67% less time on the interpreter, `ctype` 48%
+  and `ratelimit` 19%. Each call clears its frame's 2.5 KB label stack through
+  compiler_rt's memset, which Zig 0.17 vectorizes.
+
+### Fixed
+
+- **On the interpreter, `nearest` rounds ties to even and quiets a signalling
+  NaN, and `min` / `max` return `-0` / `+0` for a pair of zeros** (#655). They
+  rounded ties away from zero, could return the signalling NaN, and took the
+  zero's sign from operand order. The Wasm 2.0 value-assert corpus now also
+  runs on the interpreter in `test-all`.
+
+- **A component built with the preview1 adapter (a Go reactor, for one)
+  places lowered results through the lower's own realloc** (#639). It used
+  `cabi_realloc`, and the adapter asserted. Lowers naming two different
+  reallocs now fail the build with `UnsupportedLowerRealloc`.
+
+### Known limitations
+
+- **The JIT declines `memory.init` on a data segment index of 2048 or more,
+  and `table.init` on an element segment index of 1024 or more** (#659).
+  `--engine jit` and `zwasm compile` fail with `UnsupportedOp`; the
+  interpreter runs the module, so `--engine interp` is the workaround.
+
+- **A `.cwasm` does not record which zwasm build produced it** (#665).
+  `zwasm run x.cwasm` accepts any artifact whose format version and arch
+  match and reads the runtime at the producing build's layout. Load a `.cwasm`
+  only into the binary that compiled it; the `--cache` directory is keyed by
+  version, so only development builds sharing one are exposed.
+
 ## [2.8.1] - 2026-10-29
 
 ### Security
