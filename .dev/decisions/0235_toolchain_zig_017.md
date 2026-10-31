@@ -38,4 +38,4 @@ Zig an embedder must build with.
 
 | Date       | SHA          | Note |
 |------------|--------------|------|
-| 2026-10-31 | `<backfill>` | Initial, Accepted on PR #648; landed with the 0.17.0 pin it defines. |
+| 2026-10-31 | `828ff7148` | Initial, Accepted on PR #648; landed with the 0.17.0 pin it defines. |
