@@ -123,6 +123,36 @@ fn popF64Pair(rt: *Runtime) Trap!struct { a: f64, b: f64 } {
     return .{ .a = a, .b = b };
 }
 
+/// Wasm spec §4.3.3 (fnearest) — round to the nearest integral value, ties
+/// to even, keeping the sign of `x` (so `nearest(-0.5)` is `-0`). A NaN comes
+/// back with its quiet bit set, as ROUNDSS / FRINTN return it. `@round`
+/// rounds ties away from zero.
+fn nearest(comptime F: type, x: F) F {
+    const Bits = @Int(.unsigned, @bitSizeOf(F));
+    if (std.math.isNan(x)) {
+        const quiet: Bits = @as(Bits, 1) << (std.math.floatMantissaBits(F) - 1);
+        return @bitCast(@as(Bits, @bitCast(x)) | quiet);
+    }
+    var r = @round(x);
+    if (@abs(x - @trunc(x)) == 0.5 and @rem(r, 2) != 0) r -= std.math.copysign(@as(F, 1), x);
+    return std.math.copysign(r, x);
+}
+
+/// Wasm spec §4.3.3 (fmin / fmax) for non-NaN operands. `+0` and `-0`
+/// compare equal, so on equal operands the result is taken from the bits:
+/// OR gives `min(+0, -0) = -0`, AND gives `max(+0, -0) = +0`, and any other
+/// equal pair has identical bits. The JIT does the same (ORPS / ANDPS in
+/// `emitFpMinMax`). `@min` / `@max` return either zero.
+fn minMax(comptime F: type, comptime is_max: bool, a: F, b: F) F {
+    const Bits = @Int(.unsigned, @bitSizeOf(F));
+    if (a == b) {
+        const x: Bits = @bitCast(a);
+        const y: Bits = @bitCast(b);
+        return @bitCast(if (is_max) x & y else x | y);
+    }
+    return if (is_max) @max(a, b) else @min(a, b);
+}
+
 // --- f32 relops ---
 fn f32Eq(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     const rt = Runtime.fromOpaque(c);
@@ -178,7 +208,7 @@ fn f32Trunc(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
 }
 fn f32Nearest(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     const rt = Runtime.fromOpaque(c);
-    try rt.pushOperand(.{ .f32 = @round(rt.popOperand().f32) });
+    try rt.pushOperand(.{ .f32 = nearest(f32, rt.popOperand().f32) });
 }
 fn f32Sqrt(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     const rt = Runtime.fromOpaque(c);
@@ -212,7 +242,7 @@ fn f32Min(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     if (std.math.isNan(p.a) or std.math.isNan(p.b)) {
         try rt.pushOperand(.{ .f32 = std.math.nan(f32) });
     } else {
-        try rt.pushOperand(.{ .f32 = @min(p.a, p.b) });
+        try rt.pushOperand(.{ .f32 = minMax(f32, false, p.a, p.b) });
     }
 }
 fn f32Max(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
@@ -221,7 +251,7 @@ fn f32Max(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     if (std.math.isNan(p.a) or std.math.isNan(p.b)) {
         try rt.pushOperand(.{ .f32 = std.math.nan(f32) });
     } else {
-        try rt.pushOperand(.{ .f32 = @max(p.a, p.b) });
+        try rt.pushOperand(.{ .f32 = minMax(f32, true, p.a, p.b) });
     }
 }
 fn f32Copysign(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
@@ -285,7 +315,7 @@ fn f64Trunc(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
 }
 fn f64Nearest(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     const rt = Runtime.fromOpaque(c);
-    try rt.pushOperand(.{ .f64 = @round(rt.popOperand().f64) });
+    try rt.pushOperand(.{ .f64 = nearest(f64, rt.popOperand().f64) });
 }
 fn f64Sqrt(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     const rt = Runtime.fromOpaque(c);
@@ -319,7 +349,7 @@ fn f64Min(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     if (std.math.isNan(p.a) or std.math.isNan(p.b)) {
         try rt.pushOperand(.{ .f64 = std.math.nan(f64) });
     } else {
-        try rt.pushOperand(.{ .f64 = @min(p.a, p.b) });
+        try rt.pushOperand(.{ .f64 = minMax(f64, false, p.a, p.b) });
     }
 }
 fn f64Max(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
@@ -328,7 +358,7 @@ fn f64Max(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     if (std.math.isNan(p.a) or std.math.isNan(p.b)) {
         try rt.pushOperand(.{ .f64 = std.math.nan(f64) });
     } else {
-        try rt.pushOperand(.{ .f64 = @max(p.a, p.b) });
+        try rt.pushOperand(.{ .f64 = minMax(f64, true, p.a, p.b) });
     }
 }
 fn f64Copysign(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
@@ -402,4 +432,54 @@ test "f64.copysign: magnitude from a, sign from b" {
     try rt.pushOperand(.{ .f64 = -1.0 });
     try driveOne(&rt, &t, .@"f64.copysign", 0, 0);
     try testing.expectEqual(@as(f64, -3.0), rt.popOperand().f64);
+}
+
+fn runF32Bits(t: ZirOp, operands: []const u32) !u32 {
+    var table = DispatchTable.init();
+    mvp.register(&table);
+    var rt = Runtime.init(testing.allocator);
+    defer rt.deinit();
+    for (operands) |o| try rt.pushOperand(.{ .f32 = @bitCast(o) });
+    try driveOne(&rt, &table, t, 0, 0);
+    return @bitCast(rt.popOperand().f32);
+}
+fn runF64Bits(t: ZirOp, operands: []const u64) !u64 {
+    var table = DispatchTable.init();
+    mvp.register(&table);
+    var rt = Runtime.init(testing.allocator);
+    defer rt.deinit();
+    for (operands) |o| try rt.pushOperand(.{ .f64 = @bitCast(o) });
+    try driveOne(&rt, &table, t, 0, 0);
+    return @bitCast(rt.popOperand().f64);
+}
+
+test "f32.nearest / f64.nearest: ties round to even and keep the sign" {
+    const cases = [_][2]f64{ .{ 0.5, 0.0 }, .{ -0.5, -0.0 }, .{ 1.5, 2.0 }, .{ 2.5, 2.0 }, .{ -4.5, -4.0 }, .{ -3.5, -4.0 }, .{ 0.75, 1.0 } };
+    for (cases) |c| {
+        const want32: u32 = @bitCast(@as(f32, @floatCast(c[1])));
+        try testing.expectEqual(want32, try runF32Bits(.@"f32.nearest", &.{@bitCast(@as(f32, @floatCast(c[0])))}));
+        const want64: u64 = @bitCast(c[1]);
+        try testing.expectEqual(want64, try runF64Bits(.@"f64.nearest", &.{@bitCast(c[0])}));
+    }
+}
+
+test "f32.nearest / f64.nearest: a signalling NaN comes back quiet with its payload" {
+    try testing.expectEqual(@as(u32, 0x7fe00000), try runF32Bits(.@"f32.nearest", &.{0x7fa00000}));
+    try testing.expectEqual(@as(u32, 0xffe00000), try runF32Bits(.@"f32.nearest", &.{0xffa00000}));
+    try testing.expectEqual(@as(u64, 0x7ffc000000000000), try runF64Bits(.@"f64.nearest", &.{0x7ff4000000000000}));
+    try testing.expectEqual(@as(u64, 0xfffc000000000000), try runF64Bits(.@"f64.nearest", &.{0xfff4000000000000}));
+}
+
+test "f32.min / f64.min: -0 wins over +0 in either order" {
+    try testing.expectEqual(@as(u32, 0x80000000), try runF32Bits(.@"f32.min", &.{ 0x00000000, 0x80000000 }));
+    try testing.expectEqual(@as(u32, 0x80000000), try runF32Bits(.@"f32.min", &.{ 0x80000000, 0x00000000 }));
+    try testing.expectEqual(@as(u64, 0x8000000000000000), try runF64Bits(.@"f64.min", &.{ 0, 0x8000000000000000 }));
+    try testing.expectEqual(@as(u64, 0x8000000000000000), try runF64Bits(.@"f64.min", &.{ 0x8000000000000000, 0 }));
+}
+
+test "f32.max / f64.max: +0 wins over -0 in either order" {
+    try testing.expectEqual(@as(u32, 0x00000000), try runF32Bits(.@"f32.max", &.{ 0x80000000, 0x00000000 }));
+    try testing.expectEqual(@as(u32, 0x00000000), try runF32Bits(.@"f32.max", &.{ 0x00000000, 0x80000000 }));
+    try testing.expectEqual(@as(u64, 0), try runF64Bits(.@"f64.max", &.{ 0x8000000000000000, 0 }));
+    try testing.expectEqual(@as(u64, 0), try runF64Bits(.@"f64.max", &.{ 0, 0x8000000000000000 }));
 }
