@@ -159,3 +159,9 @@ preservation is pinned by characterization before the move.
   `record_binary_size`, comp_options floor, docs) is the de-risking input for that one-line flip.
 - **Superseded**: ADR-0182's `-Dcomponent` flag is removed; ADR-0181/0182 wording about the separate component
   axis is superseded on this branch (the flag no longer exists; component == `-Dwasi>=p2`).
+
+## Revision history
+
+| Date       | SHA          | Note |
+|------------|--------------|------|
+| 2026-10-31 | —            | The default flips `p2 → p3` for 2.10.0 (PR #673), discharging D-335 (ADR-0205 settled the host breadth); `test-wasi-p3` becomes `test-wasi-p2`, the unit suite of the `-Dwasi=p2` opt-out build. |
