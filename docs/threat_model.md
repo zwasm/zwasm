@@ -8,7 +8,7 @@ we treat as a security vulnerability. To report one, follow
 
 In scope: the released `zwasm` CLI binaries, and `libzwasm` (the C API in
 `include/` and the Zig API) built from a release tag with the default build
-options, or with `-Dwasi=p3`, on the targets we publish. Out of scope: other
+options, or with `-Dwasi=p2`, on the targets we publish. Out of scope: other
 build options, and the development tooling under `.dev/` and `scripts/`.
 
 ## Maturity

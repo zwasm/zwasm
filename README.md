@@ -11,8 +11,8 @@ A spec-compliant WebAssembly runtime written in Zig.
 - **Full spec coverage** — WebAssembly 3.0 (all 9 proposals), spec testsuite
   green on macOS aarch64, Linux x86_64 and aarch64, and Windows x86_64. CI runs both
   engines; the JIT lane enumerates its known-wrong outcomes and gates on an
-  exact match. WASI 0.1, 0.2 (Component Model, on by default) and 0.3
-  (native async, opt-in).
+  exact match. WASI 0.1, 0.2 (Component Model) and 0.3 (native async),
+  all on by default.
 - **Three execution backends** — interpreter, JIT (arm64 + x86_64) and AOT
   (`.cwasm`), differentially tested against each other on every change.
   wasmtime is the external oracle for the interpreter and JIT; the AOT lane
@@ -91,8 +91,8 @@ out of scope for now (demand-driven).
 | Spec                                 | Status                    | Notes                                                                                                                                                                                                                                                                                                                                                         |
 |--------------------------------------|---------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | WASI 0.1 (preview1)                  | ✅ functional, both engines | args / env / preopened dirs / clock / random / fd I/O with an enforced rights model, on the interpreter, the JIT and AOT. Measured against the official `WebAssembly/wasi-testsuite` preview1 corpus by a lane that blocks `ci-required`; `adapters/zwasm.py` is upstream, so a clean checkout of the suite re-derives the result against a stock binary |
-| WASI 0.2 (preview2, Component Model) | ✅ functional, default-ON | real `wasm32-wasip2` Rust / TinyGo components run end-to-end (fs, sockets incl. TCP listeners behind `--allow-network`, guest-defined resources); typed embedder API (introspection + `invokeTyped`); the Component Model spec corpus (incl. the official `assert_invalid` cases) is green in `test-all`; gated by `-Dwasi>=p2` (the default), `-Dwasi=p1` opts out |
-| WASI 0.3 (preview3, native async)    | ✅ 0.3.0 full coverage, opt-in (`-Dwasi=p3`) | all six WASI 0.3 proposals (0.3.0 released 2026-06-11; 0.3.1 and 0.3.2 change only the version strings, but a 0.3.1+ runtime must also accept the Component Model `map` type and `implements` annotation, which zwasm refuses: #611, #612) — `cli` / `clocks` / `random` / `filesystem` / `sockets` / `http` — on the Component Model's native async (`stream<T>` / `future<T>`, waitable-sets; async-lifted exports in the callback form, a stackful async lift is declined). Sockets (TCP and UDP) and http (client and the exported `handler`) are served end-to-end. Official `wasm32-wasip3` corpus **45/45 green on all three supported OSes** (`@unstable` interfaces excluded, as upstream gates them); the lane reconciles that count against the vendored corpus |
+| WASI 0.2 (preview2, Component Model) | ✅ functional, default-ON | real `wasm32-wasip2` Rust / TinyGo components run end-to-end (fs, sockets incl. TCP listeners behind `--allow-network`, guest-defined resources); typed embedder API (introspection + `invokeTyped`); the Component Model spec corpus (incl. the official `assert_invalid` cases) is green in `test-all`; gated by `-Dwasi>=p2` (the default is `p3`), `-Dwasi=p1` opts out |
+| WASI 0.3 (preview3, native async)    | ✅ 0.3.0 full coverage, default-ON (`-Dwasi=p2` opts out) | all six WASI 0.3 proposals (0.3.0 released 2026-06-11; 0.3.1 and 0.3.2 change only the version strings, but a 0.3.1+ runtime must also accept the Component Model `map` type and `implements` annotation, which zwasm refuses: #611, #612) — `cli` / `clocks` / `random` / `filesystem` / `sockets` / `http` — on the Component Model's native async (`stream<T>` / `future<T>`, waitable-sets; async-lifted exports in the callback form, a stackful async lift is declined). Sockets (TCP and UDP) and http (client and the exported `handler`) are served end-to-end. Official `wasm32-wasip3` corpus **45/45 green on all three supported OSes** (`@unstable` interfaces excluded, as upstream gates them); the lane reconciles that count against the vendored corpus |
 
 All three execution paths do full WASI I/O — the interpreter, the JIT
 (`--engine jit`), and AOT (`.cwasm`). The JIT additionally
@@ -197,7 +197,7 @@ FFI-capable language, not just C.
 
 ```
 -Dwasm=v3_0|v2_0|v1_0       # default v3_0; lower levels omit later proposals
--Dwasi=none|p1|p2|p3        # default p2; ordered tier. p2 = Component Model / WASI-P2 host,
+-Dwasi=none|p1|p2|p3        # default p3; ordered tier. p2 = Component Model / WASI-P2 host,
                             #   p3 = + Preview-3 async. -Dwasi=p1 = lean build (~-8%)
 -Dengine=both|jit|interp    # default both
 -Dstrip=true|false          # default false

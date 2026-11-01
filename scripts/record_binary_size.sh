@@ -4,7 +4,7 @@
 # "lightweight" axis of the 完成形 bar is OBSERVED, not assumed.
 #
 # Records two variants per invocation (append-only, per ROADMAP §A9):
-#   base — `zig build -Doptimize=ReleaseFast` (components default-ON via -Dwasi=p2, ADR-0193)
+#   base — `zig build -Doptimize=ReleaseFast` (the default -Dwasi=p3, ADR-0193)
 #   lean — same + -Dwasi=p1 (CM/WASI-P2 subsystem stripped)
 #
 # Cadence: manual / phase-boundary (alongside run_bench.sh --phase-record);
@@ -38,7 +38,7 @@ if [ ! -f "$out" ]; then
     cat > "$out" <<'HDR'
 # Release binary-size history — D-320 (ADR-0181). Append-only (§A9);
 # one row per (commit, variant) via scripts/record_binary_size.sh.
-# variant: "base" = ReleaseFast default (components ON, -Dwasi=p2);
+# variant: "base" = ReleaseFast default (-Dwasi=p2 until 2.9.0, -Dwasi=p3 from 2.10.0);
 # "lean" = -Dwasi=p1 (no Component Model / P2 host; ADR-0193 replaced -Dcomponent=false).
 HDR
 fi
