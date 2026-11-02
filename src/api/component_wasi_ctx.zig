@@ -21,6 +21,7 @@ const wasi_clocks = @import("../wasi/clocks.zig");
 const wasi_p1 = @import("../wasi/preview1.zig");
 const p2sock = @import("../wasi/p2_sockets.zig");
 const p3http = @import("../wasi/p3_http.zig");
+const p2http = @import("component_wasi_p2_http.zig");
 const resource_table = @import("../feature/component/resource_table.zig");
 const async_mod = @import("../feature/component/async.zig");
 const Caller = @import("../zwasm/caller.zig").Caller;
@@ -202,13 +203,15 @@ pub const WasiP2Ctx = struct {
     /// (receive → stream<u8>), `host_tcp_tx` (send's drained data stream).
     /// Values = the tcp socket list index (rep).
     udp_sockets: std.ArrayList(p2sock.UdpSocket) = .empty,
-    /// WASI-0.3 `wasi:http/types` `fields` resources (ADR-0205 phase D);
+    /// `wasi:http/types` `fields` resources (ADR-0205 phase D; both generations);
     /// a HTTP_FIELDS_RT handle's rep indexes this list. Dropped entries are
     /// deinit'ed in place (slot stays; reps are never reused).
     http_fields: std.ArrayList(p3http.HttpFields) = .empty,
     http_requests: std.ArrayList(p3http.HttpRequest) = .empty,
     http_responses: std.ArrayList(p3http.HttpResponse) = .empty,
     http_reqopts: std.ArrayList(p3http.HttpRequestOptions) = .empty,
+    /// The 0.2-only halves of the client exchange (bodies, futures).
+    http2: p2http.State = .{},
     /// Host-resolved trailers futures (keyed by READABLE handle): a guest
     /// read completes immediately with `ok(none)` — the shape a
     /// harness-built request's `consume-body` hands out (ADR-0205 D-3).
@@ -285,7 +288,7 @@ pub const WasiP2Ctx = struct {
     pub const SOCK_POLLABLE_RT: u32 = 10;
     /// WASI-0.3 `udp-socket` (rep = index into `udp_sockets`).
     pub const UDP_SOCKET3_RT: u32 = 11;
-    /// WASI-0.3 `wasi:http/types` `fields` (rep = index into `http_fields`;
+    /// `wasi:http/types` `fields` (rep = index into `http_fields`;
     /// drop frees the entry's pair storage — no OS handle).
     pub const HTTP_FIELDS_RT: u32 = 12;
     /// A BORROWED view onto a fields rep (minted by `request.get-headers` /
@@ -317,6 +320,17 @@ pub const WasiP2Ctx = struct {
     /// The pollable `monotonic-clock.subscribe-instant` / `subscribe-duration`
     /// mint. Rep indexes `clock_deadlines`.
     pub const CLOCK_POLLABLE_RT: u32 = 22;
+    /// The `wasi:http@0.2` client resources (`component_wasi_p2_http.zig`).
+    /// Each rep indexes the matching `http2` table; the outgoing-request,
+    /// incoming-response, request-options and fields reuse the 0.3 ids.
+    pub const HTTP2_OUTGOING_BODY_RT: u32 = 23;
+    pub const HTTP2_FUTURE_RESPONSE_RT: u32 = 24;
+    pub const HTTP2_INCOMING_BODY_RT: u32 = 25;
+    pub const HTTP2_FUTURE_TRAILERS_RT: u32 = 26;
+    /// The memory-backed streams of a 0.2 request body (rep = its
+    /// outgoing-body) and response body (rep = its incoming-body).
+    pub const HTTP_BODY_OUT_RT: u32 = 27;
+    pub const HTTP_BODY_IN_RT: u32 = 28;
 
     /// Iteration state of one live directory-entry-stream: the directory's
     /// P1 fd + the P1 readdir cookie to resume after.
@@ -388,6 +402,7 @@ pub const WasiP2Ctx = struct {
         self.http_requests.deinit(self.alloc);
         self.http_responses.deinit(self.alloc);
         self.http_reqopts.deinit(self.alloc);
+        self.http2.deinit(self.alloc);
         self.host_trailer_ok_futures.deinit(self.alloc);
         var body_it = self.host_body_bytes.iterator();
         while (body_it.next()) |e| self.alloc.free(e.value_ptr.data);
@@ -632,6 +647,113 @@ pub fn ctxIo(ctx: *WasiP2Ctx) WasiP2Error!std.Io {
 /// WIT result has no error arm.
 pub fn ctxRequireNetwork(ctx: *WasiP2Ctx) error{AccessDenied}!void {
     if (!ctx.host.allow_network) return error.AccessDenied;
+}
+
+/// The `wasi:http` tables both generations index (a fields handle is the
+/// owned HTTP_FIELDS_RT or a borrowed HTTP_FIELDS_VIEW_RT).
+pub fn ctxHttpFields(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*p3http.HttpFields {
+    if (rep >= ctx.http_fields.items.len) return WasiP2Error.InvalidHandle;
+    return &ctx.http_fields.items[rep];
+}
+
+pub fn ctxHttpFieldsSelf(ctx: *WasiP2Ctx, self: u32) WasiP2Error!*p3http.HttpFields {
+    const rep = ctx.resources.rep(WasiP2Ctx.HTTP_FIELDS_RT, self) catch
+        try ctx.resources.rep(WasiP2Ctx.HTTP_FIELDS_VIEW_RT, self);
+    return ctxHttpFields(ctx, rep);
+}
+
+pub fn ctxMintHttpFields(ctx: *WasiP2Ctx, fields: p3http.HttpFields) WasiP2Error!u32 {
+    const idx: u32 = @intCast(ctx.http_fields.items.len);
+    ctx.http_fields.append(ctx.alloc, fields) catch return WasiP2Error.OutOfMemory;
+    return ctx.resources.new(WasiP2Ctx.HTTP_FIELDS_RT, idx);
+}
+
+pub fn ctxHttpRequest(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*p3http.HttpRequest {
+    if (rep >= ctx.http_requests.items.len) return WasiP2Error.InvalidHandle;
+    return &ctx.http_requests.items[rep];
+}
+
+/// A completed `httpExchange`. `headers_rep` indexes an immutable entry in
+/// `http_fields`; `body` is the caller's to own.
+pub const HttpExchange = struct { status: u16, headers_rep: u32, body: []u8 };
+
+/// The blocking HTTP exchange both `wasi:http` generations send through:
+/// `std.http.Client` over `http://` + the request's authority and path.
+/// `error.HttpFailed` is every failure the guest sees as `internal-error`;
+/// the network grant is the caller's to check.
+pub fn httpExchange(ctx: *WasiP2Ctx, req: *const p3http.HttpRequest, body: []u8) (WasiP2Error || error{HttpFailed})!HttpExchange {
+    const io = try ctxIo(ctx);
+    const authority = req.authority orelse return error.HttpFailed;
+    const path = req.path_with_query orelse "/";
+    const url = ctx.alloc.print("http://{s}{s}", .{ authority, path }) catch return WasiP2Error.OutOfMemory;
+    defer ctx.alloc.free(url);
+    const uri = std.Uri.parse(url) catch return error.HttpFailed;
+    const method: std.http.Method = switch (req.method) {
+        .get => .GET,
+        .head => .HEAD,
+        .post => .POST,
+        .put => .PUT,
+        .delete => .DELETE,
+        .connect => .CONNECT,
+        .options => .OPTIONS,
+        .trace => .TRACE,
+        .patch => .PATCH,
+        .other => return error.HttpFailed,
+    };
+    // content-length is computed by the std client from the body.
+    var extra: std.ArrayList(std.http.Header) = .empty;
+    defer extra.deinit(ctx.alloc);
+    if (req.headers_rep < ctx.http_fields.items.len) {
+        for (ctx.http_fields.items[req.headers_rep].entries.items) |p| {
+            if (std.ascii.eqlIgnoreCase(p.name, "content-length")) continue;
+            extra.append(ctx.alloc, .{ .name = p.name, .value = p.value }) catch return WasiP2Error.OutOfMemory;
+        }
+    }
+    // std writes a body only for POST / PUT / PATCH / QUERY (and asserts so);
+    // another method's body follows a bodiless head that states its length.
+    const raw_body = !method.requestHasBody() and body.len != 0;
+    const len_str = ctx.alloc.print("{d}", .{body.len}) catch return WasiP2Error.OutOfMemory;
+    defer ctx.alloc.free(len_str);
+    if (raw_body) extra.append(ctx.alloc, .{ .name = "content-length", .value = len_str }) catch return WasiP2Error.OutOfMemory;
+    var client: std.http.Client = .{ .allocator = ctx.alloc, .io = io };
+    defer client.deinit();
+    var hreq = client.request(method, uri, .{ .extra_headers = extra.items }) catch return error.HttpFailed;
+    defer hreq.deinit();
+    if (method.requestHasBody()) {
+        hreq.sendBodyComplete(body) catch return error.HttpFailed;
+    } else if (raw_body) {
+        hreq.sendBodilessUnflushed() catch return error.HttpFailed;
+        const conn = hreq.connection.?;
+        conn.writer().writeAll(body) catch return error.HttpFailed;
+        conn.flush() catch return error.HttpFailed;
+    } else {
+        hreq.sendBodiless() catch return error.HttpFailed;
+    }
+    var redirect_buf: [2048]u8 = undefined;
+    var hresp = hreq.receiveHead(&redirect_buf) catch return error.HttpFailed;
+
+    const fields_idx: u32 = @intCast(ctx.http_fields.items.len);
+    ctx.http_fields.append(ctx.alloc, .{}) catch return WasiP2Error.OutOfMemory;
+    var hit = hresp.head.iterateHeaders();
+    while (hit.next()) |hd| {
+        ctx.http_fields.items[fields_idx].appendChecked(ctx.alloc, hd.name, hd.value) catch continue;
+    }
+    ctx.http_fields.items[fields_idx].immutable = true;
+
+    var transfer_buf: [4096]u8 = undefined;
+    const rdr = hresp.reader(&transfer_buf);
+    var resp_body: std.ArrayList(u8) = .empty;
+    errdefer resp_body.deinit(ctx.alloc);
+    while (true) {
+        const chunk = rdr.peekGreedy(1) catch |e| switch (e) {
+            error.EndOfStream => break,
+            else => return error.HttpFailed,
+        };
+        resp_body.appendSlice(ctx.alloc, chunk) catch return WasiP2Error.OutOfMemory;
+        rdr.toss(chunk.len);
+    }
+    const owned = resp_body.toOwnedSlice(ctx.alloc) catch return WasiP2Error.OutOfMemory;
+    return .{ .status = @backingInt(hresp.head.status), .headers_rep = fields_idx, .body = owned };
 }
 
 /// `wasi_fd.readStdin` with its errors in this layer's set.

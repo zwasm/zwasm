@@ -46,3 +46,4 @@ bench/results/recent.yaml
 scripts/dev_hosts.env
 scripts/spec_distill/__pycache__/
 test/component/wasip3/target/
+test/component/wasip2_http/target/

@@ -1,10 +1,11 @@
-//! WASI 0.3 `wasi:http/types` host backing (ADR-0205 phase D).
+//! `wasi:http/types` host backing (ADR-0205 phase D; 0.2's client half
+//! shares it, #564).
 //!
 //! The OS-agnostic data model half: the `fields` resource (RFC 9110
-//! field-name/field-value validation + ordered storage) and, as phase D
-//! progresses, the request/request-options/response models. The component
-//! trampolines (`http3*` in `component_wasi_p2.zig`) lower WIT records onto
-//! this surface; nothing here touches guest memory.
+//! field-name/field-value validation + ordered storage) and the
+//! request/request-options/response models. The component trampolines
+//! (`component_wasi_p3_host.zig`, `component_wasi_p2_http.zig`) lower WIT
+//! records onto this surface; nothing here touches guest memory.
 //!
 //! DIVERGENCE note (pinned by the official http-fields test): field NAMES
 //! are stored LOWERCASED and `copy-all` returns them that way — the WIT

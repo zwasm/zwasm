@@ -325,6 +325,26 @@ pub const P2Op = enum {
     http3_request_consume_body,
     http3_response_consume_body,
     http3_client_send,
+    // wasi:http@0.2 client ops whose lowering differs from 0.3 (#564).
+    http2_fields_from_list,
+    http2_fields_set,
+    http2_fields_delete,
+    http2_fields_append,
+    http2_outgoing_request_new,
+    http2_outgoing_request_body,
+    http2_reqopts_connect_set,
+    http2_reqopts_first_byte_set,
+    http2_reqopts_between_bytes_set,
+    http2_outgoing_body_write,
+    http2_outgoing_body_finish,
+    http2_handle,
+    http2_future_subscribe,
+    http2_future_response_get,
+    http2_incoming_response_consume,
+    http2_incoming_body_stream,
+    http2_incoming_body_finish,
+    http2_future_trailers_get,
+    http2_http_error_code,
     // wasi:io / wasi:cli resource drops a full wasi:cli world imports
     // directly (error / pollable / terminal handles); all route to the
     // generic drop.
@@ -609,6 +629,25 @@ pub fn p1Target(op: P2Op) P1Target {
         .http3_request_consume_body,
         .http3_response_consume_body,
         .http3_client_send,
+        .http2_fields_from_list,
+        .http2_fields_set,
+        .http2_fields_delete,
+        .http2_fields_append,
+        .http2_outgoing_request_new,
+        .http2_outgoing_request_body,
+        .http2_reqopts_connect_set,
+        .http2_reqopts_first_byte_set,
+        .http2_reqopts_between_bytes_set,
+        .http2_outgoing_body_write,
+        .http2_outgoing_body_finish,
+        .http2_handle,
+        .http2_future_subscribe,
+        .http2_future_response_get,
+        .http2_incoming_response_consume,
+        .http2_incoming_body_stream,
+        .http2_incoming_body_finish,
+        .http2_future_trailers_get,
+        .http2_http_error_code,
         => .noop,
         // Poll + subscribe: no P1 facility.
         .poll_pollable_ready,
@@ -849,18 +888,20 @@ const table = [_]Entry{
     .{ .iface = "wasi:sockets/types", .func = "[method]udp-socket.set-send-buffer-size", .op = .sock3_udp_sndbuf_set, .gens = p3_only },
     .{ .iface = "wasi:sockets/types", .func = "[resource-drop]udp-socket", .op = .io_resource_drop, .gens = p3_only },
     .{ .iface = "wasi:sockets/ip-name-lookup", .func = "resolve-addresses", .op = .sock3_resolve_addresses, .gens = p3_only },
-    // wasi:http/types@0.3.0 rows (ADR-0205 phase D) — the `fields` resource.
-    .{ .iface = "wasi:http/types", .func = "[constructor]fields", .op = .http3_fields_new, .gens = p3_only },
+    // wasi:http/types `fields` (ADR-0205 phase D): rows without a mask lower
+    // identically at 0.2 and 0.3. `entries` is 0.2's `copy-all`.
+    .{ .iface = "wasi:http/types", .func = "[constructor]fields", .op = .http3_fields_new },
     .{ .iface = "wasi:http/types", .func = "[static]fields.from-list", .op = .http3_fields_from_list, .gens = p3_only },
-    .{ .iface = "wasi:http/types", .func = "[method]fields.get", .op = .http3_fields_get, .gens = p3_only },
-    .{ .iface = "wasi:http/types", .func = "[method]fields.has", .op = .http3_fields_has, .gens = p3_only },
+    .{ .iface = "wasi:http/types", .func = "[method]fields.get", .op = .http3_fields_get },
+    .{ .iface = "wasi:http/types", .func = "[method]fields.has", .op = .http3_fields_has },
     .{ .iface = "wasi:http/types", .func = "[method]fields.set", .op = .http3_fields_set, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]fields.delete", .op = .http3_fields_delete, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]fields.get-and-delete", .op = .http3_fields_get_and_delete, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]fields.append", .op = .http3_fields_append, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]fields.copy-all", .op = .http3_fields_copy_all, .gens = p3_only },
-    .{ .iface = "wasi:http/types", .func = "[method]fields.clone", .op = .http3_fields_clone, .gens = p3_only },
-    .{ .iface = "wasi:http/types", .func = "[resource-drop]fields", .op = .io_resource_drop, .gens = p3_only },
+    .{ .iface = "wasi:http/types", .func = "[method]fields.clone", .op = .http3_fields_clone },
+    .{ .iface = "wasi:http/types", .func = "[resource-drop]fields", .op = .io_resource_drop },
+    .{ .iface = "wasi:http/types", .func = "[method]fields.entries", .op = .http3_fields_copy_all, .gens = p2_only },
     .{ .iface = "wasi:http/types", .func = "[static]request.new", .op = .http3_request_new, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]request.get-method", .op = .http3_request_get_method, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]request.set-method", .op = .http3_request_set_method, .gens = p3_only },
@@ -879,7 +920,7 @@ const table = [_]Entry{
     .{ .iface = "wasi:http/types", .func = "[method]response.set-status-code", .op = .http3_response_set_status, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]response.get-headers", .op = .http3_response_get_headers, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[resource-drop]response", .op = .io_resource_drop, .gens = p3_only },
-    .{ .iface = "wasi:http/types", .func = "[constructor]request-options", .op = .http3_reqopts_new, .gens = p3_only },
+    .{ .iface = "wasi:http/types", .func = "[constructor]request-options", .op = .http3_reqopts_new },
     .{ .iface = "wasi:http/types", .func = "[method]request-options.get-connect-timeout", .op = .http3_reqopts_connect_get, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]request-options.set-connect-timeout", .op = .http3_reqopts_connect_set, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]request-options.get-first-byte-timeout", .op = .http3_reqopts_first_byte_get, .gens = p3_only },
@@ -887,9 +928,51 @@ const table = [_]Entry{
     .{ .iface = "wasi:http/types", .func = "[method]request-options.get-between-bytes-timeout", .op = .http3_reqopts_between_bytes_get, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]request-options.set-between-bytes-timeout", .op = .http3_reqopts_between_bytes_set, .gens = p3_only },
     .{ .iface = "wasi:http/types", .func = "[method]request-options.clone", .op = .http3_reqopts_clone, .gens = p3_only },
-    .{ .iface = "wasi:http/types", .func = "[resource-drop]request-options", .op = .io_resource_drop, .gens = p3_only },
+    .{ .iface = "wasi:http/types", .func = "[resource-drop]request-options", .op = .io_resource_drop },
     .{ .iface = "wasi:http/types", .func = "[static]response.consume-body", .op = .http3_response_consume_body, .gens = p3_only },
     .{ .iface = "wasi:http/client", .func = "send", .op = .http3_client_send, .gens = p3_only },
+    // wasi:http@0.2 client half (#564; component_wasi_p2_http.zig). A row naming
+    // an http3_* op lowers as its 0.3 counterpart does.
+    .{ .iface = "wasi:http/types", .func = "[static]fields.from-list", .op = .http2_fields_from_list, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]fields.set", .op = .http2_fields_set, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]fields.delete", .op = .http2_fields_delete, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]fields.append", .op = .http2_fields_append, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[constructor]outgoing-request", .op = .http2_outgoing_request_new, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.body", .op = .http2_outgoing_request_body, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.method", .op = .http3_request_get_method, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.set-method", .op = .http3_request_set_method, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.path-with-query", .op = .http3_request_get_pwq, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.set-path-with-query", .op = .http3_request_set_pwq, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.scheme", .op = .http3_request_get_scheme, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.set-scheme", .op = .http3_request_set_scheme, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.authority", .op = .http3_request_get_authority, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.set-authority", .op = .http3_request_set_authority, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-request.headers", .op = .http3_request_get_headers, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[resource-drop]outgoing-request", .op = .io_resource_drop, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]request-options.connect-timeout", .op = .http3_reqopts_connect_get, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]request-options.set-connect-timeout", .op = .http2_reqopts_connect_set, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]request-options.first-byte-timeout", .op = .http3_reqopts_first_byte_get, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]request-options.set-first-byte-timeout", .op = .http2_reqopts_first_byte_set, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]request-options.between-bytes-timeout", .op = .http3_reqopts_between_bytes_get, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]request-options.set-between-bytes-timeout", .op = .http2_reqopts_between_bytes_set, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]outgoing-body.write", .op = .http2_outgoing_body_write, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[static]outgoing-body.finish", .op = .http2_outgoing_body_finish, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[resource-drop]outgoing-body", .op = .io_resource_drop, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]future-incoming-response.subscribe", .op = .http2_future_subscribe, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]future-incoming-response.get", .op = .http2_future_response_get, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[resource-drop]future-incoming-response", .op = .io_resource_drop, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]incoming-response.status", .op = .http3_response_get_status, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]incoming-response.headers", .op = .http3_response_get_headers, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]incoming-response.consume", .op = .http2_incoming_response_consume, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[resource-drop]incoming-response", .op = .io_resource_drop, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]incoming-body.stream", .op = .http2_incoming_body_stream, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[static]incoming-body.finish", .op = .http2_incoming_body_finish, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[resource-drop]incoming-body", .op = .io_resource_drop, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]future-trailers.subscribe", .op = .http2_future_subscribe, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[method]future-trailers.get", .op = .http2_future_trailers_get, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "[resource-drop]future-trailers", .op = .io_resource_drop, .gens = p2_only },
+    .{ .iface = "wasi:http/types", .func = "http-error-code", .op = .http2_http_error_code, .gens = p2_only },
+    .{ .iface = "wasi:http/outgoing-handler", .func = "handle", .op = .http2_handle, .gens = p2_only },
 };
 
 /// Classify a WASI import `(interface, func, generation)` → the `P2Op` it maps
@@ -1055,4 +1138,11 @@ test "classify: official 0.3.0 additions (ADR-0205 phase A)" {
     // 0.3.0 renames of shape-identical funcs share the 0.2 handlers.
     try testing.expectEqual(P2Op.cli_initial_cwd, classifyImport("wasi:cli/environment", "get-initial-cwd", .any).?);
     try testing.expectEqual(P2Op.random_insecure_seed, classifyImport("wasi:random/insecure-seed", "get-insecure-seed", .any).?);
+}
+
+test "classify: wasi:http/types@0.2 fields share the 0.3 ops where the lowering matches" {
+    try testing.expectEqual(P2Op.http3_fields_get, classifyImport("wasi:http/types", "[method]fields.get", .p2).?);
+    try testing.expectEqual(P2Op.http3_fields_copy_all, classifyImport("wasi:http/types", "[method]fields.entries", .p2).?);
+    try testing.expectEqual(@as(?P2Op, null), classifyImport("wasi:http/types", "[method]fields.entries", .p3));
+    try testing.expectEqual(@as(?P2Op, null), classifyImport("wasi:http/types", "[method]fields.copy-all", .p2));
 }
