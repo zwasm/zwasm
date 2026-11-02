@@ -164,8 +164,9 @@ pub const ComponentInstance = struct {
     /// guest's `cabi_realloc`. NOTE: the captured `memory` slice is valid only
     /// while the guest does not GROW memory mid-lift/lower; a growing
     /// `cabi_realloc` would dangle it (addressed for the real fixture at IT-3b).
+    /// A core module without a memory reads as an empty one: validation
+    /// admits a lift without `(memory …)` only when its signature needs none.
     pub fn canonContext(self: *ComponentInstance) CanonContextError!canon.CanonContext {
-        if (self.core.memory() == null) return CanonContextError.NoMemory;
         return .{
             .memory_ctx = @ptrCast(self),
             .memory_fn = fetchCoreMemory,

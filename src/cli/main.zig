@@ -370,7 +370,14 @@ pub fn main(init: std.process.Init) !void {
                 }
                 // The guest's fd 0 (#257, #508): both hosts read the process
                 // stdin on demand, so nothing is read before the guest runs.
-                const code = cli_run.runComponentWasi(gpa, io, run_bytes, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, allow_network, .inherit) catch |err| {
+                var refusal: std.ArrayList(u8) = .empty;
+                defer refusal.deinit(gpa);
+                const invoke: ?cli_run.ComponentInvoke = if (invoke_name) |name| .{ .name = name, .args = invoke_args } else null;
+                const code = cli_run.runComponentWasi(gpa, io, run_bytes, path, invoke, argv_list.items, preopen_list.items, env_keys.items, env_vals.items, allow_network, .inherit, &refusal) catch |err| {
+                    if (err == error.ComponentRefused) {
+                        try printlnErr(io, refusal.items);
+                        std.process.exit(1);
+                    }
                     var buf: [256]u8 = undefined;
                     const msg = std.mem.print(&buf, "zwasm run: cannot run component '{s}': {s}", .{ path, @errorName(err) }) catch "zwasm run: component run failed";
                     try printlnErr(io, msg);

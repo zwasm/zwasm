@@ -30,7 +30,10 @@ never calls it), never the entry's result; a trap exits 1 with its kind on
 stderr. A module with neither export is refused the same way (use `--invoke`).
 The same contract holds on every engine and on a `.cwasm` (CWAS magic, which
 loads + runs directly with no parse/compile); a shape the JIT cannot call is
-refused with the reason rather than silently skipped (ADR-0230).
+refused with the reason rather than silently skipped (ADR-0230). On a
+component the entry is its `wasi:cli/run` export, found by name, unless it
+lifts an export async: then the first async lift runs. A component without
+either is refused the same way, with its exports listed.
 
 Options go before the module path; everything after it is the guest's argv,
 even a token that spells a `run` option. `--` ends the options, for a module
@@ -38,7 +41,7 @@ path that begins with `-`.
 
 | Flag                       | Effect                                                                                                                                                                                                                                       |
 |----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `--invoke <name>[=a,b,…]` | run the named export instead of `_start`/`main`. `=args` (comma-separated, parsed by param type i32/i64/f32/f64) supplies its parameters; typed results print bare, one per line, on stdout. Works on both the interpreter and the JIT (D-477) |
+| `--invoke <name>[=a,b,…]` | run the named export instead of `_start`/`main`. `=args` (comma-separated, parsed by param type i32/i64/f32/f64) supplies its parameters; typed results print bare, one per line, on stdout. Works on both the interpreter and the JIT (D-477). On a component the name is a func export's (`iface#func` inside an exported interface) and `=args` parse by WIT type — `bool`, `s8`…`u64`, `f32`, `f64`, `char`, `string` (the token as given; a string argument cannot contain a comma); any other param or result type, or an async export, is refused before the call |
 | `--engine <auto\|interp\|jit>` | default `auto` — prefers the JIT, falls back to the interpreter when the JIT declines the module (`--engine auto` is the explicit spelling of the same). `--engine interp` / `jit` force one. BOTH do full WASI; `jit` additionally executes SIMD-128                    |
 | `--dir <host>[:<guest>]`   | preopen a host directory for WASI (colon separator; guest path mirrors host when omitted)                                                                                                                                                    |
 | `--env KEY=VAL`            | set a WASI environment variable for the guest (repeatable; bare `KEY` sets empty)                                                                                                                                                            |

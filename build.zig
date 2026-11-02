@@ -1362,6 +1362,27 @@ pub fn build(b: *std.Build) void {
     const test_cli_default_entry_step = b.step("test-cli-default-entry", "Run each default-entry fixture as .wasm, --engine=jit and .cwasm and require the same exit code, stdout and stderr (issue #220)");
     test_cli_default_entry_step.dependOn(&run_cli_default_entry.step);
 
+    // `zig build test-cli-component-entry` — issue #622 / ADR-0230: a
+    // component's entry is `wasi:cli/run` by name, else a refusal listing its
+    // exports; `--invoke` calls an export with WIT-typed arguments. Only a
+    // build with the component substrate can run a component.
+    const cli_component_entry_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/runners/component_entry_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_component_entry_mod.addImport("spawned_cli", spawned_cli_mod);
+    const cli_component_entry_exe = b.addExecutable(.{
+        .name = "zwasm-cli-component-entry",
+        .root_module = cli_component_entry_mod,
+    });
+    const run_cli_component_entry = b.addRunArtifact(cli_component_entry_exe);
+    run_cli_component_entry.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
+    run_cli_component_entry.addArg(pathFromRoot(b, "test/component"));
+    run_cli_component_entry.has_side_effects = true;
+    const test_cli_component_entry_step = b.step("test-cli-component-entry", "Run `zwasm run` on components with and without wasi:cli/run and --invoke, and require each exit code, stdout and stderr (issue #622)");
+    if (enable_component) test_cli_component_entry_step.dependOn(&run_cli_component_entry.step);
+
     // `zig build test-cli-invalid-module` — issue #233: `zwasm run` (both
     // drivers) and `zwasm compile` refuse the same invalid module with the
     // same reason on stderr, whether the front-end validator or the JIT's own
@@ -1818,6 +1839,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_cli_stdin.step); // issue #257 CLI stdin → guest fd 0
     test_all_step.dependOn(&run_cli_argv0.step); // issue #256 CLI argv[0] = base name
     test_all_step.dependOn(&run_cli_default_entry.step); // issue #220 default-entry parity across the two run drivers
+    if (enable_component) test_all_step.dependOn(&run_cli_component_entry.step); // issue #622 a component's entry by name, --invoke by WIT type
     test_all_step.dependOn(&run_cli_invalid_module.step); // issue #233 the same verdict from run, run --engine=jit and compile
     test_all_step.dependOn(&run_cli_usage.step); // issues #236 / #232 run's options: unknown = exit 2, `--` ends them
     test_all_step.dependOn(&run_spawned_cli_unit.step); // the `--version` mode parser every spawning runner goes through
