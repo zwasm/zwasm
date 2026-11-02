@@ -1,0 +1,9 @@
+package local:demo;
+
+interface store {
+  get: func(key: string) -> option<string>;
+}
+
+world w {
+  export cache: store;
+}

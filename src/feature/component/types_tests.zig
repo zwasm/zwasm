@@ -145,13 +145,33 @@ test "export with no externdesc (optional absent)" {
     try testing.expectEqual(@as(?ExternDesc, null), info.exports.items[0].desc);
 }
 
-test "import name 0x02 prefix carries a dropped version suffix" {
-    // import 0x02 "p:i" version "1.0" (func type 0)
-    const import_body = [_]u8{ 0x01, 0x02, 0x03, 'p', ':', 'i', 0x03, '1', '.', '0', 0x01, 0x00 };
-    const bytes = comptime buildComponent(&.{.{ 10, &import_body }});
-    var info = try decodeBoth(bytes);
-    defer info.deinit();
-    try testing.expectEqualStrings("p:i", info.imports.items[0].name);
+test "import name 0x02 attributes are consumed and dropped, one or several" {
+    // Each import: 0x02 "p:i" vec(attribute) (func type 0), then a plain
+    // import "q" (func type 1) — the second decodes only if the attribute
+    // bytes were consumed exactly.
+    const tail = [_]u8{ 0x01, 0x00, 0x00, 0x01, 'q', 0x01, 0x01 };
+    const head = [_]u8{ 0x02, 0x02, 0x03, 'p', ':', 'i' };
+    const implements = [_]u8{ 0x00, 0x05, 'a', ':', 'b', '/', 'c' };
+    const version_suffix = [_]u8{ 0x01, 0x03, '1', '.', '0' };
+    const external_id = [_]u8{ 0x02, 0x02, 'i', 'd' };
+    const bodies = .{
+        head ++ [_]u8{0x01} ++ implements ++ tail,
+        head ++ [_]u8{0x01} ++ version_suffix ++ tail,
+        head ++ [_]u8{0x01} ++ external_id ++ tail,
+        head ++ [_]u8{0x02} ++ implements ++ version_suffix ++ tail,
+    };
+    inline for (bodies) |body| {
+        var info = try decodeBoth(comptime buildComponent(&.{.{ 10, &body }}));
+        defer info.deinit();
+        try testing.expectEqualStrings("p:i", info.imports.items[0].name);
+        try testing.expectEqual(@as(u32, 0), info.imports.items[0].desc.func);
+        try testing.expectEqualStrings("q", info.imports.items[1].name);
+        try testing.expectEqual(@as(u32, 1), info.imports.items[1].desc.func);
+    }
+
+    // An attribute kind outside 0x00..0x02 is malformed.
+    const bad = head ++ [_]u8{ 0x01, 0x03, 0x01, 'x' } ++ tail;
+    try testing.expectError(Error.InvalidName, decodeBoth(comptime buildComponent(&.{.{ 10, &bad }})));
 }
 
 test "core-module externdesc (0x00 0x11)" {
@@ -258,6 +278,17 @@ test "stream<T>/future<T> decode (0x66/0x65) with optional payload" {
     try testing.expectEqual(PrimValType.u32, info.deftypes.items[0].stream.payload.?.primitive);
     try testing.expect(info.deftypes.items[1].stream.payload == null);
     try testing.expectEqual(@as(u32, 0), info.deftypes.items[2].future.payload.?.type_index);
+}
+
+test "map<K, V> decode (0x63 key value)" {
+    // type[0] map<string, u32>; type[1] map<u32, type 0>.
+    const body = [_]u8{ 0x02, 0x63, 0x73, 0x79, 0x63, 0x79, 0x00 };
+    var info = try decodeBoth(comptime buildComponent(&.{.{ 7, &body }}));
+    defer info.deinit();
+    try testing.expectEqual(PrimValType.string, info.deftypes.items[0].map.key.primitive);
+    try testing.expectEqual(PrimValType.u32, info.deftypes.items[0].map.value.primitive);
+    try testing.expectEqual(PrimValType.u32, info.deftypes.items[1].map.key.primitive);
+    try testing.expectEqual(@as(u32, 0), info.deftypes.items[1].map.value.type_index);
 }
 
 test "canon section: canon lift with opts (utf8 + memory 0 + realloc 1)" {

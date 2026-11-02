@@ -1456,6 +1456,24 @@ test "flattenType: record{list,string} = 4 flats; variant joins {f32}|{i64,i32} 
     try testing.expectEqualSlices(CoreType, &.{ .i32, .i64, .i32 }, out.items);
 }
 
+test "map<string, u32> despecializes to list<tuple<string, u32>>" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Primitive key / value: the decoded-type resolver never reads `info`.
+    const dt = types.DefType{ .map = .{ .key = .{ .primitive = .string }, .value = .{ .primitive = .u32 } } };
+    const ct = try canonTypeFromDefType(a, undefined, dt);
+    try testing.expectEqual(@as(usize, 8), sizeOf(ct));
+    try testing.expectEqual(@as(usize, 4), alignmentOf(ct));
+    var flat: std.ArrayList(CoreType) = .empty;
+    try flattenType(a, ct, &flat);
+    try testing.expectEqualSlices(CoreType, &.{ .i32, .i32 }, flat.items);
+    // The element is the (string ptr, len, u32) pair: 12 bytes, align 4.
+    try testing.expectEqual(@as(usize, 12), sizeOf(ct.list.*));
+    try testing.expectEqual(@as(usize, 4), alignmentOf(ct.list.*));
+    try testing.expectEqual(@as(usize, 2), ct.list.record.len);
+}
+
 test "lowerFlat/liftFlat round-trip: record{u32, string} + variant payload conversion" {
     var bump = Bump{ .next = 64 };
     var mem: [4096]u8 = @splat(0);
@@ -1689,8 +1707,24 @@ fn canonTypeFromLocalDefType(arena: std.mem.Allocator, info: *const types.TypeIn
         .borrow => |ti| return .{ .borrow = ti },
         .stream => |s| return .{ .stream = try boxedLocalElem(arena, info, locals, s.payload) },
         .future => |f| return .{ .future = try boxedLocalElem(arena, info, locals, f.payload) },
+        .map => |m| return mapAsList(
+            arena,
+            try canonTypeFromLocalValType(arena, info, locals, m.key),
+            try canonTypeFromLocalValType(arena, info, locals, m.value),
+        ),
         .func, .instance_type, .component_type, .resource => return TypeBridgeError.UnsupportedType,
     }
+}
+
+/// `CanonicalABI.md` `despecialize`: `map<k, v>` = `list<tuple<k, v>>`, and
+/// a tuple is a record of positional fields.
+fn mapAsList(arena: std.mem.Allocator, key: CanonType, value: CanonType) TypeBridgeError!CanonType {
+    const fields = try arena.alloc(CanonType.Field, 2);
+    fields[0] = .{ .name = "", .ty = key };
+    fields[1] = .{ .name = "", .ty = value };
+    const elem = try arena.create(CanonType);
+    elem.* = .{ .record = fields };
+    return .{ .list = elem };
 }
 
 /// Build the boxed element `CanonType` for a `stream<T>`/`future<T>` whose
@@ -1765,6 +1799,11 @@ pub fn canonTypeFromDefType(arena: std.mem.Allocator, info: *const types.TypeInf
         .borrow => |ti| return .{ .borrow = ti },
         .stream => |s| return .{ .stream = try boxedDecodedElem(arena, info, s.payload) },
         .future => |f| return .{ .future = try boxedDecodedElem(arena, info, f.payload) },
+        .map => |m| return mapAsList(
+            arena,
+            try canonTypeFromDecoded(arena, info, m.key),
+            try canonTypeFromDecoded(arena, info, m.value),
+        ),
         .func, .instance_type, .component_type, .resource => return TypeBridgeError.UnsupportedType,
     }
 }

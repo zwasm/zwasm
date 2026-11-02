@@ -69,6 +69,73 @@ test "REQ-1 (cw CM-API): open auto-selects single path for a pure component + un
     try testing.expectEqualStrings("Hello, zwasm!", out.string);
 }
 
+test "#611: a map<string, u32> param lowers as list<tuple<string, u32>> and its WitType stays a map" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/map_sum_component.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    var opened = try open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const sig = (try opened.resolveFuncSig(arena.allocator(), "test:m/m#f")).?;
+    try testing.expectEqual(@as(usize, 1), sig.params.len);
+    const map = sig.params[0].ty.map;
+    try testing.expectEqual(ctypes.PrimValType.string, map.key.prim);
+    try testing.expectEqual(ctypes.PrimValType.u32, map.value.prim);
+
+    var pairs = [_][2]ComponentValue{
+        .{ .{ .string = "a" }, .{ .u32 = 1 } },
+        .{ .{ .string = "bb" }, .{ .u32 = 20 } },
+        .{ .{ .string = "ccc" }, .{ .u32 = 300 } },
+    };
+    var items: [pairs.len]ComponentValue = undefined;
+    for (&pairs, &items) |*p, *item| item.* = .{ .tuple = p };
+    const out = (try opened.invokeTyped("test:m/m#f", &.{.{ .list = &items }}, testing.allocator)).?;
+    defer out.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 321), out.u32);
+}
+
+test "#612: an import / export carrying an implements attribute decodes under its plain name" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    for ([_][]const u8{ "test/component/implements_import_component.wasm", "test/component/implements_export_component.wasm" }, [_]bool{ true, false }) |path, is_import| {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, testing.allocator, .limited(1 << 20));
+        defer testing.allocator.free(bytes);
+
+        var comp = try decode.decode(testing.allocator, bytes);
+        defer comp.deinit(testing.allocator);
+        var info = try ctypes.decodeTypeInfo(testing.allocator, &comp);
+        defer info.deinit();
+        try cvalidate.validate(&info);
+        const found = if (is_import) for (info.imports.items) |imp| {
+            if (std.mem.eql(u8, imp.name, "cache")) break imp.desc == .instance;
+        } else false else for (info.exports.items) |ex| {
+            if (std.mem.eql(u8, ex.name, "cache")) break ex.sort == .instance;
+        } else false;
+        try testing.expect(found);
+
+        if (!is_import) continue;
+        // The host offers no `local:demo/store`: the import is unresolved.
+        var eng = try Engine.init(testing.allocator, .{});
+        defer eng.deinit();
+        var host = try wasi_host.Host.init(testing.allocator);
+        defer host.deinit();
+        host.io = io;
+        try testing.expectError(error.UnsupportedWasiImport, open(&eng, testing.allocator, bytes, &host, .{}));
+    }
+}
+
 test "REQ-7 (cw CM-API): an opened component outlives the caller's input buffer" {
     // cw caches the opened component long-lived (a GC-finalised instance box) and
     // frees its transient load buffer right after `open`. The component must OWN
