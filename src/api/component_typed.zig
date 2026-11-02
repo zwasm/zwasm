@@ -305,6 +305,19 @@ fn fromCanonDefType(out_alloc: std.mem.Allocator, scratch: std.mem.Allocator, in
             for (cv.list, items) |val, *slot| slot.* = try fromCanonValueScoped(out_alloc, scratch, info, locals, l.element.*, val);
             return .{ .list = items };
         },
+        // A map value is its despecialized `list<tuple<k, v>>` (value.zig).
+        .map => |m| {
+            const items = try out_alloc.alloc(ComponentValue, cv.list.len);
+            errdefer out_alloc.free(items);
+            for (cv.list, items) |val, *slot| {
+                const pair = try out_alloc.alloc(ComponentValue, 2);
+                errdefer out_alloc.free(pair);
+                pair[0] = try fromCanonValueScoped(out_alloc, scratch, info, locals, m.key, val.record[0]);
+                pair[1] = try fromCanonValueScoped(out_alloc, scratch, info, locals, m.value, val.record[1]);
+                slot.* = .{ .tuple = pair };
+            }
+            return .{ .list = items };
+        },
         .option => |o| {
             if (cv.variant.case == 0) return .{ .option = null };
             const slot = try out_alloc.create(ComponentValue);

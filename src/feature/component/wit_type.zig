@@ -49,6 +49,8 @@ pub const WitType = union(enum) {
     own: u32,
     /// `borrow<i>` — borrowed handle.
     borrow: u32,
+    /// `map<k, v>` — kept distinct from `list<tuple<k, v>>`.
+    map: Map,
 
     pub const Field = struct {
         /// Borrows from the decoded `TypeInfo`.
@@ -65,6 +67,11 @@ pub const WitType = union(enum) {
     pub const Result = struct {
         ok: ?*const WitType,
         err: ?*const WitType,
+    };
+
+    pub const Map = struct {
+        key: *const WitType,
+        value: *const WitType,
     };
 };
 
@@ -168,6 +175,10 @@ fn resolveDefTypeScoped(arena: std.mem.Allocator, info: *const types.TypeInfo, l
         .flags => |fl| return .{ .flags = fl.labels },
         .own => |ti| return .{ .own = ti },
         .borrow => |ti| return .{ .borrow = ti },
+        .map => |m| return .{ .map = .{
+            .key = try boxed(arena, try resolveValTypeScoped(arena, info, locals, m.key)),
+            .value = try boxed(arena, try resolveValTypeScoped(arena, info, locals, m.value)),
+        } },
         // stream/future WIT-shape resolution lands in WASI-0.3 Unit C.
         .func, .stream, .future, .instance_type, .component_type, .resource => return Error.UnsupportedType,
     }

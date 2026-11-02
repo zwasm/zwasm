@@ -56,6 +56,7 @@ pub fn validate(info: *const TypeInfo) Error!void {
         try checkDefTypeDeclDups(dt);
         try checkStreamFutureElement(info, dt);
         try checkFuncResultNoBorrow(info, dt);
+        try checkMapType(info, dt);
     }
     try checkInstances(info);
     try checkCanons(info, type_space_len);
@@ -116,7 +117,7 @@ fn checkDefTypeDeclDups(dt: DefType) Error!void {
                 }
             }
         },
-        .value, .func, .enum_, .flags, .record, .list, .tuple, .variant, .option, .result, .stream, .future, .own, .borrow, .resource => {},
+        .value, .func, .enum_, .flags, .record, .list, .tuple, .variant, .option, .result, .stream, .future, .map, .own, .borrow, .resource => {},
     }
 }
 
@@ -342,6 +343,10 @@ fn checkDeclDefTypeRefsNamed(dt: DefType, scope: anytype) Error!void {
         .option => |o| try checkDeclValTypeNamed(o.payload.*, scope),
         .stream => |s| if (s.payload) |p| try checkDeclValTypeNamed(p, scope),
         .future => |f| if (f.payload) |p| try checkDeclValTypeNamed(p, scope),
+        .map => |m| {
+            try checkDeclValTypeNamed(m.key, scope);
+            try checkDeclValTypeNamed(m.value, scope);
+        },
         .variant => |v| for (v.cases) |c| {
             if (c.payload) |pl| try checkDeclValTypeNamed(pl, scope);
         },
@@ -388,6 +393,10 @@ fn checkDeclRefNamed(idx: u32, scope: anytype) Error!void {
                     },
                     .future => |f| {
                         if (f.payload) |p| try checkDeclValTypeNamed(p, scope);
+                    },
+                    .map => |m| {
+                        try checkDeclValTypeNamed(m.key, scope);
+                        try checkDeclValTypeNamed(m.value, scope);
                     },
                     .result => |res| {
                         if (res.ok) |ok| try checkDeclValTypeNamed(ok, scope);
@@ -503,6 +512,10 @@ fn checkNotResourceCarrying(info: *const TypeInfo, dt: DefType) Error!void {
         .option => |o| try checkValTypeNotResource(info, o.payload.*),
         .stream => |s| if (s.payload) |p| try checkValTypeNotResource(info, p),
         .future => |f| if (f.payload) |p| try checkValTypeNotResource(info, p),
+        .map => |m| {
+            try checkValTypeNotResource(info, m.key);
+            try checkValTypeNotResource(info, m.value);
+        },
         .variant => |v| for (v.cases) |c| {
             if (c.payload) |pl| try checkValTypeNotResource(info, pl);
         },
@@ -681,7 +694,7 @@ fn checkDefTypeLabelDups(dt: DefType) Error!void {
         },
         .enum_ => |e| try checkLabelSliceDups(e.labels),
         .flags => |fl| try checkLabelSliceDups(fl.labels),
-        .value, .list, .tuple, .option, .result, .stream, .future, .own, .borrow, .resource => {},
+        .value, .list, .tuple, .option, .result, .stream, .future, .map, .own, .borrow, .resource => {},
         .instance_type, .component_type => {},
     }
 }
@@ -735,6 +748,10 @@ fn checkDefTypeRefsNamed(info: *const TypeInfo, dt: DefType) Error!void {
         .option => |o| try checkValTypeNamed(info, o.payload.*),
         .stream => |s| if (s.payload) |p| try checkValTypeNamed(info, p),
         .future => |f| if (f.payload) |p| try checkValTypeNamed(info, p),
+        .map => |m| {
+            try checkValTypeNamed(info, m.key);
+            try checkValTypeNamed(info, m.value);
+        },
         .variant => |v| for (v.cases) |c| {
             if (c.payload) |p| try checkValTypeNamed(info, p);
         },
@@ -773,7 +790,7 @@ fn checkDefTypeLabels(dt: DefType) Error!void {
         .variant => |v| for (v.cases) |c| try checkLabel(c.name),
         .enum_ => |e| for (e.labels) |l| try checkLabel(l),
         .flags => |fl| for (fl.labels) |l| try checkLabel(l),
-        .value, .list, .tuple, .option, .result, .stream, .future, .own, .borrow, .resource => {},
+        .value, .list, .tuple, .option, .result, .stream, .future, .map, .own, .borrow, .resource => {},
         .instance_type, .component_type => {},
     }
 }
@@ -1035,7 +1052,7 @@ fn checkDefTypeOuterAliases(dt: DefType, depth: u32) Error!void {
             .import_decl => {},
             .instance_decl => |id| try checkInstanceDeclOuterAlias(id, depth + 1),
         },
-        .value, .func, .enum_, .flags, .record, .list, .tuple, .variant, .option, .result, .stream, .future, .own, .borrow, .resource => {},
+        .value, .func, .enum_, .flags, .record, .list, .tuple, .variant, .option, .result, .stream, .future, .map, .own, .borrow, .resource => {},
     }
 }
 
@@ -1115,6 +1132,10 @@ fn checkDefTypeIndices(dt: DefType, type_space_len: u32) Error!void {
         .option => |o| try checkValType(o.payload.*, type_space_len),
         .stream => |s| if (s.payload) |p| try checkValType(p, type_space_len),
         .future => |f| if (f.payload) |p| try checkValType(p, type_space_len),
+        .map => |m| {
+            try checkValType(m.key, type_space_len);
+            try checkValType(m.value, type_space_len);
+        },
         .variant => |v| for (v.cases) |c| {
             if (c.payload) |p| try checkValType(p, type_space_len);
         },
@@ -1166,38 +1187,129 @@ fn checkFuncResultNoBorrow(info: *const TypeInfo, dt: DefType) Error!void {
 }
 
 fn checkValTypeNoBorrow(info: *const TypeInfo, vt: ValType) Error!void {
+    return checkValTypeCarries(info, vt, .{ .borrow = true }, Error.InvalidDefType);
+}
+
+/// The value-type kinds a position may forbid a type to carry transitively.
+const Carried = struct {
+    own: bool = false,
+    borrow: bool = false,
+    /// `stream`, `future` and `error-context`.
+    async_value: bool = false,
+};
+
+fn checkValTypeCarries(info: *const TypeInfo, vt: ValType, comptime forbid: Carried, err: Error) Error!void {
     switch (vt) {
-        .primitive => {},
-        .type_index => |ti| {
-            if (ti >= info.type_space.items.len) return; // bounds checked elsewhere
-            switch (info.type_space.items[ti]) {
-                .named => {},
-                .def => |d| try checkDefTypeNoBorrow(info, info.deftypes.items[d]),
-            }
+        .primitive => |p| if (forbid.async_value and p == .error_context) return err,
+        .type_index => |ti| switch (resolveRebinding(info, ti)) {
+            .def => |dt| try checkDefTypeCarries(info, dt, forbid, err),
+            .unresolved, .fresh => {},
         },
     }
 }
 
-fn checkDefTypeNoBorrow(info: *const TypeInfo, dt: DefType) Error!void {
+fn checkDefTypeCarries(info: *const TypeInfo, dt: DefType, comptime forbid: Carried, err: Error) Error!void {
     switch (dt) {
-        .borrow => return Error.InvalidDefType,
-        .value => |vt| try checkValTypeNoBorrow(info, vt),
-        .record => |rec| for (rec.fields) |f| try checkValTypeNoBorrow(info, f.ty),
-        .tuple => |t| for (t.types) |vt| try checkValTypeNoBorrow(info, vt),
-        .list => |l| try checkValTypeNoBorrow(info, l.element.*),
-        .option => |o| try checkValTypeNoBorrow(info, o.payload.*),
-        .stream => |s| if (s.payload) |p| try checkValTypeNoBorrow(info, p),
-        .future => |f| if (f.payload) |p| try checkValTypeNoBorrow(info, p),
+        .own => if (forbid.own) return err,
+        .borrow => if (forbid.borrow) return err,
+        .stream, .future => if (forbid.async_value) return err,
+        else => {},
+    }
+    switch (dt) {
+        .value => |vt| try checkValTypeCarries(info, vt, forbid, err),
+        .record => |rec| for (rec.fields) |f| try checkValTypeCarries(info, f.ty, forbid, err),
+        .tuple => |t| for (t.types) |vt| try checkValTypeCarries(info, vt, forbid, err),
+        .list => |l| try checkValTypeCarries(info, l.element.*, forbid, err),
+        .option => |o| try checkValTypeCarries(info, o.payload.*, forbid, err),
+        .stream => |s| if (s.payload) |p| try checkValTypeCarries(info, p, forbid, err),
+        .future => |f| if (f.payload) |p| try checkValTypeCarries(info, p, forbid, err),
+        .map => |m| {
+            try checkValTypeCarries(info, m.key, forbid, err);
+            try checkValTypeCarries(info, m.value, forbid, err);
+        },
         .variant => |v| for (v.cases) |c| {
-            if (c.payload) |pl| try checkValTypeNoBorrow(info, pl);
+            if (c.payload) |pl| try checkValTypeCarries(info, pl, forbid, err);
         },
         .result => |res| {
-            if (res.ok) |ok| try checkValTypeNoBorrow(info, ok);
-            if (res.err) |er| try checkValTypeNoBorrow(info, er);
+            if (res.ok) |ok| try checkValTypeCarries(info, ok, forbid, err);
+            if (res.err) |er| try checkValTypeCarries(info, er, forbid, err);
         },
-        // `own` (not borrow), funcs, resources, enum/flags, and nested type
-        // scopes never carry a borrow value type.
-        .own, .func, .enum_, .flags, .resource, .instance_type, .component_type => {},
+        // Handles are leaves; funcs, resources, enum/flags and nested type
+        // scopes are not value types.
+        .own, .borrow, .func, .enum_, .flags, .resource, .instance_type, .component_type => {},
+    }
+}
+
+/// Spec (`Explainer.md`): a `map` key is a `keytype` — `bool`, an integer,
+/// `char` or `string`, inline or behind a type index that resolves to one —
+/// and the value may not transitively contain `own`, `borrow`, `future`,
+/// `stream` or `error-context`.
+fn checkMapType(info: *const TypeInfo, dt: DefType) Error!void {
+    const m = switch (dt) {
+        .map => |m| m,
+        else => return,
+    };
+    if (!isMapKey(info, m.key)) return Error.InvalidMapKey;
+    try checkValTypeCarries(info, m.value, .{ .own = true, .borrow = true, .async_value = true }, Error.InvalidMapValue);
+}
+
+fn isMapKey(info: *const TypeInfo, key: ValType) bool {
+    const vt = switch (key) {
+        .primitive => key,
+        .type_index => |ti| switch (resolveRebinding(info, ti)) {
+            .def => |dt| switch (dt) {
+                .value => |inner| inner,
+                else => return false,
+            },
+            .unresolved => return true,
+            .fresh => return false,
+        },
+    };
+    return switch (vt) {
+        .primitive => |p| switch (p) {
+            .bool, .s8, .u8, .s16, .u16, .s32, .u32, .s64, .u64, .char, .string => true,
+            .f32, .f64, .error_context => false,
+        },
+        .type_index => false, // a deftype is never a bare typeidx
+    };
+}
+
+const Rebound = union(enum) {
+    def: DefType,
+    /// Out of bounds (checked elsewhere), or an alias: it resolves into the
+    /// aliased instance's type decls, which this file does not chase
+    /// (accepted, like the other provenance chases).
+    unresolved,
+    /// A `sub resource` import, or a malformed forward re-binding (rejected
+    /// by the export / import bounds).
+    fresh,
+};
+
+/// Follow type exports and `(eq i)` type imports from `ti` to the type they
+/// re-bind. A loop, not recursion: a chain is as long as the component's
+/// export list. A valid re-binding names a strictly earlier index, which also
+/// ends the loop on malformed input.
+fn resolveRebinding(info: *const TypeInfo, start: u32) Rebound {
+    var ti = start;
+    while (true) {
+        if (ti >= info.type_space.items.len) return .unresolved;
+        const origin = switch (info.type_space.items[ti]) {
+            .def => |d| return .{ .def = info.deftypes.items[d] },
+            .named => |o| o,
+        };
+        const target = switch (origin) {
+            .@"export" => |ei| info.exports.items[ei].index,
+            .import => |ii| switch (info.imports.items[ii].desc) {
+                .type_bound => |tb| switch (tb) {
+                    .eq => |eq_ti| eq_ti,
+                    .sub_resource => return .fresh,
+                },
+                else => return .fresh,
+            },
+            .alias => return .unresolved,
+        };
+        if (target >= ti) return .fresh;
+        ti = target;
     }
 }
 
@@ -1257,6 +1369,126 @@ test "stream/future element: reject (stream char) + transitive borrow" {
     const borrow_body = [_]u8{ 0x03, 0x3f, 0x7f, 0x00, 0x68, 0x00, 0x66, 0x01, 0x01 };
     const bad_borrow = preamble ++ [_]u8{ 7, borrow_body.len } ++ borrow_body;
     try std.testing.expectError(Error.InvalidDefType, validateBytes(&bad_borrow));
+
+    // INVALID: the same `borrow` behind a type export. type[0]=resource;
+    // (export "r" (type 0)) mints type[1]; type[2]=borrow<1>;
+    // (export "b" (type 2)) mints type[3]; type[4]=stream<type 3>.
+    const export_r = [_]u8{ 0x01, 0x00, 0x01, 'r', 0x03, 0x00, 0x00 };
+    const export_b = [_]u8{ 0x01, 0x00, 0x01, 'b', 0x03, 0x02, 0x00 };
+    const via_export = preamble ++ [_]u8{ 7, 4, 0x01, 0x3f, 0x7f, 0x00 } ++
+        [_]u8{ 11, export_r.len } ++ export_r ++
+        [_]u8{ 7, 3, 0x01, 0x68, 0x01 } ++
+        [_]u8{ 11, export_b.len } ++ export_b ++
+        [_]u8{ 7, 4, 0x01, 0x66, 0x01, 0x03 };
+    try std.testing.expectError(Error.InvalidDefType, validateBytes(&via_export));
+}
+
+test "map: the key is a keytype, the value carries no handle or async value" {
+    const preamble = [_]u8{ 0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00 };
+    const Case = struct { body: []const u8, err: ?Error };
+    const cases = [_]Case{
+        // map<string, u32>
+        .{ .body = &.{ 0x01, 0x63, 0x73, 0x79 }, .err = null },
+        // type[0]=string; map<type 0, u32> — a key behind a type index
+        .{ .body = &.{ 0x02, 0x73, 0x63, 0x00, 0x79 }, .err = null },
+        // map<f32, u32>
+        .{ .body = &.{ 0x01, 0x63, 0x76, 0x79 }, .err = Error.InvalidMapKey },
+        // type[0]=list<u8>; map<type 0, u32>
+        .{ .body = &.{ 0x02, 0x70, 0x7d, 0x63, 0x00, 0x79 }, .err = Error.InvalidMapKey },
+        // type[0]=resource; type[1]=own<0>; map<string, type 1>
+        .{ .body = &.{ 0x03, 0x3f, 0x7f, 0x00, 0x69, 0x00, 0x63, 0x73, 0x01 }, .err = Error.InvalidMapValue },
+        // type[0]=stream<u32>; type[1]=list<type 0>; map<string, type 1>
+        .{ .body = &.{ 0x03, 0x66, 0x01, 0x79, 0x70, 0x00, 0x63, 0x73, 0x01 }, .err = Error.InvalidMapValue },
+        // map<string, error-context>
+        .{ .body = &.{ 0x01, 0x63, 0x73, 0x64 }, .err = Error.InvalidMapValue },
+    };
+    inline for (cases) |c| {
+        const bytes = preamble ++ [_]u8{ 7, c.body.len } ++ c.body[0..c.body.len].*;
+        if (c.err) |e| {
+            try std.testing.expectError(e, validateBytes(&bytes));
+        } else try validateBytes(&bytes);
+    }
+
+    // A key re-bound by a type export resolves through it: type[0]=string;
+    // (export "k" (type 0)) mints type[1]; map<type 1, u32>.
+    const export_k = [_]u8{ 0x01, 0x00, 0x01, 'k', 0x03, 0x00, 0x00 };
+    const map_body = [_]u8{ 0x01, 0x63, 0x01, 0x79 };
+    const named = preamble ++ [_]u8{ 7, 2, 0x01, 0x73 } ++
+        [_]u8{ 11, export_k.len } ++ export_k ++
+        [_]u8{ 7, map_body.len } ++ map_body;
+    try validateBytes(&named);
+
+    // A value re-bound by a type export or an `eq` import is checked through
+    // it. type[0]=resource; (export "r" (type 0)) mints type[1];
+    // type[2]=own<1>; then type[3] re-binds type[2], and map<string, type 3>.
+    const export_r = [_]u8{ 0x01, 0x00, 0x01, 'r', 0x03, 0x00, 0x00 };
+    const own_body = [_]u8{ 0x01, 0x69, 0x01 };
+    const map_own = [_]u8{ 0x01, 0x63, 0x73, 0x03 };
+    const head = preamble ++ [_]u8{ 7, 4, 0x01, 0x3f, 0x7f, 0x00 } ++
+        [_]u8{ 11, export_r.len } ++ export_r ++
+        [_]u8{ 7, own_body.len } ++ own_body;
+    const export_t = [_]u8{ 0x01, 0x00, 0x01, 't', 0x03, 0x02, 0x00 };
+    const via_export = head ++ [_]u8{ 11, export_t.len } ++ export_t ++
+        [_]u8{ 7, map_own.len } ++ map_own;
+    try std.testing.expectError(Error.InvalidMapValue, validateBytes(&via_export));
+    // (import "t" (type (eq 2)))
+    const import_t = [_]u8{ 0x01, 0x00, 0x01, 't', 0x03, 0x00, 0x02 };
+    const via_import = head ++ [_]u8{ 10, import_t.len } ++ import_t ++
+        [_]u8{ 7, map_own.len } ++ map_own;
+    try std.testing.expectError(Error.InvalidMapValue, validateBytes(&via_import));
+}
+
+test "map: a value behind a long chain of type exports is resolved without recursing per export" {
+    const gpa = std.testing.allocator;
+    const n: u32 = 200_000;
+    const Leb = struct {
+        /// ULEB128, or with `signed` the SLEB128 of a non-negative value
+        /// (a valtype's type index: bit 6 of the last byte must be clear).
+        fn put(list: *std.ArrayList(u8), a: std.mem.Allocator, v: u32, signed: bool) !void {
+            var x = v;
+            while (true) {
+                const byte: u8 = @intCast(x & 0x7f);
+                x >>= 7;
+                if (x == 0 and !(signed and byte & 0x40 != 0)) return list.append(a, byte);
+                try list.append(a, byte | 0x80);
+            }
+        }
+    };
+    // type[0]=string; export i re-binds type[i] as "t<i>", minting type[i+1];
+    // then map<string, type n>.
+    var exports: std.ArrayList(u8) = .empty;
+    defer exports.deinit(gpa);
+    try Leb.put(&exports, gpa, n, false);
+    var name_buf: [16]u8 = undefined;
+    for (0..n) |i| {
+        const name = try std.mem.print(&name_buf, "t{d}", .{i});
+        try exports.append(gpa, 0x00);
+        try Leb.put(&exports, gpa, @intCast(name.len), false);
+        try exports.appendSlice(gpa, name);
+        try exports.append(gpa, 0x03);
+        try Leb.put(&exports, gpa, @intCast(i), false);
+        try exports.append(gpa, 0x00);
+    }
+    var map_body: std.ArrayList(u8) = .empty;
+    defer map_body.deinit(gpa);
+    try map_body.appendSlice(gpa, &.{ 0x01, 0x63, 0x73 });
+    try Leb.put(&map_body, gpa, n, true);
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    try bytes.appendSlice(gpa, &.{ 0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00, 7, 2, 0x01, 0x73, 11 });
+    try Leb.put(&bytes, gpa, @intCast(exports.items.len), false);
+    try bytes.appendSlice(gpa, exports.items);
+    try bytes.append(gpa, 7);
+    try Leb.put(&bytes, gpa, @intCast(map_body.items.len), false);
+    try bytes.appendSlice(gpa, map_body.items);
+
+    var comp = try decode.decode(gpa, bytes.items);
+    defer comp.deinit(gpa);
+    var info = try types.decodeTypeInfo(gpa, &comp);
+    defer info.deinit();
+    // `validate` would also run the export-name checks, quadratic in `n`.
+    try checkMapType(&info, info.deftypes.items[1]);
 }
 
 test "functype result rejects transitive borrow; borrow param is allowed (D-336)" {
@@ -1271,6 +1503,18 @@ test "functype result rejects transitive borrow; borrow param is allowed (D-336)
     const ok_body = [_]u8{ 0x03, 0x3f, 0x7f, 0x00, 0x68, 0x00, 0x40, 0x01, 0x01, 'p', 0x01, 0x01, 0x00 };
     const ok = preamble ++ [_]u8{ 7, ok_body.len } ++ ok_body;
     try validateBytes(&ok);
+
+    // INVALID: the borrow behind a type export. type[0]=resource;
+    // (export "r" (type 0)) mints type[1]; type[2]=borrow<1>;
+    // (export "b" (type 2)) mints type[3]; type[4]=(func () -> type 3).
+    const export_r = [_]u8{ 0x01, 0x00, 0x01, 'r', 0x03, 0x00, 0x00 };
+    const export_b = [_]u8{ 0x01, 0x00, 0x01, 'b', 0x03, 0x02, 0x00 };
+    const via_export = preamble ++ [_]u8{ 7, 4, 0x01, 0x3f, 0x7f, 0x00 } ++
+        [_]u8{ 11, export_r.len } ++ export_r ++
+        [_]u8{ 7, 3, 0x01, 0x68, 0x01 } ++
+        [_]u8{ 11, export_b.len } ++ export_b ++
+        [_]u8{ 7, 5, 0x01, 0x40, 0x00, 0x00, 0x03 };
+    try std.testing.expectError(Error.InvalidDefType, validateBytes(&via_export));
 }
 
 test "rule 8: case-insensitive label duplicates" {

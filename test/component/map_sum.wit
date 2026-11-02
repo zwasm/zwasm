@@ -1,0 +1,9 @@
+package test:m;
+
+interface m {
+  f: func(x: map<string, u32>) -> u32;
+}
+
+world w {
+  export m;
+}

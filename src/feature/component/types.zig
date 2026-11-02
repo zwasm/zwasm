@@ -15,7 +15,7 @@
 //!
 //! SCOPE (campaign close 2026-06-13): the full deftype family decodes —
 //! primitives, functype, compound defvaltypes (record/variant/list/tuple/
-//! flags/enum/option/result/own/borrow), componenttype/instancetype decl
+//! flags/enum/option/result/own/borrow/map), componenttype/instancetype decl
 //! scopes, and resourcetype 0x3f (D-322; raw-byte peek — it is
 //! sleb-positive unlike every other deftype op). Still typed
 //! stream/future (0x66/0x65) decode as CM-async value types (WASI 0.3).
@@ -140,6 +140,14 @@ pub const FutureType = struct {
     payload: ?ValType,
 };
 
+/// `map<k, v>` defvaltype (`Binary.md` 0x63). A specialized type: its values
+/// and canonical ABI are those of `list<tuple<k, v>>` (`CanonicalABI.md`
+/// `despecialize`), but it is not type-equal to that list.
+pub const MapType = struct {
+    key: ValType,
+    value: ValType,
+};
+
 /// One `deftype` in the type index space. A2 modelled primitives + `functype`;
 /// B2 `enum`/`flags`; B5 the remaining compound value types; own/borrow are
 /// resource handles; stream/future are the CM-async (WASI 0.3) value types.
@@ -158,6 +166,8 @@ pub const DefType = union(enum) {
     stream: StreamType,
     /// `future<t?>` (0x65) — async single-shot value of an optional type.
     future: FutureType,
+    /// `map<k, v>` (0x63).
+    map: MapType,
     /// `own<i>` (0x69) — an owning handle to resource type `i`.
     own: u32,
     /// `borrow<i>` (0x68) — a borrowed handle to resource type `i`.
@@ -975,6 +985,11 @@ pub const Error = error{
     EmptyEnum,
     /// `flags` label count outside `0 < n <= 32` (spec cap).
     InvalidFlagsCount,
+    /// A `map` key outside `keytype` (`Explainer.md`).
+    InvalidMapKey,
+    /// A `map` value that transitively carries a handle, `future`, `stream`
+    /// or `error-context`.
+    InvalidMapValue,
     /// A spec-defined form not yet decoded (compound defvaltype → B-chunks;
     /// component/instance/resource type → C-chunks). Typed deferral, not a
     /// silent skip (`no_workaround`).
@@ -1027,11 +1042,12 @@ fn decodeLabelVec(arena: Allocator, body: []const u8, pos: *usize) Error![]const
     return labels.toOwnedSlice(arena);
 }
 
-/// `importname' ::= (0x00|0x01) len name | 0x02 len name versionsuffix`.
-/// The 0x00/0x01 prefixes are the pre-1.0 plain/interface distinction (both
-/// yield the base name); 0x02 carries a trailing semver suffix, read and
-/// dropped (spec: "ignored for validation except diagnostics"). Returns the
-/// base name (borrowed).
+/// `importname' ::= 0x00 len name | 0x01 len name | 0x02 len name
+/// vec(attribute)` (`Binary.md` `nameattributes`). 0x00/0x01 are the pre-1.0
+/// plain/interface distinction; both yield the base name. The 0x02
+/// attributes (`implements`, `version-suffix`, `external-id`) are read and
+/// dropped: "all `attributes` on `import`s and `export`s are ignored by type
+/// checking" (`Explainer.md`). Returns the base name (borrowed).
 fn decodeImportExportName(body: []const u8, pos: *usize) Error![]const u8 {
     if (pos.* >= body.len) return Error.Truncated;
     const prefix = body[pos.*];
@@ -1040,9 +1056,24 @@ fn decodeImportExportName(body: []const u8, pos: *usize) Error![]const u8 {
         0x00, 0x01 => return try decodeLabel(body, pos),
         0x02 => {
             const name = try decodeLabel(body, pos);
-            _ = try decodeLabel(body, pos); // versionsuffix — dropped
+            const count = try leb128.readUleb128(u32, body, pos);
+            var i: u32 = 0;
+            while (i < count) : (i += 1) try skipNameAttribute(body, pos);
             return name;
         },
+        else => return Error.InvalidName,
+    }
+}
+
+/// `attribute ::= 0x00 len interfacename | 0x01 len semversuffix | 0x02 name`
+/// (`implements` / `version-suffix` / `external-id`). Every arm is one
+/// length-prefixed string.
+fn skipNameAttribute(body: []const u8, pos: *usize) Error!void {
+    if (pos.* >= body.len) return Error.Truncated;
+    const kind = body[pos.*];
+    pos.* += 1;
+    switch (kind) {
+        0x00, 0x01, 0x02 => _ = try decodeLabel(body, pos),
         else => return Error.InvalidName,
     }
 }
@@ -1204,6 +1235,10 @@ fn decodeDefType(arena: Allocator, body: []const u8, pos: *usize) Error!DefType 
         // OPTIONAL valtype (`<valtype>?` = 0x00 | 0x01 valtype).
         0x66 => .{ .stream = .{ .payload = try decodeOptionalValType(body, pos) } },
         0x65 => .{ .future = .{ .payload = try decodeOptionalValType(body, pos) } },
+        0x63 => blk: {
+            const key = try decodeValType(body, pos);
+            break :blk .{ .map = .{ .key = key, .value = try decodeValType(body, pos) } };
+        },
         0x41 => .{ .component_type = try decodeComponentType(arena, body, pos) },
         0x42 => .{ .instance_type = try decodeInstanceType(arena, body, pos) },
 
