@@ -1615,17 +1615,14 @@ pub fn compile(
             // the dropped-flag byte at `[r15+ptr_off]+idx`. No
             // operands consumed; no result pushed. validator already
             // bounds-checks the index, so no trap path needed.
-            .@"data.drop" => {
-                if (ins.payload >= 4096) return Error.UnsupportedOp;
-                try gpr.writeU32(allocator, &buf, inst.encLdrImm(16, abi.runtime_ptr_save_gpr, jit_abi.data_dropped_ptr_off));
+            // `baseOffLarge` reaches byte offsets (= idx) below 2^24.
+            .@"data.drop", .@"elem.drop" => {
+                if (ins.payload >= (1 << 24)) return Error.UnsupportedOp;
+                const ptr_off = if (ins.op == .@"data.drop") jit_abi.data_dropped_ptr_off else jit_abi.elem_dropped_ptr_off;
+                try gpr.writeU32(allocator, &buf, inst.encLdrImm(16, abi.runtime_ptr_save_gpr, ptr_off));
+                const flag = try gpr.baseOffLarge(allocator, &buf, 16, 16, @intCast(ins.payload), 4095);
                 try gpr.writeU32(allocator, &buf, inst.encMovzImm16(17, 1));
-                try gpr.writeU32(allocator, &buf, inst.encStrbImm(17, 16, @intCast(ins.payload)));
-            },
-            .@"elem.drop" => {
-                if (ins.payload >= 4096) return Error.UnsupportedOp;
-                try gpr.writeU32(allocator, &buf, inst.encLdrImm(16, abi.runtime_ptr_save_gpr, jit_abi.elem_dropped_ptr_off));
-                try gpr.writeU32(allocator, &buf, inst.encMovzImm16(17, 1));
-                try gpr.writeU32(allocator, &buf, inst.encStrbImm(17, 16, @intCast(ins.payload)));
+                try gpr.writeU32(allocator, &buf, inst.encStrbImm(17, flag.base, @intCast(flag.off)));
             },
             // Table ops (per ADR-0058):
             // table.get / table.set / table.size — bounds-checked

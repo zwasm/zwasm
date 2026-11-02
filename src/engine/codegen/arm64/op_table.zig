@@ -738,11 +738,10 @@ pub fn emitTableInit(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
     const elemidx: u32 = @intCast(ins.payload);
     const tableidx = ins.extra;
     // tableidx cap = 512 (TableSlice stride 24, see ADR-0068 +
-    // emitTableGet rationale). elemidx cap stays 1024 because
-    // ElemSlice stride is still 16.
-    if (elemidx >= 1024 or tableidx >= 512) return Error.UnsupportedOp;
+    // emitTableGet rationale). elemidx: `baseOffLarge` reaches byte
+    // offsets below 2^24 (ElemSlice stride 16).
+    if (elemidx >= (1 << 20) or tableidx >= 512) return Error.UnsupportedOp;
     const tbl_off: u15 = @intCast(@as(u32, tableidx) * jit_abi.table_slice_size);
-    const elem_off: u15 = @intCast(@as(u32, elemidx) * jit_abi.elem_slice_size);
 
     if (ctx.pushed_vregs.items.len < 3) return Error.AllocationMissing;
     const n_v = ctx.pushed_vregs.pop().?;
@@ -766,18 +765,22 @@ pub fn emitTableInit(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(sx13, 10, @intCast(@as(u32, tbl_off) + jit_abi.tableslice_len_off)));
 
     // Step B2: read elems[y] descriptor — X12 = elem_refs, W15 = elem_len.
+    // Past the W-form imm12 budget the descriptor address goes through X9.
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(sx10, abi.runtime_ptr_save_gpr, jit_abi.elem_segments_ptr_off));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(sx12, 10, elem_off));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImmW(15, 10, @intCast(@as(u32, elem_off) + 8)));
+    const elem = try gpr.baseOffLarge(ctx.allocator, ctx.buf, sx10, sx9, elemidx * jit_abi.elem_slice_size, 16380 - 8);
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(sx12, elem.base, @intCast(elem.off)));
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImmW(15, elem.base, @intCast(elem.off + 8)));
 
     // Step B3: dropped-flag override. If elem_dropped[elemidx] != 0,
     // seg_len → 0 via CSEL X15, X15, XZR, EQ.
     //   LDR X10, [X19, #elem_dropped_ptr_off]
-    //   LDRB W9, [X10, #elemidx]
+    //   (ADD X9, X10, #(elemidx >> 12), LSL #12)
+    //   LDRB W9, [X10|X9, #off]
     //   CMP W9, #0
     //   CSEL X15, X15, XZR, EQ
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(sx10, abi.runtime_ptr_save_gpr, jit_abi.elem_dropped_ptr_off));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrbImm(sx9, 10, @intCast(elemidx)));
+    const flag = try gpr.baseOffLarge(ctx.allocator, ctx.buf, sx10, sx9, elemidx, 4095);
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrbImm(sx9, flag.base, @intCast(flag.off)));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCmpImmW(sx9, 0));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCselX(15, 15, 31, .eq));
 

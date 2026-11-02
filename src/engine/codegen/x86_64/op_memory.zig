@@ -960,12 +960,6 @@ pub fn emitMemoryInit(
     dataidx: u32,
     is64: bool,
 ) Error!void {
-    // Encoding-budget guard: 16-byte stride means disp32 always
-    // suffices for realistic segment counts. Match the arm64 path's
-    // 2048 cap for cross-arch consistency (validator already rejects
-    // out-of-range dataidx).
-    if (dataidx >= 2048) return Error.UnsupportedOp;
-
     if (pushed_vregs.items.len < 3) return Error.AllocationMissing;
     const n_v = pushed_vregs.pop().?;
     const src_v = pushed_vregs.pop().?;
@@ -986,7 +980,7 @@ pub fn emitMemoryInit(
     //   MOV RAX, [R15 + data_segments_ptr_off]    ; seg table base
     //   MOV R9,  [RAX + idx*16 + 0]                ; seg.ptr
     //   MOV R8,  [RAX + idx*16 + 8]                ; seg.len
-    const seg_byte_off: i32 = @intCast(@as(u64, dataidx) * 16);
+    const seg_byte_off = std.math.cast(i32, @as(u64, dataidx) * 16) orelse return Error.UnsupportedOp;
     try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.rax, abi.runtime_ptr_save_gpr, jit_abi.data_segments_ptr_off).slice());
     try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.r9, .rax, seg_byte_off).slice());
     try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.r8, .rax, seg_byte_off + 8).slice());
