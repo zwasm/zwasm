@@ -31,6 +31,10 @@ const PendingClientSend = ctx_mod.PendingClientSend;
 const ctxMemory = ctx_mod.ctxMemory;
 const ctxIo = ctx_mod.ctxIo;
 const ctxRequireNetwork = ctx_mod.ctxRequireNetwork;
+const ctxHttpFields = ctx_mod.ctxHttpFields;
+const ctxHttpFieldsSelf = ctx_mod.ctxHttpFieldsSelf;
+const ctxMintHttpFields = ctx_mod.ctxMintHttpFields;
+const ctxHttpRequest = ctx_mod.ctxHttpRequest;
 const ctxTcpSocket = ctx_mod.ctxTcpSocket;
 const ctxUdpSocket = ctx_mod.ctxUdpSocket;
 const descriptorFilestat = ctx_mod.descriptorFilestat;
@@ -1477,23 +1481,6 @@ fn sock3UdpReceiveComplete(ctx: *WasiP2Ctx, rep: u32, retptr: u32) WasiP2Error!v
 // (name_ptr, name_len, val_ptr, val_len) 16 B; `result<_, header-error>` =
 // disc u8@0, err variant disc u8@4, `other`'s option<string> none u8@8.
 
-fn ctxHttpFields(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*p3http.HttpFields {
-    if (rep >= ctx.http_fields.items.len) return WasiP2Error.InvalidHandle;
-    return &ctx.http_fields.items[rep];
-}
-
-fn http3FieldsSelf(ctx: *WasiP2Ctx, self: u32) WasiP2Error!*p3http.HttpFields {
-    const rep = ctx.resources.rep(WasiP2Ctx.HTTP_FIELDS_RT, self) catch
-        try ctx.resources.rep(WasiP2Ctx.HTTP_FIELDS_VIEW_RT, self);
-    return ctxHttpFields(ctx, rep);
-}
-
-fn http3MintFields(ctx: *WasiP2Ctx, fields: p3http.HttpFields) WasiP2Error!u32 {
-    const idx: u32 = @intCast(ctx.http_fields.items.len);
-    ctx.http_fields.append(ctx.alloc, fields) catch return WasiP2Error.OutOfMemory;
-    return ctx.resources.new(WasiP2Ctx.HTTP_FIELDS_RT, idx);
-}
-
 /// `result<_, header-error>` (ok = null).
 fn writeHeaderErrResult(mem: Memory, retptr: u32, e: ?p3http.FieldsError) WasiP2Error!void {
     if (e) |err| {
@@ -1507,7 +1494,7 @@ fn writeHeaderErrResult(mem: Memory, retptr: u32, e: ?p3http.FieldsError) WasiP2
 
 fn http3FieldsNew(caller: *Caller) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
-    return http3MintFields(ctx, .{});
+    return ctxMintHttpFields(ctx, .{});
 }
 
 fn http3FieldsFromList(caller: *Caller, entries_ptr: u32, entries_len: u32, retptr: u32) WasiP2Error!void {
@@ -1528,7 +1515,7 @@ fn http3FieldsFromList(caller: *Caller, entries_ptr: u32, entries_len: u32, retp
             return;
         };
     }
-    const handle = try http3MintFields(ctx, fields);
+    const handle = try ctxMintHttpFields(ctx, fields);
     try mem.write(retptr, @as(u8, 0));
     try mem.write(retptr + 4, handle);
 }
@@ -1565,7 +1552,7 @@ fn http3WriteValueList(ctx: *WasiP2Ctx, mem: Memory, retptr: u32, values: []cons
 fn http3FieldsGet(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
-    const fields = try http3FieldsSelf(ctx, self);
+    const fields = try ctxHttpFieldsSelf(ctx, self);
     const name = try mem.sliceAt(name_ptr, name_len);
     var values: std.ArrayList([]const u8) = .empty;
     defer values.deinit(ctx.alloc);
@@ -1576,7 +1563,7 @@ fn http3FieldsGet(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, retp
 fn http3FieldsHas(caller: *Caller, self: u32, name_ptr: u32, name_len: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
-    const fields = try http3FieldsSelf(ctx, self);
+    const fields = try ctxHttpFieldsSelf(ctx, self);
     const name = try mem.sliceAt(name_ptr, name_len);
     return @intFromBool(fields.has(name));
 }
@@ -1584,7 +1571,7 @@ fn http3FieldsHas(caller: *Caller, self: u32, name_ptr: u32, name_len: u32) Wasi
 fn http3FieldsSet(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, values_ptr: u32, values_len: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
-    const fields = try http3FieldsSelf(ctx, self);
+    const fields = try ctxHttpFieldsSelf(ctx, self);
     const name = try mem.sliceAt(name_ptr, name_len);
     var values: std.ArrayList([]const u8) = .empty;
     defer values.deinit(ctx.alloc);
@@ -1601,7 +1588,7 @@ fn http3FieldsSet(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, valu
 fn http3FieldsDelete(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
-    const fields = try http3FieldsSelf(ctx, self);
+    const fields = try ctxHttpFieldsSelf(ctx, self);
     const name = try mem.sliceAt(name_ptr, name_len);
     fields.delete(ctx.alloc, name) catch |e| return writeHeaderErrResult(mem, retptr, e);
     try writeHeaderErrResult(mem, retptr, null);
@@ -1610,7 +1597,7 @@ fn http3FieldsDelete(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, r
 fn http3FieldsGetAndDelete(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
-    const fields = try http3FieldsSelf(ctx, self);
+    const fields = try ctxHttpFieldsSelf(ctx, self);
     const name = try mem.sliceAt(name_ptr, name_len);
     var out: std.ArrayList([]u8) = .empty;
     defer {
@@ -1629,7 +1616,7 @@ fn http3FieldsGetAndDelete(caller: *Caller, self: u32, name_ptr: u32, name_len: 
 fn http3FieldsAppend(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, value_ptr: u32, value_len: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
-    const fields = try http3FieldsSelf(ctx, self);
+    const fields = try ctxHttpFieldsSelf(ctx, self);
     const name = try mem.sliceAt(name_ptr, name_len);
     const value = try mem.sliceAt(value_ptr, value_len);
     fields.append(ctx.alloc, name, value) catch |e| return writeHeaderErrResult(mem, retptr, e);
@@ -1639,7 +1626,7 @@ fn http3FieldsAppend(caller: *Caller, self: u32, name_ptr: u32, name_len: u32, v
 fn http3FieldsCopyAll(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
-    const fields = try http3FieldsSelf(ctx, self);
+    const fields = try ctxHttpFieldsSelf(ctx, self);
     // Elem table = one allocation; each name string and value list its own
     // (per-element buffer ownership — see http3AllocBlob).
     const items = fields.entries.items;
@@ -1659,13 +1646,13 @@ fn http3FieldsCopyAll(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void 
 
 fn http3FieldsClone(caller: *Caller, self: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
-    const src = try http3FieldsSelf(ctx, self);
+    const src = try ctxHttpFieldsSelf(ctx, self);
     var copy: p3http.HttpFields = .{};
     src.cloneInto(ctx.alloc, &copy) catch {
         copy.deinit(ctx.alloc);
         return WasiP2Error.OutOfMemory;
     };
-    return http3MintFields(ctx, copy);
+    return ctxMintHttpFields(ctx, copy);
 }
 
 // -- request / response / request-options (ADR-0205 phase D-2) --
@@ -2114,11 +2101,6 @@ fn http3ClientSend(caller: *Caller, request: u32, retptr: u32) WasiP2Error!u32 {
     return @backingInt(async_mod.SubtaskState.started) | (h << 4);
 }
 
-fn ctxHttpRequest(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*p3http.HttpRequest {
-    if (rep >= ctx.http_requests.items.len) return WasiP2Error.InvalidHandle;
-    return &ctx.http_requests.items[rep];
-}
-
 /// Resolve parked `client.send`s whose request body is complete (the body
 /// stream's writer dropped — or no body at all): run the blocking HTTP
 /// exchange, mint the response resource, marshal the result, and flip the
@@ -2150,15 +2132,13 @@ pub fn pollPendingClientSends(self: *WasiP2Ctx) WasiP2Error!bool {
     return progressed;
 }
 
-/// The blocking HTTP exchange for one resolved `client.send`: std.http
-/// Client against the request's scheme/authority/path, the response minted
-/// as a host-built resource (`host_body_bytes`-served body; trailers via
-/// the resolved-ok(none) future at consume-body). result<own<response>,
-/// error-code> marshals at retptr with payload offset 8 (error-code
-/// carries u64 cases).
+/// Marshal one resolved `client.send` (`ctx_mod.httpExchange` performs it):
+/// the response minted as a host-built resource (`host_body_bytes`-served
+/// body; trailers via the resolved-ok(none) future at consume-body).
+/// result<own<response>, error-code> marshals at retptr with payload offset
+/// 8 (error-code carries u64 cases).
 fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void {
     const mem = try self.memory();
-    const io = try ctxIo(self);
     const req = try ctxHttpRequest(self, pcs.req_rep);
     const fail = struct {
         fn write(m: Memory, retptr: u32, sub: *async_mod.StreamFutureEnd, h: u32) WasiP2Error!void {
@@ -2177,75 +2157,23 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
     // Denied here rather than at `client.send`, so the parked body stream
     // drains and releases as on any failed exchange. `HTTP-request-denied` = 15.
     if (!pcs.granted) return fail.code(mem, pcs.retptr, sub, pcs.subtask, 15);
-    const authority = req.authority orelse return fail.write(mem, pcs.retptr, sub, pcs.subtask);
-    const path = req.path_with_query orelse "/";
-    const url = self.alloc.print("http://{s}{s}", .{ authority, path }) catch return WasiP2Error.OutOfMemory;
-    defer self.alloc.free(url);
-    const uri = std.Uri.parse(url) catch return fail.write(mem, pcs.retptr, sub, pcs.subtask);
-    const method: std.http.Method = switch (req.method) {
-        .get => .GET,
-        .head => .HEAD,
-        .post => .POST,
-        .put => .PUT,
-        .delete => .DELETE,
-        .connect => .CONNECT,
-        .options => .OPTIONS,
-        .trace => .TRACE,
-        .patch => .PATCH,
-        .other => return fail.write(mem, pcs.retptr, sub, pcs.subtask),
+    const ex = ctx_mod.httpExchange(self, req, pcs.body.items) catch |e| switch (e) {
+        error.HttpFailed => return fail.write(mem, pcs.retptr, sub, pcs.subtask),
+        else => |oe| return oe,
     };
-    // Request headers from the fields model; content-length is computed by
-    // the std client from the body.
-    var extra: std.ArrayList(std.http.Header) = .empty;
-    defer extra.deinit(self.alloc);
-    if (req.headers_rep < self.http_fields.items.len) {
-        for (self.http_fields.items[req.headers_rep].entries.items) |p| {
-            if (std.ascii.eqlIgnoreCase(p.name, "content-length")) continue;
-            extra.append(self.alloc, .{ .name = p.name, .value = p.value }) catch return WasiP2Error.OutOfMemory;
-        }
-    }
-    var client: std.http.Client = .{ .allocator = self.alloc, .io = io };
-    defer client.deinit();
-    var hreq = client.request(method, uri, .{ .extra_headers = extra.items }) catch return fail.write(mem, pcs.retptr, sub, pcs.subtask);
-    defer hreq.deinit();
-    hreq.sendBodyComplete(pcs.body.items) catch return fail.write(mem, pcs.retptr, sub, pcs.subtask);
-    var redirect_buf: [2048]u8 = undefined;
-    var hresp = hreq.receiveHead(&redirect_buf) catch return fail.write(mem, pcs.retptr, sub, pcs.subtask);
-
-    // Response headers → an immutable fields entry.
-    const fields_idx: u32 = @intCast(self.http_fields.items.len);
-    self.http_fields.append(self.alloc, .{}) catch return WasiP2Error.OutOfMemory;
-    var hit = hresp.head.iterateHeaders();
-    while (hit.next()) |hd| {
-        self.http_fields.items[fields_idx].appendChecked(self.alloc, hd.name, hd.value) catch continue;
-    }
-    self.http_fields.items[fields_idx].immutable = true;
-
-    // Response body → a host-served stream.
-    var transfer_buf: [4096]u8 = undefined;
-    const rdr = hresp.reader(&transfer_buf);
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(self.alloc);
-    while (true) {
-        const chunk = rdr.peekGreedy(1) catch |e| switch (e) {
-            error.EndOfStream => break,
-            else => return fail.write(mem, pcs.retptr, sub, pcs.subtask),
-        };
-        body.appendSlice(self.alloc, chunk) catch return WasiP2Error.OutOfMemory;
-        rdr.toss(chunk.len);
-    }
     var contents: ?u32 = null;
-    if (body.items.len > 0) {
+    if (ex.body.len > 0) {
+        // Block-scoped: disarmed once `put` has handed the bytes to the map.
+        errdefer self.alloc.free(ex.body);
         const pair = try async_mod.newStreamPair(&self.streams, &self.shared, null);
         const shared_id = (try self.streams.get(pair.readable)).shared;
-        const copy = self.alloc.dupe(u8, body.items) catch return WasiP2Error.OutOfMemory;
-        try self.host_body_bytes.put(self.alloc, shared_id, .{ .data = copy });
+        try self.host_body_bytes.put(self.alloc, shared_id, .{ .data = ex.body });
         contents = pair.readable;
-    }
+    } else self.alloc.free(ex.body);
     const resp_idx: u32 = @intCast(self.http_responses.items.len);
     self.http_responses.append(self.alloc, .{
-        .status = @backingInt(hresp.head.status),
-        .headers_rep = fields_idx,
+        .status = ex.status,
+        .headers_rep = ex.headers_rep,
         .contents_stream = contents,
     }) catch return WasiP2Error.OutOfMemory;
     const handle = try self.resources.new(WasiP2Ctx.HTTP_RESPONSE_RT, resp_idx);
@@ -2507,7 +2435,7 @@ pub fn registerP3Arms(lk: *Linker, module: []const u8, name: []const u8, op: ada
         .fs3_stat, .fs3_stat_at, .fs3_get_type, .fs3_get_flags, .fs3_set_times, .fs3_set_times_at, .fs3_set_size, .fs3_advise, .fs3_sync, .fs3_sync_data, .fs3_open_at, .fs3_create_directory_at, .fs3_remove_directory_at, .fs3_unlink_file_at, .fs3_readlink_at, .fs3_rename_at, .fs3_symlink_at, .fs3_link_at, .fs3_is_same_object, .fs3_metadata_hash, .fs3_metadata_hash_at => return error.UnsupportedWasiImport,
         // Every non-P3 op belongs to the facade classifier; listing the
         // tags (not `else`) keeps this switch compile-time exhaustive too.
-        .cli_get_stdout, .cli_get_stderr, .cli_get_stdin, .cli_stdout_write_via_stream, .cli_stderr_write_via_stream, .cli_stdin_read_via_stream, .out_stream_write, .out_stream_blocking_write_and_flush, .out_stream_blocking_flush, .out_stream_drop, .in_stream_read, .in_stream_blocking_read, .in_stream_drop, .cli_exit, .cli_exit_with_code, .clocks_wall_now, .clocks_monotonic_now, .clocks_system_now, .clocks_system_get_resolution, .clocks_monotonic_get_resolution, .clocks_wait_until, .clocks_wait_for, .random_get_bytes, .fs_descriptor_read, .fs_descriptor_write, .fs_descriptor_open_at, .fs_descriptor_sync, .fs_descriptor_stat, .fs_descriptor_get_type, .fs_descriptor_drop, .fs_get_directories, .poll_pollable_ready, .poll_pollable_block, .poll_poll, .in_stream_subscribe, .out_stream_subscribe, .clocks_subscribe_instant, .clocks_subscribe_duration, .cli_get_environment, .cli_get_arguments, .cli_initial_cwd, .cli_get_terminal_stdin, .cli_get_terminal_stdout, .cli_get_terminal_stderr, .out_stream_check_write, .random_get_u64, .random_insecure_get_bytes, .random_insecure_get_u64, .random_insecure_seed, .fs_descriptor_stat_at, .fs_descriptor_create_directory_at, .fs_descriptor_link_at, .fs_descriptor_readlink_at, .fs_descriptor_remove_directory_at, .fs_descriptor_rename_at, .fs_descriptor_symlink_at, .fs_descriptor_sync_data, .fs_descriptor_unlink_file_at, .fs_descriptor_read_directory, .fs_dir_entry_stream_read, .fs_dir_entry_stream_drop, .io_resource_drop, .fs_read_via_stream, .fs_write_via_stream, .fs_append_via_stream, .fs_stub_get_flags, .fs_descriptor_metadata_hash, .fs_descriptor_metadata_hash_at, .sock_instance_network, .sock_create_tcp, .sock_tcp_start_bind, .sock_tcp_finish_bind, .sock_tcp_start_connect, .sock_tcp_finish_connect, .sock_tcp_subscribe, .sock_tcp_shutdown, .sock_tcp_is_listening, .sock_tcp_drop, .sock_tcp_start_listen, .sock_tcp_finish_listen, .sock_tcp_accept, .sock_tcp_local_address, .sock_tcp_remote_address, .sock_tcp_set_backlog, .sock_stub_unit2, .sock_stub_unit3i, .sock_stub_unit3l, .sock_stub_unit15, .sock_stub_val1, .sock_stub_val4, .sock_stub_val8, .sock_stub_val15_4, .sock_stub_resolve, .sock_stub_recv, .sock_stub_send, .sock_stub_subscribe => return false,
+        .cli_get_stdout, .cli_get_stderr, .cli_get_stdin, .cli_stdout_write_via_stream, .cli_stderr_write_via_stream, .cli_stdin_read_via_stream, .out_stream_write, .out_stream_blocking_write_and_flush, .out_stream_blocking_flush, .out_stream_drop, .in_stream_read, .in_stream_blocking_read, .in_stream_drop, .cli_exit, .cli_exit_with_code, .clocks_wall_now, .clocks_monotonic_now, .clocks_system_now, .clocks_system_get_resolution, .clocks_monotonic_get_resolution, .clocks_wait_until, .clocks_wait_for, .random_get_bytes, .fs_descriptor_read, .fs_descriptor_write, .fs_descriptor_open_at, .fs_descriptor_sync, .fs_descriptor_stat, .fs_descriptor_get_type, .fs_descriptor_drop, .fs_get_directories, .poll_pollable_ready, .poll_pollable_block, .poll_poll, .in_stream_subscribe, .out_stream_subscribe, .clocks_subscribe_instant, .clocks_subscribe_duration, .cli_get_environment, .cli_get_arguments, .cli_initial_cwd, .cli_get_terminal_stdin, .cli_get_terminal_stdout, .cli_get_terminal_stderr, .out_stream_check_write, .random_get_u64, .random_insecure_get_bytes, .random_insecure_get_u64, .random_insecure_seed, .fs_descriptor_stat_at, .fs_descriptor_create_directory_at, .fs_descriptor_link_at, .fs_descriptor_readlink_at, .fs_descriptor_remove_directory_at, .fs_descriptor_rename_at, .fs_descriptor_symlink_at, .fs_descriptor_sync_data, .fs_descriptor_unlink_file_at, .fs_descriptor_read_directory, .fs_dir_entry_stream_read, .fs_dir_entry_stream_drop, .io_resource_drop, .fs_read_via_stream, .fs_write_via_stream, .fs_append_via_stream, .fs_stub_get_flags, .fs_descriptor_metadata_hash, .fs_descriptor_metadata_hash_at, .sock_instance_network, .sock_create_tcp, .sock_tcp_start_bind, .sock_tcp_finish_bind, .sock_tcp_start_connect, .sock_tcp_finish_connect, .sock_tcp_subscribe, .sock_tcp_shutdown, .sock_tcp_is_listening, .sock_tcp_drop, .sock_tcp_start_listen, .sock_tcp_finish_listen, .sock_tcp_accept, .sock_tcp_local_address, .sock_tcp_remote_address, .sock_tcp_set_backlog, .sock_stub_unit2, .sock_stub_unit3i, .sock_stub_unit3l, .sock_stub_unit15, .sock_stub_val1, .sock_stub_val4, .sock_stub_val8, .sock_stub_val15_4, .sock_stub_resolve, .sock_stub_recv, .sock_stub_send, .sock_stub_subscribe, .http2_fields_from_list, .http2_fields_set, .http2_fields_delete, .http2_fields_append, .http2_outgoing_request_new, .http2_outgoing_request_body, .http2_reqopts_connect_set, .http2_reqopts_first_byte_set, .http2_reqopts_between_bytes_set, .http2_outgoing_body_write, .http2_outgoing_body_finish, .http2_handle, .http2_future_subscribe, .http2_future_response_get, .http2_incoming_response_consume, .http2_incoming_body_stream, .http2_incoming_body_finish, .http2_future_trailers_get, .http2_http_error_code => return false,
     }
     return true;
 }

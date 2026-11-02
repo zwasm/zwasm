@@ -40,6 +40,7 @@ const build_options = @import("build_options");
 const ctx_mod = @import("component_wasi_ctx.zig");
 const lower_realloc = @import("component_lower_realloc.zig");
 const p3h = @import("component_wasi_p3_host.zig");
+const p2http = @import("component_wasi_p2_http.zig");
 
 // Substrate re-exports (compat surface, ADR-0207 I1) + local aliases so the
 // moved trampoline bodies read unchanged.
@@ -245,6 +246,7 @@ fn inStreamReadImpl(caller: *Caller, self_handle: u32, len: u64, retptr: u32, bl
     const h = try ctx.resources.peek(self_handle);
     if (h.rt == WasiP2Ctx.SOCK_INPUT_STREAM_RT) return sockStreamRead(ctx, mem, h.rep, len, retptr, blocking);
     if (h.rt == WasiP2Ctx.FILE_INPUT_STREAM_RT) return fileStreamRead(ctx, mem, h.rep, len, retptr);
+    if (h.rt == WasiP2Ctx.HTTP_BODY_IN_RT) return p2http.bodyInRead(ctx, mem, h.rep, len, retptr);
     if (h.rt != WasiP2Ctx.INPUT_STREAM_RT) return resource_table.Error.TypeMismatch;
     const n: u32 = @intCast(@min(len, std.math.maxInt(u32)));
     // `read` may not wait: nothing queued on an inherited stdin is ok([]).
@@ -383,6 +385,7 @@ pub fn p2OutStreamWrite(caller: *Caller, self_handle: u32, ptr: u32, len: u32, r
         try mem.write(retptr, @as(u8, 0));
         return;
     }
+    if (h.rt == WasiP2Ctx.HTTP_BODY_OUT_RT) return p2http.bodyOutWrite(ctx, mem, h.rep, bytes, retptr);
     if (h.rt != WasiP2Ctx.OUTPUT_STREAM_RT) return resource_table.Error.TypeMismatch;
     const fd: wasi_p1.Fd = @intCast(h.rep);
     if (wasi_fd.writeSlice(ctx.host, fd, bytes) != .success) return WasiP2Error.WriteFailed;
@@ -475,6 +478,7 @@ fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
                         ctx.http_fields.items[resp.headers_rep].deinit(ctx.alloc);
                     ctx.p3().drop_transferred_end(ctx, resp.trailers_future);
                     if (resp.contents_stream) |s| ctx.p3().drop_transferred_end(ctx, s);
+                    p2http.releaseResponse(ctx, h.rep);
                 }
             },
             // The request owns its uri strings, its headers fields storage,
@@ -488,9 +492,11 @@ fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
                         ctx.http_fields.items[req.headers_rep].deinit(ctx.alloc);
                     ctx.p3().drop_transferred_end(ctx, req.trailers_future);
                     if (req.contents_stream) |s| ctx.p3().drop_transferred_end(ctx, s);
+                    p2http.releaseRequest(ctx, h.rep);
                     req.deinit(ctx.alloc);
                 }
             },
+            WasiP2Ctx.HTTP2_OUTGOING_BODY_RT, WasiP2Ctx.HTTP2_FUTURE_RESPONSE_RT, WasiP2Ctx.HTTP2_INCOMING_BODY_RT, WasiP2Ctx.HTTP2_FUTURE_TRAILERS_RT, WasiP2Ctx.HTTP_BODY_OUT_RT, WasiP2Ctx.HTTP_BODY_IN_RT => try p2http.dropResource(ctx, h.rt, h.rep),
             else => _ = wasi_fd.fdClose(ctx.host, @intCast(h.rep)),
         }
     }
@@ -852,7 +858,7 @@ pub fn p2GetDirectories(caller: *Caller, retptr: u32) WasiP2Error!void {
 fn p2OutStreamFlush(caller: *Caller, self_handle: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const h = try ctx.resources.peek(self_handle); // validate handle (fd or socket stream)
-    if (h.rt != WasiP2Ctx.OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.SOCK_OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.FILE_OUTPUT_STREAM_RT)
+    if (h.rt != WasiP2Ctx.OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.SOCK_OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.FILE_OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.HTTP_BODY_OUT_RT)
         return resource_table.Error.TypeMismatch;
     const mem = try ctxMemory(caller);
     try mem.write(retptr, @as(u8, 0)); // result disc: ok (nothing buffered at this layer)
@@ -1451,7 +1457,7 @@ fn p2CheckWrite(caller: *Caller, self_handle: u32, retptr: u32) WasiP2Error!void
         try mem.write(retptr + 8, @as(u64, if (writable) 4096 else 0));
         return;
     }
-    if (h.rt != WasiP2Ctx.OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.FILE_OUTPUT_STREAM_RT) return resource_table.Error.TypeMismatch;
+    if (h.rt != WasiP2Ctx.OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.FILE_OUTPUT_STREAM_RT and h.rt != WasiP2Ctx.HTTP_BODY_OUT_RT) return resource_table.Error.TypeMismatch;
     try mem.write(retptr, @as(u8, 0)); // result disc: ok
     try mem.write(retptr + 8, @as(u64, 4096)); // bytes the guest may write now
 }
@@ -1815,6 +1821,7 @@ fn defineClassifiedFunc(lk: *Linker, module: []const u8, name: []const u8, op: a
             if (try p3h.registerP3Arms(lk, module, name, op, ctx)) return;
             return error.UnsupportedWasiImport;
         },
+        .http2_fields_from_list, .http2_fields_set, .http2_fields_delete, .http2_fields_append, .http2_outgoing_request_new, .http2_outgoing_request_body, .http2_reqopts_connect_set, .http2_reqopts_first_byte_set, .http2_reqopts_between_bytes_set, .http2_outgoing_body_write, .http2_outgoing_body_finish, .http2_handle, .http2_future_subscribe, .http2_future_response_get, .http2_incoming_response_consume, .http2_incoming_body_stream, .http2_incoming_body_finish, .http2_future_trailers_get, .http2_http_error_code => try p2http.defineHttp2Op(lk, module, name, op, ctx),
         .fs_read_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2DescriptorReadViaStream, mapGuestFault),
         .fs_write_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u64, u32) WasiP2Error!void, p2DescriptorWriteViaStream, mapGuestFault),
         .fs_append_via_stream => try defineMapped(lk, module, name, ctx, fn (*Caller, u32, u32) WasiP2Error!void, p2DescriptorAppendViaStream, mapGuestFault),

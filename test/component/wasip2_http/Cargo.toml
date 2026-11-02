@@ -1,0 +1,19 @@
+# A wasm32-wasip2 HTTP client guest (`wasi:http/*@0.2.12` via wasip2 1.0.4).
+# Build + provenance: ../README_wasip2_http.md. The emitted `.wasm` is committed.
+[package]
+name = "zwasm-wasip2-http-fixtures"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wasip2 = "=1.0.4"
+
+[[bin]]
+name = "http-get"
+path = "src/bin/http-get.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+strip = true
