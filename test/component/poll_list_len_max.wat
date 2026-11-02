@@ -17,5 +17,6 @@
       (i32.const 0)))
   (core instance $deps (export "poll" (func $poll)))
   (core instance $m (instantiate $M (with "poll" (instance $deps))))
-  (func $run (result u32) (canon lift (core func $m "run")))
-  (export "run" (func $run)))
+  (func $run (result (result)) (canon lift (core func $m "run")))
+  (instance $run-inst (export "run" (func $run)))
+  (export "wasi:cli/run@0.2.0" (instance $run-inst)))

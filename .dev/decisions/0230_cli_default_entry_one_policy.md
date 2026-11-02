@@ -100,3 +100,9 @@ shapes on all four paths (`.wasm`, `--engine interp`, `--engine jit`,
 - Files: `src/engine/runner.zig`, `src/cli/run.zig`, `src/cli/main.zig`;
   tests `test/runners/default_entry_runner.zig`,
   `test/runners/fixtures/default_entry/`
+
+## Revision history
+
+| Date       | SHA | Note |
+|------------|-----|------|
+| 2026-11-02 | —   | Components follow the same contract (#622): the sync entry is `wasi:cli/run#run` by name, else a refusal listing the exports; the async entry is still the first async lift (#677); `--invoke` calls an export by name with WIT-typed args. |

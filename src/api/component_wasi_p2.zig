@@ -1870,11 +1870,19 @@ fn nthCoreModule(decoded: *const decode.Component, n: u32) ?[]const u8 {
     return null;
 }
 
-/// The (first) `canon lift`'s underlying core-instance export — the lowered
-/// `run` the host invokes (resolved through the unified core-func index space).
-fn firstLiftCoreExport(info: *const ctypes.TypeInfo) ?ctypes.TypeInfo.CoreExportRef {
-    for (info.canons.items) |c| {
-        if (c == .lift) return info.resolveCoreFuncExport(c.lift.core_func);
+/// The core export behind the command world's entry: the `run` of the
+/// `wasi:cli/run@0.2.x` / `@0.3.x` instance export, found by name (ADR-0230),
+/// whatever else the component lifts before it. A 0.3 `run` reaches here when
+/// it is lifted sync; an async lift goes to `driveAsyncMain` first.
+fn wasiCliRunCoreExport(alloc: Allocator, info: *const ctypes.TypeInfo) Allocator.Error!?ctypes.TypeInfo.CoreExportRef {
+    const prefix = "wasi:cli/run@";
+    for (info.exports.items) |e| {
+        if (std.meta.activeTag(e.sort) != .instance or !std.mem.startsWith(u8, e.name, prefix)) continue;
+        if (ctypes.parseWasiGen(e.name[prefix.len..]) == .any) continue;
+        const path = try alloc.print("{s}#run", .{e.name});
+        defer alloc.free(path);
+        const lift = info.resolveLiftedFunc(path) orelse return null;
+        return lift.core_func;
     }
     return null;
 }
@@ -2396,10 +2404,11 @@ pub fn runWasiP2Main(engine: *Engine, alloc: Allocator, bytes: []const u8, host:
 }
 
 /// The post-build half of `runWasiP2Main` (the sync `wasi:cli/run` path):
-/// invoke the first `canon lift` export. Split out so the unified
-/// `runWasiMain` dispatcher (P3) can reuse it after building once.
+/// invoke the `wasi:cli/run` export's `run`; a component without one is
+/// `NoRunExport`. Split out so the unified `runWasiMain` dispatcher (P3) can
+/// reuse it after building once.
 pub fn runWasiP2MainBuilt(built: *BuiltComponent) anyerror!void {
-    const run_ref = firstLiftCoreExport(&built.info) orelse return error.NoRunExport;
+    const run_ref = (try wasiCliRunCoreExport(built.alloc, &built.info)) orelse return error.NoRunExport;
     const main_inst = built.guestInstance(run_ref.instance) orelse return error.NoRunExport;
     var results = [_]Value{.{ .i32 = 0 }};
     main_inst.invoke(run_ref.name, &.{}, &results) catch |err| {
@@ -2422,7 +2431,7 @@ pub fn runWasiP2MainBuilt(built: *BuiltComponent) anyerror!void {
 /// (relocated here from `component_wasi_p3.zig` so a `wasi_level < .p3` build
 /// never references the P3 driver — `component_wasi_p3.zig` is then unimported).
 /// At a p2 build an async component falls through to the sync runner, which
-/// surfaces `NoRunExport` if it has no sync `wasi:cli/run` export.
+/// surfaces `NoRunExport` if it does not export `wasi:cli/run`.
 pub fn runWasiMain(engine: *Engine, alloc: Allocator, bytes: []const u8, host: *wasi_host.Host, opts: Module.InstantiateOpts) anyerror!void {
     var built = try buildWasiP2Component(engine, alloc, bytes, host, opts);
     defer built.deinit();

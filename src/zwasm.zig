@@ -435,6 +435,7 @@ test {
     _ = @import("cli/run_prepared.zig");
     _ = @import("cli/cache.zig");
     _ = @import("cli/invoke_args.zig");
+    _ = @import("cli/component_entry.zig");
     _ = @import("feature/component/decode.zig");
     _ = @import("feature/component/types.zig");
     _ = @import("feature/component/types_tests.zig");

@@ -1,0 +1,5 @@
+package example:adder@0.1.0;
+
+world adder {
+  export add: func(a: u32, b: u32) -> u32;
+}

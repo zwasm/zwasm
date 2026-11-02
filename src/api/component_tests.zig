@@ -136,6 +136,26 @@ test "#612: an import / export carrying an implements attribute decodes under it
     }
 }
 
+test "REQ-1 (cw CM-API): a single-module component without a memory invokes its scalar export" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/add_component.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+
+    var opened = try open(&eng, testing.allocator, bytes, &host, .{});
+    defer opened.deinit();
+    try testing.expect(opened == .single);
+    const out = (try opened.invokeTyped("add", &.{ .{ .u32 = 2 }, .{ .u32 = 3 } }, testing.allocator)).?;
+    try testing.expectEqual(@as(u32, 5), out.u32);
+}
+
 test "REQ-7 (cw CM-API): an opened component outlives the caller's input buffer" {
     // cw caches the opened component long-lived (a GC-finalised instance box) and
     // frees its transient load buffer right after `open`. The component must OWN
@@ -1189,6 +1209,30 @@ test "wasi:io/poll: a poll whose result list's byte size does not fit in u32 tra
     host.io = io;
 
     try testing.expectError(error.OutOfBoundsStore, runWasiP2Main(&eng, testing.allocator, bytes, &host, .{}));
+}
+
+fn runWasiP2MainOnFixture(path: []const u8) !void {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
+}
+
+test "the sync entry is wasi:cli/run's run by name, not the first lift (#622)" {
+    // `add` is lifted first; calling it with no arguments would fail.
+    try runWasiP2MainOnFixture("test/component/run_second_lift.wasm");
+}
+
+test "a component without a wasi:cli/run export has no sync entry, whatever it lifts (#622)" {
+    try testing.expectError(error.NoRunExport, runWasiP2MainOnFixture("test/component/add_component.wasm"));
 }
 
 test "wasi:filesystem: an open-at whose result payload's address does not fit in u32 traps as the store of that result" {
