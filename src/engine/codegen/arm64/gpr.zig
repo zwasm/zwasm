@@ -90,6 +90,21 @@ pub fn frameStrGpr(allocator: Allocator, buf: *std.ArrayList(u8), src: inst.Xn, 
     }
 }
 
+pub const BaseOff = struct { base: inst.Xn, off: u32 };
+
+/// Address `[base, #byte_off]` for a load/store whose immediate encodes at most
+/// `imm_cap`. Within it, emits nothing; past it, emits `ADD scratch, base,
+/// #(byte_off >> 12), LSL #12` and leaves `byte_off & 0xFFF` for the immediate.
+/// Unlike `frameAddrLarge` (D-289) the low bits stay in the load, so a caller
+/// reading `off` and `off + 8` needs one ADD (pass `imm_cap` less 8). `byte_off`
+/// must be < 2^24; `scratch` may equal `base`.
+pub fn baseOffLarge(allocator: Allocator, buf: *std.ArrayList(u8), base: inst.Xn, scratch: inst.Xn, byte_off: u32, imm_cap: u32) Error!BaseOff {
+    if (byte_off <= imm_cap) return .{ .base = base, .off = byte_off };
+    std.debug.assert(byte_off < (1 << 24));
+    try writeU32(allocator, buf, inst.encAddImm12Lsl12(scratch, base, @intCast(byte_off >> 12)));
+    return .{ .base = scratch, .off = byte_off & 0xFFF };
+}
+
 /// D-289: FP/v128 frame-access width — S (f32, imm12×4 cap 16380), D (f64,
 /// imm12×8 cap 32760), Q (v128, imm12×16 cap 65520).
 pub const FpFrameW = enum { s, d, q };
@@ -618,4 +633,33 @@ test "qStoreSpilled: spilled vreg emits STR Q stage to SP-relative offset" {
     try testing.expectEqual(@as(usize, 4), buf.items.len);
     const word = std.mem.readInt(u32, buf.items[0..4], .little);
     try testing.expectEqual(inst_neon.encStrQImm(29, 31, 112), word);
+}
+
+test "baseOffLarge: within the cap emits nothing and keeps the base" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const r = try baseOffLarge(testing.allocator, &buf, 10, 9, 2047 * 16, max_frame_imm_off - 8);
+    try testing.expectEqual(@as(inst.Xn, 10), r.base);
+    try testing.expectEqual(@as(u32, 2047 * 16), r.off);
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+test "baseOffLarge: past the cap emits ADD ..., LSL #12 and keeps the low bits" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    // memory.init 4097: seg descriptor at 4097 * 16 = 0x10010.
+    const r = try baseOffLarge(testing.allocator, &buf, 10, 9, 4097 * 16, max_frame_imm_off - 8);
+    try testing.expectEqual(@as(inst.Xn, 9), r.base);
+    try testing.expectEqual(@as(u32, 0x10), r.off);
+    try testing.expectEqual(inst.encAddImm12Lsl12(9, 10, 0x10), std.mem.readInt(u32, buf.items[0..4], .little));
+    try testing.expectEqual(@as(usize, 4), buf.items.len);
+}
+
+test "baseOffLarge: scratch may equal base (drop sites rewrite X16)" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const r = try baseOffLarge(testing.allocator, &buf, 16, 16, 4096, 4095);
+    try testing.expectEqual(@as(inst.Xn, 16), r.base);
+    try testing.expectEqual(@as(u32, 0), r.off);
+    try testing.expectEqual(@as(u32, 0x91400610), std.mem.readInt(u32, buf.items[0..4], .little)); // ADD X16, X16, #1, LSL #12
 }

@@ -831,11 +831,10 @@ pub fn emitTableInit(
     tableidx: u32,
     dst64: bool,
 ) Error!void {
-    // tableidx cap = 512 (TableSlice stride 32 per D-475);
-    // elemidx cap stays 1024 (ElemSlice stride still 16).
-    if (elemidx >= 1024 or tableidx >= 512) return Error.UnsupportedOp;
+    // tableidx cap = 512 (TableSlice stride 32 per D-475).
+    if (tableidx >= 512) return Error.UnsupportedOp;
     const tbl_disp: i32 = @intCast(tableidx * jit_abi.table_slice_size);
-    const elem_disp: i32 = @intCast(elemidx * jit_abi.elem_slice_size);
+    const elem_disp = std.math.cast(i32, @as(u64, elemidx) * jit_abi.elem_slice_size) orelse return Error.UnsupportedOp;
 
     if (pushed_vregs.items.len < 3) return Error.AllocationMissing;
     const n_v = pushed_vregs.pop().?;
