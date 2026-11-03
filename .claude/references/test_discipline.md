@@ -58,9 +58,9 @@ test/edge_cases/p<N>/<concept>/<case>.expect    ← expected outputs
 group / feature (e.g. `trunc_f32_s`, `memory_bounds`). `<case>` =
 short slug (e.g. `at_int_min`, `nan_input`, `idx_eq_size_minus_one`).
 
-Lead `.wat` with provenance comment citing spec testsuite +
-assertion line OR "internally derived from sub-X.Y boundary at
-commit `<sha>`".
+Lead `.wat` with a provenance comment citing the spec testsuite
+file + assertion line it mirrors OR the issue whose boundary it
+guards (`;; #NNN: <one line on the boundary>`).
 
 ### `.expect` format
 
