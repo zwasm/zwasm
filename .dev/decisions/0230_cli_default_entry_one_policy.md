@@ -105,4 +105,4 @@ shapes on all four paths (`.wasm`, `--engine interp`, `--engine jit`,
 
 | Date       | SHA | Note |
 |------------|-----|------|
-| 2026-11-02 | —   | Components follow the same contract (#622): the sync entry is `wasi:cli/run#run` by name, else a refusal listing the exports; the async entry is still the first async lift (#677); `--invoke` calls an export by name with WIT-typed args. |
+| 2026-11-02 | `146f99d8a` | Components follow the same contract (#622): the sync entry is `wasi:cli/run#run` by name, else a refusal listing the exports; the async entry is still the first async lift (#677); `--invoke` calls an export by name with WIT-typed args. |
