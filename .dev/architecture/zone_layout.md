@@ -46,7 +46,7 @@ Zone 3 — Public surface (ABI, CLI)
                                      ↓ may import any lower zone
 
 Zone 2 — Execution + system surfaces
-        src/interp/                  Threaded-code interpreter
+        src/interp/                  Interpreter (while-loop dispatch over ZIR)
         src/engine/                  Compile orchestrator + codegen/{shared, arm64, x86_64, aot}
         src/wasi/                    WASI 0.1 host implementation
                                      ↓ may import Zone 0+1; NEVER api/ or cli/
