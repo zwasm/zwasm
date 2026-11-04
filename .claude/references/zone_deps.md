@@ -12,8 +12,8 @@ Zone 3: src/cli/                       -- CLI entry (cli/main.zig per ADR-0024) 
         src/api/                        -- C ABI export layer (wasm.h / wasi.h / zwasm.h)
                                         ↓ may import anything below
 
-Zone 2: src/interp/                     -- Threaded-code interpreter
-        src/engine/                     -- runner + codegen/{shared, arm64, x86_64, aot} + interp/
+Zone 2: src/interp/                     -- Interpreter (while-loop dispatch over ZIR)
+        src/engine/                     -- runner + codegen/{shared, arm64, x86_64, aot}
         src/wasi/                       -- WASI 0.1 implementation
                                         ↓ may import Zone 0+1
 

@@ -727,7 +727,7 @@ CI runs `verify()` across the spec corpus.
    │
    ├── engine = interpreter ─┐
    │                          ▼
-   │                   src/engine/interp/loop.zig (threaded-code dispatch)
+   │                   src/interp/dispatch.zig (while-loop dispatch over ZIR)
    │                          │
    │                          ▼  execute (handlers from instruction/ + feature/)
    │
@@ -1021,11 +1021,13 @@ zwasm/
 │   │   ├── threads/            # README-only reserved slot (post-v0.2.0)
 │   │   ├── stack_switching/    # README-only reserved slot (post-v0.2.0)
 │   │   └── component/          # README-only reserved slot (Component Model)
+│   ├── interp/
+│   │   ├── dispatch.zig        # while-loop dispatch over ZIR
+│   │   ├── mvp.zig             # handlers
+│   │   ├── trap_audit.zig
+│   │   └── trap_trace.zig
 │   ├── engine/                 # interp / codegen sibling parity
 │   │   ├── runner.zig          # public entry: invoke ZirFunc via runtime.vtable
-│   │   ├── interp/
-│   │   │   ├── loop.zig        # threaded-code dispatch loop
-│   │   │   └── trap_audit.zig
 │   │   └── codegen/
 │   │       ├── shared/         # regalloc, reg_class, linker, compile, entry, prologue, jit_abi
 │   │       ├── arm64/          # emit (orchestrator) + op_const/alu/memory/control/call + bounds_check + inst + abi + prologue + label
@@ -1364,7 +1366,7 @@ Brief summary of what each phase delivered (full detail in the archive):
   + zone_check / file_size_check gates. 🔒 gate cleared.
 - **Phase 1** — Frontend MVP: parse + validate + lower Wasm Core 1.0
   → ZIR; full ZirOp enum declared (P13).
-- **Phase 2** — Interpreter MVP: threaded-code interpreter; Wasm 2.0
+- **Phase 2** — Interpreter MVP: while-loop interpreter over ZIR; Wasm 2.0
   spec corpus fail=0/skip=0; 5+ realworld samples run. 🔒 gate cleared.
 - **Phase 3** — wasm-c-api C ABI: `wasm_module_new` / `_instance_new` /
   `_func_call` / `_global_set` exposed.
