@@ -164,4 +164,4 @@ preservation is pinned by characterization before the move.
 
 | Date       | SHA          | Note |
 |------------|--------------|------|
-| 2026-10-31 | —            | The default flips `p2 → p3` for 2.10.0 (PR #673), discharging D-335 (ADR-0205 settled the host breadth); `test-wasi-p3` becomes `test-wasi-p2`, the unit suite of the `-Dwasi=p2` opt-out build. |
+| 2026-10-31 | `ae4e54141`  | The default flips `p2 → p3` for 2.10.0 (PR #673), discharging D-335 (ADR-0205 settled the host breadth); `test-wasi-p3` becomes `test-wasi-p2`, the unit suite of the `-Dwasi=p2` opt-out build. |
