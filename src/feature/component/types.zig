@@ -965,6 +965,16 @@ pub const TypeInfo = struct {
     }
 };
 
+/// A type's nesting depth, counted as wasmparser counts it: a primitive is 1,
+/// a compound type is 1 + its deepest component. Within one type space (the
+/// top level, or one declaration scope) a walk from any type descends at most
+/// this many levels, which is what bounds every walker over the type tree
+/// (`validate.zig`, `canon.zig`, `wit_type.zig`); none carries its own guard.
+/// An alias counts 1 and the walk restarts at its target, but declaration
+/// scopes also nest at most this deep, so every walk is finite. wasmparser
+/// carries an alias target's depth instead (`MAX_WASM_COMPONENT_TYPE_DEPTH`).
+pub const max_type_depth: u32 = 100;
+
 pub const Error = error{
     Truncated,
     InvalidValType,
@@ -990,6 +1000,8 @@ pub const Error = error{
     /// A `map` value that transitively carries a handle, `future`, `stream`
     /// or `error-context`.
     InvalidMapValue,
+    /// A type nests deeper than `max_type_depth`.
+    TypeNestingTooDeep,
     /// A spec-defined form not yet decoded (compound defvaltype → B-chunks;
     /// component/instance/resource type → C-chunks). Typed deferral, not a
     /// silent skip (`no_workaround`).
@@ -1166,7 +1178,7 @@ fn decodeCaseVec(arena: Allocator, body: []const u8, pos: *usize) Error![]const 
     return out.toOwnedSlice(arena);
 }
 
-fn decodeDefType(arena: Allocator, body: []const u8, pos: *usize) Error!DefType {
+fn decodeDefType(arena: Allocator, body: []const u8, pos: *usize, scope_depth: u32) Error!DefType {
     // resourcetype (0x3f/0x3e) sits BELOW 0x40 — as sleb it reads positive
     // (the sign bit 0x40 is clear), unlike every other deftype op. Peek raw.
     if (pos.* < body.len and (body[pos.*] == 0x3f or body[pos.*] == 0x3e)) {
@@ -1239,8 +1251,8 @@ fn decodeDefType(arena: Allocator, body: []const u8, pos: *usize) Error!DefType 
             const key = try decodeValType(body, pos);
             break :blk .{ .map = .{ .key = key, .value = try decodeValType(body, pos) } };
         },
-        0x41 => .{ .component_type = try decodeComponentType(arena, body, pos) },
-        0x42 => .{ .instance_type = try decodeInstanceType(arena, body, pos) },
+        0x41 => .{ .component_type = try decodeComponentType(arena, body, pos, try nestedScope(scope_depth)) },
+        0x42 => .{ .instance_type = try decodeInstanceType(arena, body, pos, try nestedScope(scope_depth)) },
 
         else => Error.InvalidDefType,
     };
@@ -1271,7 +1283,7 @@ fn decodeAlias(body: []const u8, pos: *usize) Error!Alias {
 }
 
 /// `instancedecl ::= 0x00 core:type | 0x01 type | 0x02 alias | 0x04 exportdecl`.
-fn decodeInstanceDecl(arena: Allocator, body: []const u8, pos: *usize) Error!InstanceDecl {
+fn decodeInstanceDecl(arena: Allocator, body: []const u8, pos: *usize, scope_depth: u32) Error!InstanceDecl {
     if (pos.* >= body.len) return Error.Truncated;
     const tag = body[pos.*];
     pos.* += 1;
@@ -1280,7 +1292,7 @@ fn decodeInstanceDecl(arena: Allocator, body: []const u8, pos: *usize) Error!Ins
         0x00 => Error.UnsupportedTypeForm,
         0x01 => blk: {
             const dt = try arena.create(DefType);
-            dt.* = try decodeDefType(arena, body, pos);
+            dt.* = try decodeDefType(arena, body, pos, scope_depth);
             break :blk .{ .type_def = dt };
         },
         0x02 => .{ .alias = try decodeAlias(body, pos) },
@@ -1293,31 +1305,125 @@ fn decodeInstanceDecl(arena: Allocator, body: []const u8, pos: *usize) Error!Ins
 }
 
 /// `instancetype ::= 0x42 vec(instancedecl)`.
-fn decodeInstanceType(arena: Allocator, body: []const u8, pos: *usize) Error!InstanceType {
+fn decodeInstanceType(arena: Allocator, body: []const u8, pos: *usize, scope_depth: u32) Error!InstanceType {
     const count = try leb128.readUleb128(u32, body, pos);
     var decls: std.ArrayList(InstanceDecl) = .empty;
+    var depths: std.ArrayList(u32) = .empty;
     var i: u32 = 0;
-    while (i < count) : (i += 1) try decls.append(arena, try decodeInstanceDecl(arena, body, pos));
+    while (i < count) : (i += 1) {
+        const decl = try decodeInstanceDecl(arena, body, pos, scope_depth);
+        if (try instanceDeclDepth(decl, depths.items)) |d| try depths.append(arena, d);
+        try decls.append(arena, decl);
+    }
     return .{ .decls = try decls.toOwnedSlice(arena) };
 }
 
 /// `componenttype ::= 0x41 vec(componentdecl)`;
 /// `componentdecl ::= 0x03 importdecl | instancedecl`.
-fn decodeComponentType(arena: Allocator, body: []const u8, pos: *usize) Error!ComponentType {
+fn decodeComponentType(arena: Allocator, body: []const u8, pos: *usize, scope_depth: u32) Error!ComponentType {
     const count = try leb128.readUleb128(u32, body, pos);
     var decls: std.ArrayList(ComponentDecl) = .empty;
+    var depths: std.ArrayList(u32) = .empty;
     var i: u32 = 0;
     while (i < count) : (i += 1) {
         if (pos.* >= body.len) return Error.Truncated;
-        if (body[pos.*] == 0x03) {
+        const minted = if (body[pos.*] == 0x03) blk: {
             pos.* += 1;
             const name = try decodeImportExportName(body, pos);
-            try decls.append(arena, .{ .import_decl = .{ .name = name, .desc = try decodeExternDesc(body, pos) } });
-        } else {
-            try decls.append(arena, .{ .instance_decl = try decodeInstanceDecl(arena, body, pos) });
-        }
+            const desc = try decodeExternDesc(body, pos);
+            try decls.append(arena, .{ .import_decl = .{ .name = name, .desc = desc } });
+            break :blk externDescDepth(desc, depths.items);
+        } else blk: {
+            const decl = try decodeInstanceDecl(arena, body, pos, scope_depth);
+            try decls.append(arena, .{ .instance_decl = decl });
+            break :blk try instanceDeclDepth(decl, depths.items);
+        };
+        if (minted) |d| try depths.append(arena, d);
     }
     return .{ .decls = try decls.toOwnedSlice(arena) };
+}
+
+/// The scope depth inside a declaration scope opened at `scope_depth`.
+/// Checked before the decoder descends, since the descent is what it bounds.
+fn nestedScope(scope_depth: u32) Error!u32 {
+    if (scope_depth >= max_type_depth) return Error.TypeNestingTooDeep;
+    return scope_depth + 1;
+}
+
+/// The nesting depth of `dt` (see `max_type_depth`). `depths` holds the
+/// depths of the entries defined before `dt` in its type space.
+fn defTypeDepth(dt: DefType, depths: []const u32) u32 {
+    var d: u32 = 0;
+    switch (dt) {
+        .value => |vt| return valTypeDepth(vt, depths),
+        .func => |ft| {
+            for (ft.params) |p| d = @max(d, valTypeDepth(p.ty, depths));
+            if (ft.result) |r| d = @max(d, valTypeDepth(r, depths));
+        },
+        .record => |rec| for (rec.fields) |f| {
+            d = @max(d, valTypeDepth(f.ty, depths));
+        },
+        .tuple => |t| for (t.types) |vt| {
+            d = @max(d, valTypeDepth(vt, depths));
+        },
+        .variant => |v| for (v.cases) |c| {
+            if (c.payload) |pl| d = @max(d, valTypeDepth(pl, depths));
+        },
+        .list => |l| d = valTypeDepth(l.element.*, depths),
+        .option => |o| d = valTypeDepth(o.payload.*, depths),
+        .result => |res| {
+            if (res.ok) |ok| d = @max(d, valTypeDepth(ok, depths));
+            if (res.err) |er| d = @max(d, valTypeDepth(er, depths));
+        },
+        .stream => |st| if (st.payload) |p| {
+            d = valTypeDepth(p, depths);
+        },
+        .future => |fu| if (fu.payload) |p| {
+            d = valTypeDepth(p, depths);
+        },
+        .map => |m| d = @max(valTypeDepth(m.key, depths), valTypeDepth(m.value, depths)),
+        .enum_, .flags, .own, .borrow, .resource, .instance_type, .component_type => {},
+    }
+    return d + 1;
+}
+
+/// A primitive is 1. An index not yet defined counts 1: its depth is not
+/// computed, and validation refuses the forward reference.
+fn valTypeDepth(vt: ValType, depths: []const u32) u32 {
+    return switch (vt) {
+        .primitive => 1,
+        .type_index => |ti| if (ti < depths.len) depths[ti] else 1,
+    };
+}
+
+/// A re-binding carries its target's depth; a fresh resource is 1.
+fn boundDepth(tb: TypeBound, depths: []const u32) u32 {
+    return switch (tb) {
+        .eq => |ti| valTypeDepth(.{ .type_index = ti }, depths),
+        .sub_resource => 1,
+    };
+}
+
+fn checkedDepth(d: u32) Error!u32 {
+    if (d > max_type_depth) return Error.TypeNestingTooDeep;
+    return d;
+}
+
+/// The depth of the type `decl` mints in its scope, or null when it mints
+/// none (the entries `validate.instanceDeclMint` counts).
+fn instanceDeclDepth(decl: InstanceDecl, depths: []const u32) Error!?u32 {
+    return switch (decl) {
+        .type_def => |dt| try checkedDepth(defTypeDepth(dt.*, depths)),
+        .alias => |al| if (std.meta.activeTag(al.sort) == .type) 1 else null,
+        .export_decl => |ed| externDescDepth(ed.desc, depths),
+    };
+}
+
+fn externDescDepth(desc: ExternDesc, depths: []const u32) ?u32 {
+    return switch (desc) {
+        .type_bound => |tb| boundDepth(tb, depths),
+        else => null,
+    };
 }
 
 /// `sort ::= 0x00 core:sort | 0x01 func | 0x02 value | 0x03 type | 0x04
@@ -1396,7 +1502,7 @@ fn decodeTypeSection(arena: Allocator, out: *std.ArrayList(DefType), body: []con
     const count = try leb128.readUleb128(u32, body, &pos);
     var i: u32 = 0;
     while (i < count) : (i += 1) {
-        try out.append(arena, try decodeDefType(arena, body, &pos));
+        try out.append(arena, try decodeDefType(arena, body, &pos, 0));
     }
     if (pos != body.len) return Error.TrailingBytes;
 }
@@ -1754,6 +1860,8 @@ pub fn decodeTypeInfo(parent: Allocator, component: *const decode.Component) Err
     var component_funcs: std.ArrayList(ComponentFuncDef) = .empty;
     var instance_origins: std.ArrayList(InstanceOrigin) = .empty;
     var type_space: std.ArrayList(TypeSpaceEntry) = .empty;
+    // Parallel to `type_space`: each entry's depth (see `max_type_depth`).
+    var type_depths: std.ArrayList(u32) = .empty;
     var core_module_count: u32 = 0;
     var component_count: u32 = 0;
     var core_type_count: u32 = 0;
@@ -1815,13 +1923,17 @@ pub fn decodeTypeInfo(parent: Allocator, component: *const decode.Component) Err
             else => {}, // other sections decoded in later chunks
         }
         switch (sec.id) {
-            .type => for (deftypes.items[deftypes_before..], deftypes_before..) |_, abs| {
+            .type => for (deftypes.items[deftypes_before..], deftypes_before..) |dt, abs| {
+                try type_depths.append(a, try checkedDepth(defTypeDepth(dt, type_depths.items)));
                 try type_space.append(a, .{ .def = @intCast(abs) });
             },
             .import => for (imports.items[imports_before..], imports_before..) |imp, abs| switch (imp.desc) {
                 .func => try component_funcs.append(a, .{ .import = @intCast(abs) }),
                 .instance => try instance_origins.append(a, .{ .import = imp.name }),
-                .type_bound => try type_space.append(a, .{ .named = .{ .import = @intCast(abs) } }),
+                .type_bound => |tb| {
+                    try type_depths.append(a, boundDepth(tb, type_depths.items));
+                    try type_space.append(a, .{ .named = .{ .import = @intCast(abs) } });
+                },
                 else => {},
             },
             .canon => for (canons.items[canons_before..], canons_before..) |c, abs| switch (c) {
@@ -1856,7 +1968,10 @@ pub fn decodeTypeInfo(parent: Allocator, component: *const decode.Component) Err
                     },
                     .func => try component_funcs.append(a, .{ .alias = al.target }),
                     .instance => try instance_origins.append(a, .{ .alias = @intCast(al_abs) }),
-                    .type => try type_space.append(a, .{ .named = .{ .alias = @intCast(al_abs) } }),
+                    .type => {
+                        try type_depths.append(a, 1);
+                        try type_space.append(a, .{ .named = .{ .alias = @intCast(al_abs) } });
+                    },
                     else => {},
                 }
             },
@@ -1874,6 +1989,7 @@ pub fn decodeTypeInfo(parent: Allocator, component: *const decode.Component) Err
                 switch (ex.sort) {
                     .type => {
                         ex.sort_space_len_at_def = @intCast(type_space.items.len);
+                        try type_depths.append(a, valTypeDepth(.{ .type_index = ex.index }, type_depths.items));
                         try type_space.append(a, .{ .named = .{ .@"export" = @intCast(ex_abs) } });
                     },
                     .func => {
