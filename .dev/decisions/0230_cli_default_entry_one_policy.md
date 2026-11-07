@@ -106,4 +106,4 @@ shapes on all four paths (`.wasm`, `--engine interp`, `--engine jit`,
 | Date       | SHA | Note |
 |------------|-----|------|
 | 2026-11-02 | `146f99d8a` | Components follow the same contract (#622): the sync entry is `wasi:cli/run#run` by name, else a refusal listing the exports; the async entry is still the first async lift (#677); `--invoke` calls an export by name with WIT-typed args. |
-| 2026-11-07 | — | The async entry follows the sync one (#677): `wasi:cli/run#run` by name, the highest generation first, else a top-level `run` typed `func()` or `func() -> result` (it stands in for `wasi:cli/run`'s `run`, which is `func() -> result`), driven sync or async as it is lifted; a `-Dwasi=p2` build refuses an async entry. |
+| 2026-11-07 | `00155c2e2` | The async entry follows the sync one (#677): `wasi:cli/run#run` by name, the highest generation first, else a top-level `run` typed `func()` or `func() -> result` (it stands in for `wasi:cli/run`'s `run`, which is `func() -> result`), driven sync or async as it is lifted; a `-Dwasi=p2` build refuses an async entry. |
