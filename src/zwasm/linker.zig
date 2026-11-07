@@ -946,6 +946,50 @@ test "Linker.defineInstance: a tag export is registered, and a tag import links 
     defer inst_b.deinit();
 }
 
+test "Linker.instantiate: an element item `global.get` of an imported funcref global fills the table (#662)" {
+    // A: (func (result i32) i32.const 42) (global (export "f") funcref (ref.func 0))
+    const a_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: ()->(i32)
+        0x03, 0x02, 0x01, 0x00, // func: 1× type 0
+        0x06, 0x06, 0x01, 0x70, 0x00, 0xd2, 0x00, 0x0b, // global: funcref, ref.func 0
+        0x07, 0x05, 0x01, 0x01, 'f', 0x03, 0x00, // export "f"=global0
+        0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x2a, 0x0b, // code: i32.const 42
+    };
+    // B: (import "m" "f" (global funcref)) (table 1 funcref)
+    //    (elem (i32.const 0) funcref (global.get 0))
+    //    (func (export "call_imported_elem") (result i32) (call_indirect (type 0) (i32.const 0)))
+    const b_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: ()->(i32)
+        0x02, 0x08, 0x01, 0x01, 'm', 0x01, 'f', 0x03, 0x70, 0x00, // import m.f (global funcref)
+        0x03, 0x02, 0x01, 0x00, // func: 1× type 0
+        0x04, 0x04, 0x01, 0x70, 0x00, 0x01, // table: funcref, min 1
+        0x07, 0x16, 0x01, 0x12, 'c',  'a',
+        'l',  'l',  '_',  'i',  'm',  'p',
+        'o',  'r',  't',  'e',  'd',  '_',
+        'e',  'l',  'e',  'm',  0x00, 0x00,
+        0x09, 0x09, 0x01, 0x04, 0x41, 0x00, 0x0b, 0x01, 0x23, 0x00, 0x0b, // elem: active, funcref exprs [global.get 0]
+        0x0a, 0x09, 0x01, 0x07, 0x00, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b, // code: call_indirect type 0 table 0
+    };
+    var eng = try _zwasm.Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod_a = try eng.compile(&a_bytes);
+    defer mod_a.deinit();
+    var inst_a = try mod_a.instantiate(.{ .engine = .interp });
+    defer inst_a.deinit();
+
+    var lk = eng.linker();
+    defer lk.deinit();
+    try lk.defineInstance("m", &inst_a);
+
+    var mod_b = try eng.compile(&b_bytes);
+    defer mod_b.deinit();
+    var inst_b = try lk.instantiate(&mod_b, .{ .engine = .interp });
+    defer inst_b.deinit();
+    try testing.expectEqual(@as(i32, 42), try inst_b.typedFunc(fn () i32, "call_imported_elem").call(.{}));
+}
+
 test "start function may be an IMPORTED host func (wit-component start-shim shape)" {
     // (module (type (func)) (import "env" "tick" (func (type 0))) (start 0))
     // — the start funcidx names the import itself (Wasm §4.5.4 allows it;

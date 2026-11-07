@@ -366,7 +366,6 @@ fn onGetAction(
 pub const excluded = [_]struct { manifest: []const u8, issue: []const u8 }{
     .{ .manifest = "loop", .issue = "#244" },
     .{ .manifest = "fac", .issue = "#244" }, // hangs, so the whole run stops
-    .{ .manifest = "elem", .issue = "#282, #662" },
     .{ .manifest = "memory_grow", .issue = "#663" },
     .{ .manifest = "table_grow", .issue = "#663" },
 };
