@@ -1618,10 +1618,12 @@ pub fn instantiateRuntime(
                         .i64 => .i64,
                     };
                     const offset = try evalConstMemAddrExprWithGlobals(seg.offset_expr, offset_type, rt.globals);
-                    const off_usize: usize = @intCast(offset);
-                    const dst_end = off_usize + refs.len;
-                    if (dst_end > rt.tables[seg.tableidx].refs.len) return error.ElementSegmentOutOfRange;
-                    @memcpy(rt.tables[seg.tableidx].refs[off_usize..dst_end], refs);
+                    // Bounded before any sum: an imported i64 offset can be any u64.
+                    const tbl_refs = rt.tables[seg.tableidx].refs;
+                    if (offset > tbl_refs.len) return error.ElementSegmentOutOfRange;
+                    const off: usize = @intCast(offset);
+                    if (refs.len > tbl_refs.len - off) return error.ElementSegmentOutOfRange;
+                    @memcpy(tbl_refs[off..][0..refs.len], refs);
                     dropped[idx] = true;
                 } else if (seg.kind == .declarative) {
                     dropped[idx] = true;
