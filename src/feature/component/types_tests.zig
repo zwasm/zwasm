@@ -812,3 +812,34 @@ test "a func re-export chain resolves without recursing per link" {
     const ft = info.resolveFuncType(try std.mem.print(&name_buf, "f{d}", .{n - 1})).?;
     try testing.expectEqual(@as(usize, 0), ft.params.len);
 }
+
+/// A component holding `n` components, each nested in the one before.
+fn nestedComponents(gpa: std.mem.Allocator, n: u32) !std.ArrayList(u8) {
+    const preamble = [_]u8{ 0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00 };
+    var cur: std.ArrayList(u8) = .empty;
+    errdefer cur.deinit(gpa);
+    try cur.appendSlice(gpa, &preamble);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        var next: std.ArrayList(u8) = .empty;
+        errdefer next.deinit(gpa);
+        try next.appendSlice(gpa, &preamble);
+        try putSection(&next, gpa, 4, cur.items);
+        cur.deinit(gpa);
+        cur = next;
+    }
+    return cur;
+}
+
+test "nested components: max_nested_components are accepted, one more is refused" {
+    const gpa = testing.allocator;
+    var at_cap = try nestedComponents(gpa, types.max_nested_components);
+    defer at_cap.deinit(gpa);
+    var info = try decodeBoth(at_cap.items);
+    defer info.deinit();
+    try validate.validate(&info);
+
+    var past_cap = try nestedComponents(gpa, types.max_nested_components + 1);
+    defer past_cap.deinit(gpa);
+    try testing.expectError(Error.TooManyNestedComponents, decodeBoth(past_cap.items));
+}
