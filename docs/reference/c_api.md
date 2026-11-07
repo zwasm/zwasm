@@ -39,7 +39,9 @@ Full coverage of the wasm-c-api families:
   order, a tag import included — its externtype has kind `WASM_EXTERN_TAG`
   and `wasm_externtype_as_tagtype` gives its parameter signature (#475).
   `wasm_module_exports` lists a tag export the same way (#478); a tag has no
-  `wasm_extern_t`, so `wasm_instance_exports` omits it (#479).
+  `wasm_extern_t`, so `wasm_instance_exports` omits it (#479). A memory64 or
+  table64 bound past `u32` reports as `0xffffffff`, since `wasm_limits_t` is
+  `u32`; the import and export lists stay complete (#670).
 - **Values + vectors**: `wasm_val_*`, `wasm_*_vec_new`/`_copy`/`_delete`.
 - **Traps + frames**: `wasm_trap_*`, `wasm_frame_*`. `wasm_trap_origin` /
   `wasm_trap_trace` name the frames an interpreter trap unwound (function

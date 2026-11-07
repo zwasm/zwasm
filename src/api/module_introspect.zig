@@ -108,14 +108,19 @@ fn globaltypeExtern(valtype: zir.ValType, mutable: bool) ?*types.ExternType {
     return types.wasm_globaltype_as_externtype(gt);
 }
 
-fn tabletypeOf(elem_type: zir.ValType, min: u64, max: ?u64) ?*types.TableType {
-    const vt = types.wasm_valtype_new(valKindOf(elem_type)) orelse return null;
-    // table64 limits are u64; the wasm-c-api TableType is u32 — saturate a
-    // wider i64-table bound to u32-max (the closest expressible value).
-    var lim: types.Limits = .{
+/// memory64 / table64 limits are u64; the wasm-c-api `wasm_limits_t` is u32 —
+/// saturate a wider bound to u32-max (the closest expressible value), so the
+/// import and export lists stay complete.
+fn limitsOf(min: u64, max: ?u64) types.Limits {
+    return .{
         .min = std.math.cast(u32, min) orelse 0xffff_ffff,
         .max = if (max) |mx| (std.math.cast(u32, mx) orelse 0xffff_ffff) else 0xffff_ffff,
     };
+}
+
+fn tabletypeOf(elem_type: zir.ValType, min: u64, max: ?u64) ?*types.TableType {
+    const vt = types.wasm_valtype_new(valKindOf(elem_type)) orelse return null;
+    var lim = limitsOf(min, max);
     return types.wasm_tabletype_new(vt, &lim) orelse {
         types.wasm_valtype_delete(vt);
         return null;
@@ -128,10 +133,7 @@ fn tabletypeExtern(elem_type: zir.ValType, min: u64, max: ?u64) ?*types.ExternTy
 }
 
 fn memorytypeOf(min: u64, max: ?u64) ?*types.MemoryType {
-    var lim: types.Limits = .{
-        .min = std.math.cast(u32, min) orelse return null,
-        .max = if (max) |mx| (std.math.cast(u32, mx) orelse 0xffff_ffff) else 0xffff_ffff,
-    };
+    var lim = limitsOf(min, max);
     return types.wasm_memorytype_new(&lim);
 }
 
@@ -655,6 +657,60 @@ test "wasm_module_exports: null-arg → empty vec, no crash" {
     wasm_module_exports(null, &exports);
     try testing.expectEqual(@as(usize, 0), exports.size);
     wasm_module_exports(null, null);
+}
+
+// (module (import "env" "m" (memory i64 4294967296)))
+const mem64_import_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x02, 0x0e, 0x01, 0x03, 'e',  'n',  'v',  0x01,
+    'm',  0x02, 0x04, 0x80, 0x80, 0x80, 0x80, 0x10,
+};
+
+// (module (memory (export "m") i64 4294967296))
+const mem64_export_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x05, 0x07, 0x01, 0x04, 0x80, 0x80, 0x80, 0x80,
+    0x10, 0x07, 0x05, 0x01, 0x01, 'm',  0x02, 0x00,
+};
+
+test "collectImports: a memory64 min past u32 is listed, saturated (#670)" {
+    const e = instance.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer instance.wasm_engine_delete(e);
+    const s = instance.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer instance.wasm_store_delete(s);
+    var bytes = mem64_import_wasm;
+    const bv: vec.ByteVec = .{ .size = bytes.len, .data = &bytes };
+    const m = instance.wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
+    defer instance.wasm_module_delete(m);
+
+    var imports: types.ImportTypeVec = undefined;
+    try testing.expect(collectImports(m, &imports));
+    defer types.wasm_importtype_vec_delete(&imports);
+    try testing.expectEqual(@as(usize, 1), imports.size);
+    const et = types.wasm_importtype_type(imports.data.?[0].?).?;
+    const lim = types.wasm_memorytype_limits(types.wasm_externtype_as_memorytype_const(et).?).?;
+    try testing.expectEqual(@as(u32, 0xffff_ffff), lim.min);
+    try testing.expectEqual(@as(u32, 0xffff_ffff), lim.max);
+}
+
+test "wasm_module_exports: a memory64 min past u32 is listed, saturated (#670)" {
+    const e = instance.wasm_engine_new() orelse return error.EngineAllocFailed;
+    defer instance.wasm_engine_delete(e);
+    const s = instance.wasm_store_new(e) orelse return error.StoreAllocFailed;
+    defer instance.wasm_store_delete(s);
+    var bytes = mem64_export_wasm;
+    const bv: vec.ByteVec = .{ .size = bytes.len, .data = &bytes };
+    const m = instance.wasm_module_new(s, &bv) orelse return error.ModuleAllocFailed;
+    defer instance.wasm_module_delete(m);
+
+    var exports: types.ExportTypeVec = undefined;
+    wasm_module_exports(m, &exports);
+    defer types.wasm_exporttype_vec_delete(&exports);
+    try testing.expectEqual(@as(usize, 1), exports.size);
+    const et = types.wasm_exporttype_type(exports.data.?[0].?).?;
+    const lim = types.wasm_memorytype_limits(types.wasm_externtype_as_memorytype_const(et).?).?;
+    try testing.expectEqual(@as(u32, 0xffff_ffff), lim.min);
+    try testing.expectEqual(@as(u32, 0xffff_ffff), lim.max);
 }
 
 // (module (table (export "t") 1 funcref) (global (export "g") (mut i32) (i32.const 7)))
