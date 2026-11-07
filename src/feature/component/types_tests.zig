@@ -781,3 +781,34 @@ test "type depth through declaration scopes: max_type_depth levels are accepted,
     defer past_cap.deinit(gpa);
     try testing.expectError(Error.TypeNestingTooDeep, decodeBoth(past_cap.items));
 }
+
+test "a func re-export chain resolves without recursing per link" {
+    const gpa = testing.allocator;
+    const n: u32 = 300_000;
+    // export "f<i>" (func i): func 0 is the lift, export i mints func i + 1.
+    var exports: std.ArrayList(u8) = .empty;
+    defer exports.deinit(gpa);
+    try putUleb(&exports, gpa, n);
+    var name_buf: [16]u8 = undefined;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const name = try std.mem.print(&name_buf, "f{d}", .{i});
+        try exports.append(gpa, 0x00);
+        try putUleb(&exports, gpa, @intCast(name.len));
+        try exports.appendSlice(gpa, name);
+        try exports.append(gpa, 0x01); // sort func
+        try putUleb(&exports, gpa, i);
+        try exports.append(gpa, 0x00); // no externdesc
+    }
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    try bytes.appendSlice(gpa, &.{ 0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00 });
+    try putSection(&bytes, gpa, 7, &.{ 0x01, 0x40, 0x00, 0x01, 0x00 }); // type[0] = (func)
+    try putSection(&bytes, gpa, 8, &.{ 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 }); // lift core func 0, type 0
+    try putSection(&bytes, gpa, 11, exports.items);
+
+    var info = try decodeBoth(bytes.items);
+    defer info.deinit();
+    const ft = info.resolveFuncType(try std.mem.print(&name_buf, "f{d}", .{n - 1})).?;
+    try testing.expectEqual(@as(usize, 0), ft.params.len);
+}
