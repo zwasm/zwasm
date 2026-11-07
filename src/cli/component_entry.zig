@@ -152,8 +152,8 @@ fn writeMissing(alloc: Allocator, w: *Writer, info: *const TypeInfo, path: []con
     try w.writeAll(" (use --invoke NAME[=args])");
 }
 
-/// The refusal of a component run without `--invoke` that exports no
-/// `wasi:cli/run` (the entry reported `NoRunExport`).
+/// The refusal of a component run without `--invoke` that has no command
+/// entry (the entry reported `NoRunExport`).
 pub fn writeNoRunRefusal(alloc: Allocator, bytes: []const u8, path: []const u8, refusal: *std.ArrayList(u8)) !void {
     var decoded = try decode.decode(alloc, bytes);
     defer decoded.deinit(alloc);

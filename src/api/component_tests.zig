@@ -1235,6 +1235,10 @@ test "a component without a wasi:cli/run export has no sync entry, whatever it l
     try testing.expectError(error.NoRunExport, runWasiP2MainOnFixture("test/component/add_component.wasm"));
 }
 
+test "an async entry is refused on the sync path, not run sync (#677)" {
+    try testing.expectError(error.AsyncEntryNeedsWasiP3, runWasiP2MainOnFixture("test/component/async_stdout_write_via_stream.wasm"));
+}
+
 test "wasi:filesystem: an open-at whose result payload's address does not fit in u32 traps as the store of that result" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

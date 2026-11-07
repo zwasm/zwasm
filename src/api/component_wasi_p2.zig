@@ -1870,21 +1870,40 @@ fn nthCoreModule(decoded: *const decode.Component, n: u32) ?[]const u8 {
     return null;
 }
 
-/// The core export behind the command world's entry: the `run` of the
-/// `wasi:cli/run@0.2.x` / `@0.3.x` instance export, found by name (ADR-0230),
-/// whatever else the component lifts before it. A 0.3 `run` reaches here when
-/// it is lifted sync; an async lift goes to `driveAsyncMain` first.
-fn wasiCliRunCoreExport(alloc: Allocator, info: *const ctypes.TypeInfo) Allocator.Error!?ctypes.TypeInfo.CoreExportRef {
+const CommandEntry = struct { lift: ctypes.Lift, has_result: bool };
+
+/// The command entry under `zwasm run` (ADR-0230): `wasi:cli/run@<gen>#run`
+/// by name, the highest generation first, else a top-level func export `run`,
+/// whatever else the component lifts. Its own lift says sync or async.
+fn commandEntry(alloc: Allocator, info: *const ctypes.TypeInfo) Allocator.Error!?CommandEntry {
     const prefix = "wasi:cli/run@";
-    for (info.exports.items) |e| {
-        if (std.meta.activeTag(e.sort) != .instance or !std.mem.startsWith(u8, e.name, prefix)) continue;
-        if (ctypes.parseWasiGen(e.name[prefix.len..]) == .any) continue;
-        const path = try alloc.print("{s}#run", .{e.name});
-        defer alloc.free(path);
-        const lift = info.resolveLiftedFunc(path) orelse return null;
-        return lift.core_func;
+    for ([_]ctypes.WasiGen{ .p3, .p2 }) |gen| {
+        for (info.exports.items) |e| {
+            if (std.meta.activeTag(e.sort) != .instance or !std.mem.startsWith(u8, e.name, prefix)) continue;
+            if (ctypes.parseWasiGen(e.name[prefix.len..]) != gen) continue;
+            const path = try alloc.print("{s}#run", .{e.name});
+            defer alloc.free(path);
+            return .{ .lift = info.exportedLift(path) orelse return null, .has_result = true };
+        }
     }
-    return null;
+    // A top-level `run` stands in for `wasi:cli/run`'s `func() -> result`, so
+    // it is the entry only as that or `func()`; any other shape is `--invoke`'s.
+    const ft = info.resolveFuncType("run") orelse return null;
+    if (ft.params.len != 0) return null;
+    if (ft.result) |r| if (!isBareResult(info, r)) return null;
+    return .{ .lift = info.exportedLift("run") orelse return null, .has_result = ft.result != null };
+}
+
+/// `result` with neither an `ok` nor an `err` payload.
+fn isBareResult(info: *const ctypes.TypeInfo, v: ctypes.ValType) bool {
+    if (v != .type_index or v.type_index >= info.type_space.items.len) return false;
+    return switch (info.type_space.items[v.type_index]) {
+        .def => |d| switch (info.deftypes.items[d]) {
+            .result => |rt| rt.ok == null and rt.err == null,
+            else => false,
+        },
+        .named => false,
+    };
 }
 
 // ============================================================
@@ -2403,15 +2422,21 @@ pub fn runWasiP2Main(engine: *Engine, alloc: Allocator, bytes: []const u8, host:
     try runWasiP2MainBuilt(&built);
 }
 
-/// The post-build half of `runWasiP2Main` (the sync `wasi:cli/run` path):
-/// invoke the `wasi:cli/run` export's `run`; a component without one is
-/// `NoRunExport`. Split out so the unified `runWasiMain` dispatcher (P3) can
-/// reuse it after building once.
+/// The post-build half of `runWasiP2Main` (the sync path): invoke the command
+/// entry (`commandEntry`); a component without one is `NoRunExport`.
 pub fn runWasiP2MainBuilt(built: *BuiltComponent) anyerror!void {
-    const run_ref = (try wasiCliRunCoreExport(built.alloc, &built.info)) orelse return error.NoRunExport;
+    const entry = (try commandEntry(built.alloc, &built.info)) orelse return error.NoRunExport;
+    return runSyncEntry(built, entry);
+}
+
+fn runSyncEntry(built: *BuiltComponent, entry: CommandEntry) anyerror!void {
+    // Invoked sync, an async lift's packed return would read as its `result`.
+    if (entry.lift.opts.is_async) return error.AsyncEntryNeedsWasiP3;
+    const run_ref = built.info.resolveCoreFuncExport(entry.lift.core_func) orelse return error.NoRunExport;
     const main_inst = built.guestInstance(run_ref.instance) orelse return error.NoRunExport;
     var results = [_]Value{.{ .i32 = 0 }};
-    main_inst.invoke(run_ref.name, &.{}, &results) catch |err| {
+    const n_results: usize = @intFromBool(entry.has_result);
+    main_inst.invoke(run_ref.name, &.{}, results[0..n_results]) catch |err| {
         // wasi:cli/exit unwinds with ProcExit after recording host.exit_code —
         // a clean termination, not a failure.
         if (err == error.ProcExit) return;
@@ -2419,27 +2444,24 @@ pub fn runWasiP2MainBuilt(built: *BuiltComponent) anyerror!void {
     };
     // `run: func() -> result` — an `err` return (flat discriminant 1) is exit
     // code 1 per the wasi:cli command contract (official run-with-err.wasm).
-    if (results[0].i32 != 0 and built.ctx.host.exit_code == null) built.ctx.host.exit_code = 1;
+    if (entry.has_result and results[0].i32 != 0 and built.ctx.host.exit_code == null) built.ctx.host.exit_code = 1;
 }
 
-/// The unified WASI-component entry (D-335 Unit F): build once, then dispatch —
-/// an **async-lifted** export (a `canon lift` with `opts.is_async`) goes through
-/// the P3 stackless callback loop, else the sync `wasi:cli/run` path. This is
-/// the surface the CLI / embedders call so an async P3 component "just runs".
+/// The unified WASI-component entry (D-335 Unit F): build once, select the
+/// entry (`commandEntry`), then dispatch on its lift — async through the
+/// P3 stackless callback loop, sync through `runSyncEntry`. This is the
+/// surface the CLI / embedders call so an async P3 component "just runs".
 ///
 /// ADR-0193 P3: the async branch is `comptime build_options.enable_wasi_p3`-gated
 /// (relocated here from `component_wasi_p3.zig` so a `wasi_level < .p3` build
 /// never references the P3 driver — `component_wasi_p3.zig` is then unimported).
-/// At a p2 build an async component falls through to the sync runner, which
-/// surfaces `NoRunExport` if it does not export `wasi:cli/run`.
+/// At a p2 build an async entry is refused (`AsyncEntryNeedsWasiP3`).
 pub fn runWasiMain(engine: *Engine, alloc: Allocator, bytes: []const u8, host: *wasi_host.Host, opts: Module.InstantiateOpts) anyerror!void {
     var built = try buildWasiP2Component(engine, alloc, bytes, host, opts);
     defer built.deinit();
+    const entry = (try commandEntry(built.alloc, &built.info)) orelse return error.NoRunExport;
     if (comptime build_options.enable_wasi_p3) {
-        const cwasi3 = @import("component_wasi_p3.zig");
-        for (built.info.canons.items) |c| {
-            if (c == .lift and c.lift.opts.is_async) return cwasi3.driveAsyncMain(&built);
-        }
+        if (entry.lift.opts.is_async) return @import("component_wasi_p3.zig").driveAsyncCall(&built, entry.lift, &.{});
     }
-    return runWasiP2MainBuilt(&built);
+    return runSyncEntry(&built, entry);
 }
