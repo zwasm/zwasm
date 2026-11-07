@@ -510,8 +510,8 @@ pub fn runComponentCaptured(
     // REQ-4 — the component CLI path uses the default budget for now; wiring
     // the `--fuel`/`--max-memory` flags into `runComponentCaptured` is a
     // separate CLI enhancement (the API-level budget is the cw requirement).
-    // Unified runner (D-335 Unit F): async-lifted components run through the P3
-    // callback loop, sync ones through `wasi:cli/run` — auto-dispatched.
+    // Unified runner (D-335 Unit F): `runWasiMain` selects the entry by name
+    // and runs it through the P3 callback loop or the sync call, per its lift.
     var result_text: std.ArrayList(u8) = .empty;
     defer result_text.deinit(alloc);
     const ran = if (invoke) |call|
@@ -1028,13 +1028,59 @@ test "runComponentWasi: an ASYNC (WASI-0.3 P3) component runs from the CLI path 
     defer refusal.deinit(testing.allocator);
     const got = runComponentCaptured(testing.allocator, testing.io, bytes, "test.wasm", null, &.{}, &.{}, &.{}, &.{}, false, .none, &capture, &refusal);
     if (comptime !@import("build_options").enable_wasi_p3) {
-        // ADR-0193 P3: a p2 build has no async driver, and the component
-        // exports no `wasi:cli/run` for the sync one (#622).
-        try testing.expectError(error.ComponentRefused, got);
+        // ADR-0193 P3: a p2 build has no async driver for the async `run`.
+        try testing.expectError(error.AsyncEntryNeedsWasiP3, got);
         return;
     }
     try testing.expectEqual(@as(u8, 0), try got);
     try testing.expectEqualStrings("hi\n", capture.items);
+}
+
+test "runComponentWasi: a sync wasi:cli/run runs, not an unrelated async export (#677)" {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, "test/component/run_plus_async.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    var refusal: std.ArrayList(u8) = .empty;
+    defer refusal.deinit(testing.allocator);
+    const code = try runComponentCaptured(testing.allocator, testing.io, bytes, "test.wasm", null, &.{}, &.{}, &.{}, &.{}, false, .none, &capture, &refusal);
+    try testing.expectEqual(@as(u8, 0), code);
+}
+
+test "runComponentWasi: a top-level run: func() is the entry (#677)" {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, "test/component/run_void.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    var refusal: std.ArrayList(u8) = .empty;
+    defer refusal.deinit(testing.allocator);
+    const code = try runComponentCaptured(testing.allocator, testing.io, bytes, "test.wasm", null, &.{}, &.{}, &.{}, &.{}, false, .none, &capture, &refusal);
+    try testing.expectEqual(@as(u8, 0), code);
+}
+
+test "runComponentWasi: a top-level run that takes a parameter is refused with the exports listed (#677)" {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, "test/component/run_with_param.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    var refusal: std.ArrayList(u8) = .empty;
+    defer refusal.deinit(testing.allocator);
+    try testing.expectError(error.ComponentRefused, runComponentCaptured(testing.allocator, testing.io, bytes, "test.wasm", null, &.{}, &.{}, &.{}, &.{}, false, .none, &capture, &refusal));
+    try testing.expect(std.mem.find(u8, refusal.items, "its exports are: run: func(x: u32) -> u32") != null);
+}
+
+test "runComponentWasi: wasi:cli/run@0.3.0 runs over @0.2.0 (#677)" {
+    if (comptime !@import("build_options").enable_wasi_p3) return; // ADR-0193 P3: no async driver
+    // The official command's 0.3 `run` returns `err` (exit 1); its 0.2 `run`
+    // traps `Unreachable`.
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, "test/component/wasip3_official/run-with-err.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    var refusal: std.ArrayList(u8) = .empty;
+    defer refusal.deinit(testing.allocator);
+    const code = try runComponentCaptured(testing.allocator, testing.io, bytes, "test.wasm", null, &.{}, &.{}, &.{}, &.{}, false, .none, &capture, &refusal);
+    try testing.expectEqual(@as(u8, 1), code);
 }
 
 test "runWasm: malformed wasm produces a parse-phase diagnostic with byte offset (F6)" {

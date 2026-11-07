@@ -339,12 +339,14 @@ pub const WaitableSetOp = enum {
     join, // 0x23
 };
 
+pub const Lift = struct { core_func: u32, opts: CanonOpts, type_index: u32 };
+
 /// One `canon` section definition (`Binary.md` `canon`). B6 models lift/lower +
 /// the resource builtins; the stream/future builtins are the CM-async front.
 pub const Canon = union(enum) {
     /// `canon lift` (0x00 0x00): a core func exposed as a component func of
     /// `type_index`, with `opts`.
-    lift: struct { core_func: u32, opts: CanonOpts, type_index: u32 },
+    lift: Lift,
     /// `canon lower` (0x01 0x00): a component func lowered to a core func.
     lower: struct { func: u32, opts: CanonOpts },
     resource_new: u32, // 0x02 typeidx
@@ -864,7 +866,7 @@ pub const TypeInfo = struct {
     /// definition-order `component_funcs` index space (func aliases /
     /// imports occupy earlier slots in real wit-bindgen output — counting
     /// lifts by ordinal mis-resolves those components).
-    fn liftForFuncIndex(self: *const TypeInfo, fi: u32) ?@TypeOf(@as(Canon, undefined).lift) {
+    fn liftForFuncIndex(self: *const TypeInfo, fi: u32) ?Lift {
         if (fi < self.component_funcs.items.len) {
             // A re-export resolves to whatever it re-exports, followed in a
             // loop as `instanceOrigin` does: the chain is as long as the
@@ -948,14 +950,18 @@ pub const TypeInfo = struct {
         try out.append(alloc, .{ .name = path, .ty = ft });
     }
 
+    /// The `canon lift` behind a func-export path (`exportedFuncIndex`).
+    pub fn exportedLift(self: *const TypeInfo, path: []const u8) ?Lift {
+        return self.liftForFuncIndex(self.exportedFuncIndex(path) orelse return null);
+    }
+
     /// Resolve a component `func` export (by name) to its `canon lift` and the
     /// underlying core exports — so the host invokes the resolved core funcs
     /// instead of guessing names. Assumes the func index space is populated by
     /// `canon lift`s in order (true for a single-component leaf; func imports /
     /// aliases occupy earlier slots and are handled when a component uses them).
     pub fn resolveLiftedFunc(self: *const TypeInfo, export_name: []const u8) ?ResolvedLift {
-        const fi = self.exportedFuncIndex(export_name) orelse return null;
-        const lift = self.liftForFuncIndex(fi) orelse return null;
+        const lift = self.exportedLift(export_name) orelse return null;
         return .{
             .core_func = self.resolveCoreFuncExport(lift.core_func) orelse return null,
             .realloc = if (lift.opts.realloc) |r| self.resolveCoreFuncExport(r) else null,

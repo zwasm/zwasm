@@ -31,9 +31,13 @@ stderr. A module with neither export is refused the same way (use `--invoke`).
 The same contract holds on every engine and on a `.cwasm` (CWAS magic, which
 loads + runs directly with no parse/compile); a shape the JIT cannot call is
 refused with the reason rather than silently skipped (ADR-0230). On a
-component the entry is its `wasi:cli/run` export, found by name, unless it
-lifts an export async: then the first async lift runs. A component without
-either is refused the same way, with its exports listed.
+component the entry is its `wasi:cli/run` export's `run`, found by name, the
+highest generation first (`@0.3.x` over `@0.2.x`), else a top-level func export
+`run` (a zwasm convention, not a WASI one). The top-level `run` stands in for
+`wasi:cli/run`'s, whose type is `func() -> result`, so it is the entry only as
+that or `func()`; another shape is reached with `--invoke`. Either entry runs
+sync or async as it is lifted. A component without either is refused the same way, with its exports
+listed.
 
 Options go before the module path; everything after it is the guest's argv,
 even a token that spells a `run` option. `--` ends the options, for a module

@@ -13,6 +13,7 @@
 const std = @import("std");
 
 const async_mod = @import("../feature/component/async.zig");
+const ctypes = @import("../feature/component/types.zig");
 const net = std.Io.net;
 const p3http = @import("../wasi/p3_http.zig");
 const p2_sockets = @import("../wasi/p2_sockets.zig");
@@ -132,20 +133,23 @@ pub fn runWasiP3Main(engine: *Engine, alloc: Allocator, bytes: []const u8, host:
 /// can inspect the result the guest delivered via `task.return`
 /// (`built.ctx.task_return`, ADR-0189 ζ2) after the loop exits.
 pub fn driveAsyncMain(built: *wasi_p2.BuiltComponent) anyerror!void {
-    return driveAsyncCall(built, &.{});
+    return driveAsyncCall(built, firstAsyncLift(built) orelse return error.NoAsyncExport, &.{});
 }
 
-/// Drive the first async-lifted export with explicit core args (the service
-/// world's `handler.handle` takes the request handle; ADR-0205 D-3).
-pub fn driveAsyncCall(built: *wasi_p2.BuiltComponent, args: []const Value) anyerror!void {
-    // async is an export property (ADR-0188): the first `canon lift` with
-    // `opts.is_async` is the task to drive; its `callback` is the loop re-entry.
-    const lift = blk: {
-        for (built.info.canons.items) |c| {
-            if (c == .lift and c.lift.opts.is_async) break :blk c.lift;
-        }
-        return error.NoAsyncExport;
-    };
+/// The first `canon lift` with `opts.is_async`: the task `driveAsyncMain` and
+/// the service world's `handler.handle` drive. `zwasm run` selects its entry
+/// by name instead (`runWasiMain`).
+fn firstAsyncLift(built: *const wasi_p2.BuiltComponent) ?ctypes.Lift {
+    for (built.info.canons.items) |c| {
+        if (c == .lift and c.lift.opts.is_async) return c.lift;
+    }
+    return null;
+}
+
+/// Drive the async-lifted `lift` with explicit core args (the service world's
+/// `handler.handle` takes the request handle; ADR-0205 D-3). Async is an export
+/// property (ADR-0188); the lift's `callback` is the loop re-entry.
+pub fn driveAsyncCall(built: *wasi_p2.BuiltComponent, lift: ctypes.Lift, args: []const Value) anyerror!void {
     const callback_idx = lift.opts.callback orelse return error.NoAsyncCallback;
 
     const entry_ref = built.info.resolveCoreFuncExport(lift.core_func) orelse return error.NoRunExport;
@@ -181,6 +185,7 @@ pub fn driveAsyncCall(built: *wasi_p2.BuiltComponent, args: []const Value) anyer
         return error.Unreachable;
     // `run: async func() -> result` — an `err` task.return (discriminant 1) is
     // exit code 1 per the wasi:cli command contract (official run-with-err.wasm).
+    // Any other result reads the same way; `zwasm run` only drives that shape.
     if (built.ctx.task_return) |tr| {
         if (tr != 0 and built.ctx.host.exit_code == null) built.ctx.host.exit_code = 1;
     }
@@ -1152,7 +1157,7 @@ fn runServiceRequest(built: *wasi_p2.BuiltComponent, rop: HttpReqOp) !void {
         ctx.external_sock_ctx = null;
         if (svc.registered_shared) |sid| _ = ctx.host_capture_sinks.remove(sid);
     }
-    try driveAsyncCall(built, &.{.{ .i32 = @bitCast(req_handle) }});
+    try driveAsyncCall(built, firstAsyncLift(built) orelse return error.NoAsyncExport, &.{.{ .i32 = @bitCast(req_handle) }});
 
     // Assert the delivered response.
     try testing.expectEqual(@as(?u32, 0), ctx.task_return);
