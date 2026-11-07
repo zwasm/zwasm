@@ -977,6 +977,12 @@ pub const TypeInfo = struct {
 /// carries an alias target's depth instead (`MAX_WASM_COMPONENT_TYPE_DEPTH`).
 pub const max_type_depth: u32 = 100;
 
+/// Components nested in one binary, counted over the whole tree, so the
+/// count also bounds the depth `scanNestedComponent` and
+/// `validate.walkNestedScan` recurse to. It mirrors wasmparser's whole-binary
+/// `MAX_WASM_MODULES_AND_COMPONENTS`, minus core modules: they do not recurse.
+pub const max_nested_components: u32 = 1000;
+
 pub const Error = error{
     Truncated,
     InvalidValType,
@@ -1004,6 +1010,8 @@ pub const Error = error{
     InvalidMapValue,
     /// A type nests deeper than `max_type_depth`.
     TypeNestingTooDeep,
+    /// More than `max_nested_components` components nested in one binary.
+    TooManyNestedComponents,
     /// A spec-defined form not yet decoded (compound defvaltype → B-chunks;
     /// component/instance/resource type → C-chunks). Typed deferral, not a
     /// silent skip (`no_workaround`).
@@ -1550,8 +1558,11 @@ fn decodeExportSection(arena: Allocator, out: *std.ArrayList(Export), body: []co
 /// Recursively scan a nested component's binary for type-sort OUTER
 /// aliases (alias sections) and deeper nested components. Decode errors
 /// inside the nested binary propagate (an unparseable inner component is
-/// an invalid component).
-fn scanNestedComponent(a: std.mem.Allocator, bytes: []const u8) Error!NestedComponentScan {
+/// an invalid component). `budget` counts down the components left under
+/// `max_nested_components`, shared by every call over one binary.
+fn scanNestedComponent(a: std.mem.Allocator, bytes: []const u8, budget: *u32) Error!NestedComponentScan {
+    if (budget.* == 0) return Error.TooManyNestedComponents;
+    budget.* -= 1;
     // arena-allocated; no deinit (the TypeInfo arena owns everything). A
     // malformed nested binary = an invalid component (decode errors map).
     const inner = decode.decode(a, bytes) catch |e| return switch (e) {
@@ -1590,7 +1601,7 @@ fn scanNestedComponent(a: std.mem.Allocator, bytes: []const u8) Error!NestedComp
                     try func_exports.append(a, .{ .name = ex.name, .index = ex.index });
             }
         },
-        .component => try children.append(a, try scanNestedComponent(a, sec.body)),
+        .component => try children.append(a, try scanNestedComponent(a, sec.body, budget)),
         else => {},
     };
     return .{
@@ -1872,6 +1883,7 @@ pub fn decodeTypeInfo(parent: Allocator, component: *const decode.Component) Err
     var alias_space_before: std.ArrayList(AliasSpaceBefore) = .empty;
     var core_types: std.ArrayList(CoreTypeDef) = .empty;
     var nested_scans: std.ArrayList(NestedComponentScan) = .empty;
+    var nested_budget: u32 = max_nested_components;
 
     for (component.sections.items) |sec| {
         switch (sec.id) {
@@ -1898,7 +1910,7 @@ pub fn decodeTypeInfo(parent: Allocator, component: *const decode.Component) Err
             .core_instance => try decodeCoreInstanceSection(a, &core_instances, sec.body),
             .instance => try decodeInstanceSection(a, &component_instances, sec.body),
             .alias => try decodeAliasSection(a, &aliases, sec.body),
-            .component => try nested_scans.append(a, try scanNestedComponent(a, sec.body)),
+            .component => try nested_scans.append(a, try scanNestedComponent(a, sec.body, &nested_budget)),
             .core_type => {
                 // Section body = vec(core:deftype); each def mints one
                 // core-type index.
