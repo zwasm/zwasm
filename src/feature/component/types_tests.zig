@@ -7,6 +7,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const decode = @import("decode.zig");
 const canon = @import("canon.zig");
+const validate = @import("validate.zig");
 
 const Error = types.Error;
 const ExternDesc = types.ExternDesc;
@@ -681,4 +682,102 @@ test "parseWasiGen: a 0.3.x patch release is p3, whatever its patch number" {
     try testing.expectEqual(types.WasiGen.p3, types.parseWasiGen("0.3.0-rc-2026-03-15"));
     try testing.expectEqual(types.WasiGen.p2, types.parseWasiGen("0.2.6"));
     try testing.expectEqual(types.WasiGen.any, types.parseWasiGen("0.30.0"));
+}
+
+/// Append `v` as unsigned LEB128.
+fn putUleb(out: *std.ArrayList(u8), gpa: std.mem.Allocator, v: u32) !void {
+    var x = v;
+    while (true) {
+        const b: u8 = @intCast(x & 0x7f);
+        x >>= 7;
+        if (x == 0) return out.append(gpa, b);
+        try out.append(gpa, b | 0x80);
+    }
+}
+
+/// Append one section: id, size, body.
+fn putSection(out: *std.ArrayList(u8), gpa: std.mem.Allocator, id: u8, body: []const u8) !void {
+    try out.append(gpa, id);
+    try putUleb(out, gpa, @intCast(body.len));
+    try out.appendSlice(gpa, body);
+}
+
+/// Append `v` (non-negative) as signed LEB128, as a type index is encoded.
+fn putSleb(out: *std.ArrayList(u8), gpa: std.mem.Allocator, v: u32) !void {
+    var x = v;
+    while (true) {
+        const b: u8 = @intCast(x & 0x7f);
+        x >>= 7;
+        if (x == 0 and b & 0x40 == 0) return out.append(gpa, b);
+        try out.append(gpa, b | 0x80);
+    }
+}
+
+/// A type section whose last entry has nesting depth `depth`, counted as
+/// wasmparser counts it (a primitive is 1, a compound type is 1 + its
+/// deepest component): `type[0] = list<u32>`, `type[i] = list<type[i-1]>`,
+/// then `stream<type[k]>` with `k = depth - 3`.
+fn typeIndexChain(gpa: std.mem.Allocator, depth: u32) !std.ArrayList(u8) {
+    std.debug.assert(depth >= 3);
+    const k = depth - 3;
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(gpa);
+    try putUleb(&body, gpa, k + 2);
+    try body.appendSlice(gpa, &.{ 0x70, 0x79 });
+    var i: u32 = 1;
+    while (i <= k + 1) : (i += 1) {
+        try body.append(gpa, if (i <= k) 0x70 else 0x66);
+        if (i > k) try body.append(gpa, 0x01);
+        try putSleb(&body, gpa, i - 1);
+    }
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(gpa);
+    try bytes.appendSlice(gpa, &.{ 0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00 });
+    try putSection(&bytes, gpa, 7, body.items);
+    return bytes;
+}
+
+/// A type section holding one component type that nests `levels`
+/// component types, the outermost included.
+fn declScopeChain(gpa: std.mem.Allocator, levels: u32) !std.ArrayList(u8) {
+    var ty: std.ArrayList(u8) = .empty;
+    defer ty.deinit(gpa);
+    var i: u32 = 0;
+    while (i < levels - 1) : (i += 1) try ty.appendSlice(gpa, &.{ 0x41, 0x01, 0x01 });
+    try ty.appendSlice(gpa, &.{ 0x41, 0x00 });
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(gpa);
+    try body.append(gpa, 0x01);
+    try body.appendSlice(gpa, ty.items);
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(gpa);
+    try bytes.appendSlice(gpa, &.{ 0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00 });
+    try putSection(&bytes, gpa, 7, body.items);
+    return bytes;
+}
+
+test "type depth through the index space: max_type_depth is accepted, one more is refused" {
+    const gpa = testing.allocator;
+    var at_cap = try typeIndexChain(gpa, types.max_type_depth);
+    defer at_cap.deinit(gpa);
+    var info = try decodeBoth(at_cap.items);
+    defer info.deinit();
+    try validate.validate(&info);
+
+    var past_cap = try typeIndexChain(gpa, types.max_type_depth + 1);
+    defer past_cap.deinit(gpa);
+    try testing.expectError(Error.TypeNestingTooDeep, decodeBoth(past_cap.items));
+}
+
+test "type depth through declaration scopes: max_type_depth levels are accepted, one more is refused" {
+    const gpa = testing.allocator;
+    var at_cap = try declScopeChain(gpa, types.max_type_depth);
+    defer at_cap.deinit(gpa);
+    var info = try decodeBoth(at_cap.items);
+    defer info.deinit();
+    try validate.validate(&info);
+
+    var past_cap = try declScopeChain(gpa, types.max_type_depth + 1);
+    defer past_cap.deinit(gpa);
+    try testing.expectError(Error.TypeNestingTooDeep, decodeBoth(past_cap.items));
 }
