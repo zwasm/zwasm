@@ -1416,11 +1416,6 @@ pub fn instantiateRuntime(
         rt.memory = mi[0].bytes;
     }
 
-    // 10.M-D195b cycle 78 — data segments deferred to AFTER globals
-    // init so `(data (global.get N) ...)` offsets can resolve via
-    // rt.globals. Previously processed inline here; the move below
-    // happens after the globals section at line ~1020.
-
     // Tables. Imported tables value-copy the source TableInstance
     // (the refs slice is shared). Defined tables get freshly
     // allocated refs from the per-instance arena.
@@ -1505,74 +1500,6 @@ pub fn instantiateRuntime(
         }
     }
 
-    // Element segments.
-    if (module.find(.element)) |elem_section| {
-        var elems = try sections.decodeElement(a, elem_section.body);
-        defer elems.deinit();
-        if (elems.items.len > 0) {
-            const seg_storage = try a.alloc([]const Value, elems.items.len);
-            const dropped = try a.alloc(bool, elems.items.len);
-            @memset(dropped, false);
-            for (elems.items, 0..) |seg, idx| {
-                const refs = if (seg.item_exprs.len > 0) blk: {
-                    // 10.G cycle 164 — WasmGC general const-expr items
-                    // (array.new / array.new_fixed / struct.new …): evaluate
-                    // each item expr to a Value via the GC const-expr
-                    // evaluator (allocates on the already-materialised
-                    // gc_heap). gc/array.8 `array.new_elem` reads these.
-                    const rs = try a.alloc(Value, seg.item_exprs.len);
-                    // Element segments materialise before globals → no
-                    // imported-global slice available; elem const-expr
-                    // items (array.new/struct.new) don't use global.get.
-                    for (seg.item_exprs, 0..) |ex, j| rs[j] = try evalGlobalInitGc(ex, rt.gc_heap, inst.gc_type_infos, rt.func_entities, &.{});
-                    break :blk rs;
-                } else blk: {
-                    // For func-family segments the slot is a funcidx → resolve
-                    // to a funcref. For non-func segments (i31ref/anyref/…) the
-                    // slot already holds the ENCODED ref value (e.g. i31-packed,
-                    // per the element decoder) → store it directly as a GcRef.
-                    const is_funcref_family = seg.elem_type == .ref and switch (seg.elem_type.ref.heap_type) {
-                        .abstract => |ab| ab == .func,
-                        .concrete => true,
-                    };
-                    const rs = try a.alloc(Value, seg.funcidxs.len);
-                    for (seg.funcidxs, 0..) |fidx, j| {
-                        if (fidx == std.math.maxInt(u32)) {
-                            rs[j] = .{ .ref = Value.null_ref };
-                        } else if (is_funcref_family) {
-                            if (fidx >= rt.func_entities.len) return error.InvalidElementFuncIndex;
-                            rs[j] = Value.fromFuncRef(&rt.func_entities[fidx]);
-                        } else {
-                            rs[j] = .{ .ref = @as(u64, fidx) };
-                        }
-                    }
-                    break :blk rs;
-                };
-                seg_storage[idx] = refs;
-                if (seg.kind == .active) {
-                    if (seg.tableidx >= rt.tables.len) return error.InvalidTableIndex;
-                    // table64 (D-475): an i64-indexed table's active element
-                    // offset is an i64 const-expr — route it through the
-                    // i64-capable evaluator (mirrors the data-segment path);
-                    // i32 tables keep the i32 evaluator unchanged.
-                    const offset: u64 = if (rt.tables[seg.tableidx].idx_type == .i64)
-                        try evalConstMemAddrExprWithGlobals(seg.offset_expr, .i64, rt.globals)
-                    else
-                        @as(u64, @intCast(@as(u32, @bitCast(try evalConstI32Expr(seg.offset_expr)))));
-                    const off_usize: usize = @intCast(offset);
-                    const dst_end = off_usize + refs.len;
-                    if (dst_end > rt.tables[seg.tableidx].refs.len) return error.ElementSegmentOutOfRange;
-                    @memcpy(rt.tables[seg.tableidx].refs[off_usize..dst_end], refs);
-                    dropped[idx] = true;
-                } else if (seg.kind == .declarative) {
-                    dropped[idx] = true;
-                }
-            }
-            rt.elems = seg_storage;
-            rt.elem_dropped = dropped;
-        }
-    }
-
     // Globals. Imported globals alias source-instance slots via
     // per-slot pointer; defined globals point at arena-owned
     // slots in `globals_storage`.
@@ -1599,7 +1526,7 @@ pub fn instantiateRuntime(
                     // Wasm spec §3.5.10 — `ref.func N` is a valid global
                     // init expr. evalConstExprValue is instance-context-
                     // free, so resolve the funcref here against
-                    // rt.func_entities (mirrors element-init above).
+                    // rt.func_entities (mirrors element-init below).
                     // ref_func.3: `(global funcref (ref.func 0))`.
                     storage[i] = if (initExprRefFuncLocal(g.init_expr)) |fidx|
                         (if (fidx < rt.func_entities.len)
@@ -1633,12 +1560,78 @@ pub fn instantiateRuntime(
         }
     }
 
-    // 10.M-D195b cycle 78 — data segment initialization deferred
-    // from the early memory-wiring block to AFTER global init. Active
-    // data segments may carry `(data (global.get N) ...)` offsets
-    // that read from an imported global (e.g., spec testsuite's
-    // `(global.get 0)` against spectest.global_i32). rt.globals must
-    // be populated before this loop fires.
+    // Element, then data segments. Both run after globals: an elem item or
+    // an elem/data offset may be `global.get` of an imported global, read
+    // from rt.globals (#662, #282). Elements precede data per Wasm §4.5.4
+    // instantiation (table.init steps before memory.init steps).
+    if (module.find(.element)) |elem_section| {
+        var elems = try sections.decodeElement(a, elem_section.body);
+        defer elems.deinit();
+        if (elems.items.len > 0) {
+            const seg_storage = try a.alloc([]const Value, elems.items.len);
+            const dropped = try a.alloc(bool, elems.items.len);
+            @memset(dropped, false);
+            for (elems.items, 0..) |seg, idx| {
+                const refs = if (seg.item_exprs.len > 0) blk: {
+                    // 10.G cycle 164 — WasmGC general const-expr items
+                    // (array.new / array.new_fixed / struct.new …): evaluate
+                    // each item expr to a Value via the GC const-expr
+                    // evaluator (allocates on the already-materialised
+                    // gc_heap). gc/array.8 `array.new_elem` reads these.
+                    const rs = try a.alloc(Value, seg.item_exprs.len);
+                    for (seg.item_exprs, 0..) |ex, j| rs[j] = try evalGlobalInitGc(ex, rt.gc_heap, inst.gc_type_infos, rt.func_entities, rt.globals);
+                    break :blk rs;
+                } else blk: {
+                    // For func-family segments the slot is a funcidx → resolve
+                    // to a funcref. For non-func segments (i31ref/anyref/…) the
+                    // slot already holds the ENCODED ref value (e.g. i31-packed,
+                    // per the element decoder) → store it directly as a GcRef.
+                    const is_funcref_family = seg.elem_type == .ref and switch (seg.elem_type.ref.heap_type) {
+                        .abstract => |ab| ab == .func,
+                        .concrete => true,
+                    };
+                    const rs = try a.alloc(Value, seg.funcidxs.len);
+                    for (seg.funcidxs, 0..) |fidx, j| {
+                        if (fidx == std.math.maxInt(u32)) {
+                            rs[j] = .{ .ref = Value.null_ref };
+                        } else if (is_funcref_family and sections.elemEntryIsGlobalGet(fidx)) {
+                            // Only a func-family slot can carry the marker: a
+                            // negative i31 in an i31ref slot sets the same bit.
+                            const gidx = sections.elemEntryGlobalIdx(fidx);
+                            if (gidx >= rt.globals.len) return error.InvalidElementFuncIndex;
+                            rs[j] = rt.globals[gidx].*;
+                        } else if (is_funcref_family) {
+                            if (fidx >= rt.func_entities.len) return error.InvalidElementFuncIndex;
+                            rs[j] = Value.fromFuncRef(&rt.func_entities[fidx]);
+                        } else {
+                            rs[j] = .{ .ref = @as(u64, fidx) };
+                        }
+                    }
+                    break :blk rs;
+                };
+                seg_storage[idx] = refs;
+                if (seg.kind == .active) {
+                    if (seg.tableidx >= rt.tables.len) return error.InvalidTableIndex;
+                    // table64 (D-475): the offset's type is the table's index type.
+                    const offset_type: sections.MemoryEntry.IdxType = switch (rt.tables[seg.tableidx].idx_type) {
+                        .i32 => .i32,
+                        .i64 => .i64,
+                    };
+                    const offset = try evalConstMemAddrExprWithGlobals(seg.offset_expr, offset_type, rt.globals);
+                    const off_usize: usize = @intCast(offset);
+                    const dst_end = off_usize + refs.len;
+                    if (dst_end > rt.tables[seg.tableidx].refs.len) return error.ElementSegmentOutOfRange;
+                    @memcpy(rt.tables[seg.tableidx].refs[off_usize..dst_end], refs);
+                    dropped[idx] = true;
+                } else if (seg.kind == .declarative) {
+                    dropped[idx] = true;
+                }
+            }
+            rt.elems = seg_storage;
+            rt.elem_dropped = dropped;
+        }
+    }
+
     if (module.find(.data)) |data_section| {
         var datas = try sections.decodeData(a, data_section.body);
         defer datas.deinit();
