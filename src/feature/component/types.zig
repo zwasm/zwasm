@@ -866,20 +866,22 @@ pub const TypeInfo = struct {
     /// lifts by ordinal mis-resolves those components).
     fn liftForFuncIndex(self: *const TypeInfo, fi: u32) ?@TypeOf(@as(Canon, undefined).lift) {
         if (fi < self.component_funcs.items.len) {
-            switch (self.component_funcs.items[fi]) {
+            // A re-export resolves to whatever it re-exports, followed in a
+            // loop as `instanceOrigin` does: the chain is as long as the
+            // component's export list, so recursing per link lets the bytes
+            // set the host's stack depth. A target that is not strictly
+            // earlier returns null, which keeps unvalidated input terminating.
+            var idx = fi;
+            while (true) switch (self.component_funcs.items[idx]) {
                 .lift => |ci| return self.canons.items[ci].lift,
-                // A re-export resolves to whatever it re-exports. The target is
-                // always defined EARLIER in the space (an export cannot forward-
-                // reference), so this terminates; the depth bound is belt-and-
-                // braces against a malformed input that claims otherwise.
                 .re_export => |ei| {
                     if (ei >= self.exports.items.len) return null;
                     const target = self.exports.items[ei].index;
-                    if (target >= fi) return null;
-                    return self.liftForFuncIndex(target);
+                    if (target >= idx) return null;
+                    idx = target;
                 },
                 .import, .alias => return null,
-            }
+            };
         }
         // Fallback for hand-built TypeInfos without a populated func space:
         // the historical lift-ordinal walk.
