@@ -999,8 +999,13 @@ fn buildBindings(
                     .table => |t| t,
                     else => return error.ImportTypeMismatch,
                 };
+                // #449 — marked as the host-made arm above marks it.
+                const src = &source_rt.tables[ext.table_idx];
+                var shared = src.*;
+                shared.host_imported = true;
                 bindings[idx] = .{ .table = .{
-                    .instance = source_rt.tables[ext.table_idx],
+                    .instance = shared,
+                    .host_source = src,
                     .source_elem_type = desc.elem_type,
                     .source_min = desc.min,
                     .source_max = desc.max,
