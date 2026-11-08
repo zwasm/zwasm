@@ -73,9 +73,10 @@ pub const P2ErrorCode = enum(u8) {
 
 /// D-307: map a Preview-1 `errno` onto the canonical Preview-2
 /// `wasi:filesystem/types` `error-code` ordinal, so a P2 trampoline can write
-/// `result.err(error-code)` instead of trapping on a P1 failure. An errno with
-/// no arm below falls back to `io`: the network/STREAM-only ones, and eight the
-/// enum above names but this map still misses (#462).
+/// `result.err(error-code)` instead of trapping on a P1 failure. The arms are
+/// the 0.3 map's (`errnoToFs3ErrorCode`) plus `would-block` (0.3 removed it);
+/// the errnos with none below are the network/STREAM-only ones, which fall
+/// back to `io`.
 pub fn errnoToP2ErrorCode(errno: p1.Errno) P2ErrorCode {
     return switch (errno) {
         .acces => .access,
@@ -83,6 +84,8 @@ pub fn errnoToP2ErrorCode(errno: p1.Errno) P2ErrorCode {
         .already => .already,
         .badf => .bad_descriptor,
         .busy => .busy,
+        .deadlk => .deadlock,
+        .dquot => .quota,
         .exist => .exist,
         .fbig => .file_too_large,
         .ilseq => .illegal_byte_sequence,
@@ -96,17 +99,25 @@ pub fn errnoToP2ErrorCode(errno: p1.Errno) P2ErrorCode {
         .nametoolong => .name_too_long,
         .nodev => .no_device,
         .noent => .no_entry,
+        .nolck => .no_lock,
         .nomem => .insufficient_memory,
         .nospc => .insufficient_space,
         .notdir => .not_directory,
         .notempty => .not_empty,
+        .notrecoverable => .not_recoverable,
         .notsup => .unsupported,
+        .notty => .no_tty,
+        .nxio => .no_such_device,
         .overflow => .overflow,
         .perm => .not_permitted,
         .pipe => .pipe,
         .rofs => .read_only,
         .spipe => .invalid_seek,
+        .txtbsy => .text_file_busy,
         .xdev => .cross_device,
+        // P1's sandbox-escape errno; the spec text is quoted at the same arm
+        // of `errnoToFs3ErrorCode`.
+        .notcapable => .not_permitted,
         else => .io,
     };
 }
@@ -1166,6 +1177,17 @@ test "D-307: errno → P2 filesystem error-code ordinals" {
     try testing.expectEqual(@as(u8, 28), @backingInt(P2ErrorCode.no_tty));
     try testing.expectEqual(@as(u8, 36), @backingInt(P2ErrorCode.cross_device));
     try testing.expectEqual(37, @typeInfo(P2ErrorCode).@"enum".field_names.len);
+    // #462: the arms the 0.3 map (`errnoToFs3ErrorCode`) has and this one
+    // used to send to `io`.
+    try testing.expectEqual(P2ErrorCode.deadlock, errnoToP2ErrorCode(.deadlk));
+    try testing.expectEqual(P2ErrorCode.quota, errnoToP2ErrorCode(.dquot));
+    try testing.expectEqual(P2ErrorCode.no_lock, errnoToP2ErrorCode(.nolck));
+    try testing.expectEqual(P2ErrorCode.not_permitted, errnoToP2ErrorCode(.notcapable));
+    try testing.expectEqual(@as(u8, 31), @backingInt(errnoToP2ErrorCode(.notcapable)));
+    try testing.expectEqual(P2ErrorCode.not_recoverable, errnoToP2ErrorCode(.notrecoverable));
+    try testing.expectEqual(P2ErrorCode.no_tty, errnoToP2ErrorCode(.notty));
+    try testing.expectEqual(P2ErrorCode.no_such_device, errnoToP2ErrorCode(.nxio));
+    try testing.expectEqual(P2ErrorCode.text_file_busy, errnoToP2ErrorCode(.txtbsy));
     // Errnos with no P2 counterpart fall back to `io`.
     try testing.expectEqual(P2ErrorCode.io, errnoToP2ErrorCode(.connreset));
 }
