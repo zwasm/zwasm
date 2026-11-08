@@ -1138,6 +1138,27 @@ test "D-307: a failing descriptor.open-at returns result.err(no-entry), not a tr
     try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
 }
 
+test "#462: a 0.2 stat-at on a path above the preopen returns result.err(not-permitted), not io" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/wasi_p2_fs_escape.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    _ = try host.addPreopen(tmp.dir.handle, "/sandbox");
+
+    // stat-at "../x" → confine's notcapable; the guest traps unless the
+    // error-code ordinal is 31 (not-permitted).
+    try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
+}
+
 test "D3-7: a WASI-P2 component drives wasi:io/poll (subscribe + poll + ready/block)" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
