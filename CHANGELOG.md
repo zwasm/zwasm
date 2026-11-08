@@ -10,6 +10,86 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-11-08
+
+### Added
+
+- **A `wasm32-wasip2` guest that makes HTTP requests runs** (#564). The
+  `wasi:http/types@0.2.x` client resources and `outgoing-handler.handle` are
+  served behind `--allow-network` (2.9 refused the component with
+  `UnsupportedWasiImport`). Only the `http` scheme is sent; the server half
+  (`incoming-handler`) is not served.
+
+### Changed
+
+- **zwasm runs WASI 0.3 async components by default** (#673). `zwasm run` on a
+  `wasm32-wasip3` component no longer needs a `-Dwasi=p3` build (2.9 exited 1).
+  `-Dwasi=p2` is the opt-out; `zig build test-wasi-p3` is now `test-wasi-p2`,
+  its unit suite. The ReleaseSafe binary grows 0.68 MB stripped on x86_64
+  Linux, mostly the HTTP/TLS client the 0.3 outgoing handler reaches.
+
+### Fixed
+
+- **A table exported by one instance and imported by another no longer grows
+  on either side** (#449). Before, a grow reallocated the buffer both read and
+  left the other instance reading freed memory; now `table.grow` returns `-1`
+  and `wasm_table_grow` returns `false`, as for an imported `wasm_table_new`
+  table. `Linker.defineTable` by value declines on the importer's side only.
+
+- **A component using the Component Model features WASI 0.3.1 adopted decodes
+  and runs** (#611, #612). A `map<K, V>` type is accepted, its key and value
+  validated as the spec says, and crosses the canonical ABI as
+  `list<tuple<K, V>>`; the `implements` / `version-suffix` / `external-id`
+  attributes on an import or export name are read and ignored, as type checking
+  ignores them.
+
+- **`zwasm run` on a component runs its `wasi:cli/run` export by name, and
+  `--invoke` reaches a component** (#622). It ran the first lifted export (on
+  `-Dwasi=p2`, even an async-only one) and dropped `--invoke`. Without one,
+  the component is refused with its exports listed. `--invoke NAME=args` takes
+  WIT scalar, char and string args.
+
+- **`invokeTyped` calls a single-module component that has no memory** (#676).
+  A component lifting only scalar signatures needs none, but the call failed
+  with `NoMemory` before it reached the guest.
+
+- **The JIT runs `memory.init`, `table.init`, `data.drop` and `elem.drop` on
+  any segment index** (#659). It declined data index 2048, elem index 1024
+  and, on arm64, drop index 4096, caps that only the arm64 immediate encoding
+  needed, so `--engine jit` and `zwasm compile` failed with `UnsupportedOp`.
+
+- **On the interpreter, an element segment can read an imported global** (#662,
+  #282). A `global.get` item of an imported funcref global, or an active
+  offset that reads an imported global, made instantiation fail.
+
+- **`wasm_module_imports` and `wasm_module_exports` list a memory64 memory
+  whose minimum does not fit `u32`** (#670). The import list came back empty
+  and `zwasm_module_imports_ex` returned `false`; the minimum now reports as
+  `0xffffffff`, as a table64 bound already did, since `wasm_limits_t` is `u32`.
+
+- **`zwasm run` on a component with a sync `wasi:cli/run` next to an async
+  export runs `run`** (#677). It ran the first async-lifted export instead. The
+  entry is `wasi:cli/run#run` by name, the highest generation first, else a
+  top-level `run` typed `func()` or `func() -> result`, each driven sync or
+  async as it is lifted.
+
+### Security
+
+- **On the interpreter, an active element segment whose table64 offset lies
+  past the table is refused** (#685). Before, an offset near 2^64 overflowed
+  the range check and the host process stopped.
+
+- **A component that nests types, declarations or components past zwasm's
+  caps, or chains func re-exports, is refused or resolved** (#682). Before, the
+  host process stopped. A type nests at most 100 levels, and a binary holds at
+  most 1000 nested components.
+
+### Known limitations
+
+- **WASI 0.2 and 0.3 `open-at` ignores the requested descriptor-flags and
+  opens every file read-write** (#254), so a host file the process may read
+  but not write cannot be opened.
+
 ## [2.9.0] - 2026-10-31
 
 ### Changed
