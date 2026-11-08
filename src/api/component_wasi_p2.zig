@@ -2171,7 +2171,7 @@ fn defineSynth(lk: *Linker, ns: []const u8, e: SynthExport, ctx: *WasiP2Ctx) !vo
             const rt = g.inst.handle.runtime orelse return error.ImportUnsatisfied;
             for (g.inst.handle.exports_storage) |exp| {
                 if (exp.kind == .table and std.mem.eql(u8, exp.name, g.name)) {
-                    try lk.defineTable(ns, e.name, rt.tables[exp.idx]);
+                    try lk.defineTableInstance(ns, e.name, &rt.tables[exp.idx]);
                     return;
                 }
             }

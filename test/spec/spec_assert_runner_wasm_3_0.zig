@@ -1074,7 +1074,7 @@ pub fn main(init: std.process.Init) !void {
                             if (inst_ptr.handle.runtime) |rt| {
                                 for (inst_ptr.handle.exports_storage) |exp| {
                                     if (exp.kind == .table) {
-                                        cur_linker.defineTable("spectest", "table", rt.tables[exp.idx]) catch {};
+                                        cur_linker.defineTableInstance("spectest", "table", &rt.tables[exp.idx]) catch {};
                                     }
                                 }
                             }
@@ -1369,7 +1369,7 @@ pub fn main(init: std.process.Init) !void {
                                     // imports + their elem writes share it.
                                     if (inst_rt) |rt| {
                                         if (exp.idx < rt.tables.len) {
-                                            cur_linker.defineTable(d.func_name, exp.name, rt.tables[exp.idx]) catch {};
+                                            cur_linker.defineTableInstance(d.func_name, exp.name, &rt.tables[exp.idx]) catch {};
                                         }
                                     }
                                 },
