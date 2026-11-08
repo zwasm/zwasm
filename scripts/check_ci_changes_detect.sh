@@ -103,10 +103,23 @@ git -C "$REPO" add -A
 git -C "$REPO" commit -qm code-after-doc
 DOC_CODE=$(git -C "$REPO" rev-parse HEAD)
 
+# Queue heads for the tree check (#691): a new commit with the PR head's tree,
+# one whose tree has a second code file, one with the PR head's tree on a
+# base the PR head does not contain, and one with the tree of a PR whose last
+# push was doc-only.
+git -C "$REPO" reset -q --hard "$CODE"
+echo other > "$REPO/src/other.zig"
+git -C "$REPO" add -A
+git -C "$REPO" commit -qm code-plus
+QUEUE_SAME=$(git -C "$REPO" commit-tree -m queue -p "$BASE" "$CODE^{tree}")
+QUEUE_DIFF=$(git -C "$REPO" commit-tree -m queue -p "$BASE" "HEAD^{tree}")
+QUEUE_MOVED=$(git -C "$REPO" commit-tree -m queue -p "$DOC" "$CODE^{tree}")
+QUEUE_CODE_DOC=$(git -C "$REPO" commit-tree -m queue -p "$BASE" "$CODE_DOC^{tree}")
+
 fails=0
 cases=0
 
-check() { # name event base head want [before after verdict]
+check() { # name event base head want [before|pr_head after verdict matrix]
   cases=$((cases + 1))
   local out
   : > "$TMP/gh_output"
@@ -119,7 +132,7 @@ check() { # name event base head want [before after verdict]
     EVENT="$2" \
     PR_BASE="$3" PR_HEAD="$4" PR_BEFORE="${6:-}" PR_AFTER="${7:-}" PR_BEFORE_VERDICT="${8:-}" \
     PUSH_BEFORE="$3" PUSH_HEAD="$4" \
-    MG_BASE="$3" MG_HEAD="$4" \
+    MG_BASE="$3" MG_HEAD="$4" MG_PR_HEAD="${6:-}" MG_PR_HEAD_VERDICT="${8:-}" MG_PR_HEAD_MATRIX="${9:-}" \
     GITHUB_OUTPUT="$TMP/gh_output" \
     bash "$TMP/detect.sh" >/dev/null 2>&1
   ) || true
@@ -138,6 +151,14 @@ check "merge_group code"            merge_group "$BASE" "$CODE"    true
 check "merge_group docs/examples"   merge_group "$BASE" "$EXAMPLE" true
 check "merge_group base unreachable" merge_group 0000000000000000000000000000000000000000 "$CODE" true
 check "merge_group base empty"      merge_group ""      "$CODE"    true
+# A queue head rides on its PR run only with the PR head's tree, a successful
+# verdict from a run whose gate matrix ran, and a base the PR head contains
+# (the PR run gated a merge into it).
+check "merge_group tree gated"          merge_group "$BASE" "$QUEUE_SAME"     false "$CODE"     "" success success
+check "merge_group tree, no verdict"    merge_group "$BASE" "$QUEUE_SAME"     true  "$CODE"     "" none    success
+check "merge_group tree differs"        merge_group "$BASE" "$QUEUE_DIFF"     true  "$CODE"     "" success success
+check "merge_group base not in PR head" merge_group "$DOC"  "$QUEUE_MOVED"    true  "$CODE"     "" success success
+check "merge_group doc push after code" merge_group "$BASE" "$QUEUE_CODE_DOC" true  "$CODE_DOC" "" success other
 # The arms that do run, so a change to the shared filter cannot pass by
 # fixing one event and breaking another.
 check "pull_request doc-only"       pull_request "$BASE" "$DOC"     false

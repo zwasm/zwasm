@@ -274,3 +274,9 @@ gh api --method PUT repos/zwasm/zwasm/rulesets/13308987 --input /tmp/ruleset-unq
   ADR-0076 D9 (CI is authoritative)
 - GitHub docs: "Managing a merge queue"; the `merge_queue` rule parameters in
   the repository-rules REST reference
+
+## Revision history
+
+| Date       | Commit | Why-class | Summary |
+|------------|--------|-----------|---------|
+| 2026-11-08 | —      | scope     | **The queue run gates the merged tree by running the gate on it, or by showing the identical tree was gated by the PR run** (#691). The `changes` job skips the gate matrix for an entry whose tree is its PR head's, whose base the PR head contains, and whose PR head's `ci-required` succeeded on a run that ran the gate matrix; anything else runs the gate. The guarantee is on the tree, not on the branch. |

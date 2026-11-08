@@ -33,8 +33,8 @@
 # mergeable without burning the runners. Keep the branch ruleset's required
 # check pointed at `ci-required`, NOT the individual `gate (...)` legs. On a
 # PR the decision is per push, riding on the previous head's success (#298):
-# the merge queue's run gates the merged tree in full regardless (ADR-0227
-# D2/D3).
+# the merge queue's run gates the merged tree regardless, by running the gate
+# on it or by showing the PR's run gated an identical tree (ADR-0227, #691).
 #
 # The cheap `doc-truth` job runs for EVERY PR, doc-only included — checks whose
 # subject is prose must not be skipped by the doc-only short-circuit.
@@ -82,8 +82,12 @@ concurrency:
 jobs:
   # Detect whether any non-doc path changed. Doc-only PRs then skip the heavy
   # `gate` matrix while `ci-required` still reports success, so the
-  # branch ruleset's required check stays satisfiable. Only SHAs (never a
-  # branch name / title / body) reach the shell, so there is no injection seam.
+  # branch ruleset's required check stays satisfiable. A queue entry also
+  # skips when its tree is one its PR's run already gated (#691). `detect` is
+  # a pure function of its env and git — `prev` and `mg` do the lookups — and
+  # every skip fails closed: an input it cannot establish runs the gate.
+  # Untrusted strings enter only as env, and only SHAs and a PR number leave
+  # the step that parses them, so there is no injection seam.
   changes:
     name: detect changes
     runs-on: ubuntu-latest
@@ -91,6 +95,7 @@ jobs:
     permissions:
       contents: read
       checks: read
+      pull-requests: read
     outputs:
       code: ${{ steps.detect.outputs.code }}
     steps:
@@ -115,6 +120,33 @@ jobs:
           v="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PR_BEFORE}/check-runs?check_name=ci-required" --jq '.check_runs[0].conclusion // "none"' 2>/dev/null)" || v=unknown
           echo "previous head ${PR_BEFORE}: ci-required=${v}"
           echo "conclusion=${v}" >> "$GITHUB_OUTPUT"
+      # The queued PR's head, its verdict, and whether that verdict's run ran
+      # the gate matrix (a doc-only push succeeds without it), for the tree
+      # check in `detect`. The ref is not echoed: it is a branch name. Any
+      # lookup that fails leaves an output empty or not `success`, which runs
+      # the gate.
+      - name: Queued PR head's verdict
+        id: mg
+        if: github.event_name == 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MG_REF: ${{ github.event.merge_group.head_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          re='^refs/heads/gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]{40}$'
+          if ! [[ "$MG_REF" =~ $re ]]; then echo "queue ref not of the pr-<N>-<sha> form -> run gate"; exit 0; fi
+          n="${BASH_REMATCH[1]}"
+          h="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${n}" --jq .head.sha 2>/dev/null)" || h=""
+          if ! [[ "$h" =~ ^[0-9a-f]{40}$ ]]; then echo "PR #${n}: head unreadable -> run gate"; exit 0; fi
+          git fetch -q --no-tags origin "refs/pull/${n}/head" || { echo "PR #${n}: head not fetchable -> run gate"; exit 0; }
+          read -r v suite < <(gh api "repos/${GITHUB_REPOSITORY}/commits/${h}/check-runs?check_name=ci-required" --jq '.check_runs[0] | "\(.conclusion // "none") \(.check_suite.id // "none")"' 2>/dev/null || echo "unknown none")
+          m=none
+          if [[ "$suite" =~ ^[0-9]+$ ]]; then
+            m="$(gh api "repos/${GITHUB_REPOSITORY}/check-suites/${suite}/check-runs?filter=latest&per_page=100" --jq '[.check_runs[] | select(.name | startswith("gate (")) | .conclusion] | if length > 0 and all(. == "success") then "success" else "other" end' 2>/dev/null)" || m=unknown
+          fi
+          echo "PR #${n} head ${h}: ci-required=${v}, gate matrix=${m}"
+          { echo "pr_head=${h}"; echo "verdict=${v}"; echo "matrix=${m}"; } >> "$GITHUB_OUTPUT"
       - name: Detect non-doc changes
         id: detect
         env:
@@ -129,6 +161,9 @@ jobs:
           PUSH_HEAD: ${{ github.sha }}
           MG_BASE: ${{ github.event.merge_group.base_sha }}
           MG_HEAD: ${{ github.event.merge_group.head_sha }}
+          MG_PR_HEAD: ${{ steps.mg.outputs.pr_head }}
+          MG_PR_HEAD_VERDICT: ${{ steps.mg.outputs.verdict }}
+          MG_PR_HEAD_MATRIX: ${{ steps.mg.outputs.matrix }}
         shell: bash
         run: |
           set -euo pipefail
@@ -145,6 +180,20 @@ jobs:
               range="${PR_BASE}...${PR_HEAD}"
             fi
           elif [ "$EVENT" = "merge_group" ]; then
+            # The PR run gated `Merge <pr head> into <its base>`, whose tree is
+            # the PR head's only when that base is an ancestor of the head.
+            # Every `main` commit up to this entry's base is one once the base
+            # itself is (`main` only moves forward), so that, the trees, and a
+            # successful verdict from a run whose gate matrix ran together mean
+            # this tree was gated. A batched group's tree is no single PR
+            # head's.
+            pt="$(git rev-parse -q --verify "${MG_PR_HEAD}^{tree}" 2>/dev/null || true)"
+            qt="$(git rev-parse -q --verify "${MG_HEAD}^{tree}" 2>/dev/null || true)"
+            if [ "$MG_PR_HEAD_VERDICT" = "success" ] && [ "$MG_PR_HEAD_MATRIX" = "success" ] && [ -n "$MG_PR_HEAD" ] && [ -n "$pt" ] && [ "$pt" = "$qt" ] \
+               && git merge-base --is-ancestor "$MG_BASE" "$MG_PR_HEAD" 2>/dev/null; then
+              echo "code=false" >> "$GITHUB_OUTPUT"
+              echo "tree ${qt} already gated by ci-required on ${MG_PR_HEAD} -> skip the gate matrix"; exit 0
+            fi
             # The group's head contains its base, so the two-dot range is the
             # push analogue, and it covers the whole group when entries are
             # batched. Same fail-closed guard as the push arm: an uncomputable
