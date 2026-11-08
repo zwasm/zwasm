@@ -22,7 +22,8 @@ zwasm v2 is a ground-up redesign of zwasm (v1 git history at commit 517cc5a).
   push, PR required, and the `ci-required` status check (CI's 3-OS gate) must be
   green to merge; only the repo admin can bypass. Doc-only PRs auto-skip the
   heavy gate (still green via `ci-required`; the merge queue's run still gates
-  the merged tree in full, ADR-0227). The local `scripts/gate_merge.sh`
+  the merged tree, by running the gate or by proving it identical to a gated
+  one, ADR-0227). The local `scripts/gate_merge.sh`
   (3-host SSH fan-out) is an **optional** pre-PR pre-flight that runs
   `test-all` per host, not the CI leg — its header names what it leaves out
   (ADR-0076 D9) — CI's `ci-required` is authoritative. `--force`
@@ -83,7 +84,8 @@ text or code identifiers.
   is PR-only, and CI's `ci-required` runs `scripts/ci_gate.sh` on **the 3 supported
   OSes, as four legs** (aarch64-macos + x86_64-linux + aarch64-linux +
   x86_64-windows) for **every** PR, and again on the merged tree in the merge
-  queue's `merge_group` run (ADR-0227). That IS the
+  queue's `merge_group` run unless that tree is one the PR run gated
+  (ADR-0227). That IS the
   merge gate. A PR run gets the **core** gate — zig fmt + `test-all` +
   `bench-latency-build` (compile-only, ADR-0209) + the test-discovery guard,
   plus `run-rust-host` on the Linux legs only and the unit tests built
@@ -96,8 +98,9 @@ text or code identifiers.
   the **push to `main`** — they are up to ~20 cold-cache ReleaseSafe builds and
   would dominate every PR's wall-clock (rationale in `ci.yml`).
   Doc-only PRs auto-skip the heavy legs (still green via `ci-required`) — the
-  PR's last push decides, and the `merge_group` run gates the merged tree in
-  full regardless (`docs/development.md`). The
+  PR's last push decides, and the `merge_group` run gates the merged tree
+  regardless, by running the gate or by proving it identical to a gated one
+  (`docs/development.md`). The
   local `scripts/gate_merge.sh` (3-host SSH fan-out) + `scripts/gate_commit.sh`
   (pre-commit) are now **optional pre-PR pre-flight** — a preview of part of
   the leg, not a reproduction of it (`gate_merge.sh`'s header names what it

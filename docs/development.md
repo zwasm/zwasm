@@ -123,7 +123,8 @@ is `scripts/gate_exclusions.regex`) skip the heavy 3-OS legs automatically and
 are gated by the fast `doc-truth` job instead. The decision is per push, not
 per PR: a doc-only push rides on the previous head's `ci-required` when that
 succeeded, and pays in full after a failed or cancelled one; the merge queue's
-own run gates the merged tree in full regardless (ADR-0227).
+own run gates the merged tree regardless, by running the gate on it or by
+proving it identical to a tree the PR run gated (ADR-0227).
 
 To run what CI runs, locally, on your own machine — the script defines the
 leg's content except for the one blocking step beside it:
