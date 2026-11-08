@@ -78,11 +78,13 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 - **On the interpreter, an active element segment whose table64 offset lies
   past the table is refused** (#685). Before, an offset near 2^64 overflowed
   the range check and the host process stopped.
+  [GHSA-ph9p-gw3q-7chp](https://github.com/zwasm/zwasm/security/advisories/GHSA-ph9p-gw3q-7chp).
 
 - **A component that nests types, declarations or components past zwasm's
   caps, or chains func re-exports, is refused or resolved** (#682). Before, the
   host process stopped. A type nests at most 100 levels, and a binary holds at
   most 1000 nested components.
+  [GHSA-j6hh-4gp6-h45c](https://github.com/zwasm/zwasm/security/advisories/GHSA-j6hh-4gp6-h45c).
 
 ### Known limitations
 
