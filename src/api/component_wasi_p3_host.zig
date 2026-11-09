@@ -1657,6 +1657,14 @@ fn http3FieldsClone(caller: *Caller, self: u32) WasiP2Error!u32 {
 
 // -- request / response / request-options (ADR-0205 phase D-2) --
 
+/// A future the host mints but never writes (`sent`, or a trailers future the
+/// host answers through `host_trailer_ok_futures`) keeps only the guest's
+/// end; holding the writable would keep both for the instance's life. The
+/// raw drop leaves the rendezvous un-DROPPED, so a read waits as before.
+fn releaseHostWritable(ctx: *WasiP2Ctx, writable: u32) WasiP2Error!void {
+    try async_mod.dropEnd(&ctx.streams, &ctx.shared, writable);
+}
+
 /// Release a stream/future end TRANSFERRED into a request/response at
 /// `new` time (the guest's own handle moved to the host): the peer must
 /// observe DROPPED or its writer task never completes.
@@ -1664,6 +1672,9 @@ pub fn http3DropTransferredEnd(ctx: *WasiP2Ctx, handle: u32) void {
     if (handle == 0) return;
     _ = ctx.host_result_futures.remove(handle);
     _ = ctx.pending_reads.remove(handle);
+    // A stale end has no shared; the drop below reports nothing for it either.
+    const shared = if (ctx.streams.get(handle)) |end| end.shared else |_| 0;
+    ctx_mod.scrubHttpRoles(ctx, handle, shared);
     // EXEMPT-FALLBACK: destructor — a stale/already-dropped end is benign (D-568)
     async_mod.dropEndGuarded(&ctx.streams, &ctx.shared, handle) catch {};
 }
@@ -1705,8 +1716,7 @@ fn http3RequestNew(caller: *Caller, headers: u32, contents_disc: u32, contents: 
         _ = try ctx.resources.drop(WasiP2Ctx.HTTP_REQOPTS_RT, opts);
         options_rep = orep;
     }
-    const idx: u32 = @intCast(ctx.http_requests.items.len);
-    ctx.http_requests.append(ctx.alloc, .{
+    const idx = ctx.addHttpRequest(.{
         .headers_rep = headers_rep,
         .options_rep = options_rep,
         .contents_stream = if (contents_disc != 0) contents else null,
@@ -1714,6 +1724,7 @@ fn http3RequestNew(caller: *Caller, headers: u32, contents_disc: u32, contents: 
     }) catch return WasiP2Error.OutOfMemory;
     const handle = try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, idx);
     const fut = try async_mod.newFuturePair(&ctx.streams, &ctx.shared, null);
+    try releaseHostWritable(ctx, fut.writable);
     try mem.write(retptr, handle);
     try mem.write(retptr + 4, fut.readable);
 }
@@ -1909,14 +1920,14 @@ fn http3ResponseNew(caller: *Caller, headers: u32, contents_disc: u32, contents:
     const headers_rep = try ctx.resources.rep(WasiP2Ctx.HTTP_FIELDS_RT, headers);
     (try ctxHttpFields(ctx, headers_rep)).immutable = true;
     _ = try ctx.resources.drop(WasiP2Ctx.HTTP_FIELDS_RT, headers);
-    const idx: u32 = @intCast(ctx.http_responses.items.len);
-    ctx.http_responses.append(ctx.alloc, .{
+    const idx = ctx.addHttpResponse(.{
         .headers_rep = headers_rep,
         .contents_stream = if (contents_disc != 0) contents else null,
         .trailers_future = trailers_fut,
     }) catch return WasiP2Error.OutOfMemory;
     const handle = try ctx.resources.new(WasiP2Ctx.HTTP_RESPONSE_RT, idx);
     const fut = try async_mod.newFuturePair(&ctx.streams, &ctx.shared, null);
+    try releaseHostWritable(ctx, fut.writable);
     try mem.write(retptr, handle);
     try mem.write(retptr + 4, fut.readable);
 }
@@ -1943,8 +1954,7 @@ fn http3ResponseGetHeaders(caller: *Caller, self: u32) WasiP2Error!u32 {
 
 fn http3ReqoptsNew(caller: *Caller) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
-    const idx: u32 = @intCast(ctx.http_reqopts.items.len);
-    ctx.http_reqopts.append(ctx.alloc, .{}) catch return WasiP2Error.OutOfMemory;
+    const idx = ctx.addHttpReqopts(.{}) catch return WasiP2Error.OutOfMemory;
     return ctx.resources.new(WasiP2Ctx.HTTP_REQOPTS_RT, idx);
 }
 
@@ -2028,6 +2038,7 @@ fn http3RequestConsumeBody(caller: *Caller, this: u32, res_fut: u32, retptr: u32
     };
     const trailers = if (req.trailers_future != 0) req.trailers_future else blk: {
         const fut = try async_mod.newFuturePair(&ctx.streams, &ctx.shared, null);
+        try releaseHostWritable(ctx, fut.writable);
         try ctx.host_trailer_ok_futures.put(ctx.alloc, fut.readable, {});
         break :blk fut.readable;
     };
@@ -2054,6 +2065,7 @@ fn http3ResponseConsumeBody(caller: *Caller, this: u32, res_fut: u32, retptr: u3
     };
     const trailers = if (resp.trailers_future != 0) resp.trailers_future else blk: {
         const fut = try async_mod.newFuturePair(&ctx.streams, &ctx.shared, null);
+        try releaseHostWritable(ctx, fut.writable);
         try ctx.host_trailer_ok_futures.put(ctx.alloc, fut.readable, {});
         break :blk fut.readable;
     };
@@ -2170,8 +2182,7 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
         try self.host_body_bytes.put(self.alloc, shared_id, .{ .data = ex.body });
         contents = pair.readable;
     } else self.alloc.free(ex.body);
-    const resp_idx: u32 = @intCast(self.http_responses.items.len);
-    self.http_responses.append(self.alloc, .{
+    const resp_idx = self.addHttpResponse(.{
         .status = ex.status,
         .headers_rep = ex.headers_rep,
         .contents_stream = contents,
@@ -2214,8 +2225,7 @@ pub fn http3RegisterCaptureSink(ctx: *WasiP2Ctx, shared_id: u32, cap: *std.Array
 fn http3ReqoptsClone(caller: *Caller, self: u32) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
     const src = (try http3ReqoptsSelf(ctx, self)).*;
-    const idx: u32 = @intCast(ctx.http_reqopts.items.len);
-    ctx.http_reqopts.append(ctx.alloc, .{
+    const idx = ctx.addHttpReqopts(.{
         .connect_timeout_ns = src.connect_timeout_ns,
         .first_byte_timeout_ns = src.first_byte_timeout_ns,
         .between_bytes_timeout_ns = src.between_bytes_timeout_ns,
@@ -2586,8 +2596,8 @@ test "without the network grant, each 0.3 op that reaches the network answers ac
     }
     // A request sent without the grant stays denied when the grant arrives
     // before its exchange runs.
-    try ctx.http_requests.append(testing.allocator, .{ .headers_rep = 0 });
-    _ = try http3ClientSend(&caller, try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, 0), 192);
+    const req_rep = try ctx.addHttpRequest(.{ .headers_rep = 0 });
+    _ = try http3ClientSend(&caller, try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, req_rep), 192);
     host.allow_network = true;
     _ = try pollPendingClientSends(&ctx);
     try testing.expectEqual(@as(u8, 1), try mem.read(u8, 192));
@@ -2619,8 +2629,8 @@ test "an outbound HTTP exchange that fails answers internal-error, not configura
     var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
 
     // No authority, so the exchange fails before it reaches the network.
-    try ctx.http_requests.append(testing.allocator, .{ .headers_rep = 0 });
-    _ = try http3ClientSend(&caller, try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, 0), 0);
+    const req_rep = try ctx.addHttpRequest(.{ .headers_rep = 0 });
+    _ = try http3ClientSend(&caller, try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, req_rep), 0);
     _ = try pollPendingClientSends(&ctx);
     const mem = try ctx.memory();
     try testing.expectEqual(@as(u8, 1), try mem.read(u8, 0));

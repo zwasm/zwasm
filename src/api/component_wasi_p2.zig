@@ -535,14 +535,14 @@ test "D-444 II: p2ResourceDrop(HTTP_REQUEST_RT) — releases transferred ends + 
         .name = try ctx.alloc.dupe(u8, "x"),
         .value = try ctx.alloc.dupe(u8, "y"),
     });
-    try ctx.http_fields.append(ctx.alloc, flds);
-    try ctx.http_requests.append(ctx.alloc, .{
+    const fields_rep = try ctx.addHttpFields(flds);
+    const req_rep = try ctx.addHttpRequest(.{
         .path_with_query = try ctx.alloc.dupe(u8, "/probe?q=1"),
-        .headers_rep = 0,
+        .headers_rep = fields_rep,
         .contents_stream = strm.readable,
         .trailers_future = fut.readable,
     });
-    const h = try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, 0);
+    const h = try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, req_rep);
 
     try p2ResourceDrop(&caller, h);
 
@@ -557,8 +557,7 @@ test "D-444 II: p2ResourceDrop(HTTP_REQUEST_RT) — releases transferred ends + 
     // testing allocator's leak check at ctx.deinit.
 
     // A request with NO transferred ends (trailers_future = 0) drops benignly.
-    try ctx.http_requests.append(ctx.alloc, .{ .headers_rep = 99 });
-    const h2 = try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, 1);
+    const h2 = try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, try ctx.addHttpRequest(.{ .headers_rep = 99 }));
     try p2ResourceDrop(&caller, h2);
 }
 

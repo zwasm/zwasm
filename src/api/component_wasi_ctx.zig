@@ -206,11 +206,13 @@ pub const WasiP2Ctx = struct {
     udp_sockets: std.ArrayList(p2sock.UdpSocket) = .empty,
     /// `wasi:http/types` `fields` resources (ADR-0205 phase D; both generations);
     /// a HTTP_FIELDS_RT handle's rep indexes this list. Dropped entries are
-    /// deinit'ed in place (slot stays; reps are never reused).
+    /// deinit'ed in place. A slot is reused only once `sweepHttpTables` found
+    /// nothing reaching it; the `addHttp*` helpers are the only way in.
     http_fields: std.ArrayList(p3http.HttpFields) = .empty,
     http_requests: std.ArrayList(p3http.HttpRequest) = .empty,
     http_responses: std.ArrayList(p3http.HttpResponse) = .empty,
     http_reqopts: std.ArrayList(p3http.HttpRequestOptions) = .empty,
+    http_free: HttpFreeSlots = .{},
     /// The 0.2-only halves of the client exchange (bodies, futures).
     http2: p2http.State = .{},
     /// Host-resolved trailers futures (keyed by READABLE handle): a guest
@@ -403,6 +405,7 @@ pub const WasiP2Ctx = struct {
         self.http_requests.deinit(self.alloc);
         self.http_responses.deinit(self.alloc);
         self.http_reqopts.deinit(self.alloc);
+        self.http_free.deinit(self.alloc);
         self.http2.deinit(self.alloc);
         self.host_trailer_ok_futures.deinit(self.alloc);
         var body_it = self.host_body_bytes.iterator();
@@ -470,6 +473,19 @@ pub const WasiP2Ctx = struct {
     }
 
     /// The guest linear memory the lowered funcs operate on (`mem_instance`).
+    pub fn addHttpFields(self: *WasiP2Ctx, v: p3http.HttpFields) Allocator.Error!u32 {
+        return addSlot(p3http.HttpFields, self.alloc, &self.http_fields, &self.http_free.fields, v);
+    }
+    pub fn addHttpRequest(self: *WasiP2Ctx, v: p3http.HttpRequest) Allocator.Error!u32 {
+        return addSlot(p3http.HttpRequest, self.alloc, &self.http_requests, &self.http_free.requests, v);
+    }
+    pub fn addHttpResponse(self: *WasiP2Ctx, v: p3http.HttpResponse) Allocator.Error!u32 {
+        return addSlot(p3http.HttpResponse, self.alloc, &self.http_responses, &self.http_free.responses, v);
+    }
+    pub fn addHttpReqopts(self: *WasiP2Ctx, v: p3http.HttpRequestOptions) Allocator.Error!u32 {
+        return addSlot(p3http.HttpRequestOptions, self.alloc, &self.http_reqopts, &self.http_free.reqopts, v);
+    }
+
     pub fn memory(self: *WasiP2Ctx) WasiP2Error!Memory {
         const inst = self.mem_instance orelse return WasiP2Error.NoMemory;
         const rt = inst.handle.runtime orelse return WasiP2Error.NoMemory;
@@ -674,9 +690,144 @@ pub fn ctxHttpFieldsSelf(ctx: *WasiP2Ctx, self: u32) WasiP2Error!*p3http.HttpFie
     return ctxHttpFields(ctx, rep);
 }
 
+/// Free slots of the four http tables, which index by rep.
+pub const HttpFreeSlots = struct {
+    fields: std.ArrayList(u32) = .empty,
+    requests: std.ArrayList(u32) = .empty,
+    responses: std.ArrayList(u32) = .empty,
+    reqopts: std.ArrayList(u32) = .empty,
+
+    fn deinit(self: *HttpFreeSlots, alloc: Allocator) void {
+        self.fields.deinit(alloc);
+        self.requests.deinit(alloc);
+        self.responses.deinit(alloc);
+        self.reqopts.deinit(alloc);
+    }
+};
+
+/// The rep a freed 0.2 side entry names.
+pub const no_rep: u32 = std.math.maxInt(u32);
+
+/// Take a slot `sweepHttpTables` freed, or grow `list`.
+pub fn addSlot(comptime T: type, alloc: Allocator, list: *std.ArrayList(T), free: *std.ArrayList(u32), v: T) Allocator.Error!u32 {
+    if (free.pop()) |i| {
+        list.items[i] = v;
+        return i;
+    }
+    const i: u32 = @intCast(list.items.len);
+    try list.append(alloc, v);
+    return i;
+}
+
+/// Free every slot of the http tables, the 0.2 side tables included, that no
+/// live handle, pending `client.send`, or live entry reaches, for the add
+/// helpers to reuse. A 0.2 body lives as long as its request or response does
+/// (`send` and `consume` find it by that rep). A freed side entry names
+/// `no_rep`, so a lookup by rep cannot hit it. Run only while no guest code
+/// runs (`serviceHandle` calls it between requests).
+pub fn sweepHttpTables(ctx: *WasiP2Ctx) Allocator.Error!void {
+    const a = ctx.alloc;
+    const st = &ctx.http2;
+    var fields = try liveSet(a, ctx.http_fields.items.len, ctx.http_free.fields.items);
+    defer fields.deinit(a);
+    var requests = try liveSet(a, ctx.http_requests.items.len, ctx.http_free.requests.items);
+    defer requests.deinit(a);
+    var responses = try liveSet(a, ctx.http_responses.items.len, ctx.http_free.responses.items);
+    defer responses.deinit(a);
+    var reqopts = try liveSet(a, ctx.http_reqopts.items.len, ctx.http_free.reqopts.items);
+    defer reqopts.deinit(a);
+    var out_bodies = try liveSet(a, st.out_bodies.items.len, st.free.out_bodies.items);
+    defer out_bodies.deinit(a);
+    var futures = try liveSet(a, st.futures.items.len, st.free.futures.items);
+    defer futures.deinit(a);
+    var in_bodies = try liveSet(a, st.in_bodies.items.len, st.free.in_bodies.items);
+    defer in_bodies.deinit(a);
+    var trailers = try liveSet(a, st.trailers.items.len, st.free.trailers.items);
+    defer trailers.deinit(a);
+
+    for (ctx.resources.slots.items) |slot| {
+        const h = slot orelse continue;
+        switch (h.rt) {
+            WasiP2Ctx.HTTP_FIELDS_RT, WasiP2Ctx.HTTP_FIELDS_VIEW_RT => mark(&fields, h.rep),
+            WasiP2Ctx.HTTP_REQUEST_RT => mark(&requests, h.rep),
+            WasiP2Ctx.HTTP_RESPONSE_RT => mark(&responses, h.rep),
+            WasiP2Ctx.HTTP_REQOPTS_RT, WasiP2Ctx.HTTP_REQOPTS_VIEW_RT => mark(&reqopts, h.rep),
+            WasiP2Ctx.HTTP2_OUTGOING_BODY_RT, WasiP2Ctx.HTTP_BODY_OUT_RT => if (h.rep < st.out_bodies.items.len) {
+                mark(&out_bodies, h.rep);
+                mark(&requests, st.out_bodies.items[h.rep].req_rep);
+            },
+            WasiP2Ctx.HTTP2_FUTURE_RESPONSE_RT => if (h.rep < st.futures.items.len) {
+                mark(&futures, h.rep);
+                mark(&requests, st.futures.items[h.rep].req_rep);
+            },
+            WasiP2Ctx.HTTP2_INCOMING_BODY_RT, WasiP2Ctx.HTTP_BODY_IN_RT => if (h.rep < st.in_bodies.items.len) {
+                mark(&in_bodies, h.rep);
+                mark(&responses, st.in_bodies.items[h.rep].resp_rep);
+            },
+            WasiP2Ctx.HTTP2_FUTURE_TRAILERS_RT => mark(&trailers, h.rep),
+            else => {},
+        }
+    }
+    for (ctx.pending_client_sends.items) |pcs| mark(&requests, pcs.req_rep);
+    // A freed slot is reset below, so these read no stale rep.
+    for (ctx.http_requests.items, 0..) |r, i| if (requests.isSet(i)) {
+        mark(&fields, r.headers_rep);
+        if (r.options_rep) |o| mark(&reqopts, o);
+    };
+    for (ctx.http_responses.items, 0..) |r, i| if (responses.isSet(i)) mark(&fields, r.headers_rep);
+    for (st.out_bodies.items, 0..) |b, i| if (b.req_rep < requests.bit_length and requests.isSet(b.req_rep)) out_bodies.set(i);
+    for (st.in_bodies.items, 0..) |b, i| if (b.resp_rep < responses.bit_length and responses.isSet(b.resp_rep)) in_bodies.set(i);
+
+    for (ctx.http_fields.items, 0..) |*f, i| if (!fields.isSet(i)) {
+        f.deinit(a);
+        try ctx.http_free.fields.append(a, @intCast(i));
+    };
+    for (ctx.http_requests.items, 0..) |*r, i| if (!requests.isSet(i)) {
+        r.deinit(a);
+        r.* = .{ .headers_rep = no_rep };
+        try ctx.http_free.requests.append(a, @intCast(i));
+    };
+    for (ctx.http_responses.items, 0..) |*r, i| if (!responses.isSet(i)) {
+        r.* = .{ .headers_rep = no_rep };
+        try ctx.http_free.responses.append(a, @intCast(i));
+    };
+    for (ctx.http_reqopts.items, 0..) |*o, i| if (!reqopts.isSet(i)) {
+        o.* = .{};
+        try ctx.http_free.reqopts.append(a, @intCast(i));
+    };
+    for (st.out_bodies.items, 0..) |*b, i| if (!out_bodies.isSet(i)) {
+        b.bytes.deinit(a);
+        b.* = .{ .req_rep = no_rep };
+        try st.free.out_bodies.append(a, @intCast(i));
+    };
+    for (st.futures.items, 0..) |*f, i| if (!futures.isSet(i)) {
+        f.* = .{ .req_rep = no_rep };
+        try st.free.futures.append(a, @intCast(i));
+    };
+    for (st.in_bodies.items, 0..) |*b, i| if (!in_bodies.isSet(i)) {
+        a.free(b.bytes);
+        b.* = .{ .resp_rep = no_rep, .bytes = &.{} };
+        try st.free.in_bodies.append(a, @intCast(i));
+    };
+    for (st.trailers.items, 0..) |*t, i| if (!trailers.isSet(i)) {
+        t.* = false;
+        try st.free.trailers.append(a, @intCast(i));
+    };
+}
+
+/// A slot already free counts as live, so it is not freed again.
+fn liveSet(a: Allocator, len: usize, free: []const u32) Allocator.Error!std.bit_set.Dynamic {
+    var set = try std.bit_set.Dynamic.initEmpty(a, len);
+    for (free) |i| set.set(i);
+    return set;
+}
+
+fn mark(set: *std.bit_set.Dynamic, rep: u32) void {
+    if (rep < set.bit_length) set.set(rep);
+}
+
 pub fn ctxMintHttpFields(ctx: *WasiP2Ctx, fields: p3http.HttpFields) WasiP2Error!u32 {
-    const idx: u32 = @intCast(ctx.http_fields.items.len);
-    ctx.http_fields.append(ctx.alloc, fields) catch return WasiP2Error.OutOfMemory;
+    const idx = ctx.addHttpFields(fields) catch return WasiP2Error.OutOfMemory;
     return ctx.resources.new(WasiP2Ctx.HTTP_FIELDS_RT, idx);
 }
 
@@ -744,8 +895,7 @@ pub fn httpExchange(ctx: *WasiP2Ctx, req: *const p3http.HttpRequest, body: []u8)
     var redirect_buf: [2048]u8 = undefined;
     var hresp = hreq.receiveHead(&redirect_buf) catch return error.HttpFailed;
 
-    const fields_idx: u32 = @intCast(ctx.http_fields.items.len);
-    ctx.http_fields.append(ctx.alloc, .{}) catch return WasiP2Error.OutOfMemory;
+    const fields_idx = ctx.addHttpFields(.{}) catch return WasiP2Error.OutOfMemory;
     var hit = hresp.head.iterateHeaders();
     while (hit.next()) |hd| {
         ctx.http_fields.items[fields_idx].appendChecked(ctx.alloc, hd.name, hd.value) catch continue;
@@ -1516,6 +1666,17 @@ pub fn p2StreamFutureCancel(caller: *Caller, handle: u32) WasiP2Error!u32 {
     return (async_mod.ReturnCode{ .cancelled = @intCast(n) }).encode();
 }
 
+/// The http host roles a stream or future end carries, scrubbed by both drop
+/// paths (the guest's, here, and the host's `drop_transferred_end`): the
+/// handle's at once, the shared's with its last end, whose body bytes are
+/// freed with it.
+pub fn scrubHttpRoles(ctx: *WasiP2Ctx, handle: u32, shared: u32) void {
+    _ = ctx.host_trailer_ok_futures.remove(handle);
+    if (shared != 0 and (ctx.shared.refcountOf(shared) orelse 0) == 1) {
+        if (ctx.host_body_bytes.fetchRemove(shared)) |kv| ctx.alloc.free(kv.value.data);
+    }
+}
+
 /// `canon stream.drop-{readable,writable}` / `future.drop-{readable,writable}`
 /// (ADR-0189 ζ2): mark the shared rendezvous dropped (so a blocked peer observes
 /// DROPPED — traps if a copy is mid-flight) then release the end + its shared ref
@@ -1563,6 +1724,7 @@ pub fn p2StreamFutureDrop(caller: *Caller, handle: u32) WasiP2Error!void {
         _ = ctx.host_result_futures.remove(handle);
         _ = ctx.pending_reads.remove(handle);
         _ = ctx.pending_writes.remove(handle);
+        scrubHttpRoles(ctx, handle, end.shared);
         if (end.shared != 0 and (ctx.shared.refcountOf(end.shared) orelse 0) == 1) {
             _ = ctx.host_sinks.remove(end.shared);
             _ = ctx.host_sources.remove(end.shared);
@@ -1580,4 +1742,40 @@ pub fn p2StreamFutureDrop(caller: *Caller, handle: u32) WasiP2Error!void {
     // (FutureDropBeforeWrite, a guest fault by `mapGuestFault`) + marks the rendezvous
     // DROPPED for the surviving peer (same helper the graph path uses).
     try async_mod.dropEndGuarded(&ctx.streams, &ctx.shared, handle);
+}
+
+test "sweepHttpTables: a slot a live view reaches outlives its request and is freed once the view goes; a spent 0.2 body goes with its request (#688)" {
+    const testing = std.testing;
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+
+    // Request A, whose handle is gone; the guest keeps a view of its headers,
+    // and a spent 0.2 body still names it.
+    var a_headers: p3http.HttpFields = .{};
+    try a_headers.appendPair(ctx.alloc, "x", "1");
+    const a_fields = try ctx.addHttpFields(a_headers);
+    const a_req = try ctx.addHttpRequest(.{ .headers_rep = a_fields, .path_with_query = try ctx.alloc.dupe(u8, "/a") });
+    const view = try ctx.resources.new(WasiP2Ctx.HTTP_FIELDS_VIEW_RT, a_fields);
+    try ctx.http2.out_bodies.append(ctx.alloc, .{ .req_rep = a_req });
+
+    try sweepHttpTables(&ctx);
+    try testing.expectEqualSlices(u32, &.{a_req}, ctx.http_free.requests.items);
+    try testing.expectEqual(@as(usize, 0), ctx.http_free.fields.items.len);
+    try testing.expectEqual(@as(usize, 1), ctx.http_fields.items[a_fields].entries.items.len);
+    // The spent 0.2 body went with its request, and its slot is taken next.
+    try testing.expectEqual(no_rep, ctx.http2.out_bodies.items[0].req_rep);
+    const st = &ctx.http2;
+    try testing.expectEqual(@as(u32, 0), try addSlot(p2http.State.OutgoingBody, ctx.alloc, &st.out_bodies, &st.free.out_bodies, .{ .req_rep = no_rep }));
+    try testing.expectEqual(@as(usize, 1), st.out_bodies.items.len);
+
+    // Request B reuses A's request slot, then the view goes.
+    try testing.expectEqual(a_req, try ctx.addHttpRequest(.{ .headers_rep = try ctx.addHttpFields(.{}) }));
+    _ = try ctx.resources.drop(WasiP2Ctx.HTTP_FIELDS_VIEW_RT, view);
+
+    try sweepHttpTables(&ctx);
+    try testing.expectEqual(@as(usize, 0), ctx.http_fields.items[a_fields].entries.items.len);
+    try testing.expectEqual(ctx.http_fields.items.len, ctx.http_free.fields.items.len);
+    try testing.expectEqual(ctx.http_requests.items.len, ctx.http_free.requests.items.len);
 }
