@@ -244,9 +244,14 @@ pub fn validScheme(s: []const u8) bool {
     return true;
 }
 
-/// RFC 3986 path+query alphabet (pchar + "/" + "?"; raw UTF-8 ≥ 0x80
-/// accepted per the official corpus). DEL (0x7F) rejected.
+/// Shape: origin-form (leading "/"), query-only (leading "?") or empty;
+/// absolute-form and relative paths are rejected, as wasmtime's
+/// `parse_path_with_query` does — the request URL is built as
+/// authority ++ path. Then the RFC 3986 path+query alphabet (pchar +
+/// "/" + "?"; raw UTF-8 ≥ 0x80 accepted per the official corpus). DEL
+/// (0x7F) rejected.
 pub fn validPathWithQuery(s: []const u8) bool {
+    if (s.len != 0 and s[0] != '/' and s[0] != '?') return false;
     for (s) |c| {
         const ok = std.ascii.isAlphanumeric(c) or c >= 0x80 or switch (c) {
             '-', '.', '_', '~', '%', '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '@', '/', '?' => true,
@@ -407,8 +412,14 @@ test "request validators pin the official corpus alphabets" {
     try testing.expect(!validScheme("ht tp"));
     // path-with-query: pchar + / + ? + raw UTF-8; DEL and space rejected.
     try testing.expect(validPathWithQuery("/a/../../bar"));
+    try testing.expect(validPathWithQuery("//hi"));
     try testing.expect(validPathWithQuery("?foo"));
     try testing.expect(validPathWithQuery(""));
+    // Shape: a relative or absolute-form path is rejected (#699).
+    try testing.expect(!validPathWithQuery("a/b/c"));
+    try testing.expect(!validPathWithQuery("../.."));
+    try testing.expect(!validPathWithQuery("http://example.com"));
+    try testing.expect(!validPathWithQuery(".attacker.net/x"));
     try testing.expect(validPathWithQuery("/caf\xc3\xa9"));
     try testing.expect(!validPathWithQuery("/a b"));
     try testing.expect(!validPathWithQuery("/\x7f"));
