@@ -35,6 +35,55 @@ pub fn assertRunnerBuildMode(gpa: std.mem.Allocator, io: std.Io, exe_path: []con
     return error.WrongBuildMode;
 }
 
+/// Ends a spawned child still running after `seconds`, so a lane fails instead
+/// of hanging. It signals the id raw: `Child.kill` also reaps, and stays the
+/// spawning thread's. The watcher thread is detached and may outlive the
+/// caller's frame, so the state is heap-held and freed by whichever of
+/// `disarm` and the watcher lets go last.
+pub const Watchdog = struct {
+    io: std.Io,
+    id: std.process.Child.Id,
+    seconds: u64,
+    done: std.atomic.Value(bool) = .init(false),
+    refs: std.atomic.Value(u8) = .init(2),
+
+    pub fn start(io: std.Io, id: std.process.Child.Id, seconds: u64) !*Watchdog {
+        const self = try std.heap.page_allocator.create(Watchdog);
+        self.* = .{ .io = io, .id = id, .seconds = seconds };
+        const thread = std.Thread.spawn(.{}, run, .{self}) catch |err| {
+            std.heap.page_allocator.destroy(self);
+            return err;
+        };
+        thread.detach();
+        return self;
+    }
+
+    /// Call before the child is reaped; the watchdog is gone afterwards.
+    pub fn disarm(self: *Watchdog) void {
+        self.done.store(true, .release);
+        self.release();
+    }
+
+    fn run(self: *Watchdog) void {
+        defer self.release();
+        self.io.sleep(.{ .nanoseconds = @as(i96, self.seconds) * std.time.ns_per_s }, .awake) catch return;
+        if (self.done.load(.acquire)) return;
+        switch (@import("builtin").os.tag) {
+            .windows => {
+                const k32 = struct {
+                    extern "kernel32" fn TerminateProcess(h: std.os.windows.HANDLE, code: std.os.windows.UINT) callconv(.winapi) c_int;
+                };
+                _ = k32.TerminateProcess(self.id, 1);
+            },
+            else => std.posix.kill(self.id, .KILL) catch {},
+        }
+    }
+
+    fn release(self: *Watchdog) void {
+        if (self.refs.fetchSub(1, .acq_rel) == 1) std.heap.page_allocator.destroy(self);
+    }
+};
+
 /// The needle carries the line's closing paren, so a mode never matches a
 /// longer one it is a prefix of.
 fn saysMode(version_output: []const u8, want: []const u8) bool {

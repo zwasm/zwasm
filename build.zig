@@ -1383,6 +1383,27 @@ pub fn build(b: *std.Build) void {
     const test_cli_component_entry_step = b.step("test-cli-component-entry", "Run `zwasm run` on components with and without wasi:cli/run and --invoke, and require each exit code, stdout and stderr (issue #622)");
     if (enable_component) test_cli_component_entry_step.dependOn(&run_cli_component_entry.step);
 
+    // `zig build test-cli-serve` — issue #688: `zwasm serve` answers each
+    // vendored `http-service*` manifest's requests over real HTTP and stops on
+    // SIGINT with exit 0. Only a `-Dwasi=p3` build has `serve`.
+    const cli_serve_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/runners/serve_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_serve_mod.addImport("spawned_cli", spawned_cli_mod);
+    const cli_serve_exe = b.addExecutable(.{
+        .name = "zwasm-cli-serve",
+        .root_module = cli_serve_mod,
+    });
+    const run_cli_serve = b.addRunArtifact(cli_serve_exe);
+    run_cli_serve.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
+    run_cli_serve.addArg(pathFromRoot(b, "test/component/wasip3_official"));
+    run_cli_serve.addArg(pathFromRoot(b, "test/edge_cases/p10/clang_smoke/loop_sum.wasm"));
+    run_cli_serve.has_side_effects = true;
+    const test_cli_serve_step = b.step("test-cli-serve", "Serve each vendored wasi:http/service component with `zwasm serve`, send its manifest's requests over HTTP and require the responses, a clean SIGINT stop, and the refusals (issue #688)");
+    if (enable_wasi_p3) test_cli_serve_step.dependOn(&run_cli_serve.step);
+
     // `zig build test-cli-invalid-module` — issue #233: `zwasm run` (both
     // drivers) and `zwasm compile` refuse the same invalid module with the
     // same reason on stderr, whether the front-end validator or the JIT's own
@@ -1841,6 +1862,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_cli_argv0.step); // issue #256 CLI argv[0] = base name
     test_all_step.dependOn(&run_cli_default_entry.step); // issue #220 default-entry parity across the two run drivers
     if (enable_component) test_all_step.dependOn(&run_cli_component_entry.step); // issue #622 a component's entry by name, --invoke by WIT type
+    if (enable_wasi_p3) test_all_step.dependOn(&run_cli_serve.step); // issue #688 zwasm serve answers a wasi:http/service component over HTTP
     test_all_step.dependOn(&run_cli_invalid_module.step); // issue #233 the same verdict from run, run --engine=jit and compile
     test_all_step.dependOn(&run_cli_usage.step); // issues #236 / #232 run's options: unknown = exit 2, `--` ends them
     test_all_step.dependOn(&run_spawned_cli_unit.step); // the `--version` mode parser every spawning runner goes through

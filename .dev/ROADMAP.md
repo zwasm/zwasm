@@ -1046,7 +1046,7 @@ zwasm/
 │   │   ├── vec.zig
 │   │   ├── trap_surface.zig
 │   │   └── cross_module.zig
-│   ├── cli/                    # CLI exe entry + subcommands (run + compile; ADR-0159)
+│   ├── cli/                    # CLI exe entry + subcommands (run + compile; ADR-0159; serve, ADR-0205 D4)
 │   │   ├── main.zig            # Juicy Main (CLI exe entry; per ADR-0024 D-4)
 │   │   ├── run.zig
 │   │   ├── compile.zig         # Phase 12
@@ -1892,6 +1892,7 @@ wasmtime/wazero-aligned あるべき論 shape is `run` + `compile` plus standard
 ```
 zwasm run        <wasm-or-cwasm-file> [args...]
 zwasm compile    <wasm-file> [-o output.cwasm]
+zwasm serve      <component-file> [--addr host:port]   # WASI 0.3 wasi:http/service (ADR-0205 D4, #688)
 zwasm --version | -V
 zwasm --help | -h | help
 zwasm            (no subcommand)         # version + build-options banner

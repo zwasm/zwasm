@@ -28,9 +28,13 @@
 //!   compile <path.wasm>       Produce a `.cwasm` v0.5 full-fidelity artifact
 //!     -o <out.cwasm>          (per ADR-0203). Generator side; `run
 //!                             <file.cwasm>` loads + executes it.
+//!   serve <component.wasm>    Answer HTTP/1.1 with a WASI 0.3
+//!                             `wasi:http/service` component (#688,
+//!                             `cli/serve.zig`).
 //!
-//! The surface is `run` + `compile` only (ADR-0159, §16.4): the
-//! wasmtime/wazero-aligned first-principles shape for a runtime. Validation
+//! The surface is `run` + `compile` + `serve` (ADR-0159, §16.4; `serve` is
+//! ADR-0205 D4's QoI entry): the wasmtime/wazero-aligned first-principles
+//! shape for a runtime. Validation
 //! is programmatic (C-API `wasm_module_validate` / Zig `Engine.compile`);
 //! introspection + wat↔wasm conversion are `wasm-tools` / `wabt`'s job —
 //! zwasm deliberately does NOT ship `validate`/`inspect`/`features`/
@@ -45,6 +49,7 @@ const cli_cache = zwasm.cli.cache;
 const cli_compile = zwasm.cli.compile;
 const cli_limits = zwasm.cli.limits;
 const cli_dispatch = zwasm.cli.dispatch;
+const cli_serve = zwasm.cli.serve;
 const diag_print = zwasm.cli.diag_print;
 const diagnostic = zwasm.diagnostic;
 const dbg = zwasm.support.dbg;
@@ -108,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
             try printlnErr(io, msg);
             std.process.exit(2);
         },
-        .banner, .run, .compile => {},
+        .banner, .run, .compile, .serve => {},
     }
 
     if (subcmd_opt) |subcmd| {
@@ -185,32 +190,20 @@ pub fn main(init: std.process.Init) !void {
                     }
                     next_arg = arg_it.next();
                 } else if (std.mem.eql(u8, a, "--dir")) {
-                    // `--dir <host>[:<guest>]` — preopen a host dir for the
-                    // guest. Without a colon the guest path mirrors the host.
                     const spec = optionValue(&arg_it) orelse {
                         try printlnErr(io, "usage: zwasm run --dir <host>[:<guest>] <path.wasm> [args...]");
                         std.process.exit(2);
                     };
-                    const colon = std.mem.findScalar(u8, spec, ':');
-                    const host_path = if (colon) |c| spec[0..c] else spec;
-                    const guest_path = if (colon) |c| spec[c + 1 ..] else spec;
-                    try preopen_list.append(gpa, .{ .host_path = host_path, .guest_path = guest_path });
+                    try preopen_list.append(gpa, dirSpec(spec));
                     next_arg = arg_it.next();
                 } else if (std.mem.eql(u8, a, "--env")) {
-                    // `--env KEY=VAL` — inject a WASI environment variable. A
-                    // bare `--env KEY` (no '=') sets an empty value, matching
-                    // wasmtime's permissive parse.
                     const spec = optionValue(&arg_it) orelse {
                         try printlnErr(io, "usage: zwasm run --env KEY=VAL <path.wasm> [args...]");
                         std.process.exit(2);
                     };
-                    if (std.mem.findScalar(u8, spec, '=')) |eq| {
-                        try env_keys.append(gpa, spec[0..eq]);
-                        try env_vals.append(gpa, spec[eq + 1 ..]);
-                    } else {
-                        try env_keys.append(gpa, spec);
-                        try env_vals.append(gpa, spec[spec.len..]);
-                    }
+                    const kv = envSpec(spec);
+                    try env_keys.append(gpa, kv.key);
+                    try env_vals.append(gpa, kv.val);
                     next_arg = arg_it.next();
                 } else if (std.mem.eql(u8, a, "--allow-network")) {
                     allow_network = true;
@@ -396,6 +389,96 @@ pub fn main(init: std.process.Init) !void {
                 exitWithRunFailure(io, err, path, bytes);
             std.process.exit(code);
         }
+        if (std.mem.eql(u8, subcmd, "serve")) {
+            if (comptime !build_options.enable_wasi_p3) {
+                try printlnErr(io, "zwasm serve: WASI 0.3 support not compiled in (rebuild with -Dwasi=p3)");
+                std.process.exit(2);
+            }
+            var addr = cli_serve.parseAddr(cli_serve.default_addr).?;
+            var preopen_list: std.ArrayList(cli_run.PreopenDir) = .empty;
+            defer preopen_list.deinit(gpa);
+            var env_keys: std.ArrayList([]const u8) = .empty;
+            defer env_keys.deinit(gpa);
+            var env_vals: std.ArrayList([]const u8) = .empty;
+            defer env_vals.deinit(gpa);
+            var allow_network = false;
+            var next_arg = arg_it.next();
+            while (next_arg) |a| {
+                if (std.mem.eql(u8, a, "--addr") or std.mem.startsWith(u8, a, "--addr=")) {
+                    const text = if (std.mem.startsWith(u8, a, "--addr=")) a["--addr=".len..] else optionValue(&arg_it) orelse "";
+                    addr = cli_serve.parseAddr(text) orelse {
+                        try printlnErr(io, "zwasm serve: --addr expects <ipv4>:<port> or [<ipv6>]:<port>");
+                        std.process.exit(2);
+                    };
+                } else if (std.mem.eql(u8, a, "--dir")) {
+                    const spec = optionValue(&arg_it) orelse {
+                        try printlnErr(io, "usage: zwasm serve --dir <host>[:<guest>] <component.wasm> [args...]");
+                        std.process.exit(2);
+                    };
+                    try preopen_list.append(gpa, dirSpec(spec));
+                } else if (std.mem.eql(u8, a, "--env")) {
+                    const spec = optionValue(&arg_it) orelse {
+                        try printlnErr(io, "usage: zwasm serve --env KEY=VAL <component.wasm> [args...]");
+                        std.process.exit(2);
+                    };
+                    const kv = envSpec(spec);
+                    try env_keys.append(gpa, kv.key);
+                    try env_vals.append(gpa, kv.val);
+                } else if (std.mem.eql(u8, a, "--allow-network")) {
+                    allow_network = true;
+                } else if (std.mem.eql(u8, a, "--fuel") or std.mem.eql(u8, a, "--timeout") or
+                    std.mem.eql(u8, a, "--max-memory") or std.mem.eql(u8, a, "--max-table-elements"))
+                {
+                    try printlnErr(io, "zwasm serve: --fuel/--timeout/--max-memory/--max-table-elements are not wired for components yet (core modules only)");
+                    std.process.exit(2);
+                } else if (std.mem.eql(u8, a, "--")) {
+                    next_arg = arg_it.next();
+                    break;
+                } else if (isOption(a)) {
+                    var buf: [256]u8 = undefined;
+                    const msg = std.mem.print(&buf, "zwasm serve: unknown option '{s}' — run 'zwasm --help' for usage", .{a}) catch "zwasm serve: unknown option";
+                    try printlnErr(io, msg);
+                    std.process.exit(2);
+                } else break;
+                next_arg = arg_it.next();
+            }
+            const path = next_arg orelse {
+                try printlnErr(io, "usage: zwasm serve [--addr <host:port>] [--dir <host>[:<guest>]] [--env KEY=VAL] [--allow-network] <component.wasm> [args...]");
+                std.process.exit(2);
+            };
+            const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(cli_limits.max_file_bytes)) catch |err| {
+                var buf: [256]u8 = undefined;
+                const msg = std.mem.print(&buf, "zwasm serve: cannot read '{s}': {s}", .{ path, @errorName(err) }) catch "zwasm serve: read failed";
+                try printlnErr(io, msg);
+                std.process.exit(1);
+            };
+            defer gpa.free(bytes);
+            var argv_list: std.ArrayList([]const u8) = .empty;
+            defer argv_list.deinit(gpa);
+            try argv_list.append(gpa, std.Io.Dir.path.basename(path));
+            while (arg_it.next()) |a| try argv_list.append(gpa, a);
+
+            var refusal: std.ArrayList(u8) = .empty;
+            defer refusal.deinit(gpa);
+            const code = cli_serve.serve(gpa, io, bytes, path, .{
+                .addr = addr,
+                .argv = argv_list.items,
+                .preopens = preopen_list.items,
+                .env_keys = env_keys.items,
+                .env_vals = env_vals.items,
+                .allow_network = allow_network,
+            }, &refusal) catch |err| {
+                if (err == error.ComponentRefused) {
+                    try printlnErr(io, refusal.items);
+                    std.process.exit(1);
+                }
+                var buf: [256]u8 = undefined;
+                const msg = std.mem.print(&buf, "zwasm serve: cannot serve '{s}': {s}", .{ path, @errorName(err) }) catch "zwasm serve: failed";
+                try printlnErr(io, msg);
+                std.process.exit(1);
+            };
+            std.process.exit(code);
+        }
         if (std.mem.eql(u8, subcmd, "compile")) {
             const code = cli_compile.run(gpa, io, &arg_it) catch |err| {
                 if (err == error.UsageError) {
@@ -430,6 +513,23 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     try stdout.flush();
+}
+
+/// `--dir <host>[:<guest>]` (`run`, `serve`): without a colon the guest path
+/// mirrors the host.
+fn dirSpec(spec: []const u8) cli_run.PreopenDir {
+    const colon = std.mem.findScalar(u8, spec, ':');
+    return .{
+        .host_path = if (colon) |c| spec[0..c] else spec,
+        .guest_path = if (colon) |c| spec[c + 1 ..] else spec,
+    };
+}
+
+/// `--env KEY=VAL` (`run`, `serve`): a bare `--env KEY` sets an empty value,
+/// matching wasmtime's permissive parse.
+fn envSpec(spec: []const u8) struct { key: []const u8, val: []const u8 } {
+    if (std.mem.findScalar(u8, spec, '=')) |eq| return .{ .key = spec[0..eq], .val = spec[eq + 1 ..] };
+    return .{ .key = spec, .val = spec[spec.len..] };
 }
 
 /// A `run` option's value; null when it is missing or is itself an option, so

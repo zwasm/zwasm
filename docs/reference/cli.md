@@ -1,7 +1,8 @@
 # CLI reference
 
 The `zwasm` binary is deliberately minimal — `run` + `compile`, the
-wasmtime/wazero-aligned shape for a runtime. Validation is
+wasmtime/wazero-aligned shape for a runtime, and wasmtime's `serve` for a
+WASI 0.3 HTTP component. Validation is
 programmatic (C-API `wasm_module_validate` / Zig `Engine.compile`);
 wat↔wasm conversion and module introspection are `wasm-tools` / `wabt`'s
 job, not a runtime's. Dispatch source:
@@ -13,6 +14,7 @@ job, not a runtime's. Dispatch source:
 zwasm                                     # version + build-options banner
 zwasm run [options] <file.wasm|.cwasm> [args...]  # run a module
 zwasm compile <file.wasm> -o <out.cwasm>  # compile to a .cwasm AOT artifact
+zwasm serve [options] <component.wasm>    # serve a wasi:http/service component over HTTP/1.1
 zwasm --version | -V                      # version + build identity (wasm/wasi/engine/mode)
 zwasm --help | -h | help                  # usage
 ```
@@ -76,6 +78,30 @@ artifact rather than write one `run` cannot load.
 WASI / sandbox / `--invoke` behaviour to running the source `.wasm`
 (ADR-0203: cache-hit == cache-miss by construction).
 
+### `serve`
+
+Builds a WASI 0.3 component once and answers HTTP/1.1 with its exported
+`wasi:http/handler@0.3.x` `handle` (#688). Its first stderr line is
+`Serving HTTP on http://<host>:<port>/`; the guest's stderr follows. One
+request at a time, each on its own connection (`connection: close`), each with
+the default fuel budget afresh. A request not fully received within 10 s is
+answered 408, a body over 16 MiB 413, a method outside WASI's named cases
+(`GET` … `PATCH`) 405, and a handler that traps or returns `err` 500 with one
+stderr line; after a trap the component is instantiated again. Trailers are not
+sent. SIGINT or SIGTERM stops it with exit 0 after the request in flight; on
+Windows Ctrl-C keeps its default. A component without a 0.3 handler, or a core
+module, is refused with exit 1 and its exports listed; a 0.2
+`wasi:http/incoming-handler` export is not served.
+
+| Flag                  | Effect                                                                   |
+|-----------------------|--------------------------------------------------------------------------|
+| `--addr <host:port>`  | listen address (`--addr=H:P` too); default `127.0.0.1:8080`, port 0 picks a free one; IPv6 as `[addr]:port` |
+| `--dir`, `--env`, `--allow-network` | as for `run`; `--allow-network` governs the guest's own outbound calls, not the listener |
+
+Any other option is a usage error (exit 2); `--fuel` / `--timeout` /
+`--max-memory` / `--max-table-elements` are refused as for a component run.
+Components run on the interpreter (#574).
+
 ## Engine selection
 
 - `.cwasm` input → AOT-loaded into the full runtime (full WASI).
@@ -99,7 +125,7 @@ WASI / sandbox / `--invoke` behaviour to running the source `.wasm`
 | `0`  | Success — guest returned normally, or called `proc_exit(0)`                                     |
 | `N`  | Guest called `proc_exit(N)` (the guest's own status surfaces verbatim)                           |
 | `1`  | Guest trapped (OOB access, `unreachable`, integer divide-by-zero, fuel/timeout, …), OR a file read / load failure, OR a `compile` build/IO error                          |
-| `2`  | Usage error — unknown subcommand, a `run` flag parse error, a requested limit refused (loud), or a `compile` usage error                                                  |
+| `2`  | Usage error — unknown subcommand, a `run` or `serve` flag parse error, a requested limit refused (loud), or a `compile` usage error                                                  |
 | `70` | Internal zwasm fault — a fatal signal/panic caught by the diagnostic fault handler              |
 
 Source of truth: the `run` exit-code mapping (`src/cli/run.zig`) +

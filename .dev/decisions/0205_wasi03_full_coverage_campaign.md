@@ -157,3 +157,9 @@ are a doc-line change; shape-changing bumps open a debt row.
   get rows only when a phase lands with a known gap.
 - The 0.2 surface is untouched: dual-generation dispatch is additive; 0.2
   guests keep the exact rows they had.
+
+## Revision history
+
+| Date       | Note |
+|------------|------|
+| 2026-11-09 | D4 phase D's `zwasm serve` QoI entry landed for 0.3 (#688): WebAssembly/wasi-testsuite#296's runner skipped zwasm's 14 `wasi:http/service` tests for want of it. One instance, one request at a time; the 0.2 `incoming-handler` half stays open on #688. |

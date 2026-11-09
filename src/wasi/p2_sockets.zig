@@ -725,7 +725,7 @@ pub fn netWrite(io: std.Io, handle: net.Socket.Handle, data: []const []const u8)
 
 /// One zero-timeout poll(2) on a single socket handle: true iff `interest`
 /// (or an error/hup condition, which also unblocks a waiter) is pending.
-fn pollOnce(handle: net.Socket.Handle, interest: i16) !bool {
+pub fn pollOnce(handle: net.Socket.Handle, interest: i16) !bool {
     switch (builtin.os.tag) {
         .windows => return afdPollOnce(handle, interest),
         else => {

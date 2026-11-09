@@ -145,11 +145,16 @@ fn writeMissing(alloc: Allocator, w: *Writer, info: *const TypeInfo, path: []con
     try w.print("zwasm run: component '{s}' has no {s}", .{ path, what });
     if (funcs.len == 0) return w.writeAll(" and no func export");
     try w.writeAll("; its exports are: ");
+    try writeSignatures(w, info, funcs);
+    try w.writeAll(" (use --invoke NAME[=args])");
+}
+
+/// `<sig>, <sig>` for each func export, as a refusal lists them.
+pub fn writeSignatures(w: *Writer, info: *const TypeInfo, funcs: []const TypeInfo.ExportedFunc) Writer.Error!void {
     for (funcs, 0..) |f, i| {
         if (i > 0) try w.writeAll(", ");
         try writeSignature(w, info, f.name, f.ty);
     }
-    try w.writeAll(" (use --invoke NAME[=args])");
 }
 
 /// The refusal of a component run without `--invoke` that has no command

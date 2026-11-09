@@ -65,30 +65,6 @@ fn feedStdin(io: std.Io, file: std.Io.File, bytes: []const u8) void {
     file.writeStreamingAll(io, bytes) catch {};
 }
 
-/// Terminates the child if the row has not finished in time, so a host that
-/// waits where it must not fails the row instead of hanging the lane. It holds
-/// a copy of the id and signals it raw: `Child.kill` also reaps, and the main
-/// thread's own `wait` / `kill` must stay the only caller of those.
-const Watchdog = struct {
-    io: std.Io,
-    id: std.process.Child.Id,
-    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
-    fn run(self: *Watchdog) void {
-        self.io.sleep(.{ .nanoseconds = 30 * std.time.ns_per_s }, .awake) catch {};
-        if (self.done.load(.acquire)) return;
-        switch (@import("builtin").os.tag) {
-            .windows => {
-                const k32 = struct {
-                    extern "kernel32" fn TerminateProcess(h: std.os.windows.HANDLE, code: std.os.windows.UINT) callconv(.winapi) c_int;
-                };
-                _ = k32.TerminateProcess(self.id, 1);
-            },
-            else => std.posix.kill(self.id, .KILL) catch {},
-        }
-    }
-};
-
 /// Spawn the CLI with stdin held open, and read exactly `bytes.len` bytes of
 /// stdout BEFORE the writer closes: the guest must answer from a live pipe.
 /// `handshake` first reads one byte of stdout before writing anything;
@@ -96,10 +72,9 @@ const Watchdog = struct {
 fn runCliLive(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, bytes: []const u8, handshake: bool, delay_ms: u32) !Observed {
     var child = try std.process.spawn(io, .{ .argv = argv, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
     defer child.kill(io);
-    var wd: Watchdog = .{ .io = io, .id = child.id.? };
-    const wd_thread = try std.Thread.spawn(.{}, Watchdog.run, .{&wd});
-    wd_thread.detach();
-    defer wd.done.store(true, .release);
+    // A host that waits where it must not fails the row instead of hanging the lane.
+    const wd = try spawned_cli.Watchdog.start(io, child.id.?, 30);
+    defer wd.disarm();
 
     var rd_buf: [64 * 1024]u8 = undefined;
     var rd = child.stdout.?.reader(io, &rd_buf);
