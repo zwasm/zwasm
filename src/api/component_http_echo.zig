@@ -6,22 +6,31 @@ const std = @import("std");
 const net = std.Io.net;
 const p2_sockets = @import("../wasi/p2_sockets.zig");
 
-/// The manifest `endpoints` echo server (http-client, ADR-0205 D-5): one
-/// HTTP/1.1 connection served on a background thread — read head +
-/// content-length body, echo it back. The listener is created on the main
-/// io (Threaded is thread-safe); `stop` dials a wake-up connection if the
-/// guest never connected.
+/// A manifest server's `echo-body` endpoints (ADR-0205 D-5), after
+/// upstream's `_EndpointRequestHandler` (wasi-testsuite
+/// `test-runner/wasi_test_runner/test_suite_runner.py`): one HTTP/1.1
+/// connection served on a background thread — read head + content-length
+/// body, echo it back. A chunked request body is not read: zwasm's client
+/// always sends a content-length (`component_wasi_ctx.zig`). The listener is
+/// created on the main io (Threaded is thread-safe); `stop` dials a wake-up
+/// connection if the guest never connected.
 pub const EchoEndpoint = struct {
     io: std.Io,
     server: net.Server,
     port: u16,
     thread: std.Thread,
+    /// null echoes every request (the 0.2 client tests); otherwise a request
+    /// no route names gets 404, as upstream answers it.
+    routes: ?[]const Route,
 
-    pub fn start(io: std.Io) !*EchoEndpoint {
+    pub const Route = struct { method: []const u8, path: []const u8 };
+
+    pub fn start(io: std.Io, routes: ?[]const Route) !*EchoEndpoint {
         const self = try std.heap.page_allocator.create(EchoEndpoint);
         errdefer std.heap.page_allocator.destroy(self);
         const addr: net.IpAddress = .{ .ip4 = net.Ip4Address.loopback(0) };
         self.io = io;
+        self.routes = routes;
         self.server = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp });
         self.port = self.server.socket.address.getPort();
         self.thread = try std.Thread.spawn(.{}, serve, .{self});
@@ -57,11 +66,25 @@ pub const EchoEndpoint = struct {
             if (got == 0) break;
             n += got;
         }
-        const body = buf[head_end..n];
+        const body = if (self.routed(buf[0..head_end])) buf[head_end..n] else null;
         var out: [66000]u8 = undefined;
-        const resp = std.mem.print(&out, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ body.len, body }) catch return;
+        const resp = if (body) |b|
+            std.mem.print(&out, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ b.len, b }) catch return
+        else
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         const data = [_][]const u8{resp};
         _ = p2_sockets.netWrite(io, conn.socket.handle, &data) catch return;
+    }
+
+    fn routed(self: *const EchoEndpoint, head: []const u8) bool {
+        const routes = self.routes orelse return true;
+        var parts = std.mem.splitScalar(u8, head[0 .. std.mem.find(u8, head, "\r\n") orelse head.len], ' ');
+        const method = parts.next() orelse return false;
+        const target = parts.next() orelse return false;
+        for (routes) |r| {
+            if (std.ascii.eqlIgnoreCase(r.method, method) and std.mem.eql(u8, r.path, target)) return true;
+        }
+        return false;
     }
 
     pub fn stop(self: *EchoEndpoint) void {

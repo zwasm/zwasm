@@ -12,7 +12,7 @@
 # Deliberate-bump-only (ADR-0205 D6): edit PIN_SHA + re-run + commit.
 set -euo pipefail
 
-PIN_SHA="988bf8cfdca146517f917a1ed9160a4a48d3f767" # prod/testsuite-base 2026-08-10
+PIN_SHA="9d84631e427729802085c3d172d0a63cd360a1fa" # prod/testsuite-base 2026-10-30
 CLONE="${WASI_TESTSUITE_CLONE:-$HOME/Documents/OSS/wasi-testsuite}"
 DEST="$(cd "$(dirname "$0")/.." && pwd)/test/component/wasip3_official"
 

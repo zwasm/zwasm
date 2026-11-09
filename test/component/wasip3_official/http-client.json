@@ -1,8 +1,10 @@
 {
   "proposals": ["http"],
   "world": "wasi:http/service",
-  "endpoints": [
-    { "method": "POST", "path": "/echo" }
+  "servers": [
+    { "name": "main", "endpoints": [
+      { "method": "POST", "path": "/echo", "mode": "echo-body" }
+    ] }
   ],
   "operations": [
     { "type": "run" },

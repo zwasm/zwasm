@@ -1050,26 +1050,6 @@ test "WASI 0.3 conformance (wasip3): cli-clocks reads wall+monotonic clocks (rea
     try testing.expectEqual(@as(?u32, 0), host.exit_code);
 }
 
-test "WASI 0.3 conformance (wasip3): cli-env-v032 binds the 0.3.2 interface names" {
-    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/wasip3/cli-env-v032.wasm", testing.allocator, .limited(8 << 20));
-    defer testing.allocator.free(bytes);
-
-    var eng = try Engine.init(testing.allocator, .{});
-    defer eng.deinit();
-    var host = try wasi_host.Host.init(testing.allocator);
-    defer host.deinit();
-    // The official cli-env guest renamed to the 0.3.2 names
-    // (scripts/gen_wasip3_v032.sh); it asserts its own argv[0] is "cli-env.wasm".
-    try host.setArgs(&.{ "cli-env.wasm", "a", "b", "42" });
-    try host.setEnvs(&.{ "foo", "baz" }, &.{ "bar", "42" });
-
-    try wasi_p2.runWasiMain(&eng, testing.allocator, bytes, &host, .{});
-    try testing.expectEqual(@as(?u32, 0), host.exit_code orelse 0);
-}
-
 // ============================================================
 // Official wasi-testsuite conformance (ADR-0205 D3)
 // ============================================================
@@ -1124,11 +1104,13 @@ const OfficialExpect = struct {
     /// the harness drives `handler.handle` per `http_reqs` entry.
     world_service: bool = false,
     http_reqs: std.ArrayList(HttpReqOp) = .empty,
-    /// Manifest `endpoints` present: the harness serves an HTTP echo
-    /// endpoint and exports its address as `HTTP_ENDPOINT` (http-client).
-    has_endpoints: bool = false,
+    /// Manifest `servers`: each one is served by an `EchoEndpoint` whose
+    /// address the guest reads from `HTTP_SERVER_<NAME>` (http-client).
+    servers: std.ArrayList(OfficialServer) = .empty,
 
     fn deinit(self: *OfficialExpect, alloc: std.mem.Allocator) void {
+        for (self.servers.items) |*sv| sv.routes.deinit(alloc);
+        self.servers.deinit(alloc);
         self.http_reqs.deinit(alloc);
         self.env_keys.deinit(alloc);
         self.env_vals.deinit(alloc);
@@ -1148,7 +1130,9 @@ fn parseOfficialManifest(alloc: std.mem.Allocator, parsed: *const std.json.Value
     if (parsed.object.get("world")) |w| {
         if (std.mem.eql(u8, w.string, "wasi:http/service")) out.world_service = true;
     }
-    if (parsed.object.get("endpoints")) |_| out.has_endpoints = true;
+    if (parsed.object.get("servers")) |servers| {
+        for (servers.array.items) |sv| try out.servers.append(alloc, try parseOfficialServer(alloc, sv));
+    }
     const ops = parsed.object.get("operations") orelse return;
     for (ops.array.items) |op| {
         const ty = op.object.get("type").?.string;
@@ -1200,6 +1184,51 @@ fn parseOfficialManifest(alloc: std.mem.Allocator, parsed: *const std.json.Value
         } else if (std.mem.eql(u8, ty, "recv")) {
             try out.sock_ops.append(alloc, .{ .kind = .recv, .payload = op.object.get("payload").?.string });
         }
+    }
+}
+
+const OfficialServer = struct {
+    name: []const u8,
+    routes: std.ArrayList(EchoEndpoint.Route) = .empty,
+};
+
+/// One manifest `servers` entry, per upstream's `Server.from_config`
+/// (`test-runner/wasi_test_runner/test_case.py`). Only listening servers
+/// with `echo-body` endpoints are served; another kind or mode is refused.
+fn parseOfficialServer(alloc: std.mem.Allocator, v: std.json.Value) !OfficialServer {
+    const name = v.object.get("name").?.string;
+    // The name becomes part of an environment variable (SERVER_NAME_RE).
+    if (name.len == 0) return error.InvalidServerName;
+    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '_') return error.InvalidServerName;
+    if (v.object.get("kind")) |k| {
+        if (!std.mem.eql(u8, k.string, "listening")) return error.UnsupportedServerMode;
+    }
+    var sv: OfficialServer = .{ .name = name };
+    errdefer sv.routes.deinit(alloc);
+    if (v.object.get("endpoints")) |eps| {
+        for (eps.array.items) |ep| {
+            const mode = if (ep.object.get("mode")) |m| m.string else "static";
+            if (!std.mem.eql(u8, mode, "echo-body")) return error.UnsupportedServerMode;
+            try sv.routes.append(alloc, .{
+                .method = if (ep.object.get("method")) |m| m.string else "GET",
+                .path = if (ep.object.get("path")) |p| p.string else "/",
+            });
+        }
+    }
+    return sv;
+}
+
+test "wasip3_official manifest: a server the harness cannot serve is refused, not run without it" {
+    const cases = [_]struct { json: []const u8, err: anyerror }{
+        .{ .json = "{\"name\":\"main\",\"endpoints\":[{\"path\":\"/\",\"mode\":\"echo-headers\"}]}", .err = error.UnsupportedServerMode },
+        .{ .json = "{\"name\":\"main\",\"endpoints\":[{\"path\":\"/\",\"response\":\"hi\"}]}", .err = error.UnsupportedServerMode },
+        .{ .json = "{\"name\":\"gone\",\"kind\":\"closed\"}", .err = error.UnsupportedServerMode },
+        .{ .json = "{\"name\":\"a-b\"}", .err = error.InvalidServerName },
+    };
+    for (cases) |c| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, c.json, .{});
+        defer parsed.deinit();
+        try testing.expectError(c.err, parseOfficialServer(testing.allocator, parsed.value));
     }
 }
 
@@ -1419,6 +1448,23 @@ fn runOfficialWasip3Test(comptime name: []const u8) !void {
     try argv.append(alloc, name ++ ".wasm");
     try argv.appendSlice(alloc, expect.args.items);
     try host.setArgs(argv.items);
+    var endpoints: std.ArrayList(*EchoEndpoint) = .empty;
+    defer {
+        for (endpoints.items) |ep| ep.stop();
+        endpoints.deinit(alloc);
+    }
+    var server_env = std.heap.ArenaAllocator.init(alloc);
+    defer server_env.deinit();
+    for (expect.servers.items) |sv| {
+        try endpoints.ensureUnusedCapacity(alloc, 1);
+        const ep = try EchoEndpoint.start(io, sv.routes.items);
+        endpoints.appendAssumeCapacity(ep);
+        const env_alloc = server_env.allocator();
+        const key = try env_alloc.print("HTTP_SERVER_{s}", .{sv.name});
+        _ = std.ascii.upperString(key, key);
+        try expect.env_keys.append(alloc, key);
+        try expect.env_vals.append(alloc, try env_alloc.print("127.0.0.1:{d}", .{ep.port}));
+    }
     if (expect.env_keys.items.len > 0) try host.setEnvs(expect.env_keys.items, expect.env_vals.items);
     host.stdin_bytes = expect.stdin.items;
 
@@ -1432,14 +1478,6 @@ fn runOfficialWasip3Test(comptime name: []const u8) !void {
     if (expect.world_service) {
         // Service world: no cli/run export — build once, then drive the
         // exported handler per manifest `request` op (ADR-0205 D-3).
-        var endpoint: ?*EchoEndpoint = null;
-        defer if (endpoint) |ep| ep.stop();
-        var endpoint_buf: [32]u8 = undefined;
-        if (expect.has_endpoints) {
-            endpoint = try EchoEndpoint.start(io);
-            const ep_addr = try std.mem.print(&endpoint_buf, "127.0.0.1:{d}", .{endpoint.?.port});
-            try host.setEnvs(&.{"HTTP_ENDPOINT"}, &.{ep_addr});
-        }
         var built = try wasi_p2.buildWasiP2Component(&eng, alloc, bytes, &host, .{});
         defer built.deinit();
         for (expect.http_reqs.items) |rop| {
