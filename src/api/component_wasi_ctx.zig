@@ -28,6 +28,7 @@ const Caller = @import("../zwasm/caller.zig").Caller;
 
 const Allocator = std.mem.Allocator;
 const Instance = @import("../zwasm/instance.zig").Instance;
+const Trap = @import("../runtime/trap.zig").Trap;
 const Value = @import("../zwasm.zig").Value;
 const rt_value = @import("../runtime/value.zig");
 
@@ -453,7 +454,7 @@ pub const WasiP2Ctx = struct {
             .{ self.realloc_instance orelse return WasiP2Error.NoRealloc, self.realloc_name };
         var args = [_]Value{ .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = @bitCast(alignment) }, .{ .i32 = @bitCast(size) } };
         var res = [_]Value{.{ .i32 = 0 }};
-        inst.invoke(name, &args, &res) catch return WasiP2Error.ReallocFailed;
+        inst.invoke(name, &args, &res) catch |e| return guestCallbackError(e, WasiP2Error.ReallocFailed);
         const ptr: u32 = @bitCast(res[0].i32);
         if (ptr == 0 and size != 0) return WasiP2Error.ReallocFailed;
         return ptr;
@@ -627,7 +628,18 @@ pub fn ctxMemory(caller: *Caller) WasiP2Error!Memory {
 }
 
 pub const WasiP2Error = error{ NoMemory, WriteFailed, ReadFailed, NoRealloc, ReallocFailed, ProcExit, OutOfMemory, NoHostIo, Unreachable, UnsupportedAsyncBuiltin } ||
-    resource_table.Error || Memory.Error || async_mod.Error;
+    resource_table.Error || Memory.Error || async_mod.Error || Trap;
+
+/// The error a guest callback the host invoked (`cabi_realloc`, a resource
+/// destructor) unwinds with (#550). A trap the guest raised, or its exit, keeps
+/// its name; a binding name means the export the host looked up is missing or
+/// mis-typed, a host-side failure, so it becomes `fallback`.
+fn guestCallbackError(e: Instance.InvokeError, fallback: WasiP2Error) WasiP2Error {
+    return switch (e) {
+        error.ExportNotFound, error.NotAFunc, error.ArgArityMismatch, error.ResultArityMismatch, error.UnsupportedEngineSignature => fallback,
+        else => |trap| trap,
+    };
+}
 
 pub const Memory = @import("../zwasm/memory.zig").Memory;
 
@@ -963,7 +975,7 @@ pub fn p2GuestResourceDrop(caller: *Caller, handle: u32) WasiP2Error!void {
         for (rbc.ctx.guest_dtors.items) |gd| {
             if (gd.type_index != rbc.type_index) continue;
             var args = [_]Value{.{ .i32 = @bitCast(rep_val) }};
-            gd.inst.invoke(gd.name, &args, &.{}) catch return WasiP2Error.WriteFailed;
+            gd.inst.invoke(gd.name, &args, &.{}) catch |e| return guestCallbackError(e, WasiP2Error.WriteFailed);
             break;
         }
     }
