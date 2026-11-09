@@ -34,35 +34,35 @@ pub fn register(table: *DispatchTable) void {
     table.interp[op(.@"i64.extend32_s")] = i64Extend32s;
 }
 
-fn i32Extend8s(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Extend8s(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().i32;
     const low: i8 = @truncate(x);
     try rt.pushOperand(.{ .i32 = @as(i32, low) });
 }
 
-fn i32Extend16s(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Extend16s(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().i32;
     const low: i16 = @truncate(x);
     try rt.pushOperand(.{ .i32 = @as(i32, low) });
 }
 
-fn i64Extend8s(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Extend8s(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().i64;
     const low: i8 = @truncate(x);
     try rt.pushOperand(.{ .i64 = @as(i64, low) });
 }
 
-fn i64Extend16s(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Extend16s(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().i64;
     const low: i16 = @truncate(x);
     try rt.pushOperand(.{ .i64 = @as(i64, low) });
 }
 
-fn i64Extend32s(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Extend32s(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().i64;
     const low: i32 = @truncate(x);

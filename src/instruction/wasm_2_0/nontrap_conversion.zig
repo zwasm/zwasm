@@ -62,49 +62,49 @@ fn satTruncUnsigned(comptime DstUint: type, x: anytype) DstUint {
     return @intFromFloat(@trunc(x));
 }
 
-fn i32TruncSatF32S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32TruncSatF32S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f32;
     try rt.pushOperand(.{ .i32 = satTruncSigned(i32, x) });
 }
 
-fn i32TruncSatF32U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32TruncSatF32U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f32;
     try rt.pushOperand(.{ .u32 = satTruncUnsigned(u32, x) });
 }
 
-fn i32TruncSatF64S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32TruncSatF64S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f64;
     try rt.pushOperand(.{ .i32 = satTruncSigned(i32, x) });
 }
 
-fn i32TruncSatF64U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32TruncSatF64U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f64;
     try rt.pushOperand(.{ .u32 = satTruncUnsigned(u32, x) });
 }
 
-fn i64TruncSatF32S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64TruncSatF32S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f32;
     try rt.pushOperand(.{ .i64 = satTruncSigned(i64, x) });
 }
 
-fn i64TruncSatF32U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64TruncSatF32U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f32;
     try rt.pushOperand(.{ .u64 = satTruncUnsigned(u64, x) });
 }
 
-fn i64TruncSatF64S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64TruncSatF64S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f64;
     try rt.pushOperand(.{ .i64 = satTruncSigned(i64, x) });
 }
 
-fn i64TruncSatF64U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64TruncSatF64U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f64;
     try rt.pushOperand(.{ .u64 = satTruncUnsigned(u64, x) });

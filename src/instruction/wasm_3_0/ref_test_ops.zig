@@ -270,7 +270,7 @@ fn gcAbstractMatch(ht: u8, is_i31: bool, obj_kind: ?ObjectKind) bool {
     };
 }
 
-fn refTest(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn refTest(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand();
     const ht: u32 = @truncate(instr.payload);
@@ -278,7 +278,7 @@ fn refTest(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     try rt.pushOperand(.{ .i32 = matches });
 }
 
-fn refTestNull(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn refTestNull(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand();
     const ht: u32 = @truncate(instr.payload);
@@ -294,7 +294,7 @@ fn refTestNull(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// `ref.cast heap_type` (Wasm 3.0 GC §4.4.5): trap `CastFailure` if the
 /// operand is null (the non-null target rejects it) OR its runtime type
 /// is not a subtype of `ht`; else push it back. ADR-0125/0116 cycle 152.
-fn refCast(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn refCast(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand();
     const ht: u32 = @truncate(instr.payload);
@@ -305,7 +305,7 @@ fn refCast(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 
 /// `ref.cast_null heap_type`: like ref.cast but null passes (the target
 /// is `(ref null ht)`); a non-null operand still trap-checks its type.
-fn refCastNull(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn refCastNull(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand();
     const ht: u32 = @truncate(instr.payload);

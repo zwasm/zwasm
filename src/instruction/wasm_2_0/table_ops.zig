@@ -43,7 +43,7 @@ pub fn register(table: *DispatchTable) void {
     table.interp[op(.@"elem.drop")] = elemDrop;
 }
 
-fn tableGet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn tableGet(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const tableidx = instr.payload;
     if (tableidx >= rt.tables.len) return Trap.Unreachable;
@@ -65,7 +65,7 @@ inline fn popTableIndex(rt: *Runtime, idx_type: zir.IdxType) u64 {
     };
 }
 
-fn tableSet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn tableSet(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const tableidx = instr.payload;
     if (tableidx >= rt.tables.len) return Trap.Unreachable;
@@ -76,7 +76,7 @@ fn tableSet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     tbl.refs[@intCast(idx)] = v;
 }
 
-fn tableSize(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn tableSize(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const tableidx = instr.payload;
     if (tableidx >= rt.tables.len) return Trap.Unreachable;
@@ -96,7 +96,7 @@ inline fn pushTableIndex(rt: *Runtime, idx_type: zir.IdxType, val: u64) anyerror
 /// table.grow x: pop n:idx_type, init:reftype. Realloc refs to
 /// len+n and fill new slots with init. Push prev_size (at the table's
 /// address width) on success, or -1 on max-cap violation / alloc failure.
-fn tableGrow(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn tableGrow(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const tableidx = instr.payload;
     if (tableidx >= rt.tables.len) return Trap.Unreachable;
@@ -153,7 +153,7 @@ fn tableGrow(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const
 
 /// table.fill x: pop n:i32, val:reftype, dst:i32. Set n cells
 /// at dst to val. Trap OutOfBoundsTableAccess if dst+n > len.
-fn tableFill(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn tableFill(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const tableidx = instr.payload;
     if (tableidx >= rt.tables.len) return Trap.Unreachable;
@@ -174,7 +174,7 @@ fn tableFill(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const
 /// tables[y] to tables[x]. memmove semantics on overlap when
 /// tables[x] == tables[y]. Encoding: payload = dst-tableidx,
 /// extra = src-tableidx.
-fn tableCopy(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn tableCopy(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const dst_tbl_idx = instr.payload;
     const src_tbl_idx = instr.extra;
@@ -216,7 +216,7 @@ fn tableCopy(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const
 /// src, dst. Copy n refs from elems[x] to tables[y]. Trap if
 /// src+n > elem.len OR dst+n > table.len. Treat dropped segments
 /// as zero-length.
-fn tableInit(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn tableInit(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const elemidx = instr.payload;
     const tableidx = instr.extra;
@@ -242,7 +242,7 @@ fn tableInit(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const
 
 /// elem.drop x: mark element segment x as dropped. Subsequent
 /// table.init x calls treat its length as 0.
-fn elemDrop(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn elemDrop(c: *@import("../../ir/dispatch_table.zig").InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const elemidx = instr.payload;
     if (elemidx >= rt.elem_dropped.len) return Trap.Unreachable;

@@ -16,6 +16,7 @@
 //! Zone 1 — imports `ir/zir.zig` only.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zir = @import("zir.zig");
 
 pub const ZirOp = zir.ZirOp;
@@ -31,6 +32,18 @@ pub const InterpCtx = opaque {};
 pub const EmitCtx = opaque {};
 
 pub const ParseFn = *const fn (ctx: *ParserCtx, instr: *ZirInstr) anyerror!void;
+/// The link section that `interp/dispatch.zig`'s `runFrame` and every
+/// `InterpFn` handler sit in, so code laid out around the interpreter
+/// cannot move the handlers against the loop (#548, ADR-0236). The ELF
+/// name is a C identifier, so the linker defines `__start_zwasm_interp`
+/// / `__stop_zwasm_interp`, which `api/instance.zig`'s test reads.
+pub const text_section = switch (builtin.object_format) {
+    .elf => "zwasm_interp",
+    .macho => "__TEXT,__zwasm_interp",
+    .coff => ".text$zwasm_interp",
+    else => @compileError("no interpreter text section for this object format"),
+};
+
 pub const InterpFn = *const fn (ctx: *InterpCtx, instr: *const ZirInstr) anyerror!void;
 pub const EmitFn = *const fn (ctx: *EmitCtx, instr: *const ZirInstr) anyerror!void;
 

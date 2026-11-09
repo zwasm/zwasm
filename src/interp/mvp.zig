@@ -146,15 +146,15 @@ inline fn op(t: ZirOp) usize {
 // Handlers — control flow + parametric + variable
 // ============================================================
 
-fn unreachableOp(_: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn unreachableOp(_: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     return Trap.Unreachable;
 }
 
-fn nopOp(_: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn nopOp(_: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     // Wasm `nop` — intentionally empty.
 }
 
-fn selectOp(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn selectOp(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const cond = rt.popOperand().i32;
     const b = rt.popOperand();
@@ -170,7 +170,7 @@ fn selectOp(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
 //             the operand stack; 0/1 for Wasm 1.0, ≥1 for Wasm
 //             2.0 multivalue typeidx blocks).
 
-fn blockOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn blockOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const frame = rt.currentFrame();
     const fnz = frame.func orelse return Trap.Unreachable;
@@ -196,7 +196,7 @@ fn blockOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     });
 }
 
-fn loopOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn loopOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const frame = rt.currentFrame();
     const fnz = frame.func orelse return Trap.Unreachable;
@@ -226,7 +226,7 @@ fn loopOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     });
 }
 
-fn ifOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn ifOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const frame = rt.currentFrame();
     const cond = rt.popOperand().i32;
@@ -251,7 +251,7 @@ fn ifOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     }
 }
 
-fn elseOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn elseOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     // Reaching else from the then-branch — jump to the matching `end`.
     const rt = Runtime.fromOpaque(c);
     const frame = rt.currentFrame();
@@ -260,7 +260,7 @@ fn elseOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     frame.pc = fnz.blocks.items[instr.payload].end_inst;
 }
 
-fn endOp(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn endOp(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const frame = rt.currentFrame();
     if (frame.label_len == 0) {
@@ -326,12 +326,12 @@ inline fn doBranch(rt: *Runtime, frame: *runtime.Frame, depth: u32) Trap!void {
     frame.pc = target.target_pc;
 }
 
-fn brOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn brOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try doBranch(rt, rt.currentFrame(), @intCast(instr.payload));
 }
 
-fn brIfOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn brIfOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const cond = rt.popOperand().i32;
     if (cond != 0) {
@@ -361,14 +361,14 @@ fn brOnCastImpl(c: *InterpCtx, instr: *const ZirInstr, is_fail: bool) anyerror!v
     if (take) try doBranch(rt, rt.currentFrame(), labelidx);
 }
 
-fn brOnCastOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn brOnCastOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     return brOnCastImpl(c, instr, false);
 }
-fn brOnCastFailOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn brOnCastFailOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     return brOnCastImpl(c, instr, true);
 }
 
-fn brTableOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn brTableOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const frame = rt.currentFrame();
     const idx = rt.popOperand().u32;
@@ -385,7 +385,7 @@ fn brTableOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// Recursive call. Pops args, allocates locals (params + zero-init
 /// declared locals), pushes a frame, recursively runs the callee
 /// body, then pops the frame on return.
-fn callOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn callOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const idx = instr.payload;
     // Host-call short-circuit (§9.4 / 4.7 chunk c). For imports
@@ -452,7 +452,7 @@ inline fn popTableSelector(rt: *Runtime, idx_type: zir.IdxType) u64 {
     };
 }
 
-fn callIndirectOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn callIndirectOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const tableidx = instr.extra;
     if (tableidx >= rt.tables.len) return Trap.Unreachable;
@@ -508,7 +508,7 @@ fn callIndirectOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// Differs from call_indirect by sourcing the funcref directly
 /// from the operand stack (no table indexing); spec-required null
 /// trap supplants call_indirect's table-bound UninitializedElement.
-fn callRefOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn callRefOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const ref_v = rt.popOperand();
     if (ref_v.ref == runtime.Value.null_ref) return Trap.NullReference;
@@ -611,7 +611,7 @@ fn signalTailCall(rt: *Runtime, callee: *const zir.ZirFunc) void {
 /// variant of call_ref. Pops funcref + the typeidx-determined args,
 /// runs the same null + sig-mismatch checks, then routes the callee
 /// as `callRefOp` does and tail-calls it.
-fn returnCallRefOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn returnCallRefOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const ref_v = rt.popOperand();
     if (ref_v.ref == runtime.Value.null_ref) return Trap.NullReference;
@@ -638,7 +638,7 @@ fn returnCallRefOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// frame done; the trampoline pops the caller frame, pops args
 /// off the operand stack into fresh callee locals, and continues
 /// iterating in the same Zig stack frame.
-fn returnCallOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn returnCallOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const idx: u32 = @intCast(instr.payload);
     if (idx < rt.host_calls.len) {
@@ -657,7 +657,7 @@ fn returnCallOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// tail-call variant of `call_indirect`. Mirrors `callIndirectOp` +
 /// `tailReturn`. Encoding: `instr.payload` = typeidx, `instr.extra`
 /// = tableidx.
-fn returnCallIndirectOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn returnCallIndirectOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const tableidx = instr.extra;
     if (tableidx >= rt.tables.len) return Trap.Unreachable;
@@ -820,7 +820,7 @@ pub fn invokeCrossRuntime(
 /// When no matching catch is found in the current frame, the
 /// stashed payload is dropped and `Trap.UncaughtException`
 /// propagates (cross-frame unwind lands at 10.E-5d).
-fn throwOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn throwOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const frame = rt.currentFrame();
     const thrown_tag_idx: u32 = @intCast(instr.payload);
@@ -870,7 +870,7 @@ fn throwOp(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// is NOT re-allocated — `throw_ref` just routes the existing
 /// `*Exception` back through the unwinder, so catch arms that
 /// match see the same payload + tag_idx as the original throw.
-fn throwRefOp(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn throwRefOp(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const frame = rt.currentFrame();
     const ref_v = rt.popOperand();
@@ -1015,17 +1015,17 @@ fn returnFromFunction(rt: *Runtime, frame: *runtime.Frame) Trap!void {
     frame.done = true;
 }
 
-fn returnOp(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn returnOp(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try returnFromFunction(rt, rt.currentFrame());
 }
 
-fn drop(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn drop(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     _ = rt.popOperand();
 }
 
-fn localGet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn localGet(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const idx = instr.payload;
     const frame = rt.currentFrame();
@@ -1033,7 +1033,7 @@ fn localGet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     try rt.pushOperand(frame.locals[idx]);
 }
 
-fn localSet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn localSet(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const idx = instr.payload;
     const frame = rt.currentFrame();
@@ -1041,7 +1041,7 @@ fn localSet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     frame.locals[idx] = rt.popOperand();
 }
 
-fn localTee(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn localTee(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const idx = instr.payload;
     const frame = rt.currentFrame();
@@ -1049,14 +1049,14 @@ fn localTee(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     frame.locals[idx] = rt.topOperand();
 }
 
-fn globalGet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn globalGet(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const idx = instr.payload;
     if (idx >= rt.globals.len) return Trap.Unreachable;
     try rt.pushOperand(rt.globals[idx].*);
 }
 
-fn globalSet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn globalSet(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const idx = instr.payload;
     if (idx >= rt.globals.len) return Trap.Unreachable;

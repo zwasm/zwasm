@@ -24,6 +24,7 @@
 //! zones (`interp/`, `wasi/`, `frontend/`, `ir/`, `util/`) freely.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const runtime = @import("../runtime/runtime.zig");
 const runtime_instance = @import("../runtime/instance/instance.zig");
@@ -37,6 +38,7 @@ const hooks = @import("../runtime/hooks.zig");
 const vec = @import("vec.zig");
 const trap_trace = @import("../interp/trap_trace.zig");
 const interp_mvp = @import("../interp/mvp.zig");
+const interp_dispatch = @import("../interp/dispatch.zig");
 const runner = @import("../engine/runner.zig"); // ADR-0200 JIT engine (Zone 2)
 const build_options = @import("build_options");
 const wasm_2_0_enabled = @backingInt(build_options.wasm_level) >= @backingInt(@as(@TypeOf(build_options.wasm_level), .v2_0));
@@ -2002,6 +2004,29 @@ pub fn dispatchTable() *const dispatch_table_mod.DispatchTable {
 
 test "g_dispatch_table_storage stays page-aligned (#541)" {
     try testing.expectEqual(@as(?usize, 4096), @typeInfo(@TypeOf(&g_dispatch_table_storage)).pointer.attrs.@"align");
+}
+
+// Every format gets the same `linksection` from the same source, so the
+// ELF legs catch a handler that lacks it for all of them.
+test "runFrame and every interp handler sit in one section (#548)" {
+    if (comptime builtin.object_format != .elf) return;
+    const bounds = struct {
+        extern const __start_zwasm_interp: u8;
+        extern const __stop_zwasm_interp: u8;
+    };
+    const lo = @intFromPtr(&bounds.__start_zwasm_interp);
+    const hi = @intFromPtr(&bounds.__stop_zwasm_interp);
+    const run_frame = interp_dispatch.runFrameAddress();
+    try testing.expect(run_frame >= lo and run_frame < hi);
+    var outside: usize = 0;
+    for (dispatchTable().interp, 0..) |slot, i| {
+        const h = @intFromPtr(slot orelse continue);
+        if (h < lo or h >= hi) {
+            std.debug.print("handler for {t} lies outside the section\n", .{@as(zir.ZirOp, @fromBackingInt(@intCast(i)))});
+            outside += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), outside);
 }
 
 /// `zwasm_instance_get_func` — project-extension helper that

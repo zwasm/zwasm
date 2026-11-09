@@ -59,10 +59,10 @@ pub fn register(table: *DispatchTable) void {
     table.interp[op(.@"struct.set")] = structSet;
 }
 
-fn structGetS(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn structGetS(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     return structGetPacked(c, instr, true);
 }
-fn structGetU(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn structGetU(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     return structGetPacked(c, instr, false);
 }
 
@@ -113,7 +113,7 @@ fn allocateStruct(rt: *Runtime, typeidx: u32, payload_size: u32) anyerror!u32 {
     return object_alloc.allocStructObject(heap, typeidx, payload_size, false);
 }
 
-fn structNew(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn structNew(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const typeidx: u32 = @intCast(instr.payload);
@@ -144,7 +144,7 @@ fn structNew(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// bytes are reinterpreted as the entire Value union — the
 /// validator-narrowed declared field type tells the consumer
 /// which arm is live.
-fn structGet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn structGet(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const typeidx: u32 = @intCast(instr.payload);
@@ -166,7 +166,7 @@ fn structGet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// Wasm 3.0 GC §3.3.5.6.4 — `struct.set typeidx fieldidx`:
 /// pop value + GcRef (trap null), write 8-byte slot. Validator
 /// already enforced field.mutable + correct value type.
-fn structSet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn structSet(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const typeidx: u32 = @intCast(instr.payload);
@@ -185,7 +185,7 @@ fn structSet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     @memcpy(dst, std.mem.asBytes(&v)[0..field.size]);
 }
 
-fn structNewDefault(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn structNewDefault(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const typeidx: u32 = @intCast(instr.payload);

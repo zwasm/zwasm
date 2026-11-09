@@ -116,11 +116,11 @@ pub fn register(table: *DispatchTable) void {
 // Handlers — i32 / i64 constants
 // ============================================================
 
-fn i32Const(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32Const(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .i32 = @bitCast(@as(u32, @truncate(instr.payload))) });
 }
-fn i64Const(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64Const(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const lo: u64 = instr.payload;
     const hi: u64 = instr.extra;
@@ -131,27 +131,27 @@ fn i64Const(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 // Handlers — i32 unops / binops / relops
 // ============================================================
 
-fn i32Eqz(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Eqz(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().i32;
     try rt.pushOperand(.{ .i32 = if (x == 0) 1 else 0 });
 }
 
-fn i32Clz(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Clz(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().u32;
     const r: i32 = @intCast(@clz(x));
     try rt.pushOperand(.{ .i32 = r });
 }
 
-fn i32Ctz(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Ctz(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().u32;
     const r: i32 = @intCast(@ctz(x));
     try rt.pushOperand(.{ .i32 = r });
 }
 
-fn i32Popcnt(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Popcnt(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().u32;
     const r: i32 = @intCast(@popCount(x));
@@ -174,25 +174,25 @@ fn popU32Pair(rt: *Runtime) Trap!struct { a: u32, b: u32 } {
     return .{ .a = a, .b = b };
 }
 
-fn i32Add(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Add(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popI32Pair(rt);
     try rt.pushOperand(.{ .i32 = p.a +% p.b });
 }
 
-fn i32Sub(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Sub(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popI32Pair(rt);
     try rt.pushOperand(.{ .i32 = p.a -% p.b });
 }
 
-fn i32Mul(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Mul(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popI32Pair(rt);
     try rt.pushOperand(.{ .i32 = p.a *% p.b });
 }
 
-fn i32DivS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32DivS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popI32Pair(rt);
     if (p.b == 0) return Trap.DivByZero;
@@ -200,14 +200,14 @@ fn i32DivS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     try rt.pushOperand(.{ .i32 = @divTrunc(p.a, p.b) });
 }
 
-fn i32DivU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32DivU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     if (p.b == 0) return Trap.DivByZero;
     try rt.pushOperand(.{ .u32 = p.a / p.b });
 }
 
-fn i32RemS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32RemS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popI32Pair(rt);
     if (p.b == 0) return Trap.DivByZero;
@@ -219,60 +219,60 @@ fn i32RemS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     try rt.pushOperand(.{ .i32 = @rem(p.a, p.b) });
 }
 
-fn i32RemU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32RemU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     if (p.b == 0) return Trap.DivByZero;
     try rt.pushOperand(.{ .u32 = p.a % p.b });
 }
 
-fn i32And(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32And(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     try rt.pushOperand(.{ .u32 = p.a & p.b });
 }
 
-fn i32Or(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Or(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     try rt.pushOperand(.{ .u32 = p.a | p.b });
 }
 
-fn i32Xor(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Xor(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     try rt.pushOperand(.{ .u32 = p.a ^ p.b });
 }
 
-fn i32Shl(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Shl(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     const sh: u5 = @intCast(p.b & 31);
     try rt.pushOperand(.{ .u32 = p.a << sh });
 }
 
-fn i32ShrS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32ShrS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popI32Pair(rt);
     const sh: u5 = @intCast(@as(u32, @bitCast(p.b)) & 31);
     try rt.pushOperand(.{ .i32 = p.a >> sh });
 }
 
-fn i32ShrU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32ShrU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     const sh: u5 = @intCast(p.b & 31);
     try rt.pushOperand(.{ .u32 = p.a >> sh });
 }
 
-fn i32Rotl(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Rotl(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     const sh: u5 = @intCast(p.b & 31);
     try rt.pushOperand(.{ .u32 = std.math.rotl(u32, p.a, sh) });
 }
 
-fn i32Rotr(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Rotr(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     const sh: u5 = @intCast(p.b & 31);
@@ -285,52 +285,52 @@ inline fn pushBool(rt: *Runtime, b: bool) anyerror!void {
     try rt.pushOperand(.{ .i32 = if (b) 1 else 0 });
 }
 
-fn i32Eq(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Eq(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popI32Pair(rt);
     try pushBool(rt, p.a == p.b);
 }
-fn i32Ne(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32Ne(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popI32Pair(rt);
     try pushBool(rt, p.a != p.b);
 }
-fn i32LtS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32LtS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popI32Pair(rt);
     try pushBool(rt, p.a < p.b);
 }
-fn i32LtU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32LtU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     try pushBool(rt, p.a < p.b);
 }
-fn i32GtS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32GtS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popI32Pair(rt);
     try pushBool(rt, p.a > p.b);
 }
-fn i32GtU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32GtU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     try pushBool(rt, p.a > p.b);
 }
-fn i32LeS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32LeS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popI32Pair(rt);
     try pushBool(rt, p.a <= p.b);
 }
-fn i32LeU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32LeU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     try pushBool(rt, p.a <= p.b);
 }
-fn i32GeS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32GeS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popI32Pair(rt);
     try pushBool(rt, p.a >= p.b);
 }
-fn i32GeU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32GeU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popU32Pair(rt);
     try pushBool(rt, p.a >= p.b);
@@ -338,27 +338,27 @@ fn i32GeU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
 
 // --- i64 unops / testop ---
 
-fn i64Eqz(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Eqz(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().i64;
     try rt.pushOperand(.{ .i32 = if (x == 0) 1 else 0 });
 }
 
-fn i64Clz(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Clz(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().u64;
     const r: i64 = @intCast(@clz(x));
     try rt.pushOperand(.{ .i64 = r });
 }
 
-fn i64Ctz(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Ctz(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().u64;
     const r: i64 = @intCast(@ctz(x));
     try rt.pushOperand(.{ .i64 = r });
 }
 
-fn i64Popcnt(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Popcnt(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().u64;
     const r: i64 = @intCast(@popCount(x));
@@ -379,19 +379,19 @@ fn popU64Pair(rt: *Runtime) struct { a: u64, b: u64 } {
     return .{ .a = a, .b = b };
 }
 
-fn i64Add(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Add(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popI64Pair(rt);
     try rt.pushOperand(.{ .i64 = p.a +% p.b });
 }
 
-fn i64Sub(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Sub(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popI64Pair(rt);
     try rt.pushOperand(.{ .i64 = p.a -% p.b });
 }
 
-fn i64Mul(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Mul(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popI64Pair(rt);
     try rt.pushOperand(.{ .i64 = p.a *% p.b });
@@ -404,7 +404,7 @@ fn i64Mul(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
 // does the assembly/split.
 
 /// `i64.add128` — pop [a_lo, a_hi, b_lo, b_hi], push [r_lo, r_hi] (wrapping).
-fn i64Add128(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Add128(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const b_hi = rt.popOperand().u64;
     const b_lo = rt.popOperand().u64;
@@ -418,7 +418,7 @@ fn i64Add128(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
 }
 
 /// `i64.sub128` — pop [a_lo, a_hi, b_lo, b_hi], push [r_lo, r_hi] (wrapping).
-fn i64Sub128(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Sub128(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const b_hi = rt.popOperand().u64;
     const b_lo = rt.popOperand().u64;
@@ -432,7 +432,7 @@ fn i64Sub128(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
 }
 
 /// `i64.mul_wide_u` — pop a, b, push the full 128-bit unsigned product [lo, hi].
-fn i64MulWideU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64MulWideU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const b = rt.popOperand().u64;
     const a = rt.popOperand().u64;
@@ -442,7 +442,7 @@ fn i64MulWideU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
 }
 
 /// `i64.mul_wide_s` — pop a, b, push the full 128-bit signed product [lo, hi].
-fn i64MulWideS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64MulWideS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const b = rt.popOperand().u64;
     const a = rt.popOperand().u64;
@@ -453,7 +453,7 @@ fn i64MulWideS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     try rt.pushOperand(.{ .u64 = @truncate(r >> 64) });
 }
 
-fn i64DivS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64DivS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popI64Pair(rt);
     if (p.b == 0) return Trap.DivByZero;
@@ -461,14 +461,14 @@ fn i64DivS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     try rt.pushOperand(.{ .i64 = @divTrunc(p.a, p.b) });
 }
 
-fn i64DivU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64DivU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     if (p.b == 0) return Trap.DivByZero;
     try rt.pushOperand(.{ .u64 = p.a / p.b });
 }
 
-fn i64RemS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64RemS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popI64Pair(rt);
     if (p.b == 0) return Trap.DivByZero;
@@ -479,60 +479,60 @@ fn i64RemS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     try rt.pushOperand(.{ .i64 = @rem(p.a, p.b) });
 }
 
-fn i64RemU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64RemU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     if (p.b == 0) return Trap.DivByZero;
     try rt.pushOperand(.{ .u64 = p.a % p.b });
 }
 
-fn i64And(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64And(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     try rt.pushOperand(.{ .u64 = p.a & p.b });
 }
 
-fn i64Or(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Or(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     try rt.pushOperand(.{ .u64 = p.a | p.b });
 }
 
-fn i64Xor(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Xor(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     try rt.pushOperand(.{ .u64 = p.a ^ p.b });
 }
 
-fn i64Shl(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Shl(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     const sh: u6 = @intCast(p.b & 63);
     try rt.pushOperand(.{ .u64 = p.a << sh });
 }
 
-fn i64ShrS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64ShrS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popI64Pair(rt);
     const sh: u6 = @intCast(@as(u64, @bitCast(p.b)) & 63);
     try rt.pushOperand(.{ .i64 = p.a >> sh });
 }
 
-fn i64ShrU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64ShrU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     const sh: u6 = @intCast(p.b & 63);
     try rt.pushOperand(.{ .u64 = p.a >> sh });
 }
 
-fn i64Rotl(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Rotl(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     const sh: u6 = @intCast(p.b & 63);
     try rt.pushOperand(.{ .u64 = std.math.rotl(u64, p.a, sh) });
 }
 
-fn i64Rotr(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Rotr(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     const sh: u6 = @intCast(p.b & 63);
@@ -541,52 +541,52 @@ fn i64Rotr(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
 
 // --- i64 relops ---
 
-fn i64Eq(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Eq(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popI64Pair(rt);
     try pushBool(rt, p.a == p.b);
 }
-fn i64Ne(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64Ne(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popI64Pair(rt);
     try pushBool(rt, p.a != p.b);
 }
-fn i64LtS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64LtS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popI64Pair(rt);
     try pushBool(rt, p.a < p.b);
 }
-fn i64LtU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64LtU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     try pushBool(rt, p.a < p.b);
 }
-fn i64GtS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64GtS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popI64Pair(rt);
     try pushBool(rt, p.a > p.b);
 }
-fn i64GtU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64GtU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     try pushBool(rt, p.a > p.b);
 }
-fn i64LeS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64LeS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popI64Pair(rt);
     try pushBool(rt, p.a <= p.b);
 }
-fn i64LeU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64LeU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     try pushBool(rt, p.a <= p.b);
 }
-fn i64GeS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64GeS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popI64Pair(rt);
     try pushBool(rt, p.a >= p.b);
 }
-fn i64GeU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64GeU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = popU64Pair(rt);
     try pushBool(rt, p.a >= p.b);

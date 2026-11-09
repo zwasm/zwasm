@@ -74,7 +74,7 @@ inline fn outOfRange(base: u64, n: u64, len: usize) bool {
     return end[1] != 0 or end[0] > len;
 }
 
-fn memoryCopy(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn memoryCopy(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     // 10.M cycle 67 — payload = dst_memidx, extra = src_memidx.
     const dst_mem = memSliceByIdx(rt, instr.payload);
@@ -102,7 +102,7 @@ fn memoryCopy(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     }
 }
 
-fn memoryFill(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn memoryFill(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const mem = memSliceByIdx(rt, instr.payload);
     // D-324: dst + n carry the TARGET memory's idx_type width.
@@ -123,7 +123,7 @@ fn memoryFill(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// dst. Trap OutOfBoundsStore if src+n > data.len OR dst+n >
 /// mem.len. If the segment was previously dropped, treat its data
 /// length as 0 (any n>0 → trap).
-fn memoryInit(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn memoryInit(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     // 10.M cycle 67 — payload = dataidx, extra = dst_memidx.
     const dataidx = instr.payload;
@@ -147,7 +147,7 @@ fn memoryInit(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 
 /// data.drop x: mark data segment x as dropped. Subsequent
 /// memory.init x calls treat its length as 0.
-fn dataDrop(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn dataDrop(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const dataidx = instr.payload;
     if (dataidx >= rt.data_dropped.len) return Trap.Unreachable;

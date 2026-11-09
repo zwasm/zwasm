@@ -36,7 +36,7 @@ pub fn register(table: *DispatchTable) void {
     table.interp[op(.@"array.len")] = arrayLen;
 }
 
-fn convertIdentity(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn convertIdentity(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     // Reftypes share the same Value runtime representation; the
     // any↔extern distinction is validator-only. Leave the operand
     // on the stack unchanged.
@@ -46,7 +46,7 @@ fn convertIdentity(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
 /// Wasm 3.0 GC §3.3.5.2 — `ref.eq`: pop two reftypes, push i32
 /// (1 iff same reference identity, else 0). Two nulls compare
 /// equal per spec (null_ref == null_ref).
-fn refEq(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn refEq(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const b = rt.popOperand();
     const a = rt.popOperand();
@@ -59,7 +59,7 @@ fn refEq(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
 /// haven't landed, so every reftype operand is structurally null →
 /// trap NullReference. Real length-decode lands with ArrayInfo
 /// RTT when sub-chunk 6 of the bundle plan ships.
-fn arrayLen(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn arrayLen(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     _ = rt.popOperand();
     return runtime.Trap.NullReference;

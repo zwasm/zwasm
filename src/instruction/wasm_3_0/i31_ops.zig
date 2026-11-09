@@ -43,13 +43,13 @@ pub fn register(table: *DispatchTable) void {
     table.interp[op(.@"i31.get_u")] = i31GetU;
 }
 
-fn refI31(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn refI31(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().i32;
     try rt.pushOperand(Value.fromI31Truncate(x));
 }
 
-fn i31GetS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i31GetS(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand();
     // Spec: `i31.get_*` traps if input is null. With the low-bit-1
@@ -61,7 +61,7 @@ fn i31GetS(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
     try rt.pushOperand(.{ .i32 = Value.refAsI31Signed(v) });
 }
 
-fn i31GetU(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i31GetU(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand();
     if (!Value.isI31Ref(v)) return runtime.Trap.NullReference;
