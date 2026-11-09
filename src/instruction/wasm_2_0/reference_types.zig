@@ -40,18 +40,18 @@ pub fn register(table: *DispatchTable) void {
     table.interp[op(.@"ref.func")] = refFunc;
 }
 
-fn refNull(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn refNull(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .ref = Value.null_ref });
 }
 
-fn refIsNull(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn refIsNull(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const r = rt.popOperand().ref;
     try rt.pushOperand(.{ .i32 = if (r == Value.null_ref) 1 else 0 });
 }
 
-fn refFunc(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn refFunc(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const idx = instr.payload;
     if (idx >= rt.func_entities.len) return runtime.Trap.Unreachable;

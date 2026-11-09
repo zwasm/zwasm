@@ -51,13 +51,16 @@ pub fn step(
 /// interpreter's speed moves by up to 13% with where this loop sits
 /// against a 64-byte boundary (#541, Zen 3). `noinline` keeps a change
 /// to `run` from moving it; `align(64)` keeps a change to code laid
-/// out before it from moving it.
+/// out before it from moving it. The handlers move it by up to 12%
+/// with their distance from this loop (#548), so the loop and every
+/// handler sit in `dispatch_table.text_section`, where only
+/// interpreter code lies between them.
 noinline fn runFrame(
     rt: *Runtime,
     table: *const DispatchTable,
     f: *runtime.Frame,
     instrs: []const ZirInstr,
-) align(64) anyerror!void {
+) align(64) linksection(dispatch_table.text_section) anyerror!void {
     while (f.pc < instrs.len and !f.done) {
         // ADR-0179 #3a: throttled cooperative-interrupt poll so a tight
         // `(loop (br 0))` with no calls is still interruptible. Zero cost
@@ -77,6 +80,12 @@ noinline fn runFrame(
         try step(rt, table, &instrs[cur]);
         if (f.pc == cur) f.pc += 1;
     }
+}
+
+/// `runFrame`'s address, for `api/instance.zig`'s test that the loop and
+/// the handlers share one section.
+pub fn runFrameAddress() usize {
+    return @intFromPtr(&runFrame);
 }
 
 /// Walk an instruction sequence linearly. The loop tracks `pc`

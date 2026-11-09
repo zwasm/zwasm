@@ -45,7 +45,7 @@ pub fn register(table: *DispatchTable) void {
     table.interp[op(.br_on_non_null)] = brOnNonNull;
 }
 
-fn refAsNonNull(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn refAsNonNull(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const r = rt.popOperand().ref;
     if (r == Value.null_ref) return runtime.Trap.NullReference;
@@ -95,7 +95,7 @@ fn branchTo(rt: *Runtime, depth: u32) anyerror!void {
 /// null, branch to label l (consume l.branch_arity values from
 /// stack as branch values); else push the non-null reftype back
 /// and fall through.
-fn brOnNull(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn brOnNull(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const r = rt.popOperand().ref;
     if (r != Value.null_ref) {
@@ -110,7 +110,7 @@ fn brOnNull(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// expects `[t1*, reftype]` — the non-null ref is passed as a
 /// branch value at top). Otherwise consume the (null) ref and
 /// fall through with the prefix `[t1*]` on stack.
-fn brOnNonNull(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn brOnNonNull(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const r = rt.popOperand().ref;
     if (r == Value.null_ref) return; // null: fall through, ref consumed

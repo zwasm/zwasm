@@ -91,111 +91,111 @@ fn truncFloatToUint(comptime DstUint: type, x: anytype) !DstUint {
     return @intFromFloat(truncated);
 }
 
-fn i32WrapI64(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32WrapI64(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().u64;
     try rt.pushOperand(.{ .u32 = @truncate(x) });
 }
 
-fn i32TruncF32S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32TruncF32S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f32;
     const r = try truncFloatToInt(i32, x);
     try rt.pushOperand(.{ .i32 = r });
 }
-fn i32TruncF32U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32TruncF32U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f32;
     const r = try truncFloatToUint(u32, x);
     try rt.pushOperand(.{ .u32 = r });
 }
-fn i32TruncF64S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32TruncF64S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f64;
     const r = try truncFloatToInt(i32, x);
     try rt.pushOperand(.{ .i32 = r });
 }
-fn i32TruncF64U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32TruncF64U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f64;
     const r = try truncFloatToUint(u32, x);
     try rt.pushOperand(.{ .u32 = r });
 }
 
-fn i64ExtendI32S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64ExtendI32S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().i32;
     try rt.pushOperand(.{ .i64 = @as(i64, x) });
 }
-fn i64ExtendI32U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64ExtendI32U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().u32;
     try rt.pushOperand(.{ .u64 = @as(u64, x) });
 }
 
-fn i64TruncF32S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64TruncF32S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f32;
     const r = try truncFloatToInt(i64, x);
     try rt.pushOperand(.{ .i64 = r });
 }
-fn i64TruncF32U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64TruncF32U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f32;
     const r = try truncFloatToUint(u64, x);
     try rt.pushOperand(.{ .u64 = r });
 }
-fn i64TruncF64S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64TruncF64S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f64;
     const r = try truncFloatToInt(i64, x);
     try rt.pushOperand(.{ .i64 = r });
 }
-fn i64TruncF64U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64TruncF64U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const x = rt.popOperand().f64;
     const r = try truncFloatToUint(u64, x);
     try rt.pushOperand(.{ .u64 = r });
 }
 
-fn f32ConvertI32S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32ConvertI32S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f32 = @floatFromInt(rt.popOperand().i32) });
 }
-fn f32ConvertI32U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32ConvertI32U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f32 = @floatFromInt(rt.popOperand().u32) });
 }
-fn f32ConvertI64S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32ConvertI64S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f32 = @floatFromInt(rt.popOperand().i64) });
 }
-fn f32ConvertI64U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32ConvertI64U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f32 = @floatFromInt(rt.popOperand().u64) });
 }
-fn f32DemoteF64(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32DemoteF64(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f32 = @floatCast(rt.popOperand().f64) });
 }
 
-fn f64ConvertI32S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64ConvertI32S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f64 = @floatFromInt(rt.popOperand().i32) });
 }
-fn f64ConvertI32U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64ConvertI32U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f64 = @floatFromInt(rt.popOperand().u32) });
 }
-fn f64ConvertI64S(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64ConvertI64S(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f64 = @floatFromInt(rt.popOperand().i64) });
 }
-fn f64ConvertI64U(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64ConvertI64U(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f64 = @floatFromInt(rt.popOperand().u64) });
 }
-fn f64PromoteF32(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64PromoteF32(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f64 = @floatCast(rt.popOperand().f32) });
 }
@@ -203,22 +203,22 @@ fn f64PromoteF32(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
 // Reinterpret: copy bits, no value conversion. The Value union is
 // extern, so f32 and u32 share storage; popping as `.bits64` and
 // pushing back is the canonical bit-preserving move.
-fn i32ReinterpretF32(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i32ReinterpretF32(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand();
     try rt.pushOperand(.{ .u32 = @truncate(v.bits64) });
 }
-fn i64ReinterpretF64(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn i64ReinterpretF64(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand();
     try rt.pushOperand(.{ .u64 = v.bits64 });
 }
-fn f32ReinterpretI32(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32ReinterpretI32(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand();
     try rt.pushOperand(.{ .bits64 = @as(u64, v.u32) });
 }
-fn f64ReinterpretI64(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64ReinterpretI64(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand();
     try rt.pushOperand(.{ .bits64 = v.u64 });

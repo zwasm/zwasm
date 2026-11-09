@@ -181,7 +181,7 @@ fn effectiveAddrStore(mem: []u8, popped_addr: u32, offset: u64, width: usize) Tr
 
 // --- Loads ---
 
-fn i32Load(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32Load(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const mem = memorySlice(rt, instr.extra);
     const ea: u64 = @as(u64, rt.popOperand().u32) + @as(u64, instr.payload);
@@ -196,7 +196,7 @@ fn i32Load(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// Per spec step 8 the alignment trap (`ea mod 4 ≠ 0`) is checked
 /// BEFORE the bounds test (step 14a). Validation already pinned the
 /// static memarg align to exactly 2 (natural).
-fn i32AtomicLoad(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32AtomicLoad(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const mem = memorySlice(rt, instr.extra);
     const ea: u64 = @as(u64, rt.popOperand().u32) + @as(u64, instr.payload);
@@ -210,7 +210,7 @@ fn i32AtomicLoad(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// aligned 8-byte seq-cst load. Mirrors `i32AtomicLoad` (alignment
 /// trap `ea mod 8 ≠ 0` BEFORE bounds, spec step 8 < 14a); natural
 /// align pinned to 3 by validation.
-fn i64AtomicLoad(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64AtomicLoad(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const mem = memorySlice(rt, instr.extra);
     const ea: u64 = @as(u64, rt.popOperand().u32) + @as(u64, instr.payload);
@@ -231,33 +231,33 @@ fn atomicLoadU(mem: []const u8, popped_addr: u32, comptime W: type, offset: u64)
     if (ea + width > mem.len) return Trap.OutOfBoundsLoad;
     return @as(u64, std.mem.readInt(W, mem[@intCast(ea)..][0..width], .little));
 }
-fn i32AtomicLoad8U(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32AtomicLoad8U(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = try atomicLoadU(memorySlice(rt, instr.extra), rt.popOperand().u32, u8, instr.payload);
     try rt.pushOperand(.{ .u32 = @intCast(v) });
 }
-fn i32AtomicLoad16U(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32AtomicLoad16U(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = try atomicLoadU(memorySlice(rt, instr.extra), rt.popOperand().u32, u16, instr.payload);
     try rt.pushOperand(.{ .u32 = @intCast(v) });
 }
-fn i64AtomicLoad8U(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64AtomicLoad8U(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = try atomicLoadU(memorySlice(rt, instr.extra), rt.popOperand().u32, u8, instr.payload);
     try rt.pushOperand(.{ .u64 = v });
 }
-fn i64AtomicLoad16U(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64AtomicLoad16U(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = try atomicLoadU(memorySlice(rt, instr.extra), rt.popOperand().u32, u16, instr.payload);
     try rt.pushOperand(.{ .u64 = v });
 }
-fn i64AtomicLoad32U(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64AtomicLoad32U(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = try atomicLoadU(memorySlice(rt, instr.extra), rt.popOperand().u32, u32, instr.payload);
     try rt.pushOperand(.{ .u64 = v });
 }
 
-fn i64Load(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64Load(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const mem = memorySlice(rt, instr.extra);
     const ea: u64 = @as(u64, rt.popOperand().u32) + @as(u64, instr.payload);
@@ -266,7 +266,7 @@ fn i64Load(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     try rt.pushOperand(.{ .u64 = v });
 }
 
-fn f32Load(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn f32Load(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const mem = memorySlice(rt, instr.extra);
     const ea: u64 = @as(u64, rt.popOperand().u32) + @as(u64, instr.payload);
@@ -275,7 +275,7 @@ fn f32Load(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     try rt.pushOperand(.{ .bits64 = bits });
 }
 
-fn f64Load(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn f64Load(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const mem = memorySlice(rt, instr.extra);
     const ea: u64 = @as(u64, rt.popOperand().u32) + @as(u64, instr.payload);
@@ -297,61 +297,61 @@ fn loadInt(mem: []const u8, popped_addr: u32, comptime W: type, comptime sign_ex
     return @as(i64, @as(i64, @bitCast(@as(u64, raw))));
 }
 
-fn i32Load8S(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32Load8S(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const addr = rt.popOperand().u32;
     const v = try loadInt(memorySlice(rt, instr.extra), addr, u8, true, instr.payload);
     try rt.pushOperand(.{ .i32 = @intCast(@as(i32, @truncate(v))) });
 }
-fn i32Load8U(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32Load8U(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const addr = rt.popOperand().u32;
     const v = try loadInt(memorySlice(rt, instr.extra), addr, u8, false, instr.payload);
     try rt.pushOperand(.{ .u32 = @intCast(v) });
 }
-fn i32Load16S(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32Load16S(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const addr = rt.popOperand().u32;
     const v = try loadInt(memorySlice(rt, instr.extra), addr, u16, true, instr.payload);
     try rt.pushOperand(.{ .i32 = @intCast(@as(i32, @truncate(v))) });
 }
-fn i32Load16U(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32Load16U(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const addr = rt.popOperand().u32;
     const v = try loadInt(memorySlice(rt, instr.extra), addr, u16, false, instr.payload);
     try rt.pushOperand(.{ .u32 = @intCast(v) });
 }
-fn i64Load8S(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64Load8S(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const addr = rt.popOperand().u32;
     const v = try loadInt(memorySlice(rt, instr.extra), addr, u8, true, instr.payload);
     try rt.pushOperand(.{ .i64 = v });
 }
-fn i64Load8U(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64Load8U(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const addr = rt.popOperand().u32;
     const v = try loadInt(memorySlice(rt, instr.extra), addr, u8, false, instr.payload);
     try rt.pushOperand(.{ .u64 = @intCast(v) });
 }
-fn i64Load16S(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64Load16S(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const addr = rt.popOperand().u32;
     const v = try loadInt(memorySlice(rt, instr.extra), addr, u16, true, instr.payload);
     try rt.pushOperand(.{ .i64 = v });
 }
-fn i64Load16U(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64Load16U(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const addr = rt.popOperand().u32;
     const v = try loadInt(memorySlice(rt, instr.extra), addr, u16, false, instr.payload);
     try rt.pushOperand(.{ .u64 = @intCast(v) });
 }
-fn i64Load32S(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64Load32S(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const addr = rt.popOperand().u32;
     const v = try loadInt(memorySlice(rt, instr.extra), addr, u32, true, instr.payload);
     try rt.pushOperand(.{ .i64 = v });
 }
-fn i64Load32U(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64Load32U(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const addr = rt.popOperand().u32;
     const v = try loadInt(memorySlice(rt, instr.extra), addr, u32, false, instr.payload);
@@ -360,7 +360,7 @@ fn i64Load32U(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 
 // --- Stores ---
 
-fn i32Store(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32Store(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand().u32;
     const addr = rt.popOperand().u32;
@@ -368,7 +368,7 @@ fn i32Store(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     const ea = try effectiveAddrStore(mem, addr, instr.payload, 4);
     std.mem.writeInt(u32, mem[ea..][0..4], v, .little);
 }
-fn i64Store(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64Store(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand().u64;
     const addr = rt.popOperand().u32;
@@ -376,7 +376,7 @@ fn i64Store(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     const ea = try effectiveAddrStore(mem, addr, instr.payload, 8);
     std.mem.writeInt(u64, mem[ea..][0..8], v, .little);
 }
-fn f32Store(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn f32Store(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand();
     const bits: u32 = @truncate(v.bits64);
@@ -385,7 +385,7 @@ fn f32Store(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     const ea = try effectiveAddrStore(mem, addr, instr.payload, 4);
     std.mem.writeInt(u32, mem[ea..][0..4], bits, .little);
 }
-fn f64Store(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn f64Store(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand();
     const addr = rt.popOperand().u32;
@@ -393,7 +393,7 @@ fn f64Store(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     const ea = try effectiveAddrStore(mem, addr, instr.payload, 8);
     std.mem.writeInt(u64, mem[ea..][0..8], v.bits64, .little);
 }
-fn i32Store8(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32Store8(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v: u8 = @truncate(rt.popOperand().u32);
     const addr = rt.popOperand().u32;
@@ -401,7 +401,7 @@ fn i32Store8(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     const ea = try effectiveAddrStore(mem, addr, instr.payload, 1);
     mem[ea] = v;
 }
-fn i32Store16(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32Store16(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v: u16 = @truncate(rt.popOperand().u32);
     const addr = rt.popOperand().u32;
@@ -409,7 +409,7 @@ fn i32Store16(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     const ea = try effectiveAddrStore(mem, addr, instr.payload, 2);
     std.mem.writeInt(u16, mem[ea..][0..2], v, .little);
 }
-fn i64Store8(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64Store8(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v: u8 = @truncate(rt.popOperand().u64);
     const addr = rt.popOperand().u32;
@@ -417,7 +417,7 @@ fn i64Store8(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     const ea = try effectiveAddrStore(mem, addr, instr.payload, 1);
     mem[ea] = v;
 }
-fn i64Store16(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64Store16(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v: u16 = @truncate(rt.popOperand().u64);
     const addr = rt.popOperand().u32;
@@ -425,7 +425,7 @@ fn i64Store16(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     const ea = try effectiveAddrStore(mem, addr, instr.payload, 2);
     std.mem.writeInt(u16, mem[ea..][0..2], v, .little);
 }
-fn i64Store32(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64Store32(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v: u32 = @truncate(rt.popOperand().u64);
     const addr = rt.popOperand().u32;
@@ -444,43 +444,43 @@ fn atomicStoreEa(mem: []u8, popped_addr: u32, offset: u64, width: usize) Trap!us
     if (ea + width > mem.len) return Trap.OutOfBoundsStore;
     return @intCast(ea);
 }
-fn i32AtomicStore(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32AtomicStore(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand().u32;
     const ea = try atomicStoreEa(memorySlice(rt, instr.extra), rt.popOperand().u32, instr.payload, 4);
     std.mem.writeInt(u32, memorySlice(rt, instr.extra)[ea..][0..4], v, .little);
 }
-fn i64AtomicStore(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64AtomicStore(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v = rt.popOperand().u64;
     const ea = try atomicStoreEa(memorySlice(rt, instr.extra), rt.popOperand().u32, instr.payload, 8);
     std.mem.writeInt(u64, memorySlice(rt, instr.extra)[ea..][0..8], v, .little);
 }
-fn i32AtomicStore8(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32AtomicStore8(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v: u8 = @truncate(rt.popOperand().u32);
     const ea = try atomicStoreEa(memorySlice(rt, instr.extra), rt.popOperand().u32, instr.payload, 1);
     memorySlice(rt, instr.extra)[ea] = v;
 }
-fn i32AtomicStore16(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i32AtomicStore16(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v: u16 = @truncate(rt.popOperand().u32);
     const ea = try atomicStoreEa(memorySlice(rt, instr.extra), rt.popOperand().u32, instr.payload, 2);
     std.mem.writeInt(u16, memorySlice(rt, instr.extra)[ea..][0..2], v, .little);
 }
-fn i64AtomicStore8(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64AtomicStore8(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v: u8 = @truncate(rt.popOperand().u64);
     const ea = try atomicStoreEa(memorySlice(rt, instr.extra), rt.popOperand().u32, instr.payload, 1);
     memorySlice(rt, instr.extra)[ea] = v;
 }
-fn i64AtomicStore16(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64AtomicStore16(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v: u16 = @truncate(rt.popOperand().u64);
     const ea = try atomicStoreEa(memorySlice(rt, instr.extra), rt.popOperand().u32, instr.payload, 2);
     std.mem.writeInt(u16, memorySlice(rt, instr.extra)[ea..][0..2], v, .little);
 }
-fn i64AtomicStore32(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn i64AtomicStore32(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const v: u32 = @truncate(rt.popOperand().u64);
     const ea = try atomicStoreEa(memorySlice(rt, instr.extra), rt.popOperand().u32, instr.payload, 4);
@@ -501,7 +501,7 @@ const RmwKind = enum { add, sub, @"and", @"or", xor, xchg };
 fn rmwHandler(comptime W: type, comptime res64: bool, comptime kind: RmwKind) dispatch.InterpFn {
     const width = @sizeOf(W);
     return struct {
-        fn h(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+        fn h(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
             const rt = Runtime.fromOpaque(c);
             const raw_val = if (res64) rt.popOperand().u64 else @as(u64, rt.popOperand().u32);
             const addr = rt.popOperand().u32;
@@ -534,7 +534,7 @@ fn rmwHandler(comptime W: type, comptime res64: bool, comptime kind: RmwKind) di
 fn cmpxchgHandler(comptime W: type, comptime res64: bool) dispatch.InterpFn {
     const width = @sizeOf(W);
     return struct {
-        fn h(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+        fn h(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
             const rt = Runtime.fromOpaque(c);
             const rep_raw = if (res64) rt.popOperand().u64 else @as(u64, rt.popOperand().u32);
             const exp_raw = if (res64) rt.popOperand().u64 else @as(u64, rt.popOperand().u32);
@@ -557,7 +557,7 @@ fn cmpxchgHandler(comptime W: type, comptime res64: bool) dispatch.InterpFn {
 /// align(4)+bounds trap, push the number of waiters woken. Single-
 /// threaded substrate: no waiters ever exist → always 0 (valid on a
 /// non-shared memory too). Alignment trap BEFORE bounds.
-fn atomicNotify(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn atomicNotify(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     _ = rt.popOperand().u32; // count (no waiters single-thread)
     const addr = rt.popOperand().u32;
@@ -578,7 +578,7 @@ fn atomicNotify(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 fn waitHandler(comptime W: type) dispatch.InterpFn {
     const width = @sizeOf(W);
     return struct {
-        fn h(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+        fn h(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
             const rt = Runtime.fromOpaque(c);
             _ = rt.popOperand().u64; // timeout (instant-timeout single-thread)
             const expected = if (W == u64) rt.popOperand().u64 else @as(u64, rt.popOperand().u32);
@@ -605,7 +605,7 @@ inline fn memoryIsI64(rt: *const Runtime, memidx: usize) bool {
     return memidx < rt.memories.len and rt.memories[memidx].idx_type == .i64;
 }
 
-fn memorySize(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn memorySize(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     // 10.M cycle 66 — memidx in instr.payload (was reserved 0x00
     // pre-multi-memory). Route through rt.memories[memidx]; fall
@@ -627,7 +627,7 @@ fn memorySize(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     }
 }
 
-fn memoryGrow(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn memoryGrow(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const memidx: usize = @intCast(instr.payload);
     const is_i64 = memoryIsI64(rt, memidx);

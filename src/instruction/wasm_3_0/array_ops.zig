@@ -90,7 +90,7 @@ fn allocateArray(rt: *Runtime, typeidx: u32, length: u32, element_size: u8) anye
     return object_alloc.allocArrayObject(heap, typeidx, length, element_size, false);
 }
 
-fn arrayNew(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arrayNew(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const typeidx: u32 = @intCast(instr.payload);
@@ -112,7 +112,7 @@ fn arrayNew(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     try rt.pushOperand(.{ .ref = @as(u64, ref) });
 }
 
-fn arrayNewDefault(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arrayNewDefault(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const typeidx: u32 = @intCast(instr.payload);
@@ -129,7 +129,7 @@ fn arrayNewDefault(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
     try rt.pushOperand(.{ .ref = @as(u64, ref) });
 }
 
-fn arrayNewFixed(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arrayNewFixed(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const typeidx: u32 = @intCast(instr.payload);
@@ -155,7 +155,7 @@ fn arrayNewFixed(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// slots are packed `element.size` bytes — the segment layout matches).
 /// Trap OutOfBoundsLoad if offset + size*element.size exceeds the
 /// segment length; the validator enforced $t is arraydef + $d in range.
-fn arrayNewData(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arrayNewData(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const typeidx: u32 = @intCast(instr.payload);
@@ -210,7 +210,7 @@ fn dataElemNaturalSize(valtype_byte: u8) ?u8 {
 /// size:i32], build a `size`-element array of $t whose elements are the
 /// `size` ref Values copied from element segment $e starting at
 /// `offset`. Trap OutOfBoundsLoad if offset + size exceeds the segment.
-fn arrayNewElem(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arrayNewElem(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const typeidx: u32 = @intCast(instr.payload);
@@ -249,7 +249,7 @@ fn readArrayHeader(heap: anytype, ref: u32) ArrayHeader {
 /// GcRef (trap null), bounds-check against ArrayHeader.length,
 /// read 8-byte element slot, push Value (validator-narrowed
 /// declared element type tells consumer which union arm is live).
-fn arrayGet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arrayGet(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const typeidx: u32 = @intCast(instr.payload);
@@ -275,10 +275,10 @@ fn arrayGet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// pop i32 idx + arrayref (trap null / OOB), read the packed (i8/i16)
 /// element from its 8-byte slot, sign-/zero-extend to i32 (ADR-0125
 /// B-exec). Validator restricts these to packed-element arrays.
-fn arrayGetS(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arrayGetS(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     return arrayGetPacked(c, instr, true);
 }
-fn arrayGetU(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arrayGetU(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     return arrayGetPacked(c, instr, false);
 }
 fn arrayGetPacked(c: *InterpCtx, instr: *const ZirInstr, signed: bool) anyerror!void {
@@ -306,7 +306,7 @@ fn arrayGetPacked(c: *InterpCtx, instr: *const ZirInstr, signed: bool) anyerror!
 
 /// Wasm 3.0 GC §3.3.5.6.12 — `array.set typeidx`: pop value +
 /// i32 idx + GcRef (trap null), bounds-check, write element.
-fn arraySet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arraySet(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const typeidx: u32 = @intCast(instr.payload);
@@ -331,7 +331,7 @@ fn arraySet(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// Wasm 3.0 GC §3.3.5.6.14 — `array.fill typeidx`: pop count +
 /// value + i32 idx + GcRef (trap null), bounds-check
 /// `idx + count ≤ length`, fill `count` slots with `value`.
-fn arrayFill(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arrayFill(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const typeidx: u32 = @intCast(instr.payload);
@@ -366,7 +366,7 @@ fn arrayFill(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// OOB; copy `len` 8-byte slots src→dst (memmove semantics for overlap
 /// within the same array). Slots are uniform 8 bytes (ADR-0116 §3a), so
 /// element widths match regardless of dst/src declared element type.
-fn arrayCopy(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arrayCopy(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const dst_ai = try resolveArrayInfo(inst, @intCast(instr.payload));
@@ -409,7 +409,7 @@ fn arrayCopy(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// dst_off, dst_ref]; copy `len` natural-width elements from data segment
 /// $d (LE zero-extended into the 8-byte slot, mirror array.new_data) into
 /// the existing array at dst_off. (10.G cycle 158.)
-fn arrayInitData(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arrayInitData(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const ai = try resolveArrayInfo(inst, @intCast(instr.payload));
@@ -446,7 +446,7 @@ fn arrayInitData(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// Wasm 3.0 GC §3.3.5.6.17 — `array.init_elem $t $e`: pop [len, src_off,
 /// dst_off, dst_ref]; copy `len` refs from element segment $e into the
 /// existing array at dst_off (mirror array.new_elem). (10.G cycle 158.)
-fn arrayInitElem(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn arrayInitElem(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const inst = @as(*const Instance, @ptrCast(@alignCast(rt.instance orelse return runtime.Trap.NullReference)));
     const ai = try resolveArrayInfo(inst, @intCast(instr.payload));
@@ -479,7 +479,7 @@ fn arrayInitElem(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
 /// Wasm 3.0 GC §3.3.5.6.13 — `array.len`: pop GcRef (trap null),
 /// read ArrayHeader.length, push i32. Upgrades the cycle-12 stub
 /// in `ref_convert_ops.zig` that always trapped NullReference.
-fn arrayLen(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn arrayLen(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const ref_val = rt.popOperand();
     if (ref_val.ref == Value.null_ref) return runtime.Trap.NullReference;

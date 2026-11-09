@@ -93,12 +93,12 @@ pub fn register(table: *DispatchTable) void {
 // Handlers — f32 / f64 constants
 // ============================================================
 
-fn f32Const(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn f32Const(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .bits64 = instr.payload });
 }
 
-fn f64Const(c: *InterpCtx, instr: *const ZirInstr) anyerror!void {
+fn f64Const(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const lo: u64 = instr.payload;
     const hi: u64 = instr.extra;
@@ -153,89 +153,89 @@ fn minMax(comptime F: type, comptime is_max: bool, a: F, b: F) F {
 }
 
 // --- f32 relops ---
-fn f32Eq(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Eq(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     try pushBool(rt, p.a == p.b);
 }
-fn f32Ne(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Ne(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     try pushBool(rt, p.a != p.b);
 }
-fn f32Lt(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Lt(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     try pushBool(rt, p.a < p.b);
 }
-fn f32Gt(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Gt(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     try pushBool(rt, p.a > p.b);
 }
-fn f32Le(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Le(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     try pushBool(rt, p.a <= p.b);
 }
-fn f32Ge(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Ge(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     try pushBool(rt, p.a >= p.b);
 }
 
 // --- f32 unops ---
-fn f32Abs(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Abs(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f32 = @abs(rt.popOperand().f32) });
 }
-fn f32Neg(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Neg(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f32 = -rt.popOperand().f32 });
 }
-fn f32Ceil(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Ceil(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f32 = @ceil(rt.popOperand().f32) });
 }
-fn f32Floor(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Floor(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f32 = @floor(rt.popOperand().f32) });
 }
-fn f32Trunc(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Trunc(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f32 = @trunc(rt.popOperand().f32) });
 }
-fn f32Nearest(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Nearest(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f32 = nearest(f32, rt.popOperand().f32) });
 }
-fn f32Sqrt(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Sqrt(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f32 = @sqrt(rt.popOperand().f32) });
 }
 
 // --- f32 binops ---
-fn f32Add(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Add(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     try rt.pushOperand(.{ .f32 = p.a + p.b });
 }
-fn f32Sub(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Sub(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     try rt.pushOperand(.{ .f32 = p.a - p.b });
 }
-fn f32Mul(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Mul(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     try rt.pushOperand(.{ .f32 = p.a * p.b });
 }
-fn f32Div(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Div(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     try rt.pushOperand(.{ .f32 = p.a / p.b });
 }
-fn f32Min(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Min(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     if (std.math.isNan(p.a) or std.math.isNan(p.b)) {
@@ -244,7 +244,7 @@ fn f32Min(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
         try rt.pushOperand(.{ .f32 = minMax(f32, false, p.a, p.b) });
     }
 }
-fn f32Max(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Max(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     if (std.math.isNan(p.a) or std.math.isNan(p.b)) {
@@ -253,96 +253,96 @@ fn f32Max(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
         try rt.pushOperand(.{ .f32 = minMax(f32, true, p.a, p.b) });
     }
 }
-fn f32Copysign(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f32Copysign(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF32Pair(rt);
     try rt.pushOperand(.{ .f32 = std.math.copysign(p.a, p.b) });
 }
 
 // --- f64 relops ---
-fn f64Eq(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Eq(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     try pushBool(rt, p.a == p.b);
 }
-fn f64Ne(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Ne(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     try pushBool(rt, p.a != p.b);
 }
-fn f64Lt(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Lt(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     try pushBool(rt, p.a < p.b);
 }
-fn f64Gt(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Gt(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     try pushBool(rt, p.a > p.b);
 }
-fn f64Le(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Le(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     try pushBool(rt, p.a <= p.b);
 }
-fn f64Ge(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Ge(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     try pushBool(rt, p.a >= p.b);
 }
 
 // --- f64 unops ---
-fn f64Abs(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Abs(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f64 = @abs(rt.popOperand().f64) });
 }
-fn f64Neg(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Neg(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f64 = -rt.popOperand().f64 });
 }
-fn f64Ceil(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Ceil(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f64 = @ceil(rt.popOperand().f64) });
 }
-fn f64Floor(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Floor(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f64 = @floor(rt.popOperand().f64) });
 }
-fn f64Trunc(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Trunc(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f64 = @trunc(rt.popOperand().f64) });
 }
-fn f64Nearest(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Nearest(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f64 = nearest(f64, rt.popOperand().f64) });
 }
-fn f64Sqrt(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Sqrt(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     try rt.pushOperand(.{ .f64 = @sqrt(rt.popOperand().f64) });
 }
 
 // --- f64 binops ---
-fn f64Add(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Add(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     try rt.pushOperand(.{ .f64 = p.a + p.b });
 }
-fn f64Sub(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Sub(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     try rt.pushOperand(.{ .f64 = p.a - p.b });
 }
-fn f64Mul(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Mul(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     try rt.pushOperand(.{ .f64 = p.a * p.b });
 }
-fn f64Div(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Div(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     try rt.pushOperand(.{ .f64 = p.a / p.b });
 }
-fn f64Min(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Min(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     if (std.math.isNan(p.a) or std.math.isNan(p.b)) {
@@ -351,7 +351,7 @@ fn f64Min(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
         try rt.pushOperand(.{ .f64 = minMax(f64, false, p.a, p.b) });
     }
 }
-fn f64Max(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Max(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     if (std.math.isNan(p.a) or std.math.isNan(p.b)) {
@@ -360,7 +360,7 @@ fn f64Max(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
         try rt.pushOperand(.{ .f64 = minMax(f64, true, p.a, p.b) });
     }
 }
-fn f64Copysign(c: *InterpCtx, _: *const ZirInstr) anyerror!void {
+fn f64Copysign(c: *InterpCtx, _: *const ZirInstr) linksection(dispatch.text_section) anyerror!void {
     const rt = Runtime.fromOpaque(c);
     const p = try popF64Pair(rt);
     try rt.pushOperand(.{ .f64 = std.math.copysign(p.a, p.b) });
