@@ -106,3 +106,9 @@ dogfooding.
   `crates/cli-flags/src/lib.rs:342/345/389`, `--env` `run/wasi.rs:94`) are CLI *convenience over the embedder
   API*, not core needs — wazero (`cmd/wazero/wazero.go`) ships exactly `compile`+`run` with no `-invoke`. The
   run+compile scope is reaffirmed; `--invoke` (D-273) stays deferred until a real consumer need.
+
+## Revision history
+
+| Date       | Note |
+|------------|------|
+| 2026-11-09 | The surface gains `serve` (#688), wasmtime's verb for a `wasi:http/service` component, as ADR-0205 D4's demand-driven QoI entry. The run/compile reasoning above is unchanged: `serve` runs a component the way `run` runs a command. |

@@ -496,16 +496,8 @@ pub fn runComponentCaptured(
 
     var host = try wasi_host.Host.init(alloc);
     defer host.deinit();
-    host.io = io;
     if (stdout_capture) |b| host.stdout_buffer = b;
-    if (argv.len > 0) try host.setArgs(argv);
-    if (env_keys.len > 0) try host.setEnvs(env_keys, env_vals); // D-295 P0: --env KEY=VAL
-    host.allow_network = allow_network;
-    stdin.applyTo(&host); // the guest's fd 0 source
-    // `--dir` preopens feed the P2 host: `get-directories` enumerates them and
-    // the descriptor `*-at` methods resolve against their fds.
-    for (preopens) |pd| try host.addPendingPreopen(pd.host_path, pd.guest_path);
-    try host.materializePendingPreopens();
+    try configureComponentHost(&host, io, argv, preopens, env_keys, env_vals, allow_network, stdin);
 
     // REQ-4 — the component CLI path uses the default budget for now; wiring
     // the `--fuel`/`--max-memory` flags into `runComponentCaptured` is a
@@ -529,6 +521,29 @@ pub fn runComponentCaptured(
     try writeResultText(io, stdout_capture, alloc, result_text.items);
     if (host.exit_code) |code| return @intCast(@min(code, std.math.maxInt(u8)));
     return 0;
+}
+
+/// The component host as `zwasm run` and `zwasm serve` give it to the guest:
+/// argv, `--env`, `--dir`, `--allow-network` and its fd 0.
+pub fn configureComponentHost(
+    host: *wasi_host.Host,
+    io: std.Io,
+    argv: []const []const u8,
+    preopens: []const PreopenDir,
+    env_keys: []const []const u8,
+    env_vals: []const []const u8,
+    allow_network: bool,
+    stdin: StdinSource,
+) !void {
+    host.io = io;
+    if (argv.len > 0) try host.setArgs(argv);
+    if (env_keys.len > 0) try host.setEnvs(env_keys, env_vals); // D-295 P0: --env KEY=VAL
+    host.allow_network = allow_network;
+    stdin.applyTo(host);
+    // `--dir` preopens feed the P2 host: `get-directories` enumerates them and
+    // the descriptor `*-at` methods resolve against their fds.
+    for (preopens) |pd| try host.addPendingPreopen(pd.host_path, pd.guest_path);
+    try host.materializePendingPreopens();
 }
 
 /// `zwasm run <file.cwasm>` (ADR-0203 stage 3): a `.cwasm` runs through the

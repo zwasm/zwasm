@@ -292,6 +292,8 @@ pub const cli = struct {
     pub const limits = @import("cli/limits.zig");
     pub const dispatch = @import("cli/dispatch.zig");
     pub const diag_print = @import("cli/diag_print.zig");
+    /// Absent below `-Dwasi=p3`: it drives the P3 service handler.
+    pub const serve = if (@import("build_options").enable_wasi_p3) @import("cli/serve.zig") else struct {};
 };
 
 // ============================================================
@@ -459,7 +461,10 @@ test {
     // ADR-0193 P3: the P3 driver + its async tests compile only at
     // `wasi_level >= .p3` (the default); `test-wasi-p2` covers the build
     // without them.
-    if (@import("build_options").enable_wasi_p3) _ = @import("api/component_wasi_p3.zig");
+    if (@import("build_options").enable_wasi_p3) {
+        _ = @import("api/component_wasi_p3.zig");
+        _ = @import("cli/serve.zig");
+    }
     _ = @import("api/component_typed.zig");
 }
 

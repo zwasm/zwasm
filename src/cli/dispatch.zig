@@ -1,14 +1,14 @@
 //! Top-level CLI verb classification — pure + testable. `main.zig`
-//! routes on the returned `Action`; `run` / `compile` keep their own
+//! routes on the returned `Action`; `run` / `compile` / `serve` keep their own
 //! per-subcommand arg parsing. Splitting the top-level routing out
 //! here is what makes the CLI surface (ADR-0159: run + compile +
-//! --version/--help) unit-testable without spawning the exe.
+//! --version/--help; `serve`, #688) unit-testable without spawning the exe.
 //!
 //! Zone 3 (`src/cli/`).
 
 const std = @import("std");
 
-pub const Action = enum { banner, help, version, run, compile, unknown };
+pub const Action = enum { banner, help, version, run, compile, serve, unknown };
 
 /// Classify the first CLI token. `null` (no subcommand) = the
 /// version + build-options banner. An unrecognised token is
@@ -20,6 +20,7 @@ pub fn classify(subcmd: ?[]const u8) Action {
     if (eq(s, "--version") or eq(s, "-V")) return .version;
     if (eq(s, "run")) return .run;
     if (eq(s, "compile")) return .compile;
+    if (eq(s, "serve")) return .serve;
     return .unknown;
 }
 
@@ -62,6 +63,9 @@ pub const usage =
     \\    [--cache[=DIR]]                            Transparent compilation cache (content-keyed .cwasm reuse)
     \\    [--cache-clear]                            Delete this build's cache subdirectory (combine with --cache to repopulate)
     \\  zwasm compile <file.wasm> -o <out.cwasm>     Compile to a .cwasm AOT artifact
+    \\  zwasm serve [options] <component.wasm> [args...]  Serve a WASI 0.3 wasi:http/service component over HTTP/1.1
+    \\    [--addr <host:port>]                       Listen address: default 127.0.0.1:8080; port 0 picks a free one
+    \\    [--dir] [--env] [--allow-network]          As for run
     \\  zwasm --version | -V                         Print the version + build identity
     \\  zwasm --help | -h | help                     Print this help
     \\  zwasm                                        Print version + build options
@@ -71,6 +75,7 @@ pub const usage =
 test "classify: known verbs" {
     try std.testing.expectEqual(Action.run, classify("run"));
     try std.testing.expectEqual(Action.compile, classify("compile"));
+    try std.testing.expectEqual(Action.serve, classify("serve"));
 }
 
 test "classify: help + version flags and aliases" {
@@ -97,9 +102,11 @@ test "versionLine: carries version + wasm/wasi/engine/mode build identity" {
     try std.testing.expect(std.mem.find(u8, line, "mode: safe") != null);
 }
 
-test "usage text names both shipped subcommands + every run flag main.zig parses" {
+test "usage text names every subcommand + every run and serve flag main.zig parses" {
     try std.testing.expect(std.mem.find(u8, usage, "zwasm run ") != null);
     try std.testing.expect(std.mem.find(u8, usage, "zwasm compile ") != null);
+    try std.testing.expect(std.mem.find(u8, usage, "zwasm serve ") != null);
+    try std.testing.expect(std.mem.find(u8, usage, "--addr") != null);
     // Lock doc/code coherence: every flag `run` actually accepts (main.zig)
     // must be documented, so help can't silently drop one again (--env did).
     try std.testing.expect(std.mem.find(u8, usage, "--invoke") != null);
