@@ -19,6 +19,7 @@ const p3http = @import("../wasi/p3_http.zig");
 const p2_sockets = @import("../wasi/p2_sockets.zig");
 const wasi_host = @import("../wasi/host.zig");
 const wasi_p2 = @import("component_wasi_p2.zig");
+const wasi_ctx = @import("component_wasi_ctx.zig");
 
 const Allocator = std.mem.Allocator;
 const Engine = @import("../zwasm/engine.zig").Engine;
@@ -251,7 +252,9 @@ pub fn serviceHandler(alloc: Allocator, info: *const ctypes.TypeInfo) Allocator.
 
 /// Mint a request resource for `req`, drive `handler.handle` with it to
 /// completion, and return the response it delivered with its body read.
-/// `error.HandlerFailed` = the handler returned `err`.
+/// `error.HandlerFailed` = the handler returned `err`. What earlier requests
+/// left that nothing reaches any more is freed first, so one instance serves
+/// any number of requests.
 pub fn serviceHandle(built: *wasi_p2.BuiltComponent, req: ServiceRequest) !ServiceResponse {
     const ctx = built.ctx;
     const alloc = ctx.alloc;
@@ -264,8 +267,11 @@ pub fn serviceHandle(built: *wasi_p2.BuiltComponent, req: ServiceRequest) !Servi
         return error.UnknownMethod;
     };
 
-    const fields_idx: u32 = @intCast(ctx.http_fields.items.len);
-    try ctx.http_fields.append(alloc, .{});
+    try wasi_ctx.sweepHttpTables(ctx);
+    var body_writable: ?u32 = null;
+    defer releaseHostEnds(ctx, body_writable);
+
+    const fields_idx = try ctx.addHttpFields(.{});
     for (req.headers) |h| try ctx.http_fields.items[fields_idx].appendPair(alloc, h.name, h.value);
     ctx.http_fields.items[fields_idx].immutable = true;
 
@@ -273,13 +279,13 @@ pub fn serviceHandle(built: *wasi_p2.BuiltComponent, req: ServiceRequest) !Servi
     var contents: ?u32 = null;
     if (req.body.len > 0) {
         const pair = try async_mod.newStreamPair(&ctx.streams, &ctx.shared, null);
+        body_writable = pair.writable;
         const shared_id = (try ctx.streams.get(pair.readable)).shared;
         try ctx.host_body_bytes.put(alloc, shared_id, .{ .data = try alloc.dupe(u8, req.body) });
         contents = pair.readable;
     }
 
-    const req_idx: u32 = @intCast(ctx.http_requests.items.len);
-    try ctx.http_requests.append(alloc, .{
+    const req_idx = try ctx.addHttpRequest(.{
         .method = method,
         .path_with_query = try alloc.dupe(u8, req.path_with_query),
         .scheme = .http,
@@ -324,6 +330,29 @@ pub fn serviceHandle(built: *wasi_p2.BuiltComponent, req: ServiceRequest) !Servi
         filled += 1;
     }
     return .{ .status = resp.status, .headers = headers, .body = try body.toOwnedSlice(alloc) };
+}
+
+/// The ends of one request the host holds: its body's writable, and the
+/// response `handle` delivered (only an `ok` result carries one). Left held,
+/// they would keep the request's slots reachable.
+fn releaseHostEnds(ctx: *wasi_p2.WasiP2Ctx, body_writable: ?u32) void {
+    if (body_writable) |w| wasi_p2.http3DropTransferredEnd(ctx, w);
+    if (ctx.task_return == 0) if (ctx.task_return_payload) |resp_handle| dropHostResponse(ctx, resp_handle);
+    ctx.task_return_payload = null;
+}
+
+/// The response `handle` delivered is the host's: drop it with the body and
+/// trailers ends it still holds. A lent one stays, and keeps its slots.
+fn dropHostResponse(ctx: *wasi_p2.WasiP2Ctx, handle: u32) void {
+    const Ctx = wasi_p2.WasiP2Ctx;
+    const rep = ctx.resources.rep(Ctx.HTTP_RESPONSE_RT, handle) catch return;
+    _ = ctx.resources.drop(Ctx.HTTP_RESPONSE_RT, handle) catch return;
+    if (rep >= ctx.http_responses.items.len) return;
+    const resp = &ctx.http_responses.items[rep];
+    if (resp.contents_stream) |cs| wasi_p2.http3DropTransferredEnd(ctx, cs);
+    wasi_p2.http3DropTransferredEnd(ctx, resp.trailers_future);
+    resp.contents_stream = null;
+    resp.trailers_future = 0;
 }
 
 /// The no-progress hook of `serviceHandle`: once the guest delivered its
@@ -1255,6 +1284,64 @@ fn runServiceRequest(built: *wasi_p2.BuiltComponent, rop: HttpReqOp) !void {
         }
     }
     if (rop.expect_body) |eb| try testing.expectEqualStrings(eb, resp.body);
+}
+
+fn liveSlots(slots: anytype) usize {
+    var n: usize = 0;
+    for (slots) |s| n += @intFromBool(s != null);
+    return n;
+}
+
+test "serviceHandle: one instance answers request after request without the ctx growing (#688)" {
+    const alloc = testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/wasip3_official/http-service-echo.wasm", alloc, .limited(8 << 20));
+    defer alloc.free(bytes);
+    var eng = try Engine.init(alloc, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(alloc);
+    defer host.deinit();
+    host.io = io;
+    var built = try wasi_p2.buildWasiP2Component(&eng, alloc, bytes, &host, .{});
+    defer built.deinit();
+    const ctx = built.ctx;
+
+    const reqs = [_]ServiceRequest{
+        .{ .method = "POST", .path_with_query = "/echo", .authority = "localhost", .body = "hello, echo" },
+        .{ .method = "GET", .path_with_query = "/reflect-header", .authority = "localhost", .headers = &.{.{ .name = "x-echo", .value = "ping" }} },
+        .{ .method = "GET", .path_with_query = "/whatever", .authority = "localhost" },
+    };
+    // The host's ends go with each request; the http tables keep one
+    // request's slots until the next request frees them for reuse.
+    const Held = struct { bodies: usize, handles: usize, ends: usize, shareds: usize };
+    const Tables = struct { fields: usize, requests: usize, responses: usize };
+    const held = struct {
+        fn of(c: *wasi_p2.WasiP2Ctx) Held {
+            return .{
+                .bodies = c.host_body_bytes.count(),
+                .handles = liveSlots(c.resources.slots.items),
+                .ends = liveSlots(c.streams.slots.items),
+                .shareds = liveSlots(c.shared.slots.items),
+            };
+        }
+    }.of;
+    const tables = struct {
+        fn of(c: *wasi_p2.WasiP2Ctx) Tables {
+            return .{ .fields = c.http_fields.items.len, .requests = c.http_requests.items.len, .responses = c.http_responses.items.len };
+        }
+    }.of;
+    const before = held(ctx);
+    var after_first_round: ?Tables = null;
+    for (0..3) |_| {
+        for (reqs) |r| {
+            var resp = try serviceHandle(&built, r);
+            defer resp.deinit(alloc);
+            try testing.expectEqual(before, held(ctx));
+        }
+        if (after_first_round) |t| try testing.expectEqual(t, tables(ctx)) else after_first_round = tables(ctx);
+    }
 }
 
 /// The corpus entry a `test "wasip3-official: <name>"` block covers, taken

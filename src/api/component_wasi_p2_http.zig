@@ -32,6 +32,12 @@ pub const State = struct {
     in_bodies: std.ArrayList(IncomingBody) = .empty,
     /// One `taken` flag per future-trailers.
     trailers: std.ArrayList(bool) = .empty,
+    free: struct {
+        out_bodies: std.ArrayList(u32) = .empty,
+        futures: std.ArrayList(u32) = .empty,
+        in_bodies: std.ArrayList(u32) = .empty,
+        trailers: std.ArrayList(u32) = .empty,
+    } = .{},
 
     pub const OutgoingBody = struct {
         req_rep: u32,
@@ -61,6 +67,10 @@ pub const State = struct {
         for (self.in_bodies.items) |b| alloc.free(b.bytes);
         self.in_bodies.deinit(alloc);
         self.trailers.deinit(alloc);
+        self.free.out_bodies.deinit(alloc);
+        self.free.futures.deinit(alloc);
+        self.free.in_bodies.deinit(alloc);
+        self.free.trailers.deinit(alloc);
     }
 };
 
@@ -178,8 +188,7 @@ fn http2OutgoingRequestNew(caller: *Caller, headers: u32) WasiP2Error!u32 {
     const headers_rep = try ctx.resources.rep(WasiP2Ctx.HTTP_FIELDS_RT, headers);
     (try ctxHttpFields(ctx, headers_rep)).immutable = true;
     _ = try ctx.resources.drop(WasiP2Ctx.HTTP_FIELDS_RT, headers);
-    const idx: u32 = @intCast(ctx.http_requests.items.len);
-    ctx.http_requests.append(ctx.alloc, .{ .headers_rep = headers_rep }) catch return WasiP2Error.OutOfMemory;
+    const idx = ctx.addHttpRequest(.{ .headers_rep = headers_rep }) catch return WasiP2Error.OutOfMemory;
     return ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, idx);
 }
 
@@ -194,8 +203,8 @@ fn http2OutgoingRequestBody(caller: *Caller, self: u32, retptr: u32) WasiP2Error
     const mem = try ctxMemory(caller);
     const req_rep = try rep(ctx, WasiP2Ctx.HTTP_REQUEST_RT, self, ctx.http_requests.items.len);
     if (findOutBody(ctx, req_rep) != null) return writeHandleResult(mem, retptr, null);
-    const idx: u32 = @intCast(ctx.http2.out_bodies.items.len);
-    ctx.http2.out_bodies.append(ctx.alloc, .{ .req_rep = req_rep }) catch return WasiP2Error.OutOfMemory;
+    const st = &ctx.http2;
+    const idx = ctx_mod.addSlot(State.OutgoingBody, ctx.alloc, &st.out_bodies, &st.free.out_bodies, .{ .req_rep = req_rep }) catch return WasiP2Error.OutOfMemory;
     try writeHandleResult(mem, retptr, try ctx.resources.new(WasiP2Ctx.HTTP2_OUTGOING_BODY_RT, idx));
 }
 
@@ -280,8 +289,8 @@ fn http2Handle(caller: *Caller, request: u32, opts_disc: u32, opts: u32, retptr:
         try mem.write(retptr, @as(u8, 1));
         return writeErrorCode(ctx, mem, retptr + 8, ordinal, null);
     }
-    const idx: u32 = @intCast(ctx.http2.futures.items.len);
-    ctx.http2.futures.append(ctx.alloc, .{ .req_rep = req_rep }) catch return WasiP2Error.OutOfMemory;
+    const st = &ctx.http2;
+    const idx = ctx_mod.addSlot(State.FutureResponse, ctx.alloc, &st.futures, &st.free.futures, .{ .req_rep = req_rep }) catch return WasiP2Error.OutOfMemory;
     try mem.write(retptr, @as(u8, 0));
     try mem.write(retptr + 8, try ctx.resources.new(WasiP2Ctx.HTTP2_FUTURE_RESPONSE_RT, idx));
 }
@@ -331,12 +340,13 @@ fn http2FutureResponseGet(caller: *Caller, self: u32, retptr: u32) WasiP2Error!v
         },
         else => |oe| return oe,
     };
-    const resp_idx: u32 = @intCast(ctx.http_responses.items.len);
-    {
+    const resp_idx = blk: {
         errdefer ctx.alloc.free(ex.body);
-        ctx.http_responses.append(ctx.alloc, .{ .status = ex.status, .headers_rep = ex.headers_rep }) catch return WasiP2Error.OutOfMemory;
-        ctx.http2.in_bodies.append(ctx.alloc, .{ .resp_rep = resp_idx, .bytes = ex.body }) catch return WasiP2Error.OutOfMemory;
-    }
+        const i = ctx.addHttpResponse(.{ .status = ex.status, .headers_rep = ex.headers_rep }) catch return WasiP2Error.OutOfMemory;
+        const st = &ctx.http2;
+        _ = ctx_mod.addSlot(State.IncomingBody, ctx.alloc, &st.in_bodies, &st.free.in_bodies, .{ .resp_rep = i, .bytes = ex.body }) catch return WasiP2Error.OutOfMemory;
+        break :blk i;
+    };
     try mem.write(retptr + 16, @as(u8, 0));
     try mem.write(retptr + 24, try ctx.resources.new(WasiP2Ctx.HTTP_RESPONSE_RT, resp_idx));
 }
@@ -375,8 +385,8 @@ fn http2IncomingBodyFinish(caller: *Caller, this: u32) WasiP2Error!u32 {
     if (ctx.http2.in_bodies.items[r].stream_live) return WasiP2Error.Unreachable;
     _ = try ctx.resources.drop(WasiP2Ctx.HTTP2_INCOMING_BODY_RT, this);
     releaseInBody(ctx, r);
-    const idx: u32 = @intCast(ctx.http2.trailers.items.len);
-    ctx.http2.trailers.append(ctx.alloc, false) catch return WasiP2Error.OutOfMemory;
+    const st = &ctx.http2;
+    const idx = ctx_mod.addSlot(bool, ctx.alloc, &st.trailers, &st.free.trailers, false) catch return WasiP2Error.OutOfMemory;
     return ctx.resources.new(WasiP2Ctx.HTTP2_FUTURE_TRAILERS_RT, idx);
 }
 
