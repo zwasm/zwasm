@@ -45,6 +45,20 @@ pub fn validFieldName(name: []const u8) bool {
     return true;
 }
 
+/// Wasmtime's `DEFAULT_FORBIDDEN_HEADERS`, which the official http-fields
+/// test asserts; the spec has no list yet (WebAssembly/WASI#940).
+const forbidden_field_names = [_][]const u8{
+    "connection",        "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection",
+    "transfer-encoding", "upgrade",    "host",               "http2-settings",
+};
+
+pub fn isForbiddenFieldName(name: []const u8) bool {
+    for (forbidden_field_names) |f| {
+        if (std.ascii.eqlIgnoreCase(f, name)) return true;
+    }
+    return false;
+}
+
 /// RFC 9110 §5.6.2 `field-value`: SP / HTAB / VCHAR (0x21-0x7E) /
 /// obs-text (0x80-0xFF). (The full ABNF also forbids leading/trailing
 /// SP/HTAB; the official corpus treats them as valid — e.g. `" \t \t "` —
@@ -122,6 +136,7 @@ pub const HttpFields = struct {
         if (self.immutable) return error.Immutable;
         if (!validFieldName(name)) return error.InvalidSyntax;
         for (values) |v| if (!validFieldValue(v)) return error.InvalidSyntax;
+        if (isForbiddenFieldName(name)) return error.Forbidden;
         self.removeAll(alloc, name);
         for (values) |v| self.appendPair(alloc, name, v) catch return error.Other;
     }
@@ -130,6 +145,7 @@ pub const HttpFields = struct {
     pub fn delete(self: *HttpFields, alloc: std.mem.Allocator, name: []const u8) FieldsError!void {
         if (self.immutable) return error.Immutable;
         if (!validFieldName(name)) return error.InvalidSyntax;
+        if (isForbiddenFieldName(name)) return error.Forbidden;
         self.removeAll(alloc, name);
     }
 
@@ -138,6 +154,7 @@ pub const HttpFields = struct {
     pub fn getAndDelete(self: *HttpFields, out: *std.ArrayList([]u8), alloc: std.mem.Allocator, name: []const u8) FieldsError!void {
         if (self.immutable) return error.Immutable;
         if (!validFieldName(name)) return error.InvalidSyntax;
+        if (isForbiddenFieldName(name)) return error.Forbidden;
         var i: usize = 0;
         while (i < self.entries.items.len) {
             const p = self.entries.items[i];
@@ -154,6 +171,7 @@ pub const HttpFields = struct {
         if (self.immutable) return error.Immutable;
         if (!validFieldName(name)) return error.InvalidSyntax;
         if (!validFieldValue(value)) return error.InvalidSyntax;
+        if (isForbiddenFieldName(name)) return error.Forbidden;
         self.appendPair(alloc, name, value) catch return error.Other;
     }
 
@@ -161,6 +179,7 @@ pub const HttpFields = struct {
     pub fn appendChecked(self: *HttpFields, alloc: std.mem.Allocator, name: []const u8, value: []const u8) FieldsError!void {
         if (!validFieldName(name)) return error.InvalidSyntax;
         if (!validFieldValue(value)) return error.InvalidSyntax;
+        if (isForbiddenFieldName(name)) return error.Forbidden;
         self.appendPair(alloc, name, value) catch return error.Other;
     }
 
@@ -395,6 +414,43 @@ test "fields: ordered storage, case-insensitive access, lowercased copy-all" {
     try testing.expectError(error.Immutable, f.set(alloc, "foo", &.{}));
     try testing.expectError(error.Immutable, f.delete(alloc, "foo"));
     try testing.expect(f.has("foo"));
+    f.immutable = false;
+}
+
+test "fields: every mutator refuses a forbidden name in any casing" {
+    const alloc = testing.allocator;
+    var f: HttpFields = .{};
+    defer f.deinit(alloc);
+
+    var out: std.ArrayList([]u8) = .empty;
+    defer out.deinit(alloc);
+    for ([_][]const u8{ "Connection", "HOST", "transfer-encoding" }) |name| {
+        try testing.expectError(error.Forbidden, f.set(alloc, name, &.{"v"}));
+        try testing.expectError(error.Forbidden, f.append(alloc, name, "v"));
+        try testing.expectError(error.Forbidden, f.appendChecked(alloc, name, "v"));
+        try testing.expectError(error.Forbidden, f.delete(alloc, name));
+        try testing.expectError(error.Forbidden, f.getAndDelete(&out, alloc, name));
+    }
+    try testing.expectEqual(@as(usize, 0), f.entries.items.len);
+
+    // Spelled out, not read from `forbidden_field_names`, so dropping an
+    // entry there fails here.
+    for ([_][]const u8{
+        "connection",        "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection",
+        "transfer-encoding", "upgrade",    "host",               "http2-settings",
+    }) |name| try testing.expect(isForbiddenFieldName(name));
+
+    // Only the exact names: a longer name that contains one is ordinary.
+    try f.append(alloc, "ConnectionLevel142", "v");
+    try f.append(alloc, "x-connection", "v");
+    try testing.expectEqual(@as(usize, 2), f.entries.items.len);
+
+    // Immutability is reported before the name is looked at.
+    f.immutable = true;
+    try testing.expectError(error.Immutable, f.set(alloc, "host", &.{"v"}));
+    try testing.expectError(error.Immutable, f.append(alloc, "host", "v"));
+    try testing.expectError(error.Immutable, f.delete(alloc, "host"));
+    try testing.expectError(error.Immutable, f.getAndDelete(&out, alloc, "host"));
     f.immutable = false;
 }
 
