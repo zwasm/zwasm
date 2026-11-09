@@ -88,14 +88,19 @@ pub fn clockTimeNs(host: *Host, clock_id: u32) error{ NoSys, Inval }!u64 {
 /// P1/0.2 paths keep the unsigned `clockTimeNs` view.
 pub fn clockTimeNsSigned(host: *Host, clock_id: u32) error{ NoSys, Inval }!i96 {
     const io = host.io orelse return error.NoSys;
-    const clock: std.Io.Clock = switch (clock_id) {
+    return std.Io.Timestamp.now(io, try clockFromId(clock_id)).toNanoseconds();
+}
+
+/// The four witx `clockid` values; anything else is `inval` on every path
+/// that takes an id, including a relative `poll_oneoff` timer (#311).
+fn clockFromId(clock_id: u32) error{Inval}!std.Io.Clock {
+    return switch (clock_id) {
         0 => .real,
         1 => .awake,
         2 => .cpu_process,
         3 => .cpu_thread,
-        else => return error.Inval,
+        else => error.Inval,
     };
-    return std.Io.Timestamp.now(io, clock).toNanoseconds();
 }
 
 // ============================================================
@@ -129,13 +134,7 @@ pub fn clockResGet(
 /// mapping as `clock_time_get`; requires `host.io`.
 pub fn clockResNs(host: *Host, clock_id: u32) error{ NoSys, Inval, NotSup, Io }!u64 {
     const io = host.io orelse return error.NoSys;
-    const clock: std.Io.Clock = switch (clock_id) {
-        0 => .real,
-        1 => .awake,
-        2 => .cpu_process,
-        3 => .cpu_thread,
-        else => return error.Inval,
-    };
+    const clock = try clockFromId(clock_id);
     const dur = clock.resolution(io) catch |err| switch (err) {
         error.ClockUnavailable => return error.NotSup,
         error.Unexpected => return error.Io,
@@ -339,7 +338,10 @@ pub fn pollOneoff(
                         error.Inval => .inval,
                     };
                     break :blk if (timeout_ns > now_ns) timeout_ns - now_ns else 0;
-                } else timeout_ns;
+                } else blk: {
+                    _ = clockFromId(clock_id) catch return .inval;
+                    break :blk timeout_ns;
+                };
                 if (best_rel_ns == null or rel < best_rel_ns.?) {
                     best_rel_ns = rel;
                     best_userdata = userdata;
@@ -541,6 +543,48 @@ test "pollOneoff: a clock subscription fires + writes one event" {
     try testing.expectEqual(@as(u64, 0xCAFE), std.mem.readInt(u64, mem[48..56], .little)); // event.userdata
     try testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, mem[56..58], .little)); // event.error = success
     try testing.expectEqual(@as(u8, @backingInt(p1.EventType.clock)), mem[58]); // event.type @ 48+10
+}
+
+test "pollOneoff: a relative clock subscription with an unknown clock_id is inval (#311)" {
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    var mem: [128]u8 = @splat(0);
+    std.mem.writeInt(u32, mem[80..84], 0xAAAA_AAAA, .little); // nevents sentinel
+    mem[8] = @backingInt(p1.EventType.clock);
+    std.mem.writeInt(u32, mem[16..20], 99, .little);
+    const e = pollOneoff(&h, &mem, 0, 48, 1, 80, null);
+    try testing.expectEqual(p1.Errno.inval, e);
+    try testing.expectEqual(@as(u32, 0xAAAA_AAAA), std.mem.readInt(u32, mem[80..84], .little));
+}
+
+test "pollOneoff: an unknown clock_id fails the whole call, with a valid subscription behind it (#311)" {
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    // Subscriptions @0 and @48; events @96; nevents @160.
+    var mem: [192]u8 = @splat(0);
+    std.mem.writeInt(u32, mem[160..164], 0xAAAA_AAAA, .little);
+    mem[8] = @backingInt(p1.EventType.clock);
+    std.mem.writeInt(u32, mem[16..20], 99, .little);
+    mem[48 + 8] = @backingInt(p1.EventType.clock);
+    std.mem.writeInt(u32, mem[48 + 16 ..][0..4], 1, .little); // monotonic, timeout 0
+    const e = pollOneoff(&h, &mem, 0, 96, 2, 160, null);
+    try testing.expectEqual(p1.Errno.inval, e);
+    try testing.expectEqual(@as(u32, 0xAAAA_AAAA), std.mem.readInt(u32, mem[160..164], .little));
+}
+
+test "pollOneoff: a relative process-cputime subscription is still a timer (#311)" {
+    // wasmtime refuses id 2 on some paths; #311 keeps ids 2 and 3 accepted.
+    var h = try Host.init(testing.allocator);
+    defer h.deinit();
+    h.io = testing.io;
+    var mem: [128]u8 = @splat(0);
+    mem[8] = @backingInt(p1.EventType.clock);
+    std.mem.writeInt(u32, mem[16..20], 2, .little);
+    const e = pollOneoff(&h, &mem, 0, 48, 1, 80, null);
+    try testing.expectEqual(p1.Errno.success, e);
+    try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, mem[80..84], .little));
 }
 
 fn raiseAfter(io: std.Io, ms: u64, flag: *std.atomic.Value(u32)) void {
