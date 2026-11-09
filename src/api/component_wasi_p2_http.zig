@@ -549,7 +549,7 @@ fn runHttpGuestOutcome(mode: []const u8, allow_network: bool, serve: bool, inspe
     defer if (endpoint) |e| e.stop();
     var addr_buf: [32]u8 = undefined;
     const addr = if (serve) blk: {
-        endpoint = try EchoEndpoint.start(io);
+        endpoint = try EchoEndpoint.start(io, null);
         break :blk try std.mem.print(&addr_buf, "127.0.0.1:{d}", .{endpoint.?.port});
     } else "127.0.0.1:9";
     try host.setEnvs(&.{"HTTP_ENDPOINT"}, &.{addr});

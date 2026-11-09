@@ -1,0 +1,13 @@
+{
+  "proposals": [
+    "sockets"
+  ],
+  "operations": [
+    {
+      "type": "run"
+    },
+    {
+      "type": "wait"
+    }
+  ]
+}
