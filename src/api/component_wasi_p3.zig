@@ -136,9 +136,9 @@ pub fn driveAsyncMain(built: *wasi_p2.BuiltComponent) anyerror!void {
     return driveAsyncCall(built, firstAsyncLift(built) orelse return error.NoAsyncExport, &.{});
 }
 
-/// The first `canon lift` with `opts.is_async`: the task `driveAsyncMain` and
-/// the service world's `handler.handle` drive. `zwasm run` selects its entry
-/// by name instead (`runWasiMain`).
+/// The first `canon lift` with `opts.is_async`: the task `driveAsyncMain`
+/// drives. `zwasm run` (`runWasiMain`) and `serviceHandle` select theirs by
+/// name instead.
 fn firstAsyncLift(built: *const wasi_p2.BuiltComponent) ?ctypes.Lift {
     for (built.info.canons.items) |c| {
         if (c == .lift and c.lift.opts.is_async) return c.lift;
@@ -204,6 +204,162 @@ fn asyncExportExpectsResult(built: *wasi_p2.BuiltComponent, type_index: u32) boo
         .named => false,
     };
 }
+
+/// One request for a `wasi:http/service` component's `handler.handle`
+/// (ADR-0205 D-3). `zwasm serve` builds it from the wire; the official lane's
+/// harness from a manifest op.
+pub const ServiceRequest = struct {
+    /// The request-line token; `serviceHandle` refuses one outside
+    /// `p3http.Method.known_names` with `error.UnknownMethod`.
+    method: []const u8,
+    path_with_query: []const u8,
+    authority: []const u8,
+    headers: []const std.http.Header = &.{},
+    body: []const u8 = "",
+};
+
+/// What the handler delivered, owned by `built.alloc`. Trailers are not read.
+pub const ServiceResponse = struct {
+    status: u16,
+    headers: []std.http.Header,
+    body: []u8,
+
+    pub fn deinit(self: *ServiceResponse, alloc: Allocator) void {
+        for (self.headers) |h| {
+            alloc.free(h.name);
+            alloc.free(h.value);
+        }
+        alloc.free(self.headers);
+        alloc.free(self.body);
+    }
+};
+
+/// The async `handle` lift of a `wasi:http/handler@0.3.x` export: the entry
+/// `serviceHandle` drives. Null when the component exports none.
+pub fn serviceHandler(alloc: Allocator, info: *const ctypes.TypeInfo) Allocator.Error!?ctypes.Lift {
+    const prefix = "wasi:http/handler@";
+    for (info.exports.items) |e| {
+        if (std.meta.activeTag(e.sort) != .instance or !std.mem.startsWith(u8, e.name, prefix)) continue;
+        if (ctypes.parseWasiGen(e.name[prefix.len..]) != .p3) continue;
+        const path = try alloc.print("{s}#handle", .{e.name});
+        defer alloc.free(path);
+        const lift = info.exportedLift(path) orelse continue;
+        if (lift.opts.is_async) return lift;
+    }
+    return null;
+}
+
+/// Mint a request resource for `req`, drive `handler.handle` with it to
+/// completion, and return the response it delivered with its body read.
+/// `error.HandlerFailed` = the handler returned `err`.
+pub fn serviceHandle(built: *wasi_p2.BuiltComponent, req: ServiceRequest) !ServiceResponse {
+    const ctx = built.ctx;
+    const alloc = ctx.alloc;
+    const lift = (try serviceHandler(alloc, &built.info)) orelse return error.NoServiceHandler;
+
+    const method: p3http.Method = blk: {
+        inline for (p3http.Method.known_names) |k| {
+            if (std.mem.eql(u8, req.method, k.name)) break :blk @unionInit(p3http.Method, @tagName(k.tag), {});
+        }
+        return error.UnknownMethod;
+    };
+
+    const fields_idx: u32 = @intCast(ctx.http_fields.items.len);
+    try ctx.http_fields.append(alloc, .{});
+    for (req.headers) |h| try ctx.http_fields.items[fields_idx].appendPair(alloc, h.name, h.value);
+    ctx.http_fields.items[fields_idx].immutable = true;
+
+    // The body-bytes branch serves the readable end from the stored buffer.
+    var contents: ?u32 = null;
+    if (req.body.len > 0) {
+        const pair = try async_mod.newStreamPair(&ctx.streams, &ctx.shared, null);
+        const shared_id = (try ctx.streams.get(pair.readable)).shared;
+        try ctx.host_body_bytes.put(alloc, shared_id, .{ .data = try alloc.dupe(u8, req.body) });
+        contents = pair.readable;
+    }
+
+    const req_idx: u32 = @intCast(ctx.http_requests.items.len);
+    try ctx.http_requests.append(alloc, .{
+        .method = method,
+        .path_with_query = try alloc.dupe(u8, req.path_with_query),
+        .scheme = .http,
+        .authority = try alloc.dupe(u8, req.authority),
+        .headers_rep = fields_idx,
+        .contents_stream = contents,
+    });
+    const req_handle = try ctx.resources.new(wasi_p2.WasiP2Ctx.HTTP_REQUEST_RT, req_idx);
+
+    ctx.task_return = null;
+    ctx.task_return_payload = null;
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(alloc);
+    var svc = ServiceCapture{ .wp2 = ctx, .capture = &body };
+    ctx.external_sock_step = ServiceCapture.step;
+    ctx.external_sock_ctx = &svc;
+    defer {
+        ctx.external_sock_step = null;
+        ctx.external_sock_ctx = null;
+        if (svc.registered_shared) |sid| _ = ctx.host_capture_sinks.remove(sid);
+    }
+    try driveAsyncCall(built, lift, &.{.{ .i32 = @bitCast(req_handle) }});
+
+    if (ctx.task_return != 0) return error.HandlerFailed;
+    const resp_handle = ctx.task_return_payload orelse return error.HandlerFailed;
+    const resp = ctx.http_responses.items[try ctx.resources.rep(wasi_p2.WasiP2Ctx.HTTP_RESPONSE_RT, resp_handle)];
+
+    const pairs = ctx.http_fields.items[resp.headers_rep].entries.items;
+    const headers = try alloc.alloc(std.http.Header, pairs.len);
+    var filled: usize = 0;
+    errdefer {
+        for (headers[0..filled]) |h| {
+            alloc.free(h.name);
+            alloc.free(h.value);
+        }
+        alloc.free(headers);
+    }
+    for (pairs, headers) |p, *h| {
+        const name = try alloc.dupe(u8, p.name);
+        errdefer alloc.free(name);
+        h.* = .{ .name = name, .value = try alloc.dupe(u8, p.value) };
+        filled += 1;
+    }
+    return .{ .status = resp.status, .headers = headers, .body = try body.toOwnedSlice(alloc) };
+}
+
+/// The no-progress hook of `serviceHandle`: once the guest delivered its
+/// response via task.return, register the capture sink on the response's
+/// contents stream — the guest's spawned body writer parks BEFORE the host can
+/// know the stream id, so the registration (which drains the parked write)
+/// must happen inside the drive.
+const ServiceCapture = struct {
+    wp2: *wasi_p2.WasiP2Ctx,
+    capture: *std.ArrayList(u8),
+    registered_shared: ?u32 = null,
+    done: bool = false,
+
+    fn step(ptr: *anyopaque) bool {
+        const self: *ServiceCapture = @ptrCast(@alignCast(ptr));
+        if (self.done) return false;
+        if (self.wp2.task_return != 0) return false;
+        const payload = self.wp2.task_return_payload orelse return false;
+        const rep = self.wp2.resources.rep(wasi_p2.WasiP2Ctx.HTTP_RESPONSE_RT, payload) catch return false;
+        if (rep >= self.wp2.http_responses.items.len) return false;
+        const resp = &self.wp2.http_responses.items[rep];
+        // Trailers are not read: release the readable so the guest's parked
+        // trailers writer observes DROPPED.
+        if (resp.trailers_future != 0) {
+            wasi_p2.http3DropTransferredEnd(self.wp2, resp.trailers_future);
+            resp.trailers_future = 0;
+        }
+        if (resp.contents_stream) |cs| {
+            const end = self.wp2.streams.get(cs) catch return false;
+            wasi_p2.http3RegisterCaptureSink(self.wp2, end.shared, self.capture) catch return false;
+            self.registered_shared = end.shared;
+        }
+        self.done = true;
+        return true;
+    }
+};
 
 const testing = std.testing;
 
@@ -1066,123 +1222,39 @@ const ExternalClient = struct {
 
 const EchoEndpoint = @import("component_http_echo.zig").EchoEndpoint;
 
-/// The no-progress hook for service driving (ADR-0205 D-3): once the guest
-/// delivered its response via task.return, register the harness capture
-/// sink on the response's contents stream — the guest's spawned body writer
-/// parks BEFORE the harness can know the stream id, so the registration
-/// (which drains the parked write) must happen inside the drive.
-const ServiceCapture = struct {
-    wp2: *wasi_p2.WasiP2Ctx,
-    capture: *std.ArrayList(u8),
-    registered_shared: ?u32 = null,
-    done: bool = false,
-
-    fn step(ptr: *anyopaque) bool {
-        const self: *ServiceCapture = @ptrCast(@alignCast(ptr));
-        if (self.done) return false;
-        if (self.wp2.task_return != 0) return false;
-        const payload = self.wp2.task_return_payload orelse return false;
-        const rep = self.wp2.resources.rep(wasi_p2.WasiP2Ctx.HTTP_RESPONSE_RT, payload) catch return false;
-        if (rep >= self.wp2.http_responses.items.len) return false;
-        const resp = &self.wp2.http_responses.items[rep];
-        // The harness never reads response trailers: release the readable so
-        // the guest's parked trailers writer observes DROPPED.
-        if (resp.trailers_future != 0) {
-            wasi_p2.http3DropTransferredEnd(self.wp2, resp.trailers_future);
-            resp.trailers_future = 0;
-        }
-        if (resp.contents_stream) |cs| {
-            const end = self.wp2.streams.get(cs) catch return false;
-            wasi_p2.http3RegisterCaptureSink(self.wp2, end.shared, self.capture) catch return false;
-            self.registered_shared = end.shared;
-        }
-        self.done = true;
-        return true;
-    }
-};
-
-/// Build a harness-side request resource for one manifest `request` op and
-/// drive the guest's `handler.handle` with it; assert the response.
+/// Drive the guest's `handler.handle` with one manifest `request` op and
+/// assert the response.
 fn runServiceRequest(built: *wasi_p2.BuiltComponent, rop: HttpReqOp) !void {
-    const ctx = built.ctx;
-    const alloc = ctx.alloc;
-
-    // Request headers: a fresh immutable fields entry.
-    const fields_idx: u32 = @intCast(ctx.http_fields.items.len);
-    try ctx.http_fields.append(alloc, .{});
+    const alloc = built.ctx.alloc;
+    var headers: std.ArrayList(std.http.Header) = .empty;
+    defer headers.deinit(alloc);
     if (rop.headers) |hs| {
         var it = hs.object.iterator();
-        while (it.next()) |e| {
-            try ctx.http_fields.items[fields_idx].appendChecked(alloc, e.key_ptr.*, e.value_ptr.string);
-        }
+        while (it.next()) |e| try headers.append(alloc, .{ .name = e.key_ptr.*, .value = e.value_ptr.string });
     }
-    ctx.http_fields.items[fields_idx].immutable = true;
-
-    // Request body: served from the stored buffer by the body-bytes branch.
-    var contents: ?u32 = null;
-    if (rop.body.len > 0) {
-        const pair = try async_mod.newStreamPair(&ctx.streams, &ctx.shared, null);
-        const shared_id = (try ctx.streams.get(pair.readable)).shared;
-        try ctx.host_body_bytes.put(alloc, shared_id, .{ .data = try alloc.dupe(u8, rop.body) });
-        contents = pair.readable;
-    }
-
-    const method: p3http.Method = blk: {
-        inline for (p3http.Method.known_names) |k| {
-            if (std.mem.eql(u8, rop.method, k.name)) break :blk @unionInit(p3http.Method, @tagName(k.tag), {});
-        }
-        return error.TestUnexpectedResult; // manifest methods are all known
-    };
-    const req_idx: u32 = @intCast(ctx.http_requests.items.len);
-    try ctx.http_requests.append(alloc, .{
-        .method = method,
-        .path_with_query = try alloc.dupe(u8, rop.path),
-        .scheme = .http,
-        .authority = try alloc.dupe(u8, "localhost"),
-        .headers_rep = fields_idx,
-        .contents_stream = contents,
+    var resp = try serviceHandle(built, .{
+        .method = rop.method,
+        .path_with_query = rop.path,
+        .authority = "localhost",
+        .headers = headers.items,
+        .body = rop.body,
     });
-    const req_handle = try ctx.resources.new(wasi_p2.WasiP2Ctx.HTTP_REQUEST_RT, req_idx);
+    defer resp.deinit(alloc);
 
-    // Drive handler.handle(request) with the capture seam installed.
-    ctx.task_return = null;
-    ctx.task_return_payload = null;
-    var capture: std.ArrayList(u8) = .empty;
-    defer capture.deinit(alloc);
-    var svc = ServiceCapture{ .wp2 = ctx, .capture = &capture };
-    ctx.external_sock_step = ServiceCapture.step;
-    ctx.external_sock_ctx = &svc;
-    defer {
-        ctx.external_sock_step = null;
-        ctx.external_sock_ctx = null;
-        if (svc.registered_shared) |sid| _ = ctx.host_capture_sinks.remove(sid);
-    }
-    try driveAsyncCall(built, firstAsyncLift(built) orelse return error.NoAsyncExport, &.{.{ .i32 = @bitCast(req_handle) }});
-
-    // Assert the delivered response.
-    try testing.expectEqual(@as(?u32, 0), ctx.task_return);
-    const resp_handle = ctx.task_return_payload orelse return error.TestUnexpectedResult;
-    const rep = try ctx.resources.rep(wasi_p2.WasiP2Ctx.HTTP_RESPONSE_RT, resp_handle);
-    const resp = ctx.http_responses.items[rep];
     try testing.expectEqual(rop.expect_status, resp.status);
     if (rop.expect_headers) |ehs| {
-        const flds = &ctx.http_fields.items[resp.headers_rep];
         var it = ehs.object.iterator();
         while (it.next()) |e| {
-            var got: std.ArrayList([]const u8) = .empty;
-            defer got.deinit(alloc);
-            try flds.get(&got, alloc, e.key_ptr.*);
-            var found = false;
-            for (got.items) |v| {
-                if (std.mem.eql(u8, v, e.value_ptr.string)) found = true;
-            }
+            const found = for (resp.headers) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, e.key_ptr.*) and std.mem.eql(u8, h.value, e.value_ptr.string)) break true;
+            } else false;
             if (!found) {
                 std.debug.print("[service] missing response header {s}: {s}\n", .{ e.key_ptr.*, e.value_ptr.string });
                 return error.TestUnexpectedResult;
             }
         }
     }
-    if (rop.expect_body) |eb| try testing.expectEqualStrings(eb, capture.items);
+    if (rop.expect_body) |eb| try testing.expectEqualStrings(eb, resp.body);
 }
 
 /// The corpus entry a `test "wasip3-official: <name>"` block covers, taken
