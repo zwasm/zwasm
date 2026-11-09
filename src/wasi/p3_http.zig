@@ -97,7 +97,10 @@ pub const HttpFields = struct {
         self.* = .{};
     }
 
-    fn appendPair(self: *HttpFields, alloc: std.mem.Allocator, name: []const u8, value: []const u8) !void {
+    /// No syntax or forbidden-name check: also the seed of a host-minted
+    /// incoming request's headers, which wasmtime passes to the guest as
+    /// received (`FieldMap::new_immutable`).
+    pub fn appendPair(self: *HttpFields, alloc: std.mem.Allocator, name: []const u8, value: []const u8) !void {
         const n = try alloc.alloc(u8, name.len);
         errdefer alloc.free(n);
         for (name, 0..) |c, i| n[i] = std.ascii.toLower(c);
