@@ -565,6 +565,7 @@ pub fn build(b: *std.Build) void {
     // `core_tests` omits the async tests.
     const p3_tests = b.addTest(.{ .root_module = core_p3, .filters = test_filters });
     const run_p3_tests = b.addRunArtifact(p3_tests);
+    for ([_]*std.Build.Step.Run{ run_core_tests, run_p3_tests }) |run| addTreeInputs(b, run, "test/component/wasip3_official");
 
     // `zig build test-spec-simd` — §9.9 per ADR-0045. SIMD spec
     // assertion runner (parallel to spec_assert_runner). §9.9-a
@@ -1972,6 +1973,29 @@ pub fn build(b: *std.Build) void {
 /// GCC on the host has libstdc++ headers and the newest does not (gcc-14
 /// next to g++-13 only), and `-Werror` would fail C that includes no C++.
 const strict_c_flags: []const []const u8 = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-gcc-install-dir-libstdcxx" };
+
+/// Declare every file under `sub_path` an input of `run`. A unit-test run
+/// has no side effects, so it is cached on its declared inputs alone, and a
+/// corpus the tests read through the cwd is not one: without this, a run
+/// after a corpus-only change reports the previous result. The configuration
+/// is cached too, so each directory's listing is declared as what it depends
+/// on; otherwise a file added later would not be an input.
+fn addTreeInputs(b: *std.Build, run: *std.Build.Step.Run, sub_path: []const u8) void {
+    const io = b.graph.io;
+    b.dependOnDirectoryContents(b.path(sub_path));
+    var dir = b.root.openDir(io, sub_path, .{ .iterate = true }) catch |err|
+        std.debug.panic("unit-test corpus '{s}' not openable: {t}", .{ sub_path, err });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (it.next(io) catch |err| std.debug.panic("listing '{s}': {t}", .{ sub_path, err })) |entry| {
+        const path = b.pathJoin(&.{ sub_path, entry.name });
+        switch (entry.kind) {
+            .file => run.addFileInput(b.path(path)),
+            .directory => addTreeInputs(b, run, path),
+            else => {},
+        }
+    }
+}
 
 /// Zig 0.16's `b.pathFromRoot`, removed in 0.17 along with `b.build_root`.
 fn pathFromRoot(b: *std.Build, sub_path: []const u8) []u8 {
