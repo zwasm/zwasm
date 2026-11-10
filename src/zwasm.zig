@@ -453,6 +453,7 @@ test {
     _ = @import("api/component.zig");
     _ = @import("api/component_wasi_ctx.zig");
     _ = @import("api/component_wasi_p3_host.zig");
+    _ = @import("api/component_wasi_p3_http.zig");
     _ = @import("api/component_wasi_p2.zig");
     _ = @import("api/component_wasi_p2_http.zig");
     _ = @import("api/component_tests.zig");

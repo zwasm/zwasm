@@ -126,3 +126,9 @@ EXEMPT rationale ≤ 2500; full 3-OS CI green; D-444 discharged.
   the S5 growth-ratchet is the guard against silent regrowth.
 - **Superseded-ADR note**: ADR-0190's "sibling `component_wasi_p3_host.zig`"
   reservation is now REAL (this ADR delivered it).
+
+## Revision history
+
+| Date       | SHA | Note |
+|------------|-----|------|
+| 2026-11-10 | —   | **Part (c) is two files.** The wasi:http 0.3 host moved to `component_wasi_p3_http.zig`, since that is where (c) grows (+419 lines in #707). `registerP3Arms` delegates the http arms to its `defineHttp3Op`, and `hooksTable` names its two hook targets; it needs nothing from the rest of (c). Graph: (b)→(a),(c),(c-http); (c)→(a),(c-http); (c-http)→(a). |

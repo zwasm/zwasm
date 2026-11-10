@@ -2,8 +2,9 @@
 //! WASI **Preview 2** trampolines + classifier + component orchestration —
 //! ADR-0207 (b). The substrate (`WasiP2Ctx`, engines, straddle helpers)
 //! lives in `component_wasi_ctx.zig`; the 0.3 layer in
-//! `component_wasi_p3_host.zig`. This file is also the compat surface:
-//! external importers keep resolving every historical pub symbol here.
+//! `component_wasi_p3_host.zig` and `component_wasi_p3_http.zig`. This file
+//! is also the compat surface: external importers keep resolving every
+//! historical pub symbol here.
 
 const std = @import("std");
 
@@ -41,6 +42,7 @@ const ctx_mod = @import("component_wasi_ctx.zig");
 const lower_realloc = @import("component_lower_realloc.zig");
 const p3h = @import("component_wasi_p3_host.zig");
 const p2http = @import("component_wasi_p2_http.zig");
+const http3_host = @import("component_wasi_p3_http.zig");
 
 // Substrate re-exports (compat surface, ADR-0207 I1) + local aliases so the
 // moved trampoline bodies read unchanged.
@@ -99,9 +101,9 @@ const p2StreamFutureCancel = ctx_mod.p2StreamFutureCancel;
 const p2StreamFutureDrop = ctx_mod.p2StreamFutureDrop;
 
 // P3-side pubs (consumed by component_wasi_p3.zig; re-export per ADR-0207 I1).
-pub const http3DropTransferredEnd = p3h.http3DropTransferredEnd;
-pub const pollPendingClientSends = p3h.pollPendingClientSends;
-pub const http3RegisterCaptureSink = p3h.http3RegisterCaptureSink;
+pub const http3DropTransferredEnd = http3_host.http3DropTransferredEnd;
+pub const pollPendingClientSends = http3_host.pollPendingClientSends;
+pub const http3RegisterCaptureSink = http3_host.http3RegisterCaptureSink;
 
 pub fn p2GetStdout(caller: *Caller) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
