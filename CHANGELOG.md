@@ -10,6 +10,86 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-11-10
+
+### Added
+
+- **`zwasm serve` runs a WASI 0.3 `wasi:http/service` component as an
+  HTTP/1.1 server** (#688). One instance, one request at a time; `--addr`
+  (default `127.0.0.1:8080`, port 0 picks a free one); prints
+  `Serving HTTP on http://…` to stderr. The 0.2 `incoming-handler` half is
+  still not served.
+
+### Fixed
+
+- **A WASI 0.1 `poll_oneoff` clock subscription with an unknown `clock_id`
+  fails with `inval` on the relative path too** (#311). Before, an id that is
+  none of the four `clockid` values was checked only when `ABSTIME` was set,
+  and a relative subscription with it became a plain timer.
+
+- **A block whose first exit is `br_on_null`, `br_on_non_null`, `br_on_cast`
+  or `br_on_cast_fail` returns the right result on the JIT** (#400). The
+  liveness pass did not record the block's merge values at those four
+  instructions as the emit does, so with a call between the block's end and
+  the use of its result, the register holding it could be reused first.
+
+- **A WASI 0.2 guest's filesystem error for a path outside the preopen is
+  `not-permitted`, as the spec and wasmtime give it** (#462). That and seven
+  other conditions (`deadlock`, `quota`, `no-lock`, `not-recoverable`,
+  `no-tty`, `no-such-device`, `text-file-busy`) read as `io` before.
+
+- **The interpreter's speed no longer moves with code laid out around it**
+  (#548). The dispatch loop and every handler sit in one link section; a
+  change elsewhere in the binary used to shift them by up to 12%.
+
+- **A trap the guest's `cabi_realloc` or a resource destructor raises reaches
+  the embedder as that trap** (#550). Before, both reported `HostTrap`, the
+  name for a host-side failure.
+
+- **`wasi:http` fields refuse the forbidden field names** (#698). `set`,
+  `append`, `from-list`, `delete` and `get-and-delete` answer `forbidden` for
+  `connection`, `host`, `transfer-encoding` and the six others wasmtime
+  refuses, in any casing; before, any syntactically valid name went through.
+
+- **`wasi:http` `set-path-with-query` refuses a path that is not
+  origin-form** (#699). A value must be empty or start with `/` or `?`;
+  before, `a/b/c` or `http://other.example/x` was accepted and then spliced
+  onto the request's authority.
+
+- **A WASI 0.3 request's `sent` future resolves, so a guest that awaits it
+  no longer deadlocks** (#703). The host minted it and never wrote it; now
+  it resolves with the send's outcome (`ok`, or the `error-code`
+  `client.send` returned), and `ok` when the request is dropped unsent, as
+  wasmtime does.
+
+- **A WASI 0.3 response's trailer section reaches the guest** (#704). The
+  trailers future `consume-body` hands out always resolved `ok(none)`; it
+  now resolves `ok(some(fields))` with the trailers a chunked response
+  carried.
+
+- **A WASI 0.3 request sends the trailers its future resolves to** (#705).
+  The host dropped the request's trailers future at `client.send`, so the
+  guest's write never completed and the instance deadlocked. Now
+  `ok(some)` sends the body chunked with that trailer section, and `err`
+  aborts the request: `client.send` returns the guest's error.
+
+- **An interpreter call chain deeper than 256 no longer traps
+  `CallStackExhausted` while the host stack has room** (#638). Frames past
+  256 go into heap chunks; the cap is `Runtime.max_frame_depth` (16384),
+  and the native-stack check still traps runaway recursion first.
+
+- **A component built with the preview1 adapter (Go, TinyGo, C) links and
+  runs** (#634). It failed with `UnknownImport`: the adapter's `env::memory`
+  and three WASI 0.2 rows it imports (`filesystem-error-code`, the 0.2 clock
+  `resolution`s) were not served.
+
+### Documentation
+
+- **The threat model covers `zwasm serve`.** A peer that connects to its
+  listener is untrusted, and a host crash it causes is a breach of goal 2;
+  the listener has no TLS or authentication, and its availability is not a
+  security goal.
+
 ## [2.10.0] - 2026-11-08
 
 ### Added
