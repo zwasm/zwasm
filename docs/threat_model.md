@@ -16,8 +16,9 @@ build options, and the development tooling under `.dev/` and `scripts/`.
 As of October 2026, zwasm is maintained in practice by one person and has had
 no external security audit. Fuzzing covers module loading and an
 interpreter-versus-JIT execution differential over small committed corpora
-(`test/fuzz/`); the WASI and component hosts are not fuzzed. Treat hostile
-multi-tenant use — guests you do not trust, sharing one process — as beta.
+(`test/fuzz/`); the WASI and component hosts, and the HTTP path of
+`zwasm serve`, are not fuzzed. Treat hostile multi-tenant use — guests you do
+not trust, sharing one process — as beta.
 Report what you find through [private vulnerability reporting](https://github.com/zwasm/zwasm/security/advisories/new);
 published advisories are listed at
 [security/advisories](https://github.com/zwasm/zwasm/security/advisories).
@@ -26,12 +27,12 @@ published advisories are listed at
 
 | Actor | Trust | Why |
 | --- | --- | --- |
-| Embedder, or the operator of a `zwasm run` | Trusted | Links the instances, grants the WASI resources and sets the limits. Anything an embedder can configure, CLI flags included, is not an attack. |
+| Embedder, or the operator of a `zwasm run` or `zwasm serve` | Trusted | Links the instances, grants the WASI resources and sets the limits. Anything an embedder can configure, CLI flags included, is not an attack. |
 | Guest code | **Untrusted** | The adversary. We assume it is hostile from its first instruction, and that the module bytes are malformed on purpose. |
 | Host functions | Trusted | Embedder code, called from the guest. |
 | `.cwasm` artifacts | Trusted as native code | See [Trust boundaries](#5-artifact--runtime). |
 | WASI host resources | Granted | Directories, environment variables, arguments and network access the embedder passed in. |
-| Network peers | **Untrusted** | Whatever a guest's sockets talk to. |
+| Network peers | **Untrusted** | Whatever a guest's sockets talk to, and whoever connects to a `zwasm serve` listener. |
 
 ## Trust boundaries
 
@@ -79,6 +80,15 @@ A `.cwasm` is native code. The loader checks its format version and target, not
 its origin or integrity. Load only artifacts you built yourself or trust as you
 would a shared library; the same holds for the `--cache` directory.
 
+### 6. Network peer ↔ `zwasm serve`
+
+`zwasm serve` opens a listener, and the host reads HTTP/1.1 from whoever
+connects before any guest code runs. A peer's bytes are as untrusted as a
+module's: the host answers the request, refuses it with an HTTP error status,
+or closes the connection, and anything else is a breach of goal 2. The listener
+has no TLS and no authentication; it binds `127.0.0.1:8080` unless `--addr`
+says otherwise.
+
 ## Security goals
 
 These are not properties zwasm guarantees. Each names a breach that, with the
@@ -87,9 +97,9 @@ default settings, we treat as a vulnerability unless
 
 1. **Sandbox.** A guest runs native code, or reads or writes memory outside its
    own memories and tables.
-2. **Host integrity.** A guest triggers behaviour of the host process that the
-   specification does not define: a crash that is not a trap, a read of
-   undefined memory.
+2. **Host integrity.** A guest, or a peer of `zwasm serve`, triggers behaviour
+   of the host process that the specification does not define: a crash that is
+   not a trap, a read of undefined memory.
 3. **Isolation.** A function runs on another instance's state, or an instance
    reaches something it was not linked with.
 4. **Grants.** A guest reaches a host resource it was not granted.
@@ -108,6 +118,7 @@ default settings, we treat as a vulnerability unless
 | `--allow-network`, `Host.allow_network` (Zig API) | 4 | A grant: a component reaches any address the host can route, and listens on any port the host can bind. |
 | `--engine` / `zwasm_instance_new_ex` | 3 | The interpreter and the JIT have different known isolation gaps (#536, #578). |
 | `--cache` | — | The cache directory holds native code (boundary 5). |
+| `zwasm serve --addr` off loopback | — | Any host that can reach the address drives the component (boundary 6). |
 
 ## What we treat as a vulnerability
 
@@ -115,7 +126,7 @@ A breach of a security goal that Known limitations does not name. A maintainer
 sorts a report with three questions:
 
 1. Does the attacker control only the untrusted side — the guest's bytes and
-   what the embedder linked it with?
+   what the embedder linked it with, or the bytes a peer sends to `zwasm serve`?
 2. Does it breach a security goal?
 3. Is the result something other than a trap or a refusal: a wrong answer the
    host acts on, undefined behaviour, a process abort, or a set limit that does
@@ -141,6 +152,8 @@ Three yeses make a vulnerability. One no makes it a bug. In particular:
   crashes the compiler is a vulnerability, one that is slow to compile is not.
 - **Side channels.** zwasm has no mitigation for speculative side channels, and
   guests of different trust in one process share them.
+- **Availability of `zwasm serve`.** It answers one request at a time, so a peer
+  that keeps it busy, up to 10 s per unfinished request, holds the others.
 
 ## Known limitations
 
