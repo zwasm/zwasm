@@ -27,12 +27,6 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   none of the four `clockid` values was checked only when `ABSTIME` was set,
   and a relative subscription with it became a plain timer.
 
-- **A block whose first exit is `br_on_null`, `br_on_non_null`, `br_on_cast`
-  or `br_on_cast_fail` returns the right result on the JIT** (#400). The
-  liveness pass did not record the block's merge values at those four
-  instructions as the emit does, so with a call between the block's end and
-  the use of its result, the register holding it could be reused first.
-
 - **A WASI 0.2 guest's filesystem error for a path outside the preopen is
   `not-permitted`, as the spec and wasmtime give it** (#462). That and seven
   other conditions (`deadlock`, `quota`, `no-lock`, `not-recoverable`,
@@ -82,6 +76,15 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   runs** (#634). It failed with `UnknownImport`: the adapter's `env::memory`
   and three WASI 0.2 rows it imports (`filesystem-error-code`, the 0.2 clock
   `resolution`s) were not served.
+
+### Security
+
+- **On the JIT, a value a block carries out through `br_on_null`,
+  `br_on_non_null`, `br_on_cast` or `br_on_cast_fail` keeps its register
+  until it is used** (#400). Before, a call in between could take the
+  register, and a module could make the JIT read or write outside the GC
+  heap through a reference of its choosing. The interpreter was not affected.
+  [GHSA-4p74-j99r-p339](https://github.com/zwasm/zwasm/security/advisories/GHSA-4p74-j99r-p339).
 
 ### Documentation
 
