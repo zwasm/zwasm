@@ -2106,7 +2106,7 @@ fn http3RequestConsumeBody(caller: *Caller, this: u32, res_fut: u32, retptr: u32
     const trailers = if (req.trailers_future != 0) req.trailers_future else blk: {
         const fut = try async_mod.newFuturePair(&ctx.streams, &ctx.shared, null);
         try releaseHostWritable(ctx, fut.writable);
-        try ctx.host_trailer_ok_futures.put(ctx.alloc, fut.readable, {});
+        try ctx.host_trailer_ok_futures.put(ctx.alloc, fut.readable, null);
         break :blk fut.readable;
     };
     req.contents_stream = null;
@@ -2123,8 +2123,8 @@ fn http3RequestConsumeBody(caller: *Caller, this: u32, res_fut: u32, retptr: u32
 
 /// `[static]response.consume-body` — the response-side mirror of the
 /// request form: hand out the stored body ends (host-built responses from
-/// `client.send` carry `host_body_bytes`-served streams; a bodiless one
-/// gets a CLOSED stream and a host-resolved `ok(none)` trailers future).
+/// `client.send` carry `host_body_bytes`-served streams, a bodiless one a
+/// CLOSED stream, and a host-resolved trailers future with what was received).
 fn http3ResponseConsumeBody(caller: *Caller, this: u32, res_fut: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
@@ -2137,7 +2137,8 @@ fn http3ResponseConsumeBody(caller: *Caller, this: u32, res_fut: u32, retptr: u3
     const trailers = if (resp.trailers_future != 0) resp.trailers_future else blk: {
         const fut = try async_mod.newFuturePair(&ctx.streams, &ctx.shared, null);
         try releaseHostWritable(ctx, fut.writable);
-        try ctx.host_trailer_ok_futures.put(ctx.alloc, fut.readable, {});
+        try ctx.host_trailer_ok_futures.put(ctx.alloc, fut.readable, resp.trailers_rep);
+        resp.trailers_rep = null;
         break :blk fut.readable;
     };
     resp.contents_stream = null;
@@ -2244,7 +2245,7 @@ pub fn pollPendingClientSends(self: *WasiP2Ctx) WasiP2Error!bool {
 
 /// Marshal one resolved `client.send` (`ctx_mod.httpExchange` performs it):
 /// the response minted as a host-built resource (`host_body_bytes`-served
-/// body; trailers via the resolved-ok(none) future at consume-body).
+/// body; trailers via the host-resolved future at consume-body).
 /// result<own<response>, error-code> marshals at retptr with payload offset
 /// 8 (error-code carries u64 cases).
 fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void {
@@ -2288,10 +2289,20 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
         try self.host_body_bytes.put(self.alloc, shared_id, .{ .data = ex.body });
         contents = pair.readable;
     } else self.alloc.free(ex.body);
+    const trailers_rep: ?u32 = if (ex.trailers) |raw| blk: {
+        defer self.alloc.free(raw);
+        const rep = self.addHttpFields(.{}) catch return WasiP2Error.OutOfMemory;
+        var it: std.http.HeaderIterator = .{ .bytes = raw, .index = 0, .is_trailer = true };
+        // A field the guest could not set (#698) is dropped, as for headers.
+        while (it.next()) |t| self.http_fields.items[rep].appendChecked(self.alloc, t.name, t.value) catch continue;
+        self.http_fields.items[rep].immutable = true;
+        break :blk rep;
+    } else null;
     const resp_idx = self.addHttpResponse(.{
         .status = ex.status,
         .headers_rep = ex.headers_rep,
         .contents_stream = contents,
+        .trailers_rep = trailers_rep,
     }) catch return WasiP2Error.OutOfMemory;
     const handle = try self.resources.new(WasiP2Ctx.HTTP_RESPONSE_RT, resp_idx);
     try mem.write(pcs.retptr, @as(u8, 0));
@@ -3011,4 +3022,36 @@ test "consume-body on a guest-made 0.3 request resolves its sent future with wha
     try testing.expectEqual(async_mod.EventCode.future_read, (try ctx.streams.get(r.sent)).takePendingEvent().?.code);
     try testing.expectEqual(async_mod.EventCode.future_write, (try ctx.streams.get(res.writable)).takePendingEvent().?.code);
     try testing.expectEqual(@as(usize, 0), ctx.sent_links.items.len);
+}
+
+test "a 0.3 response's trailer section reaches the guest through consume-body's trailers future, and outlives a sweep before the read (#704)" {
+    const testing = std.testing;
+    const rig = try Http3Rig.create();
+    defer rig.destroy();
+    const ctx = rig.ctx;
+    const io = rig.host.io.?;
+    const mem = try ctx.memory();
+
+    const ep = try RawEndpoint.start(io, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n7\r\npayload\r\n0\r\nx-checksum: abc123\r\nx-parts: 1\r\n\r\n");
+    defer ep.destroy();
+    const r = try rig.newRequest(ep.port);
+    try rig.lowerTrailers(.none);
+    try rig.send(r, "", 128);
+    ep.stop();
+    try testing.expectEqual(@as(u8, 0), try mem.read(u8, 128));
+    const res = try async_mod.newFuturePair(&ctx.streams, &ctx.shared, null);
+    try http3ResponseConsumeBody(rig.caller, try mem.read(u32, 136), res.readable, 32);
+    const trailers = try mem.read(u32, 36);
+
+    try ctx_mod.sweepHttpTables(ctx);
+    @memset(try mem.sliceAt(160, 16), 0xaa);
+    try testing.expectEqual((async_mod.ReturnCode{ .completed = 0 }).encode(), try ctx_mod.p2FutureCopy(rig.copy_caller, trailers, 160));
+    try testing.expectEqualSlices(u8, &.{ 0, 1 }, &.{ try mem.read(u8, 160), try mem.read(u8, 168) });
+    const fields = try ctxHttpFieldsSelf(ctx, try mem.read(u32, 172));
+    try testing.expectEqual(@as(usize, 2), fields.entries.items.len);
+    try testing.expectEqualStrings("x-checksum", fields.entries.items[0].name);
+    try testing.expectEqualStrings("abc123", fields.entries.items[0].value);
+    try testing.expectEqualStrings("x-parts", fields.entries.items[1].name);
+    try testing.expectEqualStrings("1", fields.entries.items[1].value);
+    try testing.expect(fields.immutable);
 }

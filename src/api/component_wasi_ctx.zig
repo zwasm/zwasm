@@ -223,9 +223,10 @@ pub const WasiP2Ctx = struct {
     /// The 0.2-only halves of the client exchange (bodies, futures).
     http2: p2http.State = .{},
     /// Host-resolved trailers futures (keyed by READABLE handle): a guest
-    /// read completes immediately with `ok(none)` — the shape a
-    /// harness-built request's `consume-body` hands out (ADR-0205 D-3).
-    host_trailer_ok_futures: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    /// read completes immediately with `ok(none)`, or `ok(some)` of the
+    /// fields rep a response received (ADR-0205 D-3). The rep is the map's
+    /// until the read mints a handle for it.
+    host_trailer_ok_futures: std.AutoHashMapUnmanaged(u32, ?u32) = .empty,
     /// Resolved `sent` futures no read has taken yet (keyed by READABLE
     /// handle): null = ok, else the wasi:http error-code ordinal. A guest
     /// read completes immediately (`writeHttpUnitResult`).
@@ -795,7 +796,12 @@ pub fn sweepHttpTables(ctx: *WasiP2Ctx) Allocator.Error!void {
         mark(&fields, r.headers_rep);
         if (r.options_rep) |o| mark(&reqopts, o);
     };
-    for (ctx.http_responses.items, 0..) |r, i| if (responses.isSet(i)) mark(&fields, r.headers_rep);
+    for (ctx.http_responses.items, 0..) |r, i| if (responses.isSet(i)) {
+        mark(&fields, r.headers_rep);
+        if (r.trailers_rep) |t| mark(&fields, t);
+    };
+    var trailer_it = ctx.host_trailer_ok_futures.valueIterator();
+    while (trailer_it.next()) |v| if (v.*) |t| mark(&fields, t);
     for (st.out_bodies.items, 0..) |b, i| if (b.req_rep < requests.bit_length and requests.isSet(b.req_rep)) out_bodies.set(i);
     for (st.in_bodies.items, 0..) |b, i| if (b.resp_rep < responses.bit_length and responses.isSet(b.resp_rep)) in_bodies.set(i);
 
@@ -858,8 +864,9 @@ pub fn ctxHttpRequest(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*p3http.HttpRequest
 }
 
 /// A completed `httpExchange`. `headers_rep` indexes an immutable entry in
-/// `http_fields`; `body` is the caller's to own.
-pub const HttpExchange = struct { status: u16, headers_rep: u32, body: []u8 };
+/// `http_fields`; `body` and `trailers` (the raw trailer section, null when
+/// it has no field) are the caller's to own.
+pub const HttpExchange = struct { status: u16, headers_rep: u32, body: []u8, trailers: ?[]u8 };
 
 /// The blocking HTTP exchange both `wasi:http` generations send through:
 /// `std.http.Client` over `http://` + the request's authority and path.
@@ -958,8 +965,13 @@ pub fn httpExchange(ctx: *WasiP2Ctx, req: *const p3http.HttpRequest, body: []u8,
         resp_body.appendSlice(ctx.alloc, chunk) catch return WasiP2Error.OutOfMemory;
         rdr.toss(chunk.len);
     }
+    // A chunked body's trailer section, through its blank line; it points
+    // into the connection's buffer, so it is copied before `hreq` goes.
+    const raw_trailers = hreq.reader.trailers;
+    const resp_trailers = if (raw_trailers.len > 2) ctx.alloc.dupe(u8, raw_trailers) catch return WasiP2Error.OutOfMemory else null;
+    errdefer if (resp_trailers) |t| ctx.alloc.free(t);
     const owned = resp_body.toOwnedSlice(ctx.alloc) catch return WasiP2Error.OutOfMemory;
-    return .{ .status = @backingInt(hresp.head.status), .headers_rep = fields_idx, .body = owned };
+    return .{ .status = @backingInt(hresp.head.status), .headers_rep = fields_idx, .body = owned, .trailers = resp_trailers };
 }
 
 /// `wasi_fd.readStdin` with its errors in this layer's set.
@@ -1457,16 +1469,17 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
     // by write/read-via-stream. A host stream peer always succeeds → a guest
     // `future.read` COMPLETES with the `ok` discriminant (0, 1 byte) — no
     // rendezvous, no general typed marshalling.
-    // Harness-resolved trailers future (ADR-0205 D-3): completes with
-    // `ok(none)` — result disc @0 AND the option disc must both be
-    // written (a bare ok byte leaves the option disc as garbage). The
-    // payload offset is 8: `error-code` carries u64 cases (align 8).
-    if (abc.ctx.host_trailer_ok_futures.contains(handle)) {
+    // Host-resolved trailers future (ADR-0205 D-3): completes with
+    // `ok(none)` or `ok(some(own<fields>))` — result disc @0 AND the option
+    // disc must both be written (a bare ok byte leaves the option disc as
+    // garbage). The payload offset is 8: `error-code` carries u64 cases
+    // (align 8); the handle follows the option disc at its i32 alignment, @12.
+    if (abc.ctx.host_trailer_ok_futures.fetchRemove(handle)) |kv| {
         const mem = try abc.ctx.memory();
         const buf = try mem.sliceAt(ptr, 9);
         buf[0] = 0;
-        buf[8] = 0;
-        _ = abc.ctx.host_trailer_ok_futures.remove(handle);
+        buf[8] = @intFromBool(kv.value != null);
+        if (kv.value) |rep| try mem.write(ptr + 12, try abc.ctx.resources.new(WasiP2Ctx.HTTP_FIELDS_RT, rep));
         return (async_mod.ReturnCode{ .completed = 0 }).encode();
     }
     if (abc.ctx.host_sent_futures.fetchRemove(handle)) |kv| {
@@ -1731,7 +1744,8 @@ pub fn p2StreamFutureCancel(caller: *Caller, handle: u32) WasiP2Error!u32 {
 /// handle's at once, the shared's with its last end, whose body bytes are
 /// freed with it.
 pub fn scrubHttpRoles(ctx: *WasiP2Ctx, handle: u32, shared: u32) void {
-    _ = ctx.host_trailer_ok_futures.remove(handle);
+    // Unread trailers: nothing else reaches their fields.
+    if (ctx.host_trailer_ok_futures.fetchRemove(handle)) |kv| if (kv.value) |rep| ctx.http_fields.items[rep].deinit(ctx.alloc);
     _ = ctx.host_sent_futures.remove(handle);
     if (shared != 0 and (ctx.shared.refcountOf(shared) orelse 0) == 1) {
         if (ctx.host_body_bytes.fetchRemove(shared)) |kv| ctx.alloc.free(kv.value.data);

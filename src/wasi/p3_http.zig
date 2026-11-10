@@ -356,6 +356,9 @@ pub const HttpResponse = struct {
     headers_rep: u32,
     contents_stream: ?u32 = null,
     trailers_future: u32 = 0,
+    /// The trailer section a host-sent request's response carried (a fields
+    /// rep), handed out by `consume-body`'s host-resolved trailers future.
+    trailers_rep: ?u32 = null,
 };
 
 // ============================================================
