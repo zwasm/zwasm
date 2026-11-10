@@ -1,4 +1,4 @@
-// FILE-SIZE-EXEMPT: (cap=2700) the complete wasi 0.3 host layer (fs3/sock3/http3 + async-lowered table + hook targets; ADR-0207 (c), M4-measured 2026-08-12); a per-proposal 3-way sub-split would force pub-leak of the hook targets through hooksTable/registerP3Arms, and a sibling test file would force pub-leak of the fs3 entry points its tests drive (ADR-0099 N2), so cohesion wins. 2026-10-24 +50 for the network grant's gate tests; 2026-10-25 +10 for the internal-error ordinal test (#643); 2026-10-25 +40 for the parked append-write test (#627). Splitting the sock3 / http3 host into its own file waits until after 2.8.0.
+// FILE-SIZE-EXEMPT: (cap=3060) the complete wasi 0.3 host layer (fs3/sock3/http3 + async-lowered table + hook targets; ADR-0207 (c), M4-measured 2026-08-12); a per-proposal 3-way sub-split would force pub-leak of the hook targets through hooksTable/registerP3Arms, and a sibling test file would force pub-leak of the fs3 entry points its tests drive (ADR-0099 N2), so cohesion wins. 2026-10-24 +50 for the network grant's gate tests; 2026-10-25 +10 for the internal-error ordinal test (#643); 2026-10-25 +40 for the parked append-write test (#627). 2026-11-10 +360 for the 0.3 client's `sent` and trailer paths and their tests (#703, #704, #705). Splitting the sock3 / http3 host into its own file waits until after 2.8.0.
 //! WASI **0.3** (P3) host layer — fs3 / sock3 / http3 trampolines, the
 //! async-lowered binding table, and the classifier's P3 arm registration
 //! (ADR-0207 (c); file name reserved by ADR-0190). Depends ONLY on the
@@ -46,7 +46,7 @@ const SUBTASK_RETURNED = ctx_mod.SUBTASK_RETURNED;
 const p2WaitUntil = ctx_mod.p2WaitUntil;
 const p2WaitFor = ctx_mod.p2WaitFor;
 
-/// The substrate→P3 hook table (ADR-0207): the six fn-pointers the shared
+/// The substrate→P3 hook table (ADR-0207): the fn-pointers the shared
 /// engine / drop / poll paths call instead of naming P3 symbols.
 pub fn hooksTable() WasiP2Ctx.P3Hooks {
     return .{
@@ -54,6 +54,7 @@ pub fn hooksTable() WasiP2Ctx.P3Hooks {
         .udp_receive_complete = sock3UdpReceiveComplete,
         .fail_file_stream = fs3FailFileStream,
         .resolve_send_future = sock3ResolveSendFuture,
+        .resolve_http_sent = http3ResolveSent,
         .sock_err_code = sockErrToFs3Code,
         .dir_stream_read = fs3DirStreamRead,
     };
@@ -1657,10 +1658,10 @@ fn http3FieldsClone(caller: *Caller, self: u32) WasiP2Error!u32 {
 
 // -- request / response / request-options (ADR-0205 phase D-2) --
 
-/// A future the host mints but never writes (`sent`, or a trailers future the
-/// host answers through `host_trailer_ok_futures`) keeps only the guest's
-/// end; holding the writable would keep both for the instance's life. The
-/// raw drop leaves the rendezvous un-DROPPED, so a read waits as before.
+/// A future the host mints but never writes (`response.new`'s, or a trailers
+/// future the host answers through `host_trailer_ok_futures`) keeps only the
+/// guest's end; holding the writable would keep both for the instance's
+/// life. The raw drop leaves the rendezvous un-DROPPED, so a read waits.
 fn releaseHostWritable(ctx: *WasiP2Ctx, writable: u32) WasiP2Error!void {
     try async_mod.dropEnd(&ctx.streams, &ctx.shared, writable);
 }
@@ -1702,7 +1703,7 @@ fn http3ResponseSelf(ctx: *WasiP2Ctx, self: u32) WasiP2Error!*p3http.HttpRespons
 /// option<own<request-options>>, retptr) — consumes the headers (and
 /// options) own handles: their storage now belongs to the request and both
 /// become immutable. Returns tuple<request, future<result<_, error-code>>>
-/// at retptr; the transmission future stays unresolved until a send.
+/// at retptr; the transmission future (`sent`) resolves at `http3ResolveSent`.
 fn http3RequestNew(caller: *Caller, headers: u32, contents_disc: u32, contents: u32, trailers_fut: u32, opts_disc: u32, opts: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
@@ -1724,9 +1725,39 @@ fn http3RequestNew(caller: *Caller, headers: u32, contents_disc: u32, contents: 
     }) catch return WasiP2Error.OutOfMemory;
     const handle = try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, idx);
     const fut = try async_mod.newFuturePair(&ctx.streams, &ctx.shared, null);
-    try releaseHostWritable(ctx, fut.writable);
+    const req = &ctx.http_requests.items[idx];
+    req.sent_readable = fut.readable;
+    req.sent_writable = fut.writable;
     try mem.write(retptr, handle);
     try mem.write(retptr + 4, fut.readable);
+}
+
+/// Resolve `req`'s `sent` future once (null = ok, else the wasi:http
+/// error-code ordinal) and release the host's writable, as wasmtime does on
+/// a send's end and on a drop unsent. A read already parked completes in
+/// place; a later one is answered from `host_sent_futures`. A reader that
+/// dropped first leaves only the release.
+fn http3ResolveSent(ctx: *WasiP2Ctx, req: *p3http.HttpRequest, outcome: ?u8) WasiP2Error!void {
+    const w = req.sent_writable;
+    if (w == 0) return;
+    const r = req.sent_readable;
+    req.sent_writable = 0;
+    req.sent_readable = 0;
+    const f = switch ((try ctx.shared.get((try ctx.streams.get(w)).shared)).*) {
+        .future => |*f| f,
+        .stream, .subtask => return WasiP2Error.InvalidHandle,
+    };
+    if (!f.dropped) {
+        if (ctx.pending_reads.fetchRemove(r)) |kv| {
+            try ctx_mod.writeHttpUnitResult(try ctx.memory(), kv.value.ptr, outcome);
+            const reader = try ctx.streams.get(r);
+            reader.state = .done;
+            reader.setPendingEvent(.{ .code = .future_read, .index = r, .payload = (async_mod.ReturnCode{ .completed = 0 }).encode() });
+            f.pending = null;
+        } else try ctx.host_sent_futures.put(ctx.alloc, r, outcome);
+        f.written = true;
+    }
+    try async_mod.dropEndGuarded(&ctx.streams, &ctx.shared, w);
 }
 
 fn http3RequestGetMethod(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
@@ -2044,6 +2075,9 @@ fn http3RequestConsumeBody(caller: *Caller, this: u32, res_fut: u32, retptr: u32
     };
     req.contents_stream = null;
     req.trailers_future = 0;
+    if (req.sent_writable != 0) try releaseHostWritable(ctx, req.sent_writable);
+    req.sent_writable = 0;
+    req.sent_readable = 0;
     http3DropTransferredEnd(ctx, res_fut);
     _ = try ctx.resources.drop(WasiP2Ctx.HTTP_REQUEST_RT, this);
     try mem.write(retptr, contents);
@@ -2153,24 +2187,20 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
     const mem = try self.memory();
     const req = try ctxHttpRequest(self, pcs.req_rep);
     const fail = struct {
-        fn write(m: Memory, retptr: u32, sub: *async_mod.StreamFutureEnd, h: u32) WasiP2Error!void {
-            // error-code `internal-error(option<string>)` = ordinal 38, none.
-            return code(m, retptr, sub, h, 38);
-        }
-        fn code(m: Memory, retptr: u32, sub: *async_mod.StreamFutureEnd, h: u32, ordinal: u8) WasiP2Error!void {
-            try m.write(retptr, @as(u8, 1));
-            try m.write(retptr + 8, ordinal);
-            try m.write(retptr + 16, @as(u8, 0));
+        fn code(ctx: *WasiP2Ctx, m: Memory, p: *PendingClientSend, r: *p3http.HttpRequest, ordinal: u8) WasiP2Error!void {
+            try ctx_mod.writeHttpUnitResult(m, p.retptr, ordinal);
+            try http3ResolveSent(ctx, r, ordinal);
+            const sub = try ctx.streams.get(p.subtask);
             sub.subtask_state = .returned;
-            sub.setPendingEvent(.{ .code = .subtask, .index = h, .payload = @backingInt(async_mod.SubtaskState.returned) });
+            sub.setPendingEvent(.{ .code = .subtask, .index = p.subtask, .payload = @backingInt(async_mod.SubtaskState.returned) });
         }
     };
-    const sub = try self.streams.get(pcs.subtask);
     // Denied here rather than at `client.send`, so the parked body stream
     // drains and releases as on any failed exchange. `HTTP-request-denied` = 15.
-    if (!pcs.granted) return fail.code(mem, pcs.retptr, sub, pcs.subtask, 15);
+    if (!pcs.granted) return fail.code(self, mem, pcs, req, 15);
     const ex = ctx_mod.httpExchange(self, req, pcs.body.items) catch |e| switch (e) {
-        error.HttpFailed => return fail.write(mem, pcs.retptr, sub, pcs.subtask),
+        // `internal-error(none)`.
+        error.HttpFailed => return fail.code(self, mem, pcs, req, 38),
         else => |oe| return oe,
     };
     var contents: ?u32 = null;
@@ -2190,6 +2220,7 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
     const handle = try self.resources.new(WasiP2Ctx.HTTP_RESPONSE_RT, resp_idx);
     try mem.write(pcs.retptr, @as(u8, 0));
     try mem.write(pcs.retptr + 8, handle);
+    try http3ResolveSent(self, try ctxHttpRequest(self, pcs.req_rep), null);
     // Re-fetch: newStreamPair/http_* appends above may have grown the
     // streams table, dangling the `sub` pointer taken at entry.
     const sub2 = try self.streams.get(pcs.subtask);
@@ -2635,4 +2666,68 @@ test "an outbound HTTP exchange that fails answers internal-error, not configura
     const mem = try ctx.memory();
     try testing.expectEqual(@as(u8, 1), try mem.read(u8, 0));
     try testing.expectEqual(@as(u8, 38), try mem.read(u8, 8));
+}
+
+test "a 0.3 request's sent future carries the send's outcome to a read issued before or after it, and goes with a reader that dropped first (#703)" {
+    const testing = std.testing;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = threaded.io();
+    host.allow_network = true;
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06memory\x02\x00");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+    var abc: ctx_mod.AsyncBuiltinCtx = .{ .ctx = &ctx, .type_index = 0 };
+    var copy_caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &abc };
+    const mem = try ctx.memory();
+    const blocked = (async_mod.ReturnCode{ .blocked = {} }).encode();
+    const completed = (async_mod.ReturnCode{ .completed = 0 }).encode();
+
+    // Three requests with no authority, so each exchange fails with
+    // internal-error (38). Each `request.new` result lands at 0, the send's
+    // result at 16 + 32*i.
+    var sent: [3]u32 = undefined;
+    var writable: [3]u32 = undefined;
+    @memset(try mem.sliceAt(224, 16), 0);
+    for (&sent, &writable, 0..) |*s, *w, i| {
+        const trailers = try async_mod.newFuturePair(&ctx.streams, &ctx.shared, null);
+        const headers = try ctx.resources.new(WasiP2Ctx.HTTP_FIELDS_RT, try ctx.addHttpFields(.{}));
+        try http3RequestNew(&caller, headers, 0, 0, trailers.readable, 0, 0, 0);
+        const req = try mem.read(u32, 0);
+        s.* = try mem.read(u32, 4);
+        w.* = ctx.http_requests.items[try ctx.resources.rep(WasiP2Ctx.HTTP_REQUEST_RT, req)].sent_writable;
+        _ = try http3ClientSend(&caller, req, 16 + 32 * @as(u32, @intCast(i)));
+        // The trailers future resolves `ok(none)`, as wit-bindgen's writer
+        // does when dropped.
+        _ = try ctx_mod.p2FutureCopy(&copy_caller, trailers.writable, 224);
+    }
+    // [1] is read before the exchange ends; [2] is dropped unread.
+    try testing.expectEqual(blocked, try ctx_mod.p2FutureCopy(&copy_caller, sent[1], 160));
+    try ctx_mod.p2StreamFutureDrop(&copy_caller, sent[2]);
+    _ = try pollPendingClientSends(&ctx);
+
+    // [0], read after: completes at once, err(internal-error) in the @8 layout.
+    @memset((try mem.sliceAt(128, 24)), 0xaa);
+    try testing.expectEqual(completed, try ctx_mod.p2FutureCopy(&copy_caller, sent[0], 128));
+    try testing.expectEqualSlices(u8, &.{ 1, 38, 0 }, &.{ try mem.read(u8, 128), try mem.read(u8, 136), try mem.read(u8, 144) });
+    // [1], parked: completed in place, with its FUTURE_READ event pending.
+    try testing.expectEqualSlices(u8, &.{ 1, 38, 0 }, &.{ try mem.read(u8, 160), try mem.read(u8, 168), try mem.read(u8, 176) });
+    const ev = (try ctx.streams.get(sent[1])).takePendingEvent().?;
+    try testing.expectEqual(async_mod.EventCode.future_read, ev.code);
+    try testing.expectEqual(completed, ev.payload);
+    // The host's writables are gone, and nothing of [2] is left.
+    for (writable) |w| try testing.expectError(async_mod.Error.InvalidHandle, ctx.streams.get(w));
+    try testing.expectError(async_mod.Error.InvalidHandle, ctx.streams.get(sent[2]));
+    try testing.expectEqual(@as(u32, 0), ctx.host_sent_futures.count());
 }
