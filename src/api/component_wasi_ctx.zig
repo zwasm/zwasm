@@ -85,7 +85,14 @@ pub const PendingClientSend = struct {
     granted: bool,
     body: std.ArrayList(u8) = .empty,
     body_shared: ?u32 = null,
+    /// What the guest wrote to the request's trailers future, once taken:
+    /// `some` = a fields rep the host now owns, `err` = the error-code ordinal.
+    trailers: RequestTrailers = .none,
 };
+pub const RequestTrailers = union(enum) { none, some: u32, err: u8 };
+/// A consumed request's `sent` future, resolved with the value the guest
+/// writes to the `res` future it passed to `consume-body`.
+pub const SentLink = struct { res: u32, sent_readable: u32, sent_writable: u32 };
 
 pub const WasiP2Ctx = struct {
     host: *wasi_host.Host,
@@ -233,6 +240,7 @@ pub const WasiP2Ctx = struct {
     /// Parked `client.send` calls awaiting their request body (ADR-0205
     /// D-5); resolved by `pollPendingClientSends`.
     pending_client_sends: std.ArrayList(*PendingClientSend) = .empty,
+    sent_links: std.ArrayList(SentLink) = .empty,
     host_accept_streams: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     host_tcp_rx: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     host_tcp_tx: std.AutoHashMapUnmanaged(u32, TcpTxRole) = .empty,
@@ -423,6 +431,7 @@ pub const WasiP2Ctx = struct {
             self.alloc.destroy(pcs);
         }
         self.pending_client_sends.deinit(self.alloc);
+        self.sent_links.deinit(self.alloc);
         self.host_accept_streams.deinit(self.alloc);
         self.host_tcp_rx.deinit(self.alloc);
         self.host_tcp_tx.deinit(self.alloc);
@@ -774,7 +783,13 @@ pub fn sweepHttpTables(ctx: *WasiP2Ctx) Allocator.Error!void {
             else => {},
         }
     }
-    for (ctx.pending_client_sends.items) |pcs| mark(&requests, pcs.req_rep);
+    for (ctx.pending_client_sends.items) |pcs| {
+        mark(&requests, pcs.req_rep);
+        switch (pcs.trailers) {
+            .some => |rep| mark(&fields, rep),
+            .none, .err => {},
+        }
+    }
     // A freed slot is reset below, so these read no stale rep.
     for (ctx.http_requests.items, 0..) |r, i| if (requests.isSet(i)) {
         mark(&fields, r.headers_rep);
@@ -849,8 +864,9 @@ pub const HttpExchange = struct { status: u16, headers_rep: u32, body: []u8 };
 /// The blocking HTTP exchange both `wasi:http` generations send through:
 /// `std.http.Client` over `http://` + the request's authority and path.
 /// `error.HttpFailed` is every failure the guest sees as `internal-error`;
-/// the network grant is the caller's to check.
-pub fn httpExchange(ctx: *WasiP2Ctx, req: *const p3http.HttpRequest, body: []u8) (WasiP2Error || error{HttpFailed})!HttpExchange {
+/// the network grant is the caller's to check. `trailers` sends the body
+/// chunked with that trailer section.
+pub fn httpExchange(ctx: *WasiP2Ctx, req: *const p3http.HttpRequest, body: []u8, trailers: ?*const p3http.HttpFields) (WasiP2Error || error{HttpFailed})!HttpExchange {
     const io = try ctxIo(ctx);
     const authority = req.authority orelse return error.HttpFailed;
     const path = req.path_with_query orelse "/";
@@ -878,23 +894,45 @@ pub fn httpExchange(ctx: *WasiP2Ctx, req: *const p3http.HttpRequest, body: []u8)
             extra.append(ctx.alloc, .{ .name = p.name, .value = p.value }) catch return WasiP2Error.OutOfMemory;
         }
     }
+    var trailer_list: std.ArrayList(std.http.Header) = .empty;
+    defer trailer_list.deinit(ctx.alloc);
+    if (trailers) |t| for (t.entries.items) |p| {
+        trailer_list.append(ctx.alloc, .{ .name = p.name, .value = p.value }) catch return WasiP2Error.OutOfMemory;
+    };
     // std writes a body only for POST / PUT / PATCH / QUERY (and asserts so);
-    // another method's body follows a bodiless head that states its length.
-    const raw_body = !method.requestHasBody() and body.len != 0;
+    // another method's body follows a bodiless head that states its framing.
+    const raw_body = !method.requestHasBody() and (body.len != 0 or trailers != null);
     const len_str = ctx.alloc.print("{d}", .{body.len}) catch return WasiP2Error.OutOfMemory;
     defer ctx.alloc.free(len_str);
-    if (raw_body) extra.append(ctx.alloc, .{ .name = "content-length", .value = len_str }) catch return WasiP2Error.OutOfMemory;
+    if (raw_body) extra.append(ctx.alloc, if (trailers != null)
+        .{ .name = "transfer-encoding", .value = "chunked" }
+    else
+        .{ .name = "content-length", .value = len_str }) catch return WasiP2Error.OutOfMemory;
     var client: std.http.Client = .{ .allocator = ctx.alloc, .io = io };
     defer client.deinit();
     var hreq = client.request(method, uri, .{ .extra_headers = extra.items }) catch return error.HttpFailed;
     defer hreq.deinit();
     if (method.requestHasBody()) {
-        hreq.sendBodyComplete(body) catch return error.HttpFailed;
+        if (trailers != null) {
+            hreq.transfer_encoding = .chunked;
+            // No buffer: each write drains as its own chunk, so nothing is
+            // left unflushed when `endChunked` writes the last chunk.
+            var bw = hreq.sendBodyUnflushed(&.{}) catch return error.HttpFailed;
+            bw.writer.writeAll(body) catch return error.HttpFailed;
+            bw.endChunked(.{ .trailers = trailer_list.items }) catch return error.HttpFailed;
+        } else hreq.sendBodyComplete(body) catch return error.HttpFailed;
     } else if (raw_body) {
         hreq.sendBodilessUnflushed() catch return error.HttpFailed;
-        const conn = hreq.connection.?;
-        conn.writer().writeAll(body) catch return error.HttpFailed;
-        conn.flush() catch return error.HttpFailed;
+        const w = hreq.connection.?.writer();
+        if (trailers == null) {
+            w.writeAll(body) catch return error.HttpFailed;
+        } else {
+            if (body.len != 0) w.print("{x}\r\n{s}\r\n", .{ body.len, body }) catch return error.HttpFailed;
+            w.writeAll("0\r\n") catch return error.HttpFailed;
+            for (trailer_list.items) |t| w.print("{s}: {s}\r\n", .{ t.name, t.value }) catch return error.HttpFailed;
+            w.writeAll("\r\n") catch return error.HttpFailed;
+        }
+        hreq.connection.?.flush() catch return error.HttpFailed;
     } else {
         hreq.sendBodiless() catch return error.HttpFailed;
     }
@@ -1642,8 +1680,9 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
         .blocked => blk: {
             // Remember a parked WRITE's source span: a host file role
             // registered after the fact (write-via-stream under
-            // futures::join!) completes it at registration.
-            if (end.kind == .stream and end.side == .writable)
+            // futures::join!) completes it at registration, and the host
+            // reads a future's value from it (`http3TakeFutureWrite`).
+            if (end.side == .writable)
                 try abc.ctx.pending_writes.put(abc.ctx.alloc, handle, .{ .ptr = ptr, .count = count, .elem_size = abc.elem_size });
             // Remember a parked future READ's destination: a late host
             // resolution (tcp.send outcome at tx-drop / drain-error)

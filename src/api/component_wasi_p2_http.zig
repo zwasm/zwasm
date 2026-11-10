@@ -333,7 +333,7 @@ fn http2FutureResponseGet(caller: *Caller, self: u32, retptr: u32) WasiP2Error!v
         }
         body = b.bytes.items;
     }
-    const ex = ctx_mod.httpExchange(ctx, req, body) catch |e| switch (e) {
+    const ex = ctx_mod.httpExchange(ctx, req, body, null) catch |e| switch (e) {
         error.HttpFailed => {
             try mem.write(retptr + 16, @as(u8, 1));
             return writeErrorCode(ctx, mem, retptr + 24, EC_INTERNAL_ERROR, null);
