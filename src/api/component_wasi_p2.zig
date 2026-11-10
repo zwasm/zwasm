@@ -486,6 +486,8 @@ fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
                     const resp = &ctx.http_responses.items[h.rep];
                     if (resp.headers_rep < ctx.http_fields.items.len)
                         ctx.http_fields.items[resp.headers_rep].deinit(ctx.alloc);
+                    if (resp.trailers_rep) |t| ctx.http_fields.items[t].deinit(ctx.alloc);
+                    resp.trailers_rep = null;
                     ctx.p3().drop_transferred_end(ctx, resp.trailers_future);
                     if (resp.contents_stream) |s| ctx.p3().drop_transferred_end(ctx, s);
                     p2http.releaseResponse(ctx, h.rep);

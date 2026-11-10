@@ -340,6 +340,8 @@ fn http2FutureResponseGet(caller: *Caller, self: u32, retptr: u32) WasiP2Error!v
         },
         else => |oe| return oe,
     };
+    // 0.2 `future-trailers` answers none (#704 left it here).
+    if (ex.trailers) |t| ctx.alloc.free(t);
     const resp_idx = blk: {
         errdefer ctx.alloc.free(ex.body);
         const i = ctx.addHttpResponse(.{ .status = ex.status, .headers_rep = ex.headers_rep }) catch return WasiP2Error.OutOfMemory;
@@ -397,8 +399,9 @@ fn releaseInBody(ctx: *WasiP2Ctx, r: u32) void {
     body.pos = 0;
 }
 
-/// `get() -> option<result<result<option<trailers>, error-code>>>`: the
-/// response never carries trailers, so `some(ok(ok(none)))`, then `some(err)`.
+/// `get() -> option<result<result<option<trailers>, error-code>>>`: 0.2
+/// does not surface a received trailer section, so `some(ok(ok(none)))`,
+/// then `some(err)`.
 fn http2FutureTrailersGet(caller: *Caller, self: u32, retptr: u32) WasiP2Error!void {
     const ctx = caller.data(WasiP2Ctx);
     const mem = try ctxMemory(caller);
@@ -639,4 +642,37 @@ test "wasi:http@0.2: an abandoned upload or an unconsumed response frees its bod
     defer testing.allocator.free(r.out);
     try testing.expectEqual(@as(?anyerror, null), r.err);
     try testing.expectEqualStrings("status: 200\n", r.out);
+}
+
+test "wasi:http@0.2: a response's trailer section is freed, since future-trailers answers none (#704)" {
+    const RawEndpoint = @import("component_http_echo.zig").RawEndpoint;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = threaded.io();
+    host.allow_network = true;
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06memory\x02\x00");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+
+    const ep = try RawEndpoint.start(host.io.?, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n7\r\npayload\r\n0\r\nx-checksum: abc123\r\n\r\n");
+    defer ep.destroy();
+    const req_rep = try ctx.addHttpRequest(.{ .headers_rep = try ctx.addHttpFields(.{}), .authority = try ctx.alloc.print("127.0.0.1:{d}", .{ep.port}) });
+    try ctx.http2.futures.append(ctx.alloc, .{ .req_rep = req_rep });
+    try http2FutureResponseGet(&caller, try ctx.resources.new(WasiP2Ctx.HTTP2_FUTURE_RESPONSE_RT, 0), 0);
+    ep.stop();
+    const mem = try ctx.memory();
+    // some(ok(ok(response))): the exchange ran; the testing allocator holds
+    // the section to account at deinit.
+    try testing.expectEqualSlices(u8, &.{ 1, 0, 0 }, &.{ try mem.read(u8, 0), try mem.read(u8, 8), try mem.read(u8, 16) });
 }
