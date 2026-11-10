@@ -70,7 +70,7 @@ if [[ ${#hits[@]} -gt 0 ]]; then
   for h in "${hits[@]}"; do echo "  - $h"; done
   echo ""
   echo "All six 0.3.0 proposals are served on all three supported OSes"
-  echo "(official corpus 45/45; ADR-0205). State the coverage as complete, or"
+  echo "(the vendored official corpus is green; ADR-0205). State the coverage as complete, or"
   echo "cite a specific tracked debt row."
   fail=1
 fi

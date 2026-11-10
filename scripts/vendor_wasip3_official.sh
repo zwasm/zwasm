@@ -35,6 +35,11 @@ TESTS=(
   # phase D — http (types resources first; service/client legs follow)
   http-fields http-request-options http-request http-response
   http-service http-service-echo http-service-uri http-client
+  # phase E — http-client against the manifest's servers
+  http-client-chunked http-client-headers http-client-method
+  http-client-path http-client-path-none http-client-send-errors
+  http-client-sent http-client-status http-client-trailers
+  http-client-trailer-error
 )
 
 command -v wasm-tools >/dev/null || { echo "wasm-tools required" >&2; exit 1; }

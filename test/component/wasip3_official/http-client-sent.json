@@ -1,0 +1,16 @@
+{
+  "proposals": ["http"],
+  "world": "wasi:http/service",
+  "operations": [
+    { "type": "run",
+      "env": {
+        "HTTP_SERVER_UNRESOLVABLE": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.invalid:80"
+      } },
+    { "type": "request",
+      "method": "GET",
+      "path": "/",
+      "response": { "status": 200 } },
+    { "type": "kill", "signal": "SIGINT" },
+    { "type": "wait" }
+  ]
+}

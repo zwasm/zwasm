@@ -162,5 +162,6 @@ are a doc-line change; shape-changing bumps open a debt row.
 
 | Date       | Note |
 |------------|------|
+| 2026-11-10 | The ten `http-client-*` tests are vendored: the corpus is 55 of upstream's 55. The harness endpoint (`src/api/component_http_echo.zig`) serves every manifest server shape with upstream's semantics — `static` (canned status / headers / body, or `chunks` + `trailers`), `echo-body`, `echo-headers`, `kind: closed`. |
 | 2026-11-09 | D4 phase D's `zwasm serve` QoI entry landed for 0.3 (#688): WebAssembly/wasi-testsuite#296's runner skipped zwasm's 14 `wasi:http/service` tests for want of it. One instance, one request at a time; the 0.2 `incoming-handler` half stays open on #688. |
 | 2026-11-09 | The vendored corpus moves to the 2026-10-30 `prod/testsuite-base` (`PIN_SHA` in `scripts/vendor_wasip3_official.sh`), the same 45 tests — a shape-identical bump under D6: the binaries now import the `@0.3.2` / `@0.2.9` names, which version-stripped matching already accepted. Not vendored: the ten new `http-client-*` tests (endpoint modes, canned responses, `kind: closed`), the next phase. `sockets-{tcp,udp}-properties` gained manifests that state the no-manifest default (run + wait, exit 0). |

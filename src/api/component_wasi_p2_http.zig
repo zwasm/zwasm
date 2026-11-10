@@ -518,7 +518,7 @@ const testing = std.testing;
 const wasi_host = @import("../wasi/host.zig");
 const Engine = @import("../zwasm/engine.zig").Engine;
 const p2 = @import("component_wasi_p2.zig");
-const EchoEndpoint = @import("component_http_echo.zig").EchoEndpoint;
+const HttpEndpoint = @import("component_http_echo.zig").HttpEndpoint;
 
 /// Run `test/component/wasip2_http/http-get.wasm` in `mode` and return its
 /// stdout. `serve` starts the echo endpoint; without it `HTTP_ENDPOINT`
@@ -548,11 +548,11 @@ fn runHttpGuestOutcome(mode: []const u8, allow_network: bool, serve: bool, inspe
     defer host.deinit();
     host.io = io;
     host.allow_network = allow_network;
-    var endpoint: ?*EchoEndpoint = null;
+    var endpoint: ?*HttpEndpoint = null;
     defer if (endpoint) |e| e.stop();
     var addr_buf: [32]u8 = undefined;
     const addr = if (serve) blk: {
-        endpoint = try EchoEndpoint.start(io, null);
+        endpoint = try HttpEndpoint.start(io, null);
         break :blk try std.mem.print(&addr_buf, "127.0.0.1:{d}", .{endpoint.?.port});
     } else "127.0.0.1:9";
     try host.setEnvs(&.{"HTTP_ENDPOINT"}, &.{addr});

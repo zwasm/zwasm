@@ -95,7 +95,7 @@ ecosystem bar, not because v1 had it):
 | WASI 0.1                    | Complete                                                                                               |
 | **Component Model**         | **wasmtime-equivalent — SHIPPED** (ADR-0170/0181/0182; default-ON via `-Dwasi>=p2`, `-Dwasi=p1` = lean opt-out per ADR-0193; campaign closed 2026-06-13, corpus 158/0/0) |
 | **WASI 0.2 (preview2)**     | **wasmtime-equivalent native host** (ADR-0170/0180; CLI world + fs + sockets-TCP shipped)              |
-| **WASI 0.3 (preview3)**     | **released 2026-06-11; CM-async-based** (async func / stream / future) — **FULL COVERAGE** of all six 0.3.0 proposals (cli/clocks/random/filesystem/sockets/http), official corpus 45/45 green (§9.0 Front D / **D-335** / **ADR-0205** phases A–E complete; opt-in `-Dwasi=p3`) |
+| **WASI 0.3 (preview3)**     | **released 2026-06-11; CM-async-based** (async func / stream / future) — **FULL COVERAGE** of all six 0.3.0 proposals (cli/clocks/random/filesystem/sockets/http), official corpus 55/55 green (§9.0 Front D / **D-335** / **ADR-0205** phases A–E complete; opt-in `-Dwasi=p3`) |
 | 4-platform JIT              | aarch64-darwin / aarch64-linux / x86_64-linux / x86_64-windows                                         |
 | Spec testsuite              | 100 %, 0 skip                                                                                          |
 | **wasm-c-api conformance**  | **Standard `wasm.h`** (the interface wasmtime/wasmer follow) + minimal `wasi.h` / `zwasm.h` extensions |
