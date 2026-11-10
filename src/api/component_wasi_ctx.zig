@@ -219,6 +219,10 @@ pub const WasiP2Ctx = struct {
     /// read completes immediately with `ok(none)` — the shape a
     /// harness-built request's `consume-body` hands out (ADR-0205 D-3).
     host_trailer_ok_futures: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    /// Resolved `sent` futures no read has taken yet (keyed by READABLE
+    /// handle): null = ok, else the wasi:http error-code ordinal. A guest
+    /// read completes immediately (`writeHttpUnitResult`).
+    host_sent_futures: std.AutoHashMapUnmanaged(u32, ?u8) = .empty,
     /// Harness-supplied request-body bytes (keyed by the stream's SHARED
     /// id): a guest read drains from the buffer, then observes DROPPED.
     host_body_bytes: std.AutoHashMapUnmanaged(u32, HostBodyBytes) = .empty,
@@ -364,6 +368,7 @@ pub const WasiP2Ctx = struct {
         udp_receive_complete: *const fn (*WasiP2Ctx, u32, u32) WasiP2Error!void,
         fail_file_stream: *const fn (*WasiP2Ctx, *async_mod.StreamFutureEnd, *FileStreamRole, wasi_p1.Errno) WasiP2Error!u32,
         resolve_send_future: *const fn (*WasiP2Ctx, u32, ?u8) WasiP2Error!void,
+        resolve_http_sent: *const fn (*WasiP2Ctx, *p3http.HttpRequest, ?u8) WasiP2Error!void,
         sock_err_code: *const fn (anyerror) u8,
         dir_stream_read: *const fn (*WasiP2Ctx, u32, *async_mod.StreamFutureEnd, u32, u32) WasiP2Error!u32,
     };
@@ -408,6 +413,7 @@ pub const WasiP2Ctx = struct {
         self.http_free.deinit(self.alloc);
         self.http2.deinit(self.alloc);
         self.host_trailer_ok_futures.deinit(self.alloc);
+        self.host_sent_futures.deinit(self.alloc);
         var body_it = self.host_body_bytes.iterator();
         while (body_it.next()) |e| self.alloc.free(e.value_ptr.data);
         self.host_body_bytes.deinit(self.alloc);
@@ -1425,6 +1431,10 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
         _ = abc.ctx.host_trailer_ok_futures.remove(handle);
         return (async_mod.ReturnCode{ .completed = 0 }).encode();
     }
+    if (abc.ctx.host_sent_futures.fetchRemove(handle)) |kv| {
+        try writeHttpUnitResult(try abc.ctx.memory(), ptr, kv.value);
+        return (async_mod.ReturnCode{ .completed = 0 }).encode();
+    }
     if (abc.ctx.host_result_futures.get(handle)) |outcome| {
         const mem = try abc.ctx.memory();
         if (outcome) |code| {
@@ -1649,6 +1659,17 @@ fn p2StreamFutureCopyInner(caller: *Caller, handle: u32, ptr: u32, count: u32) W
     };
 }
 
+/// A wasi:http `result<_, error-code>` at `ptr` (null = ok, else err with
+/// that ordinal and no payload). `error-code` has u64 cases, so the variant
+/// sits @8 and its case payload @16 — `internal-error`'s option disc there.
+pub fn writeHttpUnitResult(mem: Memory, ptr: u32, outcome: ?u8) WasiP2Error!void {
+    const code = outcome orelse return mem.write(ptr, @as(u8, 0));
+    const buf = try mem.sliceAt(ptr, 17);
+    buf[0] = 1;
+    buf[8] = code;
+    buf[16] = 0;
+}
+
 /// `canon stream.cancel-{read,write}` / `future.cancel-{read,write}` (ADR-0189
 /// ζ2): cancel an async copy in flight on the end named by `handle`
 /// (`StreamFutureEnd.cancel` traps `NotCopying` unless the end is async-copying)
@@ -1672,6 +1693,7 @@ pub fn p2StreamFutureCancel(caller: *Caller, handle: u32) WasiP2Error!u32 {
 /// freed with it.
 pub fn scrubHttpRoles(ctx: *WasiP2Ctx, handle: u32, shared: u32) void {
     _ = ctx.host_trailer_ok_futures.remove(handle);
+    _ = ctx.host_sent_futures.remove(handle);
     if (shared != 0 and (ctx.shared.refcountOf(shared) orelse 0) == 1) {
         if (ctx.host_body_bytes.fetchRemove(shared)) |kv| ctx.alloc.free(kv.value.data);
     }

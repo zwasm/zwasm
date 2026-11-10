@@ -334,6 +334,10 @@ pub const HttpRequest = struct {
     options_rep: ?u32 = null,
     contents_stream: ?u32 = null,
     trailers_future: u32 = 0,
+    /// The `sent` future `request.new` returned: the guest's readable, and
+    /// the writable the host holds until it resolves it (0 = none or done).
+    sent_readable: u32 = 0,
+    sent_writable: u32 = 0,
 
     pub fn deinit(self: *HttpRequest, alloc: std.mem.Allocator) void {
         self.method.deinit(alloc);

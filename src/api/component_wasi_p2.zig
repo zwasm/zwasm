@@ -1,4 +1,4 @@
-// FILE-SIZE-EXEMPT: the WASI-P2 trampoline surface + classifier + component orchestration (ADR-0207 (b), M4-measured 2026-08-12); the P2 fs/sockets sub-split had no positive ADR-0099 condition (spec-closed clusters but shallow <300-LOC net gains), so honest-exempt over metric-split.
+// FILE-SIZE-EXEMPT: (cap=2560) the WASI-P2 trampoline surface + classifier + component orchestration (ADR-0207 (b), M4-measured 2026-08-12); the P2 fs/sockets sub-split had no positive ADR-0099 condition (spec-closed clusters but shallow <300-LOC net gains), so honest-exempt over metric-split. 2026-11-10 +45 for the drop path's `sent` resolution and response trailers, and the drop-unsent test (#703, #704).
 //! WASI **Preview 2** trampolines + classifier + component orchestration —
 //! ADR-0207 (b). The substrate (`WasiP2Ctx`, engines, straddle helpers)
 //! lives in `component_wasi_ctx.zig`; the 0.3 layer in
@@ -502,6 +502,8 @@ fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
                         ctx.http_fields.items[req.headers_rep].deinit(ctx.alloc);
                     ctx.p3().drop_transferred_end(ctx, req.trailers_future);
                     if (req.contents_stream) |s| ctx.p3().drop_transferred_end(ctx, s);
+                    // Unsent: `sent` resolves ok, as wasmtime's does.
+                    try ctx.p3().resolve_http_sent(ctx, req, null);
                     p2http.releaseRequest(ctx, h.rep);
                     req.deinit(ctx.alloc);
                 }
@@ -559,6 +561,44 @@ test "D-444 II: p2ResourceDrop(HTTP_REQUEST_RT) — releases transferred ends + 
     // A request with NO transferred ends (trailers_future = 0) drops benignly.
     const h2 = try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, try ctx.addHttpRequest(.{ .headers_rep = 99 }));
     try p2ResourceDrop(&caller, h2);
+}
+
+test "a 0.3 request dropped unsent resolves its sent future ok, and an unread answer goes with its reader (#703)" {
+    const testing = std.testing;
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    p3h.installP3Hooks(&ctx);
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06memory\x02\x00");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+    var abc: AsyncBuiltinCtx = .{ .ctx = &ctx, .type_index = 0 };
+    var copy_caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &abc };
+    const mem = try ctx.memory();
+
+    var sent: [2]u32 = undefined;
+    for (&sent) |*s| {
+        const fut = try async_mod.newFuturePair(&ctx.streams, &ctx.shared, null);
+        const req = try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, try ctx.addHttpRequest(.{ .headers_rep = 99, .sent_readable = fut.readable, .sent_writable = fut.writable }));
+        try p2ResourceDrop(&caller, req);
+        s.* = fut.readable;
+    }
+    try mem.write(@as(u32, 64), @as(u8, 0xaa));
+    try testing.expectEqual((async_mod.ReturnCode{ .completed = 0 }).encode(), try ctx_mod.p2FutureCopy(&copy_caller, sent[0], 64));
+    try testing.expectEqual(@as(u8, 0), try mem.read(u8, 64));
+    // [1] is never read: its answer leaves with the reader.
+    try testing.expectEqual(@as(u32, 1), ctx.host_sent_futures.count());
+    try ctx_mod.p2StreamFutureDrop(&copy_caller, sent[1]);
+    try testing.expectEqual(@as(u32, 0), ctx.host_sent_futures.count());
+    try testing.expectError(async_mod.Error.InvalidHandle, ctx.streams.get(sent[1]));
 }
 
 test "0.2 append-via-stream: two append streams on one file each write at the end the other left" {
