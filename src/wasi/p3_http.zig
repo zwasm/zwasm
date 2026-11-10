@@ -4,7 +4,7 @@
 //! The OS-agnostic data model half: the `fields` resource (RFC 9110
 //! field-name/field-value validation + ordered storage) and the
 //! request/request-options/response models. The component trampolines
-//! (`component_wasi_p3_host.zig`, `component_wasi_p2_http.zig`) lower WIT
+//! (`component_wasi_p3_http.zig`, `component_wasi_p2_http.zig`) lower WIT
 //! records onto this surface; nothing here touches guest memory.
 //!
 //! DIVERGENCE note (pinned by the official http-fields test): field NAMES
