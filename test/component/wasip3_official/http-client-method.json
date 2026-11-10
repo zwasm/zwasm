@@ -1,0 +1,31 @@
+{
+  "proposals": ["http"],
+  "world": "wasi:http/service",
+  "servers": [
+    { "name": "main", "endpoints": [
+      { "method": "GET", "path": "/method",
+        "response": { "status": 200, "body": "GET" } },
+      { "method": "POST", "path": "/method",
+        "response": { "status": 200, "body": "POST" } },
+      { "method": "PUT", "path": "/method",
+        "response": { "status": 200, "body": "PUT" } },
+      { "method": "DELETE", "path": "/method",
+        "response": { "status": 200, "body": "DELETE" } },
+      { "method": "PATCH", "path": "/method",
+        "response": { "status": 200, "body": "PATCH" } },
+      { "method": "OPTIONS", "path": "/method",
+        "response": { "status": 200, "body": "OPTIONS" } },
+      { "method": "HEAD", "path": "/method",
+        "response": { "status": 200, "body": "HEAD" } }
+    ] }
+  ],
+  "operations": [
+    { "type": "run" },
+    { "type": "request",
+      "method": "GET",
+      "path": "/",
+      "response": { "status": 200 } },
+    { "type": "kill", "signal": "SIGINT" },
+    { "type": "wait" }
+  ]
+}

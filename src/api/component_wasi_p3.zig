@@ -1104,12 +1104,14 @@ const OfficialExpect = struct {
     /// the harness drives `handler.handle` per `http_reqs` entry.
     world_service: bool = false,
     http_reqs: std.ArrayList(HttpReqOp) = .empty,
-    /// Manifest `servers`: each one is served by an `EchoEndpoint` whose
-    /// address the guest reads from `HTTP_SERVER_<NAME>` (http-client).
+    /// Manifest `servers`: the guest reads each one's address from
+    /// `HTTP_SERVER_<NAME>`.
     servers: std.ArrayList(OfficialServer) = .empty,
+    /// Owns what the servers' routes point at.
+    server_arena: std.heap.ArenaAllocator.State = .{},
 
     fn deinit(self: *OfficialExpect, alloc: std.mem.Allocator) void {
-        for (self.servers.items) |*sv| sv.routes.deinit(alloc);
+        self.server_arena.promote(alloc).deinit();
         self.servers.deinit(alloc);
         self.http_reqs.deinit(alloc);
         self.env_keys.deinit(alloc);
@@ -1131,7 +1133,9 @@ fn parseOfficialManifest(alloc: std.mem.Allocator, parsed: *const std.json.Value
         if (std.mem.eql(u8, w.string, "wasi:http/service")) out.world_service = true;
     }
     if (parsed.object.get("servers")) |servers| {
-        for (servers.array.items) |sv| try out.servers.append(alloc, try parseOfficialServer(alloc, sv));
+        var arena = out.server_arena.promote(alloc);
+        defer out.server_arena = arena.state;
+        for (servers.array.items) |sv| try out.servers.append(alloc, try parseOfficialServer(arena.allocator(), sv));
     }
     const ops = parsed.object.get("operations") orelse return;
     for (ops.array.items) |op| {
@@ -1189,47 +1193,129 @@ fn parseOfficialManifest(alloc: std.mem.Allocator, parsed: *const std.json.Value
 
 const OfficialServer = struct {
     name: []const u8,
-    routes: std.ArrayList(EchoEndpoint.Route) = .empty,
+    /// `kind: closed`: an address nothing listens on.
+    closed: bool = false,
+    routes: []const HttpEndpoint.Route = &.{},
 };
 
 /// One manifest `servers` entry, per upstream's `Server.from_config`
-/// (`test-runner/wasi_test_runner/test_case.py`). Only listening servers
-/// with `echo-body` endpoints are served; another kind or mode is refused.
-fn parseOfficialServer(alloc: std.mem.Allocator, v: std.json.Value) !OfficialServer {
+/// (`test-runner/wasi_test_runner/test_case.py`). `arena` owns the routes.
+fn parseOfficialServer(arena: std.mem.Allocator, v: std.json.Value) !OfficialServer {
     const name = v.object.get("name").?.string;
     // The name becomes part of an environment variable (SERVER_NAME_RE).
     if (name.len == 0) return error.InvalidServerName;
     for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '_') return error.InvalidServerName;
-    if (v.object.get("kind")) |k| {
-        if (!std.mem.eql(u8, k.string, "listening")) return error.UnsupportedServerMode;
+    const kind = if (v.object.get("kind")) |k| k.string else "listening";
+    if (std.mem.eql(u8, kind, "closed")) {
+        if (v.object.get("endpoints") != null) return error.InvalidServer;
+        return .{ .name = name, .closed = true };
     }
-    var sv: OfficialServer = .{ .name = name };
-    errdefer sv.routes.deinit(alloc);
+    if (!std.mem.eql(u8, kind, "listening")) return error.UnknownServerKind;
+    var routes: std.ArrayList(HttpEndpoint.Route) = .empty;
     if (v.object.get("endpoints")) |eps| {
         for (eps.array.items) |ep| {
             const mode = if (ep.object.get("mode")) |m| m.string else "static";
-            if (!std.mem.eql(u8, mode, "echo-body")) return error.UnsupportedServerMode;
-            try sv.routes.append(alloc, .{
+            const response = ep.object.get("response");
+            const reply: HttpEndpoint.Reply = if (std.mem.eql(u8, mode, "static"))
+                .{ .static = try parseEndpointResponse(arena, response orelse .{ .string = "" }) }
+            else if (response != null)
+                return error.InvalidServer
+            else if (std.mem.eql(u8, mode, "echo-body"))
+                .echo_body
+            else if (std.mem.eql(u8, mode, "echo-headers"))
+                .echo_headers
+            else
+                return error.UnknownEndpointMode;
+            try routes.append(arena, .{
                 .method = if (ep.object.get("method")) |m| m.string else "GET",
                 .path = if (ep.object.get("path")) |p| p.string else "/",
+                .reply = reply,
             });
         }
     }
-    return sv;
+    return .{ .name = name, .routes = routes.items };
 }
 
-test "wasip3_official manifest: a server the harness cannot serve is refused, not run without it" {
+/// A static endpoint's `response`, per upstream's
+/// `EndpointResponse.from_config`: a bare string is a 200 with that body.
+fn parseEndpointResponse(arena: std.mem.Allocator, v: std.json.Value) !HttpEndpoint.Static {
+    if (v == .string) return .{ .body = v.string };
+    var out: HttpEndpoint.Static = .{};
+    if (v.object.get("status")) |st| out.status = @intCast(st.integer);
+    if (v.object.get("headers")) |h| out.headers = try jsonHeaders(arena, h);
+    if (v.object.get("body")) |b| out.body = b.string;
+    if (v.object.get("chunks")) |cs| {
+        if (v.object.get("body") != null) return error.InvalidServer;
+        const chunks = try arena.alloc([]const u8, cs.array.items.len);
+        for (chunks, cs.array.items) |*c, item| c.* = item.string;
+        out.chunks = chunks;
+    }
+    if (v.object.get("trailers")) |t| {
+        out.trailers = try jsonHeaders(arena, t);
+        if (out.trailers.len != 0 and out.chunks == null) return error.InvalidServer;
+    }
+    return out;
+}
+
+fn jsonHeaders(arena: std.mem.Allocator, v: std.json.Value) ![]const std.http.Header {
+    const out = try arena.alloc(std.http.Header, v.object.count());
+    var it = v.object.iterator();
+    for (out) |*h| {
+        const e = it.next().?;
+        h.* = .{ .name = e.key_ptr.*, .value = e.value_ptr.string };
+    }
+    return out;
+}
+
+test "wasip3_official manifest: a server entry upstream rejects is refused, not run without it" {
     const cases = [_]struct { json: []const u8, err: anyerror }{
-        .{ .json = "{\"name\":\"main\",\"endpoints\":[{\"path\":\"/\",\"mode\":\"echo-headers\"}]}", .err = error.UnsupportedServerMode },
-        .{ .json = "{\"name\":\"main\",\"endpoints\":[{\"path\":\"/\",\"response\":\"hi\"}]}", .err = error.UnsupportedServerMode },
-        .{ .json = "{\"name\":\"gone\",\"kind\":\"closed\"}", .err = error.UnsupportedServerMode },
+        .{ .json = "{\"name\":\"main\",\"endpoints\":[{\"mode\":\"echo-query\"}]}", .err = error.UnknownEndpointMode },
+        .{ .json = "{\"name\":\"main\",\"endpoints\":[{\"mode\":\"echo-body\",\"response\":\"hi\"}]}", .err = error.InvalidServer },
+        .{ .json = "{\"name\":\"main\",\"endpoints\":[{\"response\":{\"body\":\"a\",\"chunks\":[\"b\"]}}]}", .err = error.InvalidServer },
+        .{ .json = "{\"name\":\"main\",\"endpoints\":[{\"response\":{\"trailers\":{\"x-t\":\"v\"}}}]}", .err = error.InvalidServer },
+        .{ .json = "{\"name\":\"gone\",\"kind\":\"closed\",\"endpoints\":[]}", .err = error.InvalidServer },
+        .{ .json = "{\"name\":\"main\",\"kind\":\"reset\"}", .err = error.UnknownServerKind },
         .{ .json = "{\"name\":\"a-b\"}", .err = error.InvalidServerName },
     };
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
     for (cases) |c| {
         const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, c.json, .{});
         defer parsed.deinit();
-        try testing.expectError(c.err, parseOfficialServer(testing.allocator, parsed.value));
+        try testing.expectError(c.err, parseOfficialServer(arena.allocator(), parsed.value));
     }
+}
+
+test "wasip3_official manifest: a server's endpoints become the routes the endpoint serves" {
+    const json =
+        \\{"name":"main","endpoints":[
+        \\  {"path":"/hi","response":"hi"},
+        \\  {"method":"POST","path":"/e","mode":"echo-headers"},
+        \\  {"path":"/c","response":{"status":201,"headers":{"x-a":"b"},"chunks":["one","two"],"trailers":{"x-t":"v"}}},
+        \\  {}
+        \\]}
+    ;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), json, .{});
+    const sv = try parseOfficialServer(arena.allocator(), parsed.value);
+    try testing.expect(!sv.closed);
+    try testing.expectEqual(4, sv.routes.len);
+    try testing.expectEqualStrings("hi", sv.routes[0].reply.static.body);
+    try testing.expectEqualStrings("POST", sv.routes[1].method);
+    try testing.expectEqual(HttpEndpoint.Reply.echo_headers, sv.routes[1].reply);
+    const chunked = sv.routes[2].reply.static;
+    try testing.expectEqual(201, chunked.status);
+    try testing.expectEqualStrings("x-a", chunked.headers[0].name);
+    try testing.expectEqualStrings("two", chunked.chunks.?[1]);
+    try testing.expectEqualStrings("v", chunked.trailers[0].value);
+    try testing.expectEqualStrings("GET", sv.routes[3].method);
+    try testing.expectEqualStrings("/", sv.routes[3].path);
+    try testing.expectEqual(200, sv.routes[3].reply.static.status);
+    try testing.expectEqualStrings("", sv.routes[3].reply.static.body);
+
+    const closed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), "{\"name\":\"dead\",\"kind\":\"closed\"}", .{});
+    try testing.expect((try parseOfficialServer(arena.allocator(), closed.value)).closed);
 }
 
 /// The harness-side remote client for `SockOp` manifests. `step` is the
@@ -1278,7 +1364,7 @@ const ExternalClient = struct {
     }
 };
 
-const EchoEndpoint = @import("component_http_echo.zig").EchoEndpoint;
+const HttpEndpoint = @import("component_http_echo.zig").HttpEndpoint;
 
 /// Drive the guest's `handler.handle` with one manifest `request` op and
 /// assert the response.
@@ -1448,7 +1534,7 @@ fn runOfficialWasip3Test(comptime name: []const u8) !void {
     try argv.append(alloc, name ++ ".wasm");
     try argv.appendSlice(alloc, expect.args.items);
     try host.setArgs(argv.items);
-    var endpoints: std.ArrayList(*EchoEndpoint) = .empty;
+    var endpoints: std.ArrayList(*HttpEndpoint) = .empty;
     defer {
         for (endpoints.items) |ep| ep.stop();
         endpoints.deinit(alloc);
@@ -1456,14 +1542,17 @@ fn runOfficialWasip3Test(comptime name: []const u8) !void {
     var server_env = std.heap.ArenaAllocator.init(alloc);
     defer server_env.deinit();
     for (expect.servers.items) |sv| {
-        try endpoints.ensureUnusedCapacity(alloc, 1);
-        const ep = try EchoEndpoint.start(io, sv.routes.items);
-        endpoints.appendAssumeCapacity(ep);
+        const port = if (sv.closed) try HttpEndpoint.reserveClosedPort(io) else port: {
+            try endpoints.ensureUnusedCapacity(alloc, 1);
+            const ep = try HttpEndpoint.start(io, sv.routes);
+            endpoints.appendAssumeCapacity(ep);
+            break :port ep.port;
+        };
         const env_alloc = server_env.allocator();
         const key = try env_alloc.print("HTTP_SERVER_{s}", .{sv.name});
         _ = std.ascii.upperString(key, key);
         try expect.env_keys.append(alloc, key);
-        try expect.env_vals.append(alloc, try env_alloc.print("127.0.0.1:{d}", .{ep.port}));
+        try expect.env_vals.append(alloc, try env_alloc.print("127.0.0.1:{d}", .{port}));
     }
     if (expect.env_keys.items.len > 0) try host.setEnvs(expect.env_keys.items, expect.env_vals.items);
     host.stdin_bytes = expect.stdin.items;
@@ -1639,7 +1728,37 @@ test "wasip3-official: http-service-echo (request body + header reflection)" {
 test "wasip3-official: http-service-uri (scheme/authority set by host)" {
     try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
-test "wasip3-official: http-client (client.send against the harness echo endpoint)" {
+test "wasip3-official: http-client (client.send against the manifest's echo-body server)" {
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
+}
+test "wasip3-official: http-client-chunked (a chunked response body, then its trailers)" {
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
+}
+test "wasip3-official: http-client-headers (request headers as the server received them)" {
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
+}
+test "wasip3-official: http-client-method (each method reaches its own route)" {
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
+}
+test "wasip3-official: http-client-path (path and query sent as written)" {
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
+}
+test "wasip3-official: http-client-path-none (no path-with-query sends /)" {
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
+}
+test "wasip3-official: http-client-send-errors (refused connection, unresolvable host)" {
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
+}
+test "wasip3-official: http-client-sent (a send that fails resolves the sent future with an error)" {
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
+}
+test "wasip3-official: http-client-status (200, 201, 418, 500, and 404 off the routes)" {
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
+}
+test "wasip3-official: http-client-trailers (request trailers as the server received them)" {
+    try runOfficialWasip3Test(comptime officialCorpusName(@src()));
+}
+test "wasip3-official: http-client-trailer-error (trailers that resolve to an error fail the send)" {
     try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 
@@ -1668,13 +1787,13 @@ test "wasip3-official: sockets-echo (join! interleaved data plane)" {
     try runOfficialWasip3Test(comptime officialCorpusName(@src()));
 }
 
-/// The vendored corpus root, relative to the repo root. The 45 test blocks
+/// The vendored corpus root, relative to the repo root. The test blocks
 /// above reach it through `runOfficialWasip3Test`, which builds the same
 /// prefix from a comptime name.
 const wasip3_official_root = "test/component/wasip3_official";
 
-// ADR-0210 — the denominator behind "the official wasm32-wasip3 corpus,
-// 45/45 green on all three supported OSes".
+// ADR-0210 — the denominator behind README's "N/N green on all three
+// supported OSes" for the official wasm32-wasip3 corpus.
 //
 // Every `.wasm` in the corpus does have a `test "wasip3-official: …"` block
 // above, but nothing checked that, and the two sides drift in opposite ways:
@@ -1688,11 +1807,11 @@ const wasip3_official_root = "test/component/wasip3_official";
 //                       too rather than relied on.
 //
 // The covered set is read from `builtin.test_functions` rather than from a
-// second hand-written list: a list would be one more copy of the 45 names,
+// second hand-written list: a list would be one more copy of the names,
 // and a copy is the thing this test exists to stop.
 //
 // CAVEAT: `-Dtest-filter` removes tests from `test_functions`, so a filter
-// that keeps THIS block while dropping the 45 reports them all as uncovered.
+// that keeps THIS block while dropping the others reports them all as uncovered.
 // This block is deliberately NOT named `wasip3-official: …`, so the obvious
 // filter drops this block instead — the harmless direction. No build step
 // passes a filter (`test-all` does not), and the failure names itself below.

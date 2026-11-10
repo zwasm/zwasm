@@ -85,7 +85,7 @@ Text Encoding Builtins` (skip).
 |----------------|---------------|-----------------------------------------|
 | 0.1 (preview1) | ✅ COMPLETE   | de-facto baseline; complete since Phase 11 |
 | 0.2 (preview2) | ✅ COMPLETE (default-ON) | Component Model campaign done 2026-06-13 (ADR-0170); official corpus 158/0/0 |
-| 0.3            | ✅ 0.3.0 COMPLETE (opt-in `-Dwasi=p3`) | 0.3.0 **released 2026-06-11**; rebases WASI on CM async (async func / `stream<T>` / `future<T>` — NOT core stack-switching, see callout). Full-coverage campaign done (ADR-0205 Accepted); official corpus 45/45 on all three OSes. 0.3.1 / 0.3.2 rename only, but their CM `map` / `implements` are refused (#611, #612; 2026-10-21 entry below) |
+| 0.3            | ✅ 0.3.0 COMPLETE (opt-in `-Dwasi=p3`) | 0.3.0 **released 2026-06-11**; rebases WASI on CM async (async func / `stream<T>` / `future<T>` — NOT core stack-switching, see callout). Full-coverage campaign done (ADR-0205 Accepted); official corpus green on all three OSes (count: README's WASI 0.3 row). 0.3.1 / 0.3.2 rename only, but their CM `map` / `implements` are refused (#611, #612; 2026-10-21 entry below) |
 
 - **2026-10-21** — **WASI 0.3.1 (08-11) and 0.3.2 (10-13)**: the `.wit` diff
   from `v0.3.0` is the version strings plus one doc comment in
