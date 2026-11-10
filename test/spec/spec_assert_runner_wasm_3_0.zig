@@ -528,31 +528,19 @@ const LvKnown = struct {
 /// Each row names its #400 line; the funcs are the `func[N]` of its stderr
 /// lines, taken one module per run. Re-take the table, do not edit it by
 /// hand.
+///
+/// Re-taken 2026-11-09 with #400's `br_on_*` capture rows fixed: 2 lines
+/// over 2 modules, both the dead-body row. The `.end` lines the 2026-09-07
+/// rises added went with the capture rows.
 const lv_known_x86_64_sysv: []const LvKnown = &.{
     // #400's dead-body `br_table` row (func 70, the one line of the seed's
     // 25 that #398 left): `drop` after the `.end` of a dead body
     // (`unreachable`, `br_table`, `end`), liveness depth 0 against the
     // emit's 1.
     .{ .key = "memory64/br_table/br_table.0.wasm", .count = 1 },
-    // #400 `br_on_cast` row, funcs 3–6; 5 and 6 fire as 3 and 4 do (equal
-    // depth, liveness one vreg above the emit). +2 on the seed: the `.end`
-    // after `return` in funcs 4 and 6.
-    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 15 },
-    // #400 `br_on_cast` row (func 1). +1: the `.end` after `unreachable`.
-    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 2 },
-    // #400 `br_on_cast_fail` row, funcs 2–6; 4–6 fire as 2 and 3 do. +7 on
-    // the seed: the `.end` after `return` in each of the five, and func 4's
-    // `i32.const` / `array.get_u`, which #398's first two commits brought in.
-    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 18 },
-    // #400 `br_on_cast_fail` row (funcs 1, 2). +2: the `.end` after
-    // `unreachable` in each.
-    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 4 },
-    // #400 `br_on_null` / `br_on_non_null` row (funcs 0, 1, 6) — the traced mechanism.
-    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 3 },
-    // #400 `br_on_null` / `br_on_non_null` row (func 1).
-    .{ .key = "function-references/br_on_non_null/br_on_non_null.2.wasm", .count = 1 },
-    // #400 `br_on_null` / `br_on_non_null` row (func 1).
-    .{ .key = "function-references/br_on_null/br_on_null.2.wasm", .count = 1 },
+    // The same row (func 6): `call_ref` after a block whose dead body
+    // (`unreachable`, `br_on_non_null`, ...) closes before any vreg exists.
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 1 },
 };
 
 /// x86_64-windows — seeded 2026-09-05 by this lane's own first CI run
@@ -571,13 +559,7 @@ const lv_known_x86_64_sysv: []const LvKnown = &.{
 /// table made, to the same counts.
 const lv_known_x86_64_windows: []const LvKnown = &.{
     .{ .key = "memory64/br_table/br_table.0.wasm", .count = 1 },
-    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 15 },
-    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 2 },
-    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 18 },
-    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 4 },
-    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 3 },
-    .{ .key = "function-references/br_on_non_null/br_on_non_null.2.wasm", .count = 1 },
-    .{ .key = "function-references/br_on_null/br_on_null.2.wasm", .count = 1 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 1 },
 };
 
 /// aarch64 (the macOS leg) — seeded 2026-09-05 by the same first CI run
@@ -591,13 +573,7 @@ const lv_known_x86_64_windows: []const LvKnown = &.{
 /// moves to the same counts — the third backend agreeing on #398's effect.
 const lv_known_aarch64: []const LvKnown = &.{
     .{ .key = "memory64/br_table/br_table.0.wasm", .count = 1 },
-    .{ .key = "gc/br_on_cast/br_on_cast.0.wasm", .count = 15 },
-    .{ .key = "gc/br_on_cast/br_on_cast.1.wasm", .count = 2 },
-    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.0.wasm", .count = 18 },
-    .{ .key = "gc/br_on_cast_fail/br_on_cast_fail.1.wasm", .count = 4 },
-    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 3 },
-    .{ .key = "function-references/br_on_non_null/br_on_non_null.2.wasm", .count = 1 },
-    .{ .key = "function-references/br_on_null/br_on_null.2.wasm", .count = 1 },
+    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 1 },
 };
 
 comptime {

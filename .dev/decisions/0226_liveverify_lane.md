@@ -111,8 +111,8 @@ count is per row so that "one func fixed, one regressed" in the same module
 is visible; the list carries no total.
 
 The seeds are taken the way #376 took its Windows row: the x86_64 SysV table
-is seeded from this host (the 69 above, re-taken on the PR's base; the table
-on `main` is the 2026-09-07 re-take, 45 lines over 8 modules), and the
+is seeded from this host (the 69 above, re-taken on the PR's base; each
+later re-take is dated in the table's doc comment), and the
 x86_64 Win64 and aarch64 tables start **empty**, so the PR's first CI run
 reports every residual on those legs as `unexpected` and names them. Those
 names are copied into the tables and pushed; the second run is the proof
@@ -212,3 +212,4 @@ is #400's move 2 and is not decided here.
 |------------|--------------|------|
 | 2026-09-05 | `a49bbd594` | Initial, as written 2026-09-05; landed with the lane it defines (#402). |
 | 2026-09-08 | `b56b645ee` | Tables re-taken after #398 (45 lines / 8 modules); Status flipped on the 2026-09-06 word in the follow-up doc PR. |
+| 2026-11-09 | — | Context no longer quotes the table's current count; it points at the re-takes dated on the table (2 lines / 2 modules after #400's `br_on_*` capture rows). |

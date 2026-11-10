@@ -795,6 +795,11 @@ pub fn compute(
             // on the non-null branch, then `pop()`s it (the null fall-
             // through discards it). Mirrors the emit's pushed_vregs delta
             // (D-220; lesson 2026-06-02-jit-liveness-must-mirror-emit-pushed-vregs).
+            // Its capture runs before that pop, so the ref is the top of
+            // the label's values (#400).
+            if (instr.op == .br_on_non_null) {
+                captureBlockMergeVregs(&block_stack, block_stack_len, @intCast(instr.payload), sim_stack[0..sim_len]);
+            }
             if (sim_len > 0) {
                 sim_len -= 1;
                 const cond_vreg = sim_stack[sim_len];
@@ -858,6 +863,11 @@ pub fn compute(
         // check, re-append the SAME vreg — so it belongs here too, and its
         // emit READS that vreg's register at this pc (the TEST/CMP), which
         // is what the last-use extension records (#245).
+        // Each br_on_* also captures the target block's merge vregs where
+        // its emit does (#400): br_on_null with the ref popped, so the
+        // label's values are the ones below it; br_on_cast / _fail with
+        // the ref in place, at the label depth in the payload's low 32 bits
+        // (D-453 packs ht2 above it).
         if (instr.op == .@"local.tee" or instr.op == .br_on_cast or
             instr.op == .br_on_cast_fail or instr.op == .br_on_null or
             instr.op == .@"ref.as_non_null")
@@ -865,6 +875,12 @@ pub fn compute(
             if (sim_len > 0) {
                 const top_vreg = sim_stack[sim_len - 1];
                 ranges.items[top_vreg].last_use_pc = pc;
+                if (instr.op == .br_on_null) {
+                    captureBlockMergeVregs(&block_stack, block_stack_len, @intCast(instr.payload), sim_stack[0 .. sim_len - 1]);
+                }
+            }
+            if (instr.op == .br_on_cast or instr.op == .br_on_cast_fail) {
+                captureBlockMergeVregs(&block_stack, block_stack_len, @as(u32, @truncate(instr.payload)), sim_stack[0..sim_len]);
             }
             continue;
         }
@@ -1096,6 +1112,78 @@ test "compute: br closes all live vregs at branch site (sub-7.5c-iv)" {
     defer deinit(testing.allocator, live);
     try testing.expectEqual(@as(usize, 1), live.ranges.len);
     try testing.expectEqual(@as(u32, 2), live.ranges[0].last_use_pc);
+}
+
+test "compute: br_on_null captures the block's merge vregs below the ref (#400)" {
+    // The emit pops the ref, captures the label's values without it, and
+    // re-pushes the same ref vreg on the fall-through.
+    var f = try buildFuncWithParams(testing.allocator, &.{zir.ValType.funcref}, &.{
+        .{ .op = .block, .extra = 1 }, // 0
+        .{ .op = .@"local.get", .payload = 0 }, // 1: v0, the label's value
+        .{ .op = .@"local.get", .payload = 0 }, // 2: v1, the ref
+        .{ .op = .br_on_null, .payload = 0 }, // 3
+        .{ .op = .drop }, // 4
+        .{ .op = .drop }, // 5
+        .{ .op = .@"local.get", .payload = 0 }, // 6: v2, the fall-through result
+        .{ .op = .end }, // 7
+        .{ .op = .drop }, // 8
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(usize, 3), live.ranges.len);
+    try testing.expectEqual(@as(u32, 4), live.ranges[1].last_use_pc);
+    try testing.expectEqual(@as(u32, 8), live.ranges[0].last_use_pc);
+}
+
+test "compute: br_on_non_null captures the block's merge vregs with the ref on top (#400)" {
+    var f = try buildFuncWithParams(testing.allocator, &.{zir.ValType.funcref}, &.{
+        .{ .op = .block, .extra = 2 }, // 0
+        .{ .op = .@"i32.const", .payload = 1 }, // 1: v0
+        .{ .op = .@"local.get", .payload = 0 }, // 2: v1, the ref
+        .{ .op = .br_on_non_null, .payload = 0 }, // 3
+        .{ .op = .drop }, // 4
+        .{ .op = .@"i32.const", .payload = 2 }, // 5: v2
+        .{ .op = .@"local.get", .payload = 0 }, // 6: v3
+        .{ .op = .end }, // 7
+        .{ .op = .drop }, // 8
+        .{ .op = .drop }, // 9
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(usize, 4), live.ranges.len);
+    try testing.expectEqual(@as(u32, 8), live.ranges[1].last_use_pc);
+    try testing.expectEqual(@as(u32, 9), live.ranges[0].last_use_pc);
+}
+
+test "compute: br_on_cast captures at the label depth in the payload's low 32 bits (#400)" {
+    // D-453 packs ht2 into bits 32+; the label depth (1) is the low 32.
+    var f = try buildFuncWithParams(testing.allocator, &.{zir.ValType.anyref}, &.{
+        .{ .op = .block, .extra = 1 }, // 0
+        .{ .op = .block, .extra = 0 }, // 1
+        .{ .op = .@"local.get", .payload = 0 }, // 2: v0, the ref
+        .{ .op = .br_on_cast, .payload = 1 | (@as(u64, 7) << 32) }, // 3
+        .{ .op = .drop }, // 4
+        .{ .op = .end }, // 5
+        .{ .op = .@"local.get", .payload = 0 }, // 6: v1
+        .{ .op = .end }, // 7
+        .{ .op = .drop }, // 8
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(usize, 2), live.ranges.len);
+    try testing.expectEqual(@as(u32, 8), live.ranges[0].last_use_pc);
 }
 
 test "compute: pop on empty stack is tolerant (validator-cleared dead-code path)" {
