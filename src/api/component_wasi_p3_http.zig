@@ -1291,3 +1291,54 @@ test "a 0.3 response's trailer section reaches the guest through consume-body's 
     try testing.expectEqualStrings("1", fields.entries.items[1].value);
     try testing.expect(fields.immutable);
 }
+
+test "a 3xx reaches the 0.3 guest as the response, and the host sends no second request (#711)" {
+    const testing = std.testing;
+    const rig = try Http3Rig.create();
+    defer rig.destroy();
+    const ctx = rig.ctx;
+    const io = rig.host.io.?;
+    const mem = try ctx.memory();
+
+    var away_buf: [64]u8 = undefined;
+    const away = try std.mem.print(&away_buf, "https://127.0.0.1:{d}/", .{try @import("component_http_echo.zig").HttpEndpoint.reserveClosedPort(io)});
+    const Case = struct { status: u16, location: []const u8, body: []const u8 };
+    const cases = [_]Case{
+        .{ .status = 301, .location = away, .body = "moved" },
+        .{ .status = 302, .location = away, .body = "moved" },
+        .{ .status = 303, .location = away, .body = "moved" },
+        .{ .status = 307, .location = away, .body = "moved" },
+        .{ .status = 308, .location = away, .body = "moved" },
+        // Back to the endpoint itself, where a second request would land.
+        .{ .status = 302, .location = "/again", .body = "moved" },
+        .{ .status = 304, .location = away, .body = "" },
+    };
+    for (cases) |c| {
+        var resp_buf: [256]u8 = undefined;
+        const response = try std.mem.print(&resp_buf, "HTTP/1.1 {d} Redirect\r\nLocation: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ c.status, c.location, c.body.len, c.body });
+        const ep = try RawEndpoint.start(io, response);
+        defer ep.destroy();
+        const r = try rig.newRequest(ep.port);
+        ctx.http_requests.items[r.rep].method = .get;
+        try rig.lowerTrailers(.none);
+        try rig.send(r, "", 128);
+        ep.stop();
+
+        try testing.expectEqual(@as(u32, 1), ep.connections);
+        try testing.expect(std.mem.startsWith(u8, ep.request(), "GET / HTTP/1.1\r\n"));
+        try testing.expectEqual(@as(u8, 0), try mem.read(u8, 128));
+        const resp = ctx.http_responses.items[try ctx.resources.rep(WasiP2Ctx.HTTP_RESPONSE_RT, try mem.read(u32, 136))];
+        try testing.expectEqual(c.status, resp.status);
+        var values: std.ArrayList([]const u8) = .empty;
+        defer values.deinit(testing.allocator);
+        try ctx.http_fields.items[resp.headers_rep].get(&values, testing.allocator, "location");
+        try testing.expectEqual(@as(usize, 1), values.items.len);
+        try testing.expectEqualStrings(c.location, values.items[0]);
+        if (c.body.len == 0) {
+            try testing.expectEqual(@as(?u32, null), resp.contents_stream);
+        } else {
+            const shared_id = (try ctx.streams.get(resp.contents_stream.?)).shared;
+            try testing.expectEqualStrings(c.body, ctx.host_body_bytes.get(shared_id).?.data);
+        }
+    }
+}

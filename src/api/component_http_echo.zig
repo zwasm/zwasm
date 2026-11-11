@@ -238,8 +238,10 @@ pub const HttpEndpoint = struct {
 /// One HTTP/1.1 connection that records the request as it came over the
 /// wire (head plus a content-length or chunked body) and answers `response`
 /// verbatim — for asserting the bytes the client put on the wire, and for
-/// answering a response the test spells out byte for byte. `request` is
-/// readable after `stop`.
+/// answering a response the test spells out byte for byte. A later
+/// connection is counted in `connections` and closed unanswered. `request`
+/// and `connections` are readable after `stop`; `destroy` stops it first if
+/// the test has not, so a test that fails early leaves no thread behind.
 pub const RawEndpoint = struct {
     io: std.Io,
     server: net.Server,
@@ -248,6 +250,8 @@ pub const RawEndpoint = struct {
     response: []const u8,
     buf: [65536]u8 = undefined,
     len: usize = 0,
+    connections: u32 = 0,
+    stopping: std.atomic.Value(bool) = .init(false),
 
     pub fn start(io: std.Io, response: []const u8) !*RawEndpoint {
         const self = try std.heap.page_allocator.create(RawEndpoint);
@@ -265,8 +269,17 @@ pub const RawEndpoint = struct {
 
     fn serve(self: *RawEndpoint) void {
         const io = self.io;
-        var conn = self.server.accept(io) catch return;
-        defer conn.close(io);
+        while (true) {
+            var conn = self.server.accept(io) catch return;
+            defer conn.close(io);
+            if (self.stopping.load(.acquire)) return;
+            self.connections += 1;
+            if (self.connections == 1) self.answer(conn);
+        }
+    }
+
+    fn answer(self: *RawEndpoint, conn: net.Stream) void {
+        const io = self.io;
         while (!self.complete()) {
             var bufs = [_][]u8{self.buf[self.len..]};
             const got = p2_sockets.netRead(io, conn.socket.handle, &bufs) catch return;
@@ -298,15 +311,17 @@ pub const RawEndpoint = struct {
     }
 
     pub fn stop(self: *RawEndpoint) void {
+        if (self.stopping.swap(true, .acq_rel)) return;
         const addr: net.IpAddress = .{ .ip4 = net.Ip4Address.loopback(self.port) };
         if (addr.connect(self.io, .{ .mode = .stream, .protocol = .tcp })) |s| s.close(self.io) else |_| {
-            // Already connected/served — the accept has returned; nothing to wake.
+            // The accept loop has returned; nothing to wake.
         }
         self.thread.join();
         self.server.deinit(self.io);
     }
 
     pub fn destroy(self: *RawEndpoint) void {
+        self.stop();
         std.heap.page_allocator.destroy(self);
     }
 };

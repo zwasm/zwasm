@@ -676,3 +676,67 @@ test "wasi:http@0.2: a response's trailer section is freed, since future-trailer
     // the section to account at deinit.
     try testing.expectEqualSlices(u8, &.{ 1, 0, 0 }, &.{ try mem.read(u8, 0), try mem.read(u8, 8), try mem.read(u8, 16) });
 }
+
+test "wasi:http@0.2: a 3xx reaches the guest as the response, and the host sends no second request (#711)" {
+    const RawEndpoint = @import("component_http_echo.zig").RawEndpoint;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    const io = threaded.io();
+    host.io = io;
+    host.allow_network = true;
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06memory\x02\x00");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+    const mem = try ctx.memory();
+
+    var away_buf: [64]u8 = undefined;
+    const away = try std.mem.print(&away_buf, "https://127.0.0.1:{d}/", .{try HttpEndpoint.reserveClosedPort(io)});
+    const Case = struct { status: u16, location: []const u8, body: []const u8 };
+    const cases = [_]Case{
+        .{ .status = 301, .location = away, .body = "moved" },
+        .{ .status = 302, .location = away, .body = "moved" },
+        .{ .status = 303, .location = away, .body = "moved" },
+        .{ .status = 307, .location = away, .body = "moved" },
+        .{ .status = 308, .location = away, .body = "moved" },
+        // Back to the endpoint itself, where a second request would land.
+        .{ .status = 302, .location = "/again", .body = "moved" },
+        .{ .status = 304, .location = away, .body = "" },
+    };
+    for (cases) |c| {
+        var resp_buf: [256]u8 = undefined;
+        const response = try std.mem.print(&resp_buf, "HTTP/1.1 {d} Redirect\r\nLocation: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ c.status, c.location, c.body.len, c.body });
+        const ep = try RawEndpoint.start(io, response);
+        defer ep.destroy();
+        const req_rep = try ctx.addHttpRequest(.{ .headers_rep = try ctx.addHttpFields(.{}), .authority = try ctx.alloc.print("127.0.0.1:{d}", .{ep.port}) });
+        try ctx.http2.futures.append(ctx.alloc, .{ .req_rep = req_rep });
+        try http2FutureResponseGet(&caller, try ctx.resources.new(WasiP2Ctx.HTTP2_FUTURE_RESPONSE_RT, @intCast(ctx.http2.futures.items.len - 1)), 0);
+        ep.stop();
+
+        try testing.expectEqual(@as(u32, 1), ep.connections);
+        try testing.expect(std.mem.startsWith(u8, ep.request(), "GET / HTTP/1.1\r\n"));
+        try testing.expectEqualSlices(u8, &.{ 1, 0, 0 }, &.{ try mem.read(u8, 0), try mem.read(u8, 8), try mem.read(u8, 16) });
+        const resp_rep = try ctx.resources.rep(WasiP2Ctx.HTTP_RESPONSE_RT, try mem.read(u32, 24));
+        const resp = ctx.http_responses.items[resp_rep];
+        try testing.expectEqual(c.status, resp.status);
+        var values: std.ArrayList([]const u8) = .empty;
+        defer values.deinit(testing.allocator);
+        try ctx.http_fields.items[resp.headers_rep].get(&values, testing.allocator, "location");
+        try testing.expectEqual(@as(usize, 1), values.items.len);
+        try testing.expectEqualStrings(c.location, values.items[0]);
+        const body = for (ctx.http2.in_bodies.items) |b| {
+            if (b.resp_rep == resp_rep) break b.bytes;
+        } else return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(c.body, body);
+    }
+}
