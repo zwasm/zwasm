@@ -30,116 +30,125 @@
 #   bash scripts/ci_gate.sh                    # core gate on this host
 #   ZWASM_CI_RELEASESAFE_UNIT=1 bash scripts/ci_gate.sh   # + ReleaseSafe unit tests
 #   ZWASM_CI_EXTENDED=1 bash scripts/ci_gate.sh   # + extended checks
+#   ZWASM_CI_CORE=0 ZWASM_CI_EXTENDED=1 bash scripts/ci_gate.sh   # extended only
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "[ci_gate] host: $(uname -s) — zig $(zig version)"
 
-echo "[ci_gate] (1/3) zig fmt --check src/ bench/latency/ tools/"
-zig fmt --check src/
-# bench/latency/ is compiled by step 3 but lives outside src/, so without this
-# it would be the one Zig file in the tree whose formatting can drift silently.
-zig fmt --check bench/latency/
-# tools/lint/build.zig is only built by the extended leg's `zig build lint`,
-# so without this its formatting would drift unchecked on every PR. The
-# exclude is load-bearing: zig unpacks packages into <build root>/zig-pkg,
-# and `zig fmt` recurses into it (it skips .zig-cache on its own, not this),
-# so without it a zlinter/zls bump could red this gate on a vendored file.
-zig fmt --check --exclude tools/lint/zig-pkg tools/
+# ZWASM_CI_CORE=0: the push to `main`, when a merge-queue run already passed
+# the commit (ci.yml's `detect` decides; ADR-0227). The extended checks below
+# read no output of the core steps — each builds what it runs, the DCE matrix
+# into its own prefixes — so they stand alone.
+if [ "${ZWASM_CI_CORE:-1}" = "0" ]; then
+    echo "[ci_gate] core gate skipped (ZWASM_CI_CORE=0)"
+else
+    echo "[ci_gate] (1/3) zig fmt --check src/ bench/latency/ tools/"
+    zig fmt --check src/
+    # bench/latency/ is compiled by step 3 but lives outside src/, so without this
+    # it would be the one Zig file in the tree whose formatting can drift silently.
+    zig fmt --check bench/latency/
+    # tools/lint/build.zig is only built by the extended leg's `zig build lint`,
+    # so without this its formatting would drift unchecked on every PR. The
+    # exclude is load-bearing: zig unpacks packages into <build root>/zig-pkg,
+    # and `zig fmt` recurses into it (it skips .zig-cache on its own, not this),
+    # so without it a zlinter/zls bump could red this gate on a vendored file.
+    zig fmt --check --exclude tools/lint/zig-pkg tools/
 
-echo "[ci_gate] (2/3) zig build test-all"
-# `--summary all` prints each step's own wall time (zig records
-# `result_duration_ns` and reports it in the summary tree). Without it a CI log
-# gives no step-level timing at all, and `test-all` is ~98% of the macOS leg —
-# so every question about where that leg's time goes had to be answered by
-# inferring from gaps between log lines, which produced a wrong answer twice.
-# Costs no runtime and ~200 lines on a ~58k-line log (measured 0.36%).
-zig build test-all --summary all
+    echo "[ci_gate] (2/3) zig build test-all"
+    # `--summary all` prints each step's own wall time (zig records
+    # `result_duration_ns` and reports it in the summary tree). Without it a CI log
+    # gives no step-level timing at all, and `test-all` is ~98% of the macOS leg —
+    # so every question about where that leg's time goes had to be answered by
+    # inferring from gaps between log lines, which produced a wrong answer twice.
+    # Costs no runtime and ~200 lines on a ~58k-line log (measured 0.36%).
+    zig build test-all --summary all
 
-# ADR-0209 — compile-only. `bench-latency` is a measurement and stays out of
-# test-all, but without SOMETHING building it, public-API drift would break the
-# bench with no signal until a human ran it by hand.
-echo "[ci_gate] (3/3) zig build bench-latency-build (compile-only, ADR-0209)"
-zig build bench-latency-build
+    # ADR-0209 — compile-only. `bench-latency` is a measurement and stays out of
+    # test-all, but without SOMETHING building it, public-API drift would break the
+    # bench with no signal until a human ran it by hand.
+    echo "[ci_gate] (3/3) zig build bench-latency-build (compile-only, ADR-0209)"
+    zig build bench-latency-build
 
-# rust-host embedding consumer (D-254): the third independent embedding-ABI
-# consumer (docs/examples/rust_host/hello.rs links the same libzwasm.a the C
-# host uses) — exercise it so it can't rot silently. LINUX-only: the ubuntu
-# runners ship a gnu-target rustc that is ABI-compatible with zig's native
-# libzwasm.a, so the link is clean (the macOS SDK dance + the Windows rust ABI
-# question are out of scope here). Runs on EVERY PR (core), so a break shows on
-# the PR's Linux legs before merge, not post-merge. Skips gracefully where rustc
-# is absent (e.g. a local gate host without the .#rust-host shell).
-if [ "$(uname -s)" = "Linux" ]; then
-    if command -v rustc >/dev/null 2>&1; then
-        echo "[ci_gate] rust-host embedding consumer (zig build run-rust-host, D-254)"
-        zig build run-rust-host
-    else
-        echo "[ci_gate] (skip run-rust-host — rustc not on PATH; needs the .#rust-host shell)"
+    # rust-host embedding consumer (D-254): the third independent embedding-ABI
+    # consumer (docs/examples/rust_host/hello.rs links the same libzwasm.a the C
+    # host uses) — exercise it so it can't rot silently. LINUX-only: the ubuntu
+    # runners ship a gnu-target rustc that is ABI-compatible with zig's native
+    # libzwasm.a, so the link is clean (the macOS SDK dance + the Windows rust ABI
+    # question are out of scope here). Runs on EVERY PR (core), so a break shows on
+    # the PR's Linux legs before merge, not post-merge. Skips gracefully where rustc
+    # is absent (e.g. a local gate host without the .#rust-host shell).
+    if [ "$(uname -s)" = "Linux" ]; then
+        if command -v rustc >/dev/null 2>&1; then
+            echo "[ci_gate] rust-host embedding consumer (zig build run-rust-host, D-254)"
+            zig build run-rust-host
+        else
+            echo "[ci_gate] (skip run-rust-host — rustc not on PATH; needs the .#rust-host shell)"
+        fi
     fi
+
+    # ReleaseSafe unit tests (#347). The Debug `test` lane cannot see a defect that
+    # only an optimized host frame layout produces — #323 (an unaligned frame
+    # pointer dereferenced by the EH sniffer) reached `main` that way, and every
+    # release binary is built ReleaseSafe. ReleaseSafe and not ReleaseFast /
+    # ReleaseSmall: `support.dbg` is comptime-disabled in those two, so five of its
+    # tests fail there by construction, and ReleaseSafe is the mode that names the
+    # fault instead of exiting 70 silently. Which legs run it is a matrix fact in
+    # ci.yml (`releasesafe_unit: true`, read here as ZWASM_CI_RELEASESAFE_UNIT),
+    # and the rule for a row is #347's: the leg has to finish far enough ahead of
+    # aarch64-macos, the critical path, that what this adds does not move the
+    # gate's wall-clock. Measured on PR #423's run (2026-09-09): Linux 5m48s on a
+    # 14m04s leg, Windows 6m17s on a 20m44s leg, against a 24m11s macOS leg —
+    # both inside the headroom (#303). Windows also skips 156 tests here where
+    # Linux skips 12: #370's Win64 guard, the same set as the Debug lane. Core, not
+    # extended — extended does not run on every PR, which is not a regression
+    # barrier. `--summary all` for the same reason `test-all` carries it. No
+    # graceful-skip arm: unlike rust-host this needs no external toolchain.
+    if [ "${ZWASM_CI_RELEASESAFE_UNIT:-0}" = "1" ]; then
+        echo "[ci_gate] ReleaseSafe unit tests (core on the releasesafe_unit legs, #347 / #303)"
+        zig build test -Doptimize=ReleaseSafe --summary all
+    fi
+
+    # Test-discovery guard (sweep S5): a named test block that no test step
+    # discovers never runs. Discovery is HOST-DEPENDENT for the arch-specific
+    # codegen files (an arm64-only file is analysed natively on an arm64 host but
+    # needs an explicit import to be reached on x86_64), so this has to run per-OS
+    # — and on every PR, not just the merge to main, or the first signal is a red
+    # `main` instead of a red PR (which is exactly how it first fired).
+    echo "[ci_gate] test-discovery guard (check_test_discovery --gate)"
+    bash scripts/check_test_discovery.sh --gate
+
+    # Runner dbg-init guard (issue #329; the #268 class). A test/ runner that owns
+    # its own `main(init: std.process.Init)` reaches `dbg.initFromEnv` only if it
+    # calls it, and one that does not runs every ZWASM_DEBUG channel dark with no
+    # lane going red. A grep over test/, under 0.1 s, so core rather than
+    # extended. Output kept for the same reason as check_spec_manifest_shape
+    # below: the finding is the file name.
+    echo "[ci_gate] runner dbg-init guard (check_runner_dbg_init --gate)"
+    bash scripts/check_runner_dbg_init.sh --gate
+
+    # Spec-manifest shape guard (ADR-0210). The spec runners print an
+    # enumeration denominator whose whole value is that a third party can
+    # re-derive it with `wc -l`. That only holds while the corpora stay one
+    # directive per line — a regen introducing blank or comment lines would
+    # break the re-derivation while both the runner and the corpus stayed
+    # green. Cheap (a read of 86 manifests), so it runs on every PR.
+    echo "[ci_gate] spec-manifest shape guard (check_spec_manifest_shape --gate)"
+    # Output kept (not `> /dev/null`, unlike the gate_commit invocations): the
+    # whole value of this guard is naming WHICH manifest broke the
+    # re-derivation, and a red CI leg showing only a bare non-zero exit would
+    # make the next person reproduce it by hand. Matches check_test_discovery
+    # above.
+    bash scripts/check_spec_manifest_shape.sh --gate
+
+    # ReleaseSafe-runner floor (ADR-0177). `gate_commit.sh` also runs this, but it
+    # is optional pre-flight and fires only when build.zig is staged; the merge
+    # path needs it unconditionally, because a runner dropped to Debug costs the
+    # leg minutes while every gate stays green. A grep over one file, so it sits in
+    # the core gate rather than behind ZWASM_CI_EXTENDED.
+    echo "[ci_gate] ReleaseSafe-runner floor (check_releasesafe_runners)"
+    bash scripts/check_releasesafe_runners.sh
 fi
-
-# ReleaseSafe unit tests (#347). The Debug `test` lane cannot see a defect that
-# only an optimized host frame layout produces — #323 (an unaligned frame
-# pointer dereferenced by the EH sniffer) reached `main` that way, and every
-# release binary is built ReleaseSafe. ReleaseSafe and not ReleaseFast /
-# ReleaseSmall: `support.dbg` is comptime-disabled in those two, so five of its
-# tests fail there by construction, and ReleaseSafe is the mode that names the
-# fault instead of exiting 70 silently. Which legs run it is a matrix fact in
-# ci.yml (`releasesafe_unit: true`, read here as ZWASM_CI_RELEASESAFE_UNIT),
-# and the rule for a row is #347's: the leg has to finish far enough ahead of
-# aarch64-macos, the critical path, that what this adds does not move the
-# gate's wall-clock. Measured on PR #423's run (2026-09-09): Linux 5m48s on a
-# 14m04s leg, Windows 6m17s on a 20m44s leg, against a 24m11s macOS leg —
-# both inside the headroom (#303). Windows also skips 156 tests here where
-# Linux skips 12: #370's Win64 guard, the same set as the Debug lane. Core, not
-# extended — extended does not run on every PR, which is not a regression
-# barrier. `--summary all` for the same reason `test-all` carries it. No
-# graceful-skip arm: unlike rust-host this needs no external toolchain.
-if [ "${ZWASM_CI_RELEASESAFE_UNIT:-0}" = "1" ]; then
-    echo "[ci_gate] ReleaseSafe unit tests (core on the releasesafe_unit legs, #347 / #303)"
-    zig build test -Doptimize=ReleaseSafe --summary all
-fi
-
-# Test-discovery guard (sweep S5): a named test block that no test step
-# discovers never runs. Discovery is HOST-DEPENDENT for the arch-specific
-# codegen files (an arm64-only file is analysed natively on an arm64 host but
-# needs an explicit import to be reached on x86_64), so this has to run per-OS
-# — and on every PR, not just the merge to main, or the first signal is a red
-# `main` instead of a red PR (which is exactly how it first fired).
-echo "[ci_gate] test-discovery guard (check_test_discovery --gate)"
-bash scripts/check_test_discovery.sh --gate
-
-# Runner dbg-init guard (issue #329; the #268 class). A test/ runner that owns
-# its own `main(init: std.process.Init)` reaches `dbg.initFromEnv` only if it
-# calls it, and one that does not runs every ZWASM_DEBUG channel dark with no
-# lane going red. A grep over test/, under 0.1 s, so core rather than
-# extended. Output kept for the same reason as check_spec_manifest_shape
-# below: the finding is the file name.
-echo "[ci_gate] runner dbg-init guard (check_runner_dbg_init --gate)"
-bash scripts/check_runner_dbg_init.sh --gate
-
-# Spec-manifest shape guard (ADR-0210). The spec runners print an
-# enumeration denominator whose whole value is that a third party can
-# re-derive it with `wc -l`. That only holds while the corpora stay one
-# directive per line — a regen introducing blank or comment lines would
-# break the re-derivation while both the runner and the corpus stayed
-# green. Cheap (a read of 86 manifests), so it runs on every PR.
-echo "[ci_gate] spec-manifest shape guard (check_spec_manifest_shape --gate)"
-# Output kept (not `> /dev/null`, unlike the gate_commit invocations): the
-# whole value of this guard is naming WHICH manifest broke the
-# re-derivation, and a red CI leg showing only a bare non-zero exit would
-# make the next person reproduce it by hand. Matches check_test_discovery
-# above.
-bash scripts/check_spec_manifest_shape.sh --gate
-
-# ReleaseSafe-runner floor (ADR-0177). `gate_commit.sh` also runs this, but it
-# is optional pre-flight and fires only when build.zig is staged; the merge
-# path needs it unconditionally, because a runner dropped to Debug costs the
-# leg minutes while every gate stays green. A grep over one file, so it sits in
-# the core gate rather than behind ZWASM_CI_EXTENDED.
-echo "[ci_gate] ReleaseSafe-runner floor (check_releasesafe_runners)"
-bash scripts/check_releasesafe_runners.sh
 
 # Also reachable through ZWASM_CI_JIT_RELEASESAFE, which `ci.yml` sets for the
 # Windows and aarch64-linux legs — see their matrix rows for why (#303, #545).

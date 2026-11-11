@@ -24,7 +24,8 @@
 # trigger is inert until then.
 # `main` is the trunk and is ruleset-protected: no direct pushes — every change
 # lands via a `develop/*` branch → PR → this gate must pass → merge. A push to
-# `main` is therefore a merged PR (its `push` run does the extended checks).
+# `main` is therefore a merged PR (its `push` run does the extended checks, and
+# the core gate only when no queue run passed the commit).
 #
 # Doc-only changes skip the heavy gate matrix: the `changes` job detects
 # whether any non-doc path changed and short-circuits `gate` when not. So the
@@ -83,7 +84,8 @@ jobs:
   # Detect whether any non-doc path changed. Doc-only PRs then skip the heavy
   # `gate` matrix while `ci-required` still reports success, so the
   # branch ruleset's required check stays satisfiable. A queue entry also
-  # skips when its tree is one its PR's run already gated (#691). `detect` is
+  # skips when its tree is one its PR's run already gated, and a push to `main`
+  # skips the core gate when its queue run passed it (#691). `detect` is
   # a pure function of its env and git — `prev` and `mg` do the lookups — and
   # every skip fails closed: an input it cannot establish runs the gate.
   # Untrusted strings enter only as env, and only SHAs and a PR number leave
@@ -96,8 +98,10 @@ jobs:
       contents: read
       checks: read
       pull-requests: read
+      actions: read
     outputs:
       code: ${{ steps.detect.outputs.code }}
+      core: ${{ steps.detect.outputs.core }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -147,6 +151,24 @@ jobs:
           fi
           echo "PR #${n} head ${h}: ci-required=${v}, gate matrix=${m}"
           { echo "pr_head=${h}"; echo "verdict=${v}"; echo "matrix=${m}"; } >> "$GITHUB_OUTPUT"
+      # The pushed commit's merge-queue run, for the core-gate skip in
+      # `detect`. Under REBASE the commit that lands is the queue entry's head,
+      # so its run has this SHA. A push with no queue run behind it (an admin
+      # bypass) or a lookup that fails leaves the verdict not `success`, which
+      # runs the core gate.
+      - name: Queue run's verdict
+        id: queue
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUSH_HEAD: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          r="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=merge_group&head_sha=${PUSH_HEAD}" --jq '[.workflow_runs[] | select(.conclusion == "success") | .id] | if length > 0 then "success \(.[0])" else "none -" end' 2>/dev/null)" || r="unknown -"
+          read -r v id <<< "$r"
+          echo "${PUSH_HEAD}: merge_group run ${id}, conclusion=${v}"
+          echo "conclusion=${v}" >> "$GITHUB_OUTPUT"
       - name: Detect non-doc changes
         id: detect
         env:
@@ -159,6 +181,7 @@ jobs:
           PR_BEFORE_VERDICT: ${{ steps.prev.outputs.conclusion }}
           PUSH_BEFORE: ${{ github.event.before }}
           PUSH_HEAD: ${{ github.sha }}
+          PUSH_QUEUE_VERDICT: ${{ steps.queue.outputs.conclusion }}
           MG_BASE: ${{ github.event.merge_group.base_sha }}
           MG_HEAD: ${{ github.event.merge_group.head_sha }}
           MG_PR_HEAD: ${{ steps.mg.outputs.pr_head }}
@@ -167,6 +190,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A push repeats the core gate its queue run already passed on the
+          # same commit, by running the gate, by the tree check below, or by a
+          # doc-only range from a gated base — the standard every skip here
+          # holds to. The extended checks run on the push alone, so they stay.
+          if [ "$EVENT" = "push" ] && [ "$PUSH_QUEUE_VERDICT" = "success" ]; then
+            echo "core=false" >> "$GITHUB_OUTPUT"; echo "queue run passed ${PUSH_HEAD} -> skip the core gate"
+          else
+            echo "core=true" >> "$GITHUB_OUTPUT"
+          fi
           if [ "$EVENT" = "pull_request" ]; then
             # A PR run answers for THIS push: a doc-only push rides on the
             # previous head's successful gate, and a rebase widens the range
@@ -446,10 +478,13 @@ jobs:
       # run ONLY on the merge to `main` (push) — not on every PR / dispatch, which
       # get the core gate (fmt + test-all + the Linux-only rust-host + the
       # ReleaseSafe unit tests on the `releasesafe_unit` rows; see ci_gate.sh's
-      # header). windows is always core.
+      # header). windows is always core. The push runs the core gate only when
+      # no queue run passed its commit (`detect`, #691), so a merged commit's
+      # push run is normally the extended checks alone.
       - name: ci_gate.sh
         shell: bash
         env:
+          ZWASM_CI_CORE: ${{ needs.changes.outputs.core == 'false' && '0' || '1' }}
           ZWASM_CI_EXTENDED: ${{ (github.event_name == 'push' && matrix.extended) && '1' || '0' }}
           ZWASM_CI_JIT_RELEASESAFE: ${{ (github.event_name == 'push' && matrix.jit_releasesafe) && '1' || '0' }}
           ZWASM_CI_RELEASESAFE_UNIT: ${{ matrix.releasesafe_unit && '1' || '0' }}
@@ -488,10 +523,14 @@ jobs:
       # a second full build per PR to run two lanes over 72 small binaries.
       # Here it reuses what `ci_gate.sh` just built.
       #
+      # Core content, so it drops with the core gate on a push whose queue run
+      # passed the commit (#691).
+      #
       # Time-boxed in the ADR-0174 sense, not indefinite: when D-583 goes green
       # on all three OSes the step moves into `test-all` and this block is
       # deleted. That row's DISCHARGE clause lists the edits.
       - name: test-wasi-p1-official (D-582)
+        if: needs.changes.outputs.core != 'false'
         shell: bash
         run: zig build test-wasi-p1-official
 
