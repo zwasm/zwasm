@@ -278,9 +278,7 @@ fn http2Handle(caller: *Caller, request: u32, opts_disc: u32, opts: u32, retptr:
         _ = try ctx.resources.drop(WasiP2Ctx.HTTP_REQOPTS_RT, opts);
     }
     // The result's payload sits at +8 (error-code has u64 cases).
-    // `httpExchange` sends `http://`: another scheme is refused, not sent in
-    // the clear.
-    const failed: ?u8 = if (req.authority == null or (req.scheme != null and req.scheme.? != .http))
+    const failed: ?u8 = if (req.authority == null or !ctx_mod.httpSendable(req))
         EC_HTTP_REQUEST_URI_INVALID
     else if (req.method == .other)
         EC_HTTP_REQUEST_METHOD_INVALID
@@ -667,7 +665,7 @@ test "wasi:http@0.2: a response's trailer section is freed, since future-trailer
 
     const ep = try RawEndpoint.start(host.io.?, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n7\r\npayload\r\n0\r\nx-checksum: abc123\r\n\r\n");
     defer ep.destroy();
-    const req_rep = try ctx.addHttpRequest(.{ .headers_rep = try ctx.addHttpFields(.{}), .authority = try ctx.alloc.print("127.0.0.1:{d}", .{ep.port}) });
+    const req_rep = try ctx.addHttpRequest(.{ .headers_rep = try ctx.addHttpFields(.{}), .scheme = .http, .authority = try ctx.alloc.print("127.0.0.1:{d}", .{ep.port}) });
     try ctx.http2.futures.append(ctx.alloc, .{ .req_rep = req_rep });
     try http2FutureResponseGet(&caller, try ctx.resources.new(WasiP2Ctx.HTTP2_FUTURE_RESPONSE_RT, 0), 0);
     ep.stop();
@@ -718,7 +716,7 @@ test "wasi:http@0.2: a 3xx reaches the guest as the response, and the host sends
         const response = try std.mem.print(&resp_buf, "HTTP/1.1 {d} Redirect\r\nLocation: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ c.status, c.location, c.body.len, c.body });
         const ep = try RawEndpoint.start(io, response);
         defer ep.destroy();
-        const req_rep = try ctx.addHttpRequest(.{ .headers_rep = try ctx.addHttpFields(.{}), .authority = try ctx.alloc.print("127.0.0.1:{d}", .{ep.port}) });
+        const req_rep = try ctx.addHttpRequest(.{ .headers_rep = try ctx.addHttpFields(.{}), .scheme = .http, .authority = try ctx.alloc.print("127.0.0.1:{d}", .{ep.port}) });
         try ctx.http2.futures.append(ctx.alloc, .{ .req_rep = req_rep });
         try http2FutureResponseGet(&caller, try ctx.resources.new(WasiP2Ctx.HTTP2_FUTURE_RESPONSE_RT, @intCast(ctx.http2.futures.items.len - 1)), 0);
         ep.stop();
@@ -739,4 +737,42 @@ test "wasi:http@0.2: a 3xx reaches the guest as the response, and the host sends
         } else return error.TestUnexpectedResult;
         try testing.expectEqualStrings(c.body, body);
     }
+}
+
+test "wasi:http@0.2: a request with no scheme is refused at handle, and is not sent by a get that skips handle" {
+    const RawEndpoint = @import("component_http_echo.zig").RawEndpoint;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = threaded.io();
+    host.allow_network = true;
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06memory\x02\x00");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+    const mem = try ctx.memory();
+
+    const ep = try RawEndpoint.start(host.io.?, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    defer ep.destroy();
+    const authority = "127.0.0.1:{d}";
+    const handled = try ctx.addHttpRequest(.{ .headers_rep = try ctx.addHttpFields(.{}), .authority = try ctx.alloc.print(authority, .{ep.port}) });
+    try http2Handle(&caller, try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, handled), 0, 0, 0);
+    try testing.expectEqualSlices(u8, &.{ 1, EC_HTTP_REQUEST_URI_INVALID }, &.{ try mem.read(u8, 0), try mem.read(u8, 8) });
+
+    const req_rep = try ctx.addHttpRequest(.{ .headers_rep = try ctx.addHttpFields(.{}), .authority = try ctx.alloc.print(authority, .{ep.port}) });
+    try ctx.http2.futures.append(ctx.alloc, .{ .req_rep = req_rep });
+    try http2FutureResponseGet(&caller, try ctx.resources.new(WasiP2Ctx.HTTP2_FUTURE_RESPONSE_RT, 0), 64);
+    ep.stop();
+    // some(ok(err(internal-error))), and nothing reached the endpoint.
+    try testing.expectEqualSlices(u8, &.{ 1, 0, 1, EC_INTERNAL_ERROR }, &.{ try mem.read(u8, 64), try mem.read(u8, 72), try mem.read(u8, 80), try mem.read(u8, 88) });
+    try testing.expectEqualStrings("", ep.request());
 }
