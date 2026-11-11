@@ -27,12 +27,6 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   none of the four `clockid` values was checked only when `ABSTIME` was set,
   and a relative subscription with it became a plain timer.
 
-- **A block whose first exit is `br_on_null`, `br_on_non_null`, `br_on_cast`
-  or `br_on_cast_fail` returns the right result on the JIT** (#400). The
-  liveness pass did not record the block's merge values at those four
-  instructions as the emit does, so with a call between the block's end and
-  the use of its result, the register holding it could be reused first.
-
 - **A WASI 0.2 guest's filesystem error for a path outside the preopen is
   `not-permitted`, as the spec and wasmtime give it** (#462). That and seven
   other conditions (`deadlock`, `quota`, `no-lock`, `not-recoverable`,
@@ -73,17 +67,6 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   `ok(some)` sends the body chunked with that trailer section, and `err`
   aborts the request: `client.send` returns the guest's error.
 
-- **A `wasi:http` request answered with a 3xx returns that response to the
-  guest** (#711). The host followed up to three redirects itself; now the
-  guest receives the 3xx with its `location` header and body, and the host
-  sends no further request, as wasmtime does. Both 0.2 and 0.3.
-
-- **A `wasi:http` client request is sent only when its scheme is `http`.**
-  In 0.3, `https`, any other scheme, or none fails with
-  `HTTP-protocol-error`; in 0.2, `handle` refuses them with
-  `HTTP-request-URI-invalid`, which now covers a request with no scheme.
-  The client does not speak `https` yet.
-
 - **An interpreter call chain deeper than 256 no longer traps
   `CallStackExhausted` while the host stack has room** (#638). Frames past
   256 go into heap chunks; the cap is `Runtime.max_frame_depth` (16384),
@@ -93,6 +76,29 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
   runs** (#634). It failed with `UnknownImport`: the adapter's `env::memory`
   and three WASI 0.2 rows it imports (`filesystem-error-code`, the 0.2 clock
   `resolution`s) were not served.
+
+### Security
+
+- **On the JIT, a value a block carries out through `br_on_null`,
+  `br_on_non_null`, `br_on_cast` or `br_on_cast_fail` keeps its register
+  until it is used** (#400). Before, a call in between could take the
+  register, and a module could make the JIT read or write outside the GC
+  heap through a reference of its choosing. The interpreter was not affected.
+  [GHSA-4p74-j99r-p339](https://github.com/zwasm/zwasm/security/advisories/GHSA-4p74-j99r-p339).
+
+- **A `wasi:http` request answered with a 3xx returns that response to the
+  guest** (#711). Before, the host followed up to three redirects itself, and
+  a redirect to an `https://` URL stopped the host process. Now the guest
+  receives the 3xx with its `location` header and body, and the host sends no
+  further request, as wasmtime does. Both 0.2 and 0.3.
+  [GHSA-hqq2-pc6j-fjq9](https://github.com/zwasm/zwasm/security/advisories/GHSA-hqq2-pc6j-fjq9).
+
+- **A `wasi:http` client request is sent only when its scheme is `http`.**
+  Before, the 0.3 client sent a request whose scheme was `https`, another
+  scheme or unset as plain `http://`, and the 0.2 client did so for an unset
+  scheme. Now 0.3 fails with `HTTP-protocol-error` and 0.2's `handle` refuses
+  with `HTTP-request-URI-invalid`. The client does not speak `https` yet.
+  [GHSA-7h6h-97q3-p224](https://github.com/zwasm/zwasm/security/advisories/GHSA-7h6h-97q3-p224).
 
 ### Documentation
 
