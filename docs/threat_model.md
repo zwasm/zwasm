@@ -132,7 +132,9 @@ sorts a report with three questions:
    host acts on, undefined behaviour, a process abort, or a set limit that does
    not hold?
 
-Three yeses make a vulnerability. One no makes it a bug. In particular:
+Three yeses make a vulnerability. One no makes it a bug. The goal that was
+breached decides how soon the fix is released
+([SECURITY.md](../.github/SECURITY.md#when-a-fix-is-released)). In particular:
 
 - An uncaught out-of-bounds memory or table access, or a guest leaving the
   control flow its module declares.
