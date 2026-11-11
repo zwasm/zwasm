@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_ci_changes_detect.sh — the `changes` job's doc-only decision, exercised.
+# check_ci_changes_detect.sh — the `changes` job's skip decisions, exercised.
 #
 # `ci.yml`'s `changes` step decides whether a run pays the 3-OS gate. Its
 # failure mode is a silent pass: `ci-required` treats a FAILED `changes` as
@@ -119,7 +119,7 @@ QUEUE_CODE_DOC=$(git -C "$REPO" commit-tree -m queue -p "$BASE" "$CODE_DOC^{tree
 fails=0
 cases=0
 
-check() { # name event base head want [before|pr_head after verdict matrix]
+check() { # name event base head want [before|pr_head after verdict matrix core]
   cases=$((cases + 1))
   local out
   : > "$TMP/gh_output"
@@ -131,7 +131,7 @@ check() { # name event base head want [before|pr_head after verdict matrix]
     cd "$REPO"
     EVENT="$2" \
     PR_BASE="$3" PR_HEAD="$4" PR_BEFORE="${6:-}" PR_AFTER="${7:-}" PR_BEFORE_VERDICT="${8:-}" \
-    PUSH_BEFORE="$3" PUSH_HEAD="$4" \
+    PUSH_BEFORE="$3" PUSH_HEAD="$4" PUSH_QUEUE_VERDICT="${8:-}" \
     MG_BASE="$3" MG_HEAD="$4" MG_PR_HEAD="${6:-}" MG_PR_HEAD_VERDICT="${8:-}" MG_PR_HEAD_MATRIX="${9:-}" \
     GITHUB_OUTPUT="$TMP/gh_output" \
     bash "$TMP/detect.sh" >/dev/null 2>&1
@@ -142,6 +142,15 @@ check() { # name event base head want [before|pr_head after verdict matrix]
     # answer is as much a finding as one that answers wrongly.
     echo "[check_ci_changes_detect] FAIL $1 -> ${out:-(step produced no code=; it exited non-zero)} (want code=$5)" >&2
     fails=$((fails + 1))
+  fi
+  # The core decision, where a case names one. Every case gets some answer:
+  # the step writes `core=` before any arm can exit.
+  if [ -n "${10:-}" ]; then
+    out=$(grep -o 'core=[a-z]*' "$TMP/gh_output" | tail -1 || true)
+    if [ "$out" != "core=${10}" ]; then
+      echo "[check_ci_changes_detect] FAIL $1 -> ${out:-(step produced no core=)} (want core=${10})" >&2
+      fails=$((fails + 1))
+    fi
   fi
 }
 
@@ -175,6 +184,14 @@ check "pull_request code push after doc"           pull_request "$BASE" "$DOC_CO
 check "pull_request before unreachable"            pull_request "$BASE" "$CODE_DOC" true  0000000000000000000000000000000000000000 "$CODE_DOC" success
 check "push doc-only"               push         "$BASE" "$DOC"     false
 check "push code"                   push         "$BASE" "$CODE"    true
+# The push skips only the core gate, and only behind a queue run that passed
+# the commit (#691); a success verdict on any other event is not one.
+check "push code, queue run passed"     push         "$BASE" "$CODE" true  "" "" success  "" false
+check "push code, no queue run"         push         "$BASE" "$CODE" true  "" "" none     "" true
+check "push code, queue run unknown"    push         "$BASE" "$CODE" true  "" "" unknown  "" true
+check "push doc-only, queue run passed" push         "$BASE" "$DOC"  false "" "" success  "" false
+check "pull_request, previous green"    pull_request "$BASE" "$CODE_DOC" false "$CODE" "$CODE_DOC" success "" true
+check "merge_group, tree gated"         merge_group  "$BASE" "$QUEUE_SAME" false "$CODE" "" success success true
 check "workflow_dispatch"           workflow_dispatch "" ""         true
 
 if [ "$fails" -gt 0 ]; then

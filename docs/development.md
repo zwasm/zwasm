@@ -107,7 +107,8 @@ in) — plus
 inside the script (ADR-0225). The extended
 static/build checks (lint, the build-option DCE matrix, AOT cross-compile,
 `zone_check`) run on the merge to `main`, not per PR — they are up to ~20
-cold-cache builds and would dominate every PR's wall-clock. A failure of that
+cold-cache builds and would dominate every PR's wall-clock. That run skips the
+core gate when the queue run passed the same commit (#691). A failure of that
 `main` run is reported as a comment on the open `ci:main-failure` issue, since
 the run's actor is the merge queue's bot and GitHub notifies nobody (#312).
 All four legs are blocking (ADR-0211 D3, #545). There is no additional hidden gate
@@ -133,6 +134,7 @@ leg's content except for the one blocking step beside it:
 bash scripts/ci_gate.sh                    # core (fmt + test-all)
 ZWASM_CI_RELEASESAFE_UNIT=1 bash scripts/ci_gate.sh  # + the ReleaseSafe unit tests (the Linux + Windows rows)
 ZWASM_CI_EXTENDED=1 bash scripts/ci_gate.sh  # + lint/DCE/AOT/zone checks (Unix)
+ZWASM_CI_CORE=0 ZWASM_CI_EXTENDED=1 bash scripts/ci_gate.sh  # extended alone (the push to main)
 zig build test-wasi-p1-official            # the blocking step outside the script
 ```
 
@@ -158,8 +160,9 @@ Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds
 and packages all four targets in ReleaseSafe (macOS aarch64, Linux
 x86_64/aarch64, Windows x86_64), then creates the GitHub Release with the
 archives and `SHA256SUMS`. The workflow runs no tests: the tag's
-correctness rests on the `main` run that already verified the commit
-under it, so check that run completed before pushing the tag. The Release
+correctness rests on the commit's queue run (the core gate) and its `main`
+run (the extended checks), so check the `main` run completed before pushing
+the tag. The Release
 notes are GitHub's generated pull-request list unless a Release for the tag
 already exists — to hand-write them, create the Release (with the CHANGELOG
 section as its body) before the workflow reaches that step, or edit it
