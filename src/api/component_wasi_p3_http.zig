@@ -822,9 +822,11 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
             sub.setPendingEvent(.{ .code = .subtask, .index = p.subtask, .payload = @backingInt(async_mod.SubtaskState.returned) });
         }
     };
-    // Denied here rather than at `client.send`, so the parked body stream
-    // drains and releases as on any failed exchange. `HTTP-request-denied` = 15.
+    // Denied or refused here rather than at `client.send`, so the parked body
+    // stream drains and releases as on any failed exchange.
+    // `HTTP-request-denied` = 15, `HTTP-protocol-error` = 35.
     if (!pcs.granted) return fail.code(self, mem, pcs, req, 15);
+    if (!ctx_mod.httpSendable(req)) return fail.code(self, mem, pcs, req, 35);
     const trailers: ?*const p3http.HttpFields = switch (pcs.trailers) {
         .none => null,
         .some => |rep| try ctxHttpFields(self, rep),
@@ -983,7 +985,7 @@ test "an outbound HTTP exchange that fails answers internal-error, not configura
     var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
 
     // No authority, so the exchange fails before it reaches the network.
-    const req_rep = try ctx.addHttpRequest(.{ .headers_rep = 0 });
+    const req_rep = try ctx.addHttpRequest(.{ .headers_rep = 0, .scheme = .http });
     _ = try http3ClientSend(&caller, try ctx.resources.new(WasiP2Ctx.HTTP_REQUEST_RT, req_rep), 0);
     _ = try pollPendingClientSends(&ctx);
     const mem = try ctx.memory();
@@ -1017,7 +1019,7 @@ test "a 0.3 request's sent future carries the send's outcome to a read issued be
     const blocked = (async_mod.ReturnCode{ .blocked = {} }).encode();
     const completed = (async_mod.ReturnCode{ .completed = 0 }).encode();
 
-    // Three requests with no authority, so each exchange fails with
+    // Three `http` requests with no authority, so each exchange fails with
     // internal-error (38). Each `request.new` result lands at 0, the send's
     // result at 16 + 32*i.
     var sent: [3]u32 = undefined;
@@ -1029,7 +1031,9 @@ test "a 0.3 request's sent future carries the send's outcome to a read issued be
         try http3RequestNew(&caller, headers, 0, 0, trailers.readable, 0, 0, 0);
         const req = try mem.read(u32, 0);
         s.* = try mem.read(u32, 4);
-        w.* = ctx.http_requests.items[try ctx.resources.rep(WasiP2Ctx.HTTP_REQUEST_RT, req)].sent_writable;
+        const r = &ctx.http_requests.items[try ctx.resources.rep(WasiP2Ctx.HTTP_REQUEST_RT, req)];
+        r.scheme = .http;
+        w.* = r.sent_writable;
         _ = try http3ClientSend(&caller, req, 16 + 32 * @as(u32, @intCast(i)));
         // The trailers future resolves `ok(none)`, as wit-bindgen's writer
         // does when dropped.
@@ -1130,6 +1134,7 @@ const Http3Rig = struct {
         const rep = try ctx.resources.rep(WasiP2Ctx.HTTP_REQUEST_RT, handle);
         const req = &ctx.http_requests.items[rep];
         req.method = .post;
+        req.scheme = .http;
         req.authority = try ctx.alloc.print("127.0.0.1:{d}", .{port});
         return .{ .handle = handle, .rep = rep, .sent = try mem.read(u32, 4), .body = body.writable, .trailers = trailers.writable };
     }
@@ -1231,6 +1236,41 @@ test "a 0.3 request goes chunked with the trailers its future resolves to, with 
         try testing.expectEqualSlices(u8, &.{ 1, 22 }, &.{ try mem.read(u8, 128), try mem.read(u8, 136) });
         try testing.expectEqual((async_mod.ReturnCode{ .completed = 0 }).encode(), try ctx_mod.p2FutureCopy(rig.copy_caller, r.sent, 160));
         try testing.expectEqualSlices(u8, &.{ 1, 22 }, &.{ try mem.read(u8, 160), try mem.read(u8, 168) });
+    }
+}
+
+test "a 0.3 request whose scheme is not http is refused with HTTP-protocol-error before a connection opens" {
+    const testing = std.testing;
+    const rig = try Http3Rig.create();
+    defer rig.destroy();
+    const ctx = rig.ctx;
+    const io = rig.host.io.?;
+    const mem = try ctx.memory();
+    const ok_response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    const Case = enum { https, other, unset, http };
+    for ([_]Case{ .https, .other, .unset, .http }) |case| {
+        const ep = try RawEndpoint.start(io, ok_response);
+        defer ep.destroy();
+        const r = try rig.newRequest(ep.port);
+        ctx.http_requests.items[r.rep].scheme = switch (case) {
+            .https => .https,
+            .other => .{ .other = try ctx.alloc.dupe(u8, "ftp") },
+            .unset => null,
+            .http => .http,
+        };
+        try rig.lowerTrailers(.none);
+        try rig.send(r, "ping", 128);
+        ep.stop();
+        if (case == .http) {
+            try testing.expectEqual(@as(u8, 0), try mem.read(u8, 128));
+            try testing.expect(std.mem.startsWith(u8, ep.request(), "POST / HTTP/1.1\r\n"));
+            continue;
+        }
+        try testing.expectEqualStrings("", ep.request());
+        try testing.expectEqualSlices(u8, &.{ 1, 35 }, &.{ try mem.read(u8, 128), try mem.read(u8, 136) });
+        try testing.expectEqual((async_mod.ReturnCode{ .completed = 0 }).encode(), try ctx_mod.p2FutureCopy(rig.copy_caller, r.sent, 160));
+        try testing.expectEqualSlices(u8, &.{ 1, 35 }, &.{ try mem.read(u8, 160), try mem.read(u8, 168) });
     }
 }
 

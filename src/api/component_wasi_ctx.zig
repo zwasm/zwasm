@@ -868,12 +868,21 @@ pub fn ctxHttpRequest(ctx: *WasiP2Ctx, rep: u32) WasiP2Error!*p3http.HttpRequest
 /// it has no field) are the caller's to own.
 pub const HttpExchange = struct { status: u16, headers_rep: u32, body: []u8, trailers: ?[]u8 };
 
+/// Whether `httpExchange` may send `req`. The client speaks `http` only, so
+/// a request whose scheme is unset or anything else is not sent.
+pub fn httpSendable(req: *const p3http.HttpRequest) bool {
+    return if (req.scheme) |sc| sc == .http else false;
+}
+
 /// The blocking HTTP exchange both `wasi:http` generations send through:
 /// `std.http.Client` over `http://` + the request's authority and path.
-/// `error.HttpFailed` is every failure the guest sees as `internal-error`;
-/// the network grant is the caller's to check. `trailers` sends the body
-/// chunked with that trailer section.
+/// The caller checks the network grant and `httpSendable` and maps each
+/// refusal to its own `error-code`; a request `httpSendable` refuses fails
+/// here too, before a connection opens. `error.HttpFailed` is every other
+/// failure, which the guest sees as `internal-error`. `trailers` sends the
+/// body chunked with that trailer section.
 pub fn httpExchange(ctx: *WasiP2Ctx, req: *const p3http.HttpRequest, body: []u8, trailers: ?*const p3http.HttpFields) (WasiP2Error || error{HttpFailed})!HttpExchange {
+    if (!httpSendable(req)) return error.HttpFailed;
     const io = try ctxIo(ctx);
     const authority = req.authority orelse return error.HttpFailed;
     const path = req.path_with_query orelse "/";
