@@ -51,6 +51,20 @@ against.
 For the trust boundaries, the settings that relax them, and how a report is
 classified, see [the threat model](../docs/threat_model.md).
 
+## When a fix is released
+
+A fix goes to `main` when it is ready, and its advisory is published with the
+first release that carries it. How soon that release comes depends on the
+[security goal](../docs/threat_model.md#security-goals) that was breached:
+
+| Breach | Release |
+| --- | --- |
+| Goals 1, 3 and 4 (sandbox, isolation, grants), or memory unsafety in the host | A release made for the fix, as soon as it is merged. |
+| Goal 2 where the host process stops without memory being read or written out of bounds (a panic, an abort, stack exhaustion), or goal 5 (limits) | The next release, whatever its reason, and no later than 30 days after the fix reached `main`. |
+
+A fix in the second row is on `main` before its advisory is published. Build
+from `main` if you cannot wait for the release.
+
 ## Hardening the host
 
 zwasm ships deny-by-default WASI capabilities, fuel metering, a wall-clock
