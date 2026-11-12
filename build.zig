@@ -1980,12 +1980,28 @@ const strict_c_flags: []const []const u8 = &.{ "-std=c11", "-Wall", "-Wextra", "
 /// after a corpus-only change reports the previous result. The configuration
 /// is cached too, so each directory's listing is declared as what it depends
 /// on; otherwise a file added later would not be an input.
+///
+/// A tree without `sub_path` declares no input: the package (`.paths` in
+/// build.zig.zon) ships no `test/`, and this runs on every `zig build`, a
+/// consumer's included. A configuration that depends on a missing directory
+/// fails, so the directory is opened before it is declared, and a missing one
+/// declares its nearest existing ancestor instead: creating the corpus later
+/// then repeats the configuration, which declares its files.
 fn addTreeInputs(b: *std.Build, run: *std.Build.Step.Run, sub_path: []const u8) void {
     const io = b.graph.io;
-    b.dependOnDirectoryContents(b.path(sub_path));
-    var dir = b.root.openDir(io, sub_path, .{ .iterate = true }) catch |err|
-        std.debug.panic("unit-test corpus '{s}' not openable: {t}", .{ sub_path, err });
+    var dir = b.root.openDir(io, sub_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => {
+            var ancestor = std.Io.Dir.path.dirname(sub_path) orelse "";
+            while (ancestor.len != 0) : (ancestor = std.Io.Dir.path.dirname(ancestor) orelse "") {
+                b.root.access(io, ancestor, .{}) catch continue;
+                break;
+            }
+            return b.dependOnDirectoryContents(b.path(ancestor));
+        },
+        else => std.debug.panic("unit-test corpus '{s}' not openable: {t}", .{ sub_path, err }),
+    };
     defer dir.close(io);
+    b.dependOnDirectoryContents(b.path(sub_path));
     var it = dir.iterate();
     while (it.next(io) catch |err| std.debug.panic("listing '{s}': {t}", .{ sub_path, err })) |entry| {
         const path = b.pathJoin(&.{ sub_path, entry.name });
