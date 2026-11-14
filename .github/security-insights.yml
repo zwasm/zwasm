@@ -50,6 +50,7 @@ repository:
   documentation:
     contributing-guide: https://github.com/zwasm/zwasm/blob/main/.github/CONTRIBUTING.md
     governance: https://github.com/zwasm/zwasm/blob/main/.github/MAINTAINERS.md
+    review-policy: https://github.com/zwasm/zwasm/blob/main/.github/CONTRIBUTING.md
     security-policy: https://github.com/zwasm/zwasm/blob/main/.github/SECURITY.md
   release:
     automated-pipeline: true
