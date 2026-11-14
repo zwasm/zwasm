@@ -874,14 +874,27 @@ pub fn httpSendable(req: *const p3http.HttpRequest) bool {
     return if (req.scheme) |sc| sc == .http else false;
 }
 
+/// Whether the head `receiveHead` refused as invalid named a content coding
+/// std does not know: std folds that parse error into `HttpHeadersInvalid`,
+/// so the head is parsed again. The client is fresh per exchange, so the
+/// connection's bytes up to the read position are that head (after a `100`,
+/// they parse as the `100`, and the answer is false).
+fn unknownContentCoding(hreq: *const std.http.Client.Request) bool {
+    const in = hreq.reader.in;
+    _ = std.http.Client.Response.Head.parse(in.buffer[0..in.seek]) catch |e| return e == error.HttpContentEncodingUnsupported;
+    return false;
+}
+
 /// The blocking HTTP exchange both `wasi:http` generations send through:
 /// `std.http.Client` over `http://` + the request's authority and path.
 /// The caller checks the network grant and `httpSendable` and maps each
 /// refusal to its own `error-code`; a request `httpSendable` refuses fails
-/// here too, before a connection opens. `error.HttpFailed` is every other
-/// failure, which the guest sees as `internal-error`. `trailers` sends the
-/// body chunked with that trailer section.
-pub fn httpExchange(ctx: *WasiP2Ctx, req: *const p3http.HttpRequest, body: []u8, trailers: ?*const p3http.HttpFields) (WasiP2Error || error{HttpFailed})!HttpExchange {
+/// here too, before a connection opens. `error.HttpResponseContentCoding` is
+/// a response whose `content-encoding` std's parser does not know, and
+/// `error.HttpFailed` every other failure, which the guest sees as
+/// `internal-error`. `trailers` sends the body chunked with that trailer
+/// section.
+pub fn httpExchange(ctx: *WasiP2Ctx, req: *const p3http.HttpRequest, body: []u8, trailers: ?*const p3http.HttpFields) (WasiP2Error || error{ HttpFailed, HttpResponseContentCoding })!HttpExchange {
     if (!httpSendable(req)) return error.HttpFailed;
     const io = try ctxIo(ctx);
     const authority = req.authority orelse return error.HttpFailed;
@@ -956,7 +969,14 @@ pub fn httpExchange(ctx: *WasiP2Ctx, req: *const p3http.HttpRequest, body: []u8,
     } else {
         hreq.sendBodiless() catch return error.HttpFailed;
     }
-    var hresp = hreq.receiveHead(&.{}) catch return error.HttpFailed;
+    // The body reaches the guest undecoded, so no coding std knows is refused.
+    hreq.accept_encoding = @splat(true);
+    var hresp = hreq.receiveHead(&.{}) catch |e| {
+        // Past a head that failed, the body's framing is unset: `deinit`
+        // would drain to the peer's EOF, so the connection is closed instead.
+        if (hreq.connection) |c| c.closing = true;
+        return if (e == error.HttpHeadersInvalid and unknownContentCoding(&hreq)) error.HttpResponseContentCoding else error.HttpFailed;
+    };
 
     const fields_idx = ctx.addHttpFields(.{}) catch return WasiP2Error.OutOfMemory;
     var hit = hresp.head.iterateHeaders();

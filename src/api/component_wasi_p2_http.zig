@@ -78,6 +78,7 @@ pub const State = struct {
 const EC_HTTP_REQUEST_DENIED: u8 = 15;
 const EC_HTTP_REQUEST_METHOD_INVALID: u8 = 18;
 const EC_HTTP_REQUEST_URI_INVALID: u8 = 19;
+const EC_HTTP_RESPONSE_CONTENT_CODING: u8 = 32;
 const EC_INTERNAL_ERROR: u8 = 38;
 
 fn rep(ctx: *WasiP2Ctx, rt: u32, handle: u32, len: usize) WasiP2Error!u32 {
@@ -86,11 +87,12 @@ fn rep(ctx: *WasiP2Ctx, rt: u32, handle: u32, len: usize) WasiP2Error!u32 {
     return r;
 }
 
-/// `error-code` at `at`: the disc, plus `internal-error`'s option<string>
-/// at +8 (the variant's payload offset).
+/// `error-code` at `at`: the disc, plus the option<string> of
+/// `internal-error` and `HTTP-response-content-coding` at +8 (the variant's
+/// payload offset).
 fn writeErrorCode(ctx: *WasiP2Ctx, mem: Memory, at: u32, ordinal: u8, msg: ?[]const u8) WasiP2Error!void {
     try mem.write(at, ordinal);
-    if (ordinal != EC_INTERNAL_ERROR) return;
+    if (ordinal != EC_INTERNAL_ERROR and ordinal != EC_HTTP_RESPONSE_CONTENT_CODING) return;
     const s = msg orelse return mem.write(at + 8, @as(u8, 0));
     const p = try ctx.reallocGuest(@intCast(s.len), 1);
     @memcpy(try mem.sliceAt(p, @intCast(s.len)), s);
@@ -335,6 +337,10 @@ fn http2FutureResponseGet(caller: *Caller, self: u32, retptr: u32) WasiP2Error!v
         error.HttpFailed => {
             try mem.write(retptr + 16, @as(u8, 1));
             return writeErrorCode(ctx, mem, retptr + 24, EC_INTERNAL_ERROR, null);
+        },
+        error.HttpResponseContentCoding => {
+            try mem.write(retptr + 16, @as(u8, 1));
+            return writeErrorCode(ctx, mem, retptr + 24, EC_HTTP_RESPONSE_CONTENT_CODING, null);
         },
         else => |oe| return oe,
     };
@@ -780,6 +786,70 @@ test "wasi:http@0.2: the request on the wire carries host and the guest's header
         try testing.expectEqualSlices(u8, &.{ 1, 0, 0 }, &.{ try mem.read(u8, 0), try mem.read(u8, 8), try mem.read(u8, 16) });
         var want_buf: [256]u8 = undefined;
         try testing.expectEqualStrings(try std.mem.print(&want_buf, "GET / HTTP/1.1\r\nhost: 127.0.0.1:{d}\r\n{s}\r\n", .{ ep.port, c.wire }), ep.request());
+    }
+}
+
+test "wasi:http@0.2: a response std would decode reaches the guest undecoded, one std cannot parse fails, and neither waits for the peer to close (#738)" {
+    const RawEndpoint = @import("component_http_echo.zig").RawEndpoint;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    const io = threaded.io();
+    host.io = io;
+    host.allow_network = true;
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06memory\x02\x00");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+    const mem = try ctx.memory();
+
+    // `coding` set: the response reaches the guest; else it fails with `code`.
+    const Case = struct { head: []const u8, coding: ?[]const u8 = null, code: u8 = 0 };
+    const cases = [_]Case{
+        .{ .head = "Content-Encoding: zstd\r\n", .coding = "zstd" },
+        .{ .head = "Content-Encoding: compress\r\n", .coding = "compress" },
+        .{ .head = "Content-Encoding: br\r\n", .code = EC_HTTP_RESPONSE_CONTENT_CODING },
+        .{ .head = ": x\r\n", .code = EC_INTERNAL_ERROR },
+    };
+    for (cases) |c| {
+        var resp_buf: [128]u8 = undefined;
+        const response = try std.mem.print(&resp_buf, "HTTP/1.1 200 OK\r\n{s}Content-Length: 2\r\n\r\nhi", .{c.head});
+        const ep = try RawEndpoint.startHolding(io, response);
+        defer ep.destroy();
+        const req_rep = try ctx.addHttpRequest(.{ .headers_rep = try ctx.addHttpFields(.{}), .scheme = .http, .authority = try ctx.alloc.print("127.0.0.1:{d}", .{ep.port}) });
+        try ctx.http2.futures.append(ctx.alloc, .{ .req_rep = req_rep });
+        // The payload's option disc, so a get that leaves it reads as some.
+        try mem.write(32, @as(u8, 0xff));
+        try http2FutureResponseGet(&caller, try ctx.resources.new(WasiP2Ctx.HTTP2_FUTURE_RESPONSE_RT, @intCast(ctx.http2.futures.items.len - 1)), 0);
+        ep.stop();
+
+        try testing.expect(!ep.held_out);
+        const coding = c.coding orelse {
+            // some(ok(err(code(none)))).
+            try testing.expectEqualSlices(u8, &.{ 1, 0, 1, c.code, 0 }, &.{ try mem.read(u8, 0), try mem.read(u8, 8), try mem.read(u8, 16), try mem.read(u8, 24), try mem.read(u8, 32) });
+            continue;
+        };
+        try testing.expectEqualSlices(u8, &.{ 1, 0, 0 }, &.{ try mem.read(u8, 0), try mem.read(u8, 8), try mem.read(u8, 16) });
+        const resp_rep = try ctx.resources.rep(WasiP2Ctx.HTTP_RESPONSE_RT, try mem.read(u32, 24));
+        const resp = ctx.http_responses.items[resp_rep];
+        var values: std.ArrayList([]const u8) = .empty;
+        defer values.deinit(testing.allocator);
+        try ctx.http_fields.items[resp.headers_rep].get(&values, testing.allocator, "content-encoding");
+        try testing.expectEqual(@as(usize, 1), values.items.len);
+        try testing.expectEqualStrings(coding, values.items[0]);
+        const body = for (ctx.http2.in_bodies.items) |b| {
+            if (b.resp_rep == resp_rep) break b.bytes;
+        } else return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("hi", body);
     }
 }
 

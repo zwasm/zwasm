@@ -834,8 +834,9 @@ fn http3PerformSend(self: *WasiP2Ctx, pcs: *PendingClientSend) WasiP2Error!void 
         .err => |code| return fail.code(self, mem, pcs, req, code),
     };
     const ex = ctx_mod.httpExchange(self, req, pcs.body.items, trailers) catch |e| switch (e) {
-        // `internal-error(none)`.
+        // `internal-error(none)` / `HTTP-response-content-coding(none)`.
         error.HttpFailed => return fail.code(self, mem, pcs, req, 38),
+        error.HttpResponseContentCoding => return fail.code(self, mem, pcs, req, 32),
         else => |oe| return oe,
     };
     var contents: ?u32 = null;
@@ -1415,5 +1416,52 @@ test "a 0.3 request on the wire carries host, its framing and the guest's header
         try testing.expectEqual(@as(u8, 0), try mem.read(u8, 128));
         var want_buf: [256]u8 = undefined;
         try testing.expectEqualStrings(try std.mem.print(&want_buf, c.wire, .{ep.port}), ep.request());
+    }
+}
+
+test "a 0.3 response std would decode reaches the guest undecoded, one std cannot parse fails, and neither waits for the peer to close (#738)" {
+    const testing = std.testing;
+    const rig = try Http3Rig.create();
+    defer rig.destroy();
+    const ctx = rig.ctx;
+    const io = rig.host.io.?;
+    const mem = try ctx.memory();
+
+    // `coding` set: the response reaches the guest; else it fails with `code`
+    // (`HTTP-response-content-coding` = 32, `internal-error` = 38).
+    const Case = struct { head: []const u8, coding: ?[]const u8 = null, code: u8 = 0 };
+    const cases = [_]Case{
+        .{ .head = "Content-Encoding: zstd\r\n", .coding = "zstd" },
+        .{ .head = "Content-Encoding: compress\r\n", .coding = "compress" },
+        .{ .head = "Content-Encoding: br\r\n", .code = 32 },
+        .{ .head = ": x\r\n", .code = 38 },
+    };
+    for (cases) |c| {
+        var resp_buf: [128]u8 = undefined;
+        const response = try std.mem.print(&resp_buf, "HTTP/1.1 200 OK\r\n{s}Content-Length: 2\r\n\r\nhi", .{c.head});
+        const ep = try RawEndpoint.startHolding(io, response);
+        defer ep.destroy();
+        const r = try rig.newRequest(ep.port);
+        ctx.http_requests.items[r.rep].method = .get;
+        try rig.lowerTrailers(.none);
+        try mem.write(144, @as(u8, 0xff));
+        try rig.send(r, "", 128);
+        ep.stop();
+
+        try testing.expect(!ep.held_out);
+        const coding = c.coding orelse {
+            // err(code(none)).
+            try testing.expectEqualSlices(u8, &.{ 1, c.code, 0 }, &.{ try mem.read(u8, 128), try mem.read(u8, 136), try mem.read(u8, 144) });
+            continue;
+        };
+        try testing.expectEqual(@as(u8, 0), try mem.read(u8, 128));
+        const resp = ctx.http_responses.items[try ctx.resources.rep(WasiP2Ctx.HTTP_RESPONSE_RT, try mem.read(u32, 136))];
+        var values: std.ArrayList([]const u8) = .empty;
+        defer values.deinit(testing.allocator);
+        try ctx.http_fields.items[resp.headers_rep].get(&values, testing.allocator, "content-encoding");
+        try testing.expectEqual(@as(usize, 1), values.items.len);
+        try testing.expectEqualStrings(coding, values.items[0]);
+        const shared_id = (try ctx.streams.get(resp.contents_stream.?)).shared;
+        try testing.expectEqualStrings("hi", ctx.host_body_bytes.get(shared_id).?.data);
     }
 }
