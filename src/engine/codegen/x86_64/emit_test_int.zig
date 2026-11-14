@@ -1956,11 +1956,7 @@ test "compile: #495 — every allocation failure while a large call-free frame t
     defer f.deinit(testing.allocator);
     try f.instrs.append(testing.allocator, .{ .op = .end });
     f.liveness = .{ .ranges = &.{} };
-    // Zig 0.17.0's check lets resizes reach `testing.allocator`, whose in-place growth depends
-    // on earlier runs, so the count it relies on varies (ziglang/zig#37141). Refusing them is
-    // the upstream fix (#37142, in 0.17.1); drop this wrapper when the pin reaches it.
-    var no_resize: std.testing.FailingAllocator = .init(testing.allocator, .{ .resize_fail_index = 0 });
-    try std.testing.checkAllAllocationFailures(no_resize.allocator(), compileAndDeinit, .{&f});
+    try std.testing.checkAllAllocationFailures(testing.allocator, compileAndDeinit, .{&f});
 }
 
 test "compile: try_table emit populates EmitOutput.exception_handlers" {
