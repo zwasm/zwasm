@@ -315093,3 +315093,168 @@
       stddev_ms: 0.10
       min_ms: 1.14
       max_ms: 1.40
+
+- date: 2026-11-14T09:41:14Z
+  commit: 6c402ef96b1862ef1cd97c76e775d808ce6cf0be
+  arch: x86_64-linux
+  build: ReleaseFast
+  reason: "#727 baseline: Zig 0.17.1 (vs 0.17.0 main in the PR)"
+  runs: 3
+  warmup: 1
+  benches:
+    - name: shootout/fib2
+      runtime: zwasm
+      mean_ms: 2005.33
+      stddev_ms: 9.65
+      min_ms: 1999.65
+      max_ms: 2016.46
+    - name: shootout/sieve
+      runtime: zwasm
+      mean_ms: 693.97
+      stddev_ms: 6.42
+      min_ms: 688.19
+      max_ms: 700.88
+    - name: shootout/nestedloop
+      runtime: zwasm
+      mean_ms: 4.11
+      stddev_ms: 0.02
+      min_ms: 4.10
+      max_ms: 4.14
+    - name: shootout/matrix
+      runtime: zwasm
+      mean_ms: 343.90
+      stddev_ms: 6.89
+      min_ms: 339.83
+      max_ms: 351.85
+    - name: shootout/heapsort
+      runtime: zwasm
+      mean_ms: 1870.40
+      stddev_ms: 4.06
+      min_ms: 1867.82
+      max_ms: 1875.09
+    - name: shootout/base64
+      runtime: zwasm
+      mean_ms: 571.86
+      stddev_ms: 2.22
+      min_ms: 569.70
+      max_ms: 574.14
+    - name: shootout/gimli
+      runtime: zwasm
+      mean_ms: 6.46
+      stddev_ms: 0.08
+      min_ms: 6.41
+      max_ms: 6.55
+    - name: shootout/memmove
+      runtime: zwasm
+      mean_ms: 59.37
+      stddev_ms: 1.32
+      min_ms: 58.26
+      max_ms: 60.82
+    - name: shootout/keccak
+      runtime: zwasm
+      mean_ms: 23.84
+      stddev_ms: 1.47
+      min_ms: 22.15
+      max_ms: 24.75
+    - name: shootout/ctype
+      runtime: zwasm
+      mean_ms: 570.09
+      stddev_ms: 1.48
+      min_ms: 569.06
+      max_ms: 571.78
+    - name: shootout/random
+      runtime: zwasm
+      mean_ms: 133.71
+      stddev_ms: 2.23
+      min_ms: 132.41
+      max_ms: 136.28
+    - name: shootout/ratelimit
+      runtime: zwasm
+      mean_ms: 96.99
+      stddev_ms: 2.19
+      min_ms: 95.57
+      max_ms: 99.51
+    - name: shootout/minicsv
+      runtime: zwasm
+      mean_ms: 1211.01
+      stddev_ms: 4.71
+      min_ms: 1206.37
+      max_ms: 1215.78
+    - name: shootout/xblabla20
+      runtime: zwasm
+      mean_ms: 6.43
+      stddev_ms: 0.04
+      min_ms: 6.39
+      max_ms: 6.46
+    - name: shootout/xchacha20
+      runtime: zwasm
+      mean_ms: 10.59
+      stddev_ms: 0.37
+      min_ms: 10.21
+      max_ms: 10.96
+    - name: tinygo/arith
+      runtime: zwasm
+      mean_ms: 2.39
+      stddev_ms: 0.05
+      min_ms: 2.33
+      max_ms: 2.43
+    - name: tinygo/fib
+      runtime: zwasm
+      mean_ms: 2.35
+      stddev_ms: 0.03
+      min_ms: 2.33
+      max_ms: 2.38
+    - name: tinygo/fib_loop
+      runtime: zwasm
+      mean_ms: 2.38
+      stddev_ms: 0.05
+      min_ms: 2.34
+      max_ms: 2.44
+    - name: tinygo/gcd
+      runtime: zwasm
+      mean_ms: 2.37
+      stddev_ms: 0.04
+      min_ms: 2.34
+      max_ms: 2.41
+    - name: tinygo/list_build
+      runtime: zwasm
+      mean_ms: 2.40
+      stddev_ms: 0.01
+      min_ms: 2.40
+      max_ms: 2.41
+    - name: tinygo/mfr
+      runtime: zwasm
+      mean_ms: 2.38
+      stddev_ms: 0.05
+      min_ms: 2.33
+      max_ms: 2.42
+    - name: tinygo/nqueens
+      runtime: zwasm
+      mean_ms: 2.49
+      stddev_ms: 0.06
+      min_ms: 2.44
+      max_ms: 2.56
+    - name: tinygo/real_work
+      runtime: zwasm
+      mean_ms: 2.41
+      stddev_ms: 0.05
+      min_ms: 2.38
+      max_ms: 2.46
+    - name: tinygo/sieve
+      runtime: zwasm
+      mean_ms: 2.40
+      stddev_ms: 0.02
+      min_ms: 2.39
+      max_ms: 2.42
+    - name: tinygo/string_ops
+      runtime: zwasm
+      mean_ms: 2.43
+      stddev_ms: 0.07
+      min_ms: 2.34
+      max_ms: 2.48
+    - name: tinygo/tak
+      runtime: zwasm
+      mean_ms: 2.44
+      stddev_ms: 0.08
+      min_ms: 2.35
+      max_ms: 2.50
