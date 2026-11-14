@@ -165,6 +165,11 @@ breached decides how soon the fix is released
   funcref a JIT-backed instance minted dies with a fatal signal (#578).
 - **Start function (goal 5).** No C entry point arms a limit before the start
   function runs (#465).
+- **Deadline and interrupt (goal 5).** `--timeout`, `Instance.interrupt` and
+  `zwasm_instance_interrupt` are seen at a poll site, not inside a host call
+  that blocks, except a preview1 `poll_oneoff` clock wait: a preview1 `fd_read`
+  of a silent stdin outlasts them. A WASI 0.2 / 0.3 clock wait and a 0.2 socket
+  read outlast them too (#730).
 
 ## Embedder responsibilities
 
