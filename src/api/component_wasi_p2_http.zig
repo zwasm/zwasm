@@ -739,6 +739,50 @@ test "wasi:http@0.2: a 3xx reaches the guest as the response, and the host sends
     }
 }
 
+test "wasi:http@0.2: the request on the wire carries host and the guest's headers, each once, and none of the client's own (#711)" {
+    const RawEndpoint = @import("component_http_echo.zig").RawEndpoint;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    const io = threaded.io();
+    host.io = io;
+    host.allow_network = true;
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06memory\x02\x00");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+    const mem = try ctx.memory();
+
+    const Case = struct { headers: []const [2][]const u8, wire: []const u8 };
+    const cases = [_]Case{
+        .{ .headers = &.{}, .wire = "" },
+        .{ .headers = &.{ .{ "user-agent", "guest-ua" }, .{ "accept-encoding", "br" } }, .wire = "user-agent: guest-ua\r\naccept-encoding: br\r\n" },
+    };
+    for (cases) |c| {
+        const ep = try RawEndpoint.start(io, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        defer ep.destroy();
+        var fields: p3http.HttpFields = .{};
+        for (c.headers) |h| try fields.appendPair(ctx.alloc, h[0], h[1]);
+        const req_rep = try ctx.addHttpRequest(.{ .headers_rep = try ctx.addHttpFields(fields), .scheme = .http, .authority = try ctx.alloc.print("127.0.0.1:{d}", .{ep.port}) });
+        try ctx.http2.futures.append(ctx.alloc, .{ .req_rep = req_rep });
+        try http2FutureResponseGet(&caller, try ctx.resources.new(WasiP2Ctx.HTTP2_FUTURE_RESPONSE_RT, @intCast(ctx.http2.futures.items.len - 1)), 0);
+        ep.stop();
+
+        try testing.expectEqualSlices(u8, &.{ 1, 0, 0 }, &.{ try mem.read(u8, 0), try mem.read(u8, 8), try mem.read(u8, 16) });
+        var want_buf: [256]u8 = undefined;
+        try testing.expectEqualStrings(try std.mem.print(&want_buf, "GET / HTTP/1.1\r\nhost: 127.0.0.1:{d}\r\n{s}\r\n", .{ ep.port, c.wire }), ep.request());
+    }
+}
+
 test "wasi:http@0.2: a request with no scheme is refused at handle, and is not sent by a get that skips handle" {
     const RawEndpoint = @import("component_http_echo.zig").RawEndpoint;
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});

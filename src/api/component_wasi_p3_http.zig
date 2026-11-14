@@ -1382,3 +1382,38 @@ test "a 3xx reaches the 0.3 guest as the response, and the host sends no second 
         }
     }
 }
+
+test "a 0.3 request on the wire carries host, its framing and the guest's headers, each once, and none of the client's own (#711)" {
+    const testing = std.testing;
+    const rig = try Http3Rig.create();
+    defer rig.destroy();
+    const ctx = rig.ctx;
+    const io = rig.host.io.?;
+    const mem = try ctx.memory();
+
+    const Case = struct { method: p3http.Method, body: []const u8, headers: []const [2][]const u8, wire: []const u8 };
+    const cases = [_]Case{
+        .{ .method = .get, .body = "", .headers = &.{}, .wire = "GET / HTTP/1.1\r\nhost: 127.0.0.1:{d}\r\n\r\n" },
+        .{
+            .method = .post,
+            .body = "ping",
+            .headers = &.{ .{ "user-agent", "guest-ua" }, .{ "accept-encoding", "br" } },
+            .wire = "POST / HTTP/1.1\r\nhost: 127.0.0.1:{d}\r\ncontent-length: 4\r\nuser-agent: guest-ua\r\naccept-encoding: br\r\n\r\nping",
+        },
+    };
+    inline for (cases) |c| {
+        const ep = try RawEndpoint.start(io, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        defer ep.destroy();
+        const r = try rig.newRequest(ep.port);
+        const req = &ctx.http_requests.items[r.rep];
+        req.method = c.method;
+        for (c.headers) |h| try ctx.http_fields.items[req.headers_rep].appendPair(ctx.alloc, h[0], h[1]);
+        try rig.lowerTrailers(.none);
+        try rig.send(r, c.body, 128);
+        ep.stop();
+
+        try testing.expectEqual(@as(u8, 0), try mem.read(u8, 128));
+        var want_buf: [256]u8 = undefined;
+        try testing.expectEqualStrings(try std.mem.print(&want_buf, c.wire, .{ep.port}), ep.request());
+    }
+}
