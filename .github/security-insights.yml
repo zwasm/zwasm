@@ -50,6 +50,7 @@ repository:
   documentation:
     contributing-guide: https://github.com/zwasm/zwasm/blob/main/.github/CONTRIBUTING.md
     governance: https://github.com/zwasm/zwasm/blob/main/.github/MAINTAINERS.md
+    review-policy: https://github.com/zwasm/zwasm/blob/main/.github/CONTRIBUTING.md
     security-policy: https://github.com/zwasm/zwasm/blob/main/.github/SECURITY.md
   release:
     automated-pipeline: true
@@ -57,6 +58,10 @@ repository:
       - uri: https://github.com/zwasm/zwasm/releases
         comment: GitHub Releases
     changelog: https://github.com/zwasm/zwasm/blob/main/CHANGELOG.md
+    attestations:
+      - name: SLSA build provenance
+        predicate-uri: https://slsa.dev/provenance/v1
+        location: https://github.com/zwasm/zwasm/attestations
     license:
       url: https://github.com/zwasm/zwasm/blob/main/LICENSE
       expression: Apache-2.0
