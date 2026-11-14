@@ -1,0 +1,78 @@
+# OpenSSF Security Insights (schema 2.2.0). This file points at the documents
+# that state policy; it does not restate them. SECURITY.md is the policy.
+header:
+  schema-version: 2.2.0
+  last-updated: '2026-11-12'
+  last-reviewed: '2026-11-12'
+  url: https://raw.githubusercontent.com/zwasm/zwasm/main/.github/security-insights.yml
+
+project:
+  name: zwasm
+  administrators:
+    - name: Junji Takakura
+      social: https://github.com/jtakakura
+      primary: true
+    - name: Shota Kudo
+      social: https://github.com/chaploud
+      primary: false
+  repositories:
+    - name: zwasm
+      url: https://github.com/zwasm/zwasm
+      comment: The runtime, its CLI, and libzwasm.
+  vulnerability-reporting:
+    reports-accepted: true
+    bug-bounty-available: false
+    policy: https://github.com/zwasm/zwasm/blob/main/.github/SECURITY.md
+  documentation:
+    quickstart-guide: https://github.com/zwasm/zwasm/blob/main/docs/tutorial.md
+    detailed-guide: https://github.com/zwasm/zwasm/blob/main/README.md
+    code-of-conduct: https://github.com/zwasm/zwasm/blob/main/.github/CODE_OF_CONDUCT.md
+    release-process: https://github.com/zwasm/zwasm/blob/main/docs/development.md#cutting-a-release
+    support-policy: https://github.com/zwasm/zwasm/blob/main/.github/SECURITY.md#supported-versions
+
+repository:
+  url: https://github.com/zwasm/zwasm
+  status: active
+  bug-fixes-only: false
+  accepts-change-request: true
+  accepts-automated-change-request: true
+  no-third-party-packages: false
+  core-team:
+    - name: Junji Takakura
+      social: https://github.com/jtakakura
+      primary: true
+    - name: Shota Kudo
+      social: https://github.com/chaploud
+      primary: false
+  license:
+    url: https://github.com/zwasm/zwasm/blob/main/LICENSE
+    expression: Apache-2.0
+  documentation:
+    contributing-guide: https://github.com/zwasm/zwasm/blob/main/.github/CONTRIBUTING.md
+    governance: https://github.com/zwasm/zwasm/blob/main/.github/MAINTAINERS.md
+    security-policy: https://github.com/zwasm/zwasm/blob/main/.github/SECURITY.md
+  release:
+    automated-pipeline: true
+    distribution-points:
+      - uri: https://github.com/zwasm/zwasm/releases
+        comment: GitHub Releases
+    changelog: https://github.com/zwasm/zwasm/blob/main/CHANGELOG.md
+    license:
+      url: https://github.com/zwasm/zwasm/blob/main/LICENSE
+      expression: Apache-2.0
+  security:
+    assessments:
+      self:
+        name: Threat model
+        evidence: https://github.com/zwasm/zwasm/blob/main/docs/threat_model.md
+        date: '2026-11-10'
+        comment: Trust boundaries, what counts as a vulnerability, and the runtime's maturity.
+    tools:
+      - name: zig build test-fuzz / test-fuzz-exec
+        type: fuzzing
+        rulesets: [default]
+        integration:
+          adhoc: true
+          ci: true
+          release: false
+        results: {}
