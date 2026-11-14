@@ -1,5 +1,5 @@
 {
-  description = "zwasm v2 — a from-scratch WebAssembly runtime in Zig 0.17.0";
+  description = "zwasm v2 — a from-scratch WebAssembly runtime in Zig 0.17.1";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -23,7 +23,7 @@
         # `default` shell uses plain legacyPackages — unchanged, load-bearing
         # for every host. Do NOT add generation toolchains here.
         pkgs = nixpkgs.legacyPackages.${system};
-        zig = zig-overlay.packages.${system}."0.17.0";
+        zig = zig-overlay.packages.${system}."0.17.1";
 
         # `gen` shell uses a rust-overlay-enabled package set. Separate
         # binding so the overlay never perturbs `default`.
