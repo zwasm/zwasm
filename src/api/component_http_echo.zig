@@ -239,9 +239,12 @@ pub const HttpEndpoint = struct {
 /// wire (head plus a content-length or chunked body) and answers `response`
 /// verbatim — for asserting the bytes the client put on the wire, and for
 /// answering a response the test spells out byte for byte. A later
-/// connection is counted in `connections` and closed unanswered. `request`
-/// and `connections` are readable after `stop`; `destroy` stops it first if
-/// the test has not, so a test that fails early leaves no thread behind.
+/// connection is counted in `connections` and closed unanswered. Started
+/// with `startHolding`, it keeps the answered connection open until the
+/// client closes it, for up to `hold_limit_ms`, and sets `held_out` if the
+/// client did not. `request`, `connections` and `held_out` are readable after
+/// `stop`; `destroy` stops it first if the test has not, so a test that fails
+/// early leaves no thread behind.
 pub const RawEndpoint = struct {
     io: std.Io,
     server: net.Server,
@@ -251,13 +254,25 @@ pub const RawEndpoint = struct {
     buf: [65536]u8 = undefined,
     len: usize = 0,
     connections: u32 = 0,
+    hold: bool = false,
+    held_out: bool = false,
     stopping: std.atomic.Value(bool) = .init(false),
 
+    const hold_limit_ms = 5000;
+
     pub fn start(io: std.Io, response: []const u8) !*RawEndpoint {
+        return startWith(io, response, false);
+    }
+
+    pub fn startHolding(io: std.Io, response: []const u8) !*RawEndpoint {
+        return startWith(io, response, true);
+    }
+
+    fn startWith(io: std.Io, response: []const u8, hold: bool) !*RawEndpoint {
         const self = try std.heap.page_allocator.create(RawEndpoint);
         errdefer std.heap.page_allocator.destroy(self);
         const addr: net.IpAddress = .{ .ip4 = net.Ip4Address.loopback(0) };
-        self.* = .{ .io = io, .server = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp }), .port = 0, .thread = undefined, .response = response };
+        self.* = .{ .io = io, .server = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp }), .port = 0, .thread = undefined, .response = response, .hold = hold };
         self.port = self.server.socket.address.getPort();
         self.thread = try std.Thread.spawn(.{}, serve, .{self});
         return self;
@@ -288,6 +303,24 @@ pub const RawEndpoint = struct {
         }
         const data = [_][]const u8{self.response};
         _ = p2_sockets.netWrite(io, conn.socket.handle, &data) catch return;
+        if (self.hold) self.awaitClose(conn);
+    }
+
+    fn awaitClose(self: *RawEndpoint, conn: net.Stream) void {
+        const io = self.io;
+        const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .{ .nanoseconds = hold_limit_ms * std.time.ns_per_ms }, .clock = .awake });
+        while (true) {
+            const ready = p2_sockets.pollOnce(conn.socket.handle, p2_sockets.POLL_IN) catch return;
+            if (ready) {
+                var scratch: [256]u8 = undefined;
+                var bufs = [_][]u8{&scratch};
+                const got = p2_sockets.netRead(io, conn.socket.handle, &bufs) catch return;
+                if (got == 0) return;
+            } else if (deadline.durationFromNow(io).raw.nanoseconds <= 0) {
+                self.held_out = true;
+                return;
+            } else io.sleep(.{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch return;
+        }
     }
 
     fn complete(self: *const RawEndpoint) bool {
