@@ -926,7 +926,11 @@ pub fn httpExchange(ctx: *WasiP2Ctx, req: *const p3http.HttpRequest, body: []u8,
         .{ .name = "content-length", .value = len_str }) catch return WasiP2Error.OutOfMemory;
     var client: std.http.Client = .{ .allocator = ctx.alloc, .io = io };
     defer client.deinit();
-    var hreq = client.request(method, uri, .{ .extra_headers = extra.items, .redirect_behavior = .unhandled }) catch return error.HttpFailed;
+    var hreq = client.request(method, uri, .{
+        .headers = .{ .user_agent = .omit, .connection = .omit, .accept_encoding = .omit },
+        .extra_headers = extra.items,
+        .redirect_behavior = .unhandled,
+    }) catch return error.HttpFailed;
     defer hreq.deinit();
     if (method.requestHasBody()) {
         if (trailers != null) {
