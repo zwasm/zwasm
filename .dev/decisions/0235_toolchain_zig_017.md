@@ -24,7 +24,8 @@ Zig an embedder must build with.
    release's CHANGELOG `### Changed` states that this version and later need
    Zig X.Y. 2.8.x stays on 0.16.0; 2.9.0 is the first release on 0.17.0.
 3. **A Zig patch release is followed in its own PR**, not alongside other
-   work.
+   work. It may ship in any zwasm release; the CHANGELOG's `### Changed`
+   names the version.
 4. **A port changes no behaviour.** New lints, new `std` APIs and other
    improvements the new Zig makes possible land in later PRs.
 
@@ -39,3 +40,4 @@ Zig an embedder must build with.
 | Date       | SHA          | Note |
 |------------|--------------|------|
 | 2026-10-31 | `828ff7148` | Initial, Accepted on PR #648; landed with the 0.17.0 pin it defines. |
+| 2026-11-14 | —           | D3 says which release carries a patch move (#727): any. Releases are cut from `main`, so holding the move for a minor would also hold back a fix release, which `SECURITY.md` ships as soon as the fix is merged. |
