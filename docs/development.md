@@ -158,8 +158,10 @@ its own (ADR-0156). Three manual steps; the rest is the `release` workflow.
 
 Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds
 and packages all four targets in ReleaseSafe (macOS aarch64, Linux
-x86_64/aarch64, Windows x86_64), then creates the GitHub Release with the
-archives and `SHA256SUMS`. The workflow runs no tests: the tag's
+x86_64/aarch64, Windows x86_64), attests each archive's build provenance,
+then creates the GitHub Release with the archives and `SHA256SUMS`. A user
+checks an archive with `gh attestation verify <archive> --repo zwasm/zwasm`.
+The workflow runs no tests: the tag's
 correctness rests on the commit's queue run (the core gate) and its `main`
 run (the extended checks), so check the `main` run completed before pushing
 the tag. The Release
