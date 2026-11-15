@@ -68,6 +68,14 @@ invoke` is bounded without an extra call. On a live instance, `Instance.setFuel`
 / `fuelRemaining` / `setMemoryPagesLimit` / `interrupt` adjust or cancel the
 budgets.
 
+## Threads
+
+The engine is single-threaded: one thread per process, not one per `Engine` or
+`Instance`. Make every call into zwasm from the same thread. Instances share
+process-global state, so a call from a second thread is undefined even when no
+other call is running. `Instance.interrupt` is the one exception: it is made to
+be called from another thread. The [C API](c_api.md) has the same rule.
+
 ## Observability hooks
 
 `Engine.setCompileHook` / `setInstantiateHook` / `setTrapHook` /
