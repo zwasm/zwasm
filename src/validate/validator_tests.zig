@@ -1200,7 +1200,7 @@ test "validate: ref.cast_null heap_type round-trip (10.G op_gc cycle 8)" {
 test "validate: br_on_cast inside block round-trip (10.G op_gc cycle 9)" {
     // Wasm 3.0 GC §3.3.5.5. Body:
     //   block (param anyref) (result anyref)
-    //     br_on_cast 0 anyref anyref     ;; flags=0, label=0, ht1=ht2=0x6E
+    //     br_on_cast 0 anyref (ref any)  ;; flags=1 (ht1 nullable), label=0, ht1=ht2=0x6E
     //   end
     //   drop
     //   ref.null anyref
@@ -1209,13 +1209,13 @@ test "validate: br_on_cast inside block round-trip (10.G op_gc cycle 9)" {
     // Encoding (block uses typeidx 1 = (anyref) -> (anyref)):
     //   0xD0 0x6E         — ref.null anyref
     //   0x02 0x01         — block typeidx 1
-    //   0xFB 0x18 ...     — br_on_cast flags=0 label=0 ht1=anyref ht2=anyref
+    //   0xFB 0x18 ...     — br_on_cast flags=1 (rt1 takes the nullable param) ht1=ht2=any
     //   0x0B 0x1A 0xD0 0x6E 0x0B
     const body = [_]u8{
         0xD0, 0x6E,
         0x02, 0x01,
         0xFB, 0x18,
-        0x00, 0x00,
+        0x01, 0x00,
         0x6E, 0x6E,
         0x0B, 0x1A,
         0xD0, 0x6E,
@@ -1233,7 +1233,7 @@ test "validate: br_on_cast_fail inside block round-trip (10.G op_gc cycle 9)" {
         0xD0, 0x6E,
         0x02, 0x01,
         0xFB, 0x19,
-        0x00, 0x00,
+        0x01, 0x00,
         0x6E, 0x6E,
         0x0B, 0x1A,
         0xD0, 0x6E,
@@ -2432,11 +2432,11 @@ test "validate (try_table): catch_all (no tag_idx) still accepts with empty tags
     try validateFunctionWithTags(empty_sig, &.{}, &body, &.{}, &.{}, &.{}, 0, &.{}, 0, &.{});
 }
 
-test "validate (throw_ref): pops reftype + marks unreachable" {
-    // body: ref.null funcref ; throw_ref ; end
-    // ref.null 0x70 (funcref) pushes a funcref; throw_ref pops it
+test "validate (throw_ref): pops an exnref + marks unreachable" {
+    // body: ref.null exn ; throw_ref ; end
+    // ref.null 0x69 (exnref) pushes an exnref; throw_ref pops it
     // and marks unreachable.
-    const body = [_]u8{ 0xD0, 0x70, 0x0A, 0x0B };
+    const body = [_]u8{ 0xD0, 0x69, 0x0A, 0x0B };
     try validateFunction(empty_sig, &.{}, &body, &.{}, &.{}, &.{}, 0, &.{}, 0);
 }
 

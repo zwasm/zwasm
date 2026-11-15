@@ -395,6 +395,7 @@ test {
     _ = @import("validate/validator.zig");
     _ = @import("validate/validator_tests.zig");
     _ = @import("validate/validator_helpers_tests.zig");
+    _ = @import("validate/validator_reftype_operand_tests.zig");
     _ = @import("ir/lower.zig");
     _ = @import("ir/lower_tests.zig");
     _ = @import("parse/ctx.zig");
