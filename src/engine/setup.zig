@@ -644,7 +644,7 @@ pub fn setupRuntimeLinked(
     // Fill the imported-global slots [0..num_global_imports) with the
     // resolved values (D-225); the defined globals land at the offset below.
     for (0..num_global_imports) |i| {
-        globals_buf[i] = .{ .bits64 = if (i < imported_global_vals.len) imported_global_vals[i] else 0 };
+        globals_buf[i] = .{ .bits128 = if (i < imported_global_vals.len) imported_global_vals[i] else 0 };
     }
     // D-225 / #397 — `[]*Value` view of every global slot, in index order,
     // for the setup-time const-expr evals' `global.get N`: a prefix of it is
@@ -1135,9 +1135,9 @@ pub fn setupRuntimeLinked(
                     for (seg.item_exprs, 0..) |ie, k| {
                         const v = instantiate.evalConstExprValue(ie) catch |e| blk: {
                             if (e == error.UnsupportedConstExpr) {
-                                break :blk instantiate.evalGlobalInitGc(ie, gc_heap_typed, elem_gti_val, func_entities, global_ptrs) catch Value{ .ref = Value.null_ref };
+                                break :blk instantiate.evalGlobalInitGc(ie, gc_heap_typed, elem_gti_val, func_entities, global_ptrs) catch Value.fromRef(Value.null_ref);
                             }
-                            break :blk Value{ .ref = Value.null_ref };
+                            break :blk Value.fromRef(Value.null_ref);
                         };
                         elem_refs_arena[off + k] = v.ref;
                     }

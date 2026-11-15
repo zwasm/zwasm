@@ -2087,11 +2087,11 @@ pub const RefMarshalCtx = struct {
 /// we only read it — no free here.)
 pub fn marshalValIn(v: Val) runtime.Value {
     return switch (v.kind) {
-        .i32 => .{ .i32 = v.of.i32 },
-        .i64 => .{ .i64 = v.of.i64 },
-        .f32 => .{ .bits64 = @as(u64, @as(u32, @bitCast(v.of.f32))) },
-        .f64 => .{ .bits64 = @bitCast(v.of.f64) },
-        .anyref, .funcref => .{ .ref = if (v.of.ref) |rp| refPayload(rp) else runtime.Value.null_ref },
+        .i32 => runtime.Value.fromI32(v.of.i32),
+        .i64 => runtime.Value.fromI64(v.of.i64),
+        .f32 => runtime.Value.fromF32Bits(@bitCast(v.of.f32)),
+        .f64 => runtime.Value.fromF64Bits(@bitCast(v.of.f64)),
+        .anyref, .funcref => runtime.Value.fromRef(if (v.of.ref) |rp| refPayload(rp) else runtime.Value.null_ref),
     };
 }
 
@@ -2644,7 +2644,7 @@ pub export fn wasm_table_set(t: ?*Table, idx: u32, ref: ?*Ref) callconv(.c) bool
         break :blk rt.tables[handle.table_idx];
     } else (handle.tinst orelse return false).*; // refs slice aliased — write hits the backing
     if (idx >= tab.refs.len) return false;
-    tab.refs[idx] = .{ .ref = payload };
+    tab.refs[idx] = runtime.Value.fromRef(payload);
     return true;
 }
 
@@ -2687,7 +2687,7 @@ pub export fn wasm_table_grow(t: ?*Table, delta: u32, init: ?*Ref) callconv(.c) 
     }
     const grown = alloc.realloc(tab_ptr.refs, new_len) catch return false;
     const payload: u64 = if (init) |r| r.ref else runtime.Value.null_ref;
-    for (grown[old_len..new_len]) |*slot| slot.* = .{ .ref = payload };
+    for (grown[old_len..new_len]) |*slot| slot.* = runtime.Value.fromRef(payload);
     tab_ptr.refs = grown;
     return true;
 }

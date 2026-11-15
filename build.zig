@@ -1058,6 +1058,29 @@ pub fn build(b: *std.Build) void {
     const run_aot_diff_unit = b.addRunArtifact(aot_diff_unit_tests);
     test_step.dependOn(&run_aot_diff_unit.step);
 
+    // One module compiled twice in-process and once in a child process
+    // must give byte-identical `.cwasm` files. The engine is the ReleaseSafe
+    // floor (ADR-0177), the mode the released CLI is built in; the Debug
+    // engine's const-expr values are pinned by the unit tests in
+    // `instantiate_const_expr.zig`.
+    const cwasm_determinism_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/aot/cwasm_determinism.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cwasm_determinism_mod.addImport("zwasm", zwasm_lib_mod);
+    const cwasm_determinism_exe = b.addExecutable(.{
+        .name = "zwasm-cwasm-determinism",
+        .root_module = cwasm_determinism_mod,
+    });
+    // Position-independent, so the child loads at another address (macOS
+    // and Windows executables already are).
+    if (target.result.os.tag == .linux) cwasm_determinism_exe.pie = true;
+    const run_cwasm_determinism = b.addRunArtifact(cwasm_determinism_exe);
+    run_cwasm_determinism.has_side_effects = true;
+    test_step.dependOn(&run_cwasm_determinism.step);
+    b.step("test-cwasm-determinism", "The same module compiles to the same .cwasm bytes, in-process and across processes").dependOn(&run_cwasm_determinism.step);
+
     // `zig build test-realworld-run` — Phase 6 / §9.6 / 6.1
     // chunk b. Drives each fixture through `cli_run.runWasm`
     // end-to-end (engine → store → WASI → instantiate → entry
@@ -1860,6 +1883,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_fuzz_exec.step); // D-469 interp-vs-JIT exec differential (exec_seed; toolchain-free, 3-host)
     test_all_step.dependOn(&run_aot_diff.step); // AOT campaign Phase II cross-process .wasm-vs-.cwasm differential (toolchain-free, 3-host)
     test_all_step.dependOn(&run_aot_diff_unit.step); // the `verdict` / `rowExpired` rows the empty known_table cannot reach
+    test_all_step.dependOn(&run_cwasm_determinism.step); // the same module compiles to the same `.cwasm` bytes, in-process and across processes
     test_all_step.dependOn(&run_cli_stdin.step); // issue #257 CLI stdin → guest fd 0
     test_all_step.dependOn(&run_cli_argv0.step); // issue #256 CLI argv[0] = base name
     test_all_step.dependOn(&run_cli_default_entry.step); // issue #220 default-entry parity across the two run drivers
