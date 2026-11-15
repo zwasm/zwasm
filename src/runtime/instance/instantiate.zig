@@ -1491,7 +1491,7 @@ pub fn instantiateRuntime(
                                 return e;
                         for (refs) |*r| r.* = v;
                     } else {
-                        for (refs) |*r| r.* = .{ .ref = Value.null_ref };
+                        for (refs) |*r| r.* = Value.fromRef(Value.null_ref);
                     }
                     tbl_storage[imp_table_count + i] = .{
                         .refs = refs,
@@ -1611,7 +1611,7 @@ pub fn instantiateRuntime(
                     const rs = try a.alloc(Value, seg.funcidxs.len);
                     for (seg.funcidxs, 0..) |fidx, j| {
                         if (fidx == std.math.maxInt(u32)) {
-                            rs[j] = .{ .ref = Value.null_ref };
+                            rs[j] = Value.fromRef(Value.null_ref);
                         } else if (is_funcref_family and sections.elemEntryIsGlobalGet(fidx)) {
                             // Only a func-family slot can carry the marker: a
                             // negative i31 in an i31ref slot sets the same bit.
@@ -1622,7 +1622,7 @@ pub fn instantiateRuntime(
                             if (fidx >= rt.func_entities.len) return error.InvalidElementFuncIndex;
                             rs[j] = Value.fromFuncRef(&rt.func_entities[fidx]);
                         } else {
-                            rs[j] = .{ .ref = @as(u64, fidx) };
+                            rs[j] = Value.fromRef(fidx);
                         }
                     }
                     break :blk rs;

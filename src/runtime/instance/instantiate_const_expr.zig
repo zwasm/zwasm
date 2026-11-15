@@ -24,35 +24,37 @@ const FuncEntity = runtime_mod.FuncEntity;
 /// `ref.null funcref|externref; end`, and Wasm 2.0 `v128.const
 /// b0..b15; end` (post-ADR-0110 §9.13-V Phase A.4f; closes D-169).
 /// `global.get N` (importing from another module's globals) defers
-/// with the rest of cross-module global imports.
+/// with the rest of cross-module global imports. Every byte of the
+/// result is defined: the value's own bytes, zero above them, since
+/// every arm builds it with a `Value.from*` constructor.
 pub fn evalConstExprValue(expr: []const u8) !Value {
     if (expr.len < 2) return error.UnsupportedConstExpr;
     var pos: usize = 1;
     const v: Value = switch (expr[0]) {
         0x41 => blk: {
             const n = try leb128.readSleb128(i32, expr, &pos);
-            break :blk .{ .i32 = n };
+            break :blk Value.fromI32(n);
         },
         0x42 => blk: {
             const n = try leb128.readSleb128(i64, expr, &pos);
-            break :blk .{ .i64 = n };
+            break :blk Value.fromI64(n);
         },
         0x43 => blk: {
             if (pos + 4 > expr.len) return error.UnsupportedConstExpr;
             const bits = std.mem.readInt(u32, expr[pos..][0..4], .little);
             pos += 4;
-            break :blk .{ .bits64 = bits };
+            break :blk Value.fromF32Bits(bits);
         },
         0x44 => blk: {
             if (pos + 8 > expr.len) return error.UnsupportedConstExpr;
             const bits = std.mem.readInt(u64, expr[pos..][0..8], .little);
             pos += 8;
-            break :blk .{ .bits64 = bits };
+            break :blk Value.fromF64Bits(bits);
         },
         0xD0 => blk: {
             if (pos >= expr.len) return error.UnsupportedConstExpr;
             pos += 1;
-            break :blk .{ .ref = Value.null_ref };
+            break :blk Value.fromRef(Value.null_ref);
         },
         // Wasm 2.0 SIMD prefix — currently only `v128.const`
         // (sub-opcode 0x0C) is a valid const-expression op (per
@@ -66,7 +68,7 @@ pub fn evalConstExprValue(expr: []const u8) !Value {
             var bytes: [16]u8 = undefined;
             @memcpy(&bytes, expr[pos..][0..16]);
             pos += 16;
-            break :blk .{ .v128 = bytes };
+            break :blk Value.fromV128(bytes);
         },
         else => return error.UnsupportedConstExpr,
     };
@@ -116,22 +118,22 @@ pub fn evalGlobalInitGc(
         if (sp >= stack.len) return error.UnsupportedConstExpr;
         switch (op) {
             0x41 => {
-                stack[sp] = .{ .i32 = try leb128.readSleb128(i32, expr, &pos) };
+                stack[sp] = Value.fromI32(try leb128.readSleb128(i32, expr, &pos));
                 sp += 1;
             },
             0x42 => {
-                stack[sp] = .{ .i64 = try leb128.readSleb128(i64, expr, &pos) };
+                stack[sp] = Value.fromI64(try leb128.readSleb128(i64, expr, &pos));
                 sp += 1;
             },
             0x43 => {
                 if (pos + 4 > expr.len) return error.UnsupportedConstExpr;
-                stack[sp] = .{ .bits64 = std.mem.readInt(u32, expr[pos..][0..4], .little) };
+                stack[sp] = Value.fromF32Bits(std.mem.readInt(u32, expr[pos..][0..4], .little));
                 pos += 4;
                 sp += 1;
             },
             0x44 => {
                 if (pos + 8 > expr.len) return error.UnsupportedConstExpr;
-                stack[sp] = .{ .bits64 = std.mem.readInt(u64, expr[pos..][0..8], .little) };
+                stack[sp] = Value.fromF64Bits(std.mem.readInt(u64, expr[pos..][0..8], .little));
                 pos += 8;
                 sp += 1;
             },
@@ -144,22 +146,22 @@ pub fn evalGlobalInitGc(
                 sp -= 1;
                 const a = stack[sp - 1].i32;
                 const b = stack[sp].i32;
-                stack[sp - 1] = .{ .i32 = switch (op) {
+                stack[sp - 1] = Value.fromI32(switch (op) {
                     0x6A => a +% b,
                     0x6B => a -% b,
                     else => a *% b,
-                } };
+                });
             },
             0x7C, 0x7D, 0x7E => { // i64.add / i64.sub / i64.mul
                 if (sp < 2) return error.UnsupportedConstExpr;
                 sp -= 1;
                 const a = stack[sp - 1].i64;
                 const b = stack[sp].i64;
-                stack[sp - 1] = .{ .i64 = switch (op) {
+                stack[sp - 1] = Value.fromI64(switch (op) {
                     0x7C => a +% b,
                     0x7D => a -% b,
                     else => a *% b,
-                } };
+                });
             },
             0xFD => { // SIMD prefix — only v128.const (sub 0x0C) is constant
                 // (Wasm 2.0 §3.5.4). Needed for a v128 GC aggregate field/
@@ -170,7 +172,7 @@ pub fn evalGlobalInitGc(
                 var bytes: [16]u8 = undefined;
                 @memcpy(&bytes, expr[pos..][0..16]);
                 pos += 16;
-                stack[sp] = .{ .v128 = bytes };
+                stack[sp] = Value.fromV128(bytes);
                 sp += 1;
             },
             0x23 => { // global.get N — Wasm §3.5.10 const-expr; read an
@@ -221,7 +223,7 @@ pub fn evalGlobalInitGc(
                                 @memcpy(heap.bytes[off .. off + fsz], std.mem.asBytes(&stack[sp])[0..fsz]);
                             }
                         }
-                        stack[sp] = .{ .ref = @as(u64, ref) };
+                        stack[sp] = Value.fromRef(ref);
                         sp += 1;
                     },
                     6, 7 => { // array.new / array.new_default
@@ -236,7 +238,7 @@ pub fn evalGlobalInitGc(
                         sp -= 1;
                         if (stack[sp].i32 < 0) return error.UnsupportedConstExpr;
                         const length: u32 = @intCast(stack[sp].i32);
-                        var init_v: Value = .{ .i64 = 0 };
+                        var init_v: Value = Value.zero;
                         if (sub == 6) {
                             if (sp == 0) return error.UnsupportedConstExpr;
                             sp -= 1;
@@ -261,7 +263,7 @@ pub fn evalGlobalInitGc(
                                 @memset(heap.bytes[off .. off + ai.element.size], 0);
                             }
                         }
-                        stack[sp] = .{ .ref = @as(u64, ref) };
+                        stack[sp] = Value.fromRef(ref);
                         sp += 1;
                     },
                     26, 27 => {}, // any.convert_extern / extern.convert_any:
@@ -287,7 +289,7 @@ pub fn evalGlobalInitGc(
                             const off = ref + ahs + k * @as(u32, ai.element.size);
                             @memcpy(heap.bytes[off .. off + ai.element.size], std.mem.asBytes(&stack[sp])[0..ai.element.size]);
                         }
-                        stack[sp] = .{ .ref = @as(u64, ref) };
+                        stack[sp] = Value.fromRef(ref);
                         sp += 1;
                     },
                     else => return error.UnsupportedConstExpr,
@@ -414,4 +416,55 @@ pub fn evalConstMemAddrExprWithGlobals(
             },
         },
     }
+}
+
+const testing = std.testing;
+
+/// Fill the stack below the caller's frame with `pattern`, so a callee
+/// that leaves a byte undefined returns whatever the pattern put there.
+noinline fn dirtyStack(pattern: u8) void {
+    var buf: [4096]u8 = undefined;
+    @memset(&buf, pattern);
+    std.mem.doNotOptimizeAway(&buf);
+}
+
+/// The 16 bytes a value of `x`'s type defines: `x` little-endian, then zero.
+fn definedBytes(x: anytype) [16]u8 {
+    var out: [16]u8 = @splat(0);
+    const T = @TypeOf(x);
+    std.mem.writeInt(T, out[0..@sizeOf(T)], x, .little);
+    return out;
+}
+
+test "evalConstExprValue: all 16 bytes of the result are the type's, the rest zero" {
+    const v128_bytes = [16]u8{ 0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF };
+    const cases = [_]struct { expr: []const u8, want: [16]u8 }{
+        .{ .expr = &.{ 0x41, 0x7E, 0x0B }, .want = definedBytes(@as(i32, -2)) }, // i32.const -2
+        .{ .expr = &.{ 0x42, 0x7E, 0x0B }, .want = definedBytes(@as(i64, -2)) }, // i64.const -2
+        .{ .expr = &.{ 0x43, 0x00, 0x00, 0x80, 0xBF, 0x0B }, .want = definedBytes(@as(u32, 0xBF80_0000)) }, // f32.const -1
+        .{ .expr = &.{ 0x44, 0, 0, 0, 0, 0, 0, 0xF0, 0xBF, 0x0B }, .want = definedBytes(@as(u64, 0xBFF0_0000_0000_0000)) }, // f64.const -1
+        .{ .expr = &([_]u8{ 0xFD, 0x0C } ++ v128_bytes ++ [_]u8{0x0B}), .want = v128_bytes }, // v128.const
+        .{ .expr = &.{ 0xD0, 0x70, 0x0B }, .want = definedBytes(@as(u64, 0)) }, // ref.null func
+        .{ .expr = &.{ 0xD0, 0x6F, 0x0B }, .want = definedBytes(@as(u64, 0)) }, // ref.null extern
+        .{ .expr = &.{ 0x41, 0x2A, 0xFB, 0x1C, 0x0B }, .want = definedBytes(@as(u64, (42 << 1) | 1)) }, // ref.i31 (i32.const 42)
+    };
+    for (cases) |c| for ([_]u8{ 0x00, 0xA5, 0xFF }) |pattern| {
+        dirtyStack(pattern);
+        const v = try evalConstExprValue(c.expr);
+        try testing.expectEqualSlices(u8, &c.want, &v.v128);
+    };
+}
+
+test "evalGlobalInitGc: all 16 bytes of the result are the type's, the rest zero" {
+    const cases = [_]struct { expr: []const u8, want: [16]u8 }{
+        .{ .expr = &.{ 0x41, 40, 0x41, 2, 0x6A, 0x0B }, .want = definedBytes(@as(i32, 42)) }, // i32.add
+        .{ .expr = &.{ 0x42, 0x7E, 0x42, 7, 0x7E, 0x0B }, .want = definedBytes(@as(i64, -14)) }, // i64.mul
+        .{ .expr = &.{ 0x43, 0x00, 0x00, 0x80, 0xBF, 0x0B }, .want = definedBytes(@as(u32, 0xBF80_0000)) }, // f32.const -1
+        .{ .expr = &.{ 0x41, 0x05, 0xFB, 0x1C, 0xFB, 0x1B, 0x0B }, .want = definedBytes(@as(u64, (5 << 1) | 1)) }, // extern.convert_any (ref.i31 5)
+    };
+    for (cases) |c| for ([_]u8{ 0x00, 0xA5, 0xFF }) |pattern| {
+        dirtyStack(pattern);
+        const v = try evalGlobalInitGc(c.expr, null, null, &.{}, &.{});
+        try testing.expectEqualSlices(u8, &c.want, &v.v128);
+    };
 }

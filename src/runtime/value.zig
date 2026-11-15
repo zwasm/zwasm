@@ -9,6 +9,7 @@
 //! Zone 1 (`src/runtime/`).
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const FuncEntity = @import("instance/func.zig").FuncEntity;
 
@@ -74,20 +75,23 @@ pub const Value = extern union {
     pub const zero: Value = .{ .bits128 = 0 };
     pub const null_ref: u64 = 0;
 
+    // The `from*` constructors define all 16 bytes: the value's own
+    // bytes at the low end, zero above them. Each initialises the whole
+    // slot through `bits128`.
     pub fn fromI32(v: i32) Value {
-        return .{ .i32 = v };
+        return .{ .bits128 = @as(u32, @bitCast(v)) };
     }
     pub fn fromI64(v: i64) Value {
-        return .{ .i64 = v };
+        return .{ .bits128 = @as(u64, @bitCast(v)) };
     }
     pub fn fromF32Bits(b: u32) Value {
-        return .{ .bits64 = b };
+        return .{ .bits128 = b };
     }
     pub fn fromF64Bits(b: u64) Value {
-        return .{ .bits64 = b };
+        return .{ .bits128 = b };
     }
     pub fn fromRef(r: u64) Value {
-        return .{ .ref = r };
+        return .{ .bits128 = r };
     }
 
     /// Construct a Value from a v128 byte array (Wasm 2.0 §2.3.4
@@ -101,7 +105,7 @@ pub const Value = extern union {
     /// tied to the owning Runtime's `func_entities` array, which
     /// the per-instance arena holds for the Runtime's lifetime).
     pub fn fromFuncRef(fe: *const FuncEntity) Value {
-        return .{ .ref = @intFromPtr(fe) };
+        return fromRef(@intFromPtr(fe));
     }
 
     /// Decode a funcref `Value` to its `*const FuncEntity` source,
@@ -120,7 +124,7 @@ pub const Value = extern union {
     /// enforced (the operand stack type tracking knows which
     /// reftype is in play at each pop site).
     pub fn fromExceptionRef(exc: *anyopaque) Value {
-        return .{ .ref = @intFromPtr(exc) };
+        return fromRef(@intFromPtr(exc));
     }
 
     /// Decode an exnref `Value` to its `*anyopaque` source (caller
@@ -142,7 +146,7 @@ pub const Value = extern union {
     /// heap-pointer encodings; the ref slot is sufficient while
     /// no heap-ref Value exists.
     pub fn fromI31Truncate(x: i32) Value {
-        return .{ .ref = @as(u64, i31_pack.i32ToI31Truncate(x)) };
+        return fromRef(i31_pack.i32ToI31Truncate(x));
     }
 
     /// Decode an i31-tagged ref to a signed i32 (Wasm 3.0
@@ -174,6 +178,9 @@ comptime {
     // null_ref must re-survey the malloc guarantees on all three
     // target hosts. A change here without an ADR is a §18 deviation.
     std.debug.assert(Value.null_ref == 0);
+    // The scalar fields alias the low bytes of `bits128` (the layout
+    // above), which the `from*` constructors rely on.
+    std.debug.assert(builtin.cpu.arch.endian() == .little);
 }
 
 // FuncEntity moved to runtime/instance/func.zig per ADR-0023 §7

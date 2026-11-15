@@ -14,8 +14,8 @@ pub fn zwasmToRuntime(v: _zwasm.Value) _runtime_value.Value {
         .f32 => |b| _runtime_value.Value.fromF32Bits(b),
         .f64 => |b| _runtime_value.Value.fromF64Bits(b),
         .v128 => |b| .{ .bits128 = b },
-        .funcref => |r| .{ .ref = r orelse 0 },
-        .externref => |r| .{ .ref = r orelse 0 },
+        .funcref => |r| _runtime_value.Value.fromRef(r orelse 0),
+        .externref => |r| _runtime_value.Value.fromRef(r orelse 0),
     };
 }
 
