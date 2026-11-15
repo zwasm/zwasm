@@ -88,7 +88,9 @@ the default fuel budget afresh. A request not fully received within 10 s is
 answered 408, a body over 16 MiB 413, a method outside WASI's named cases
 (`GET` … `PATCH`) 405, and a handler that traps or returns `err` 500 with one
 stderr line; after a trap the component is instantiated again. Trailers are not
-sent. SIGINT or SIGTERM stops it with exit 0 after the request in flight; on
+sent. The future `response.new` returns resolves `ok` once the host has the
+whole response, before it is written to the peer, so a failed write is not
+reported to the guest. SIGINT or SIGTERM stops it with exit 0 after the request in flight; on
 Windows Ctrl-C keeps its default. A component without a 0.3 handler, or a core
 module, is refused with exit 1 and its exports listed; a 0.2
 `wasi:http/incoming-handler` export is not served.

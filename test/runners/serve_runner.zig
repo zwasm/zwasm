@@ -4,13 +4,15 @@
 //! wasi-testsuite's runner reads it), every `request` op of its manifest goes
 //! over a real connection, and SIGINT ends the server with exit 0. A client
 //! that never finishes its head is answered 408 and does not hold the next
-//! one; more requests than one fuel budget covers all succeed. A component
-//! without a 0.3 handler and a core module are refused with exit 1.
+//! one; more requests than one fuel budget covers all succeed; a handler that
+//! awaits the future `response.new` returned is answered with its response
+//! (#734). A component without a 0.3 handler and a core module are refused
+//! with exit 1.
 //!
 //! Why a subprocess: the URL line, the signal and the exit code are the CLI's.
 //!
 //! Usage: `zig build test-cli-serve` /
-//!        `zwasm-cli-serve <zwasm-cli> <test/component/wasip3_official dir> <core module>`
+//!        `zwasm-cli-serve <zwasm-cli> <test/component/wasip3_official dir> <core module> <awaiting handler>`
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -27,6 +29,7 @@ pub fn main(init: std.process.Init) !u8 {
     const cli = arg_it.next() orelse return error.MissingCliPath;
     const corpus = arg_it.next() orelse return error.MissingCorpusDir;
     const core_module = arg_it.next() orelse return error.MissingCoreModule;
+    const awaiting = arg_it.next() orelse return error.MissingAwaitingHandler;
     try spawned_cli.assertRunnerBuildMode(gpa, io, cli);
 
     var failures: usize = 0;
@@ -42,6 +45,10 @@ pub fn main(init: std.process.Init) !u8 {
     };
     servePastOneFuelBudget(gpa, io, cli, corpus) catch |err| {
         std.debug.print("FAIL  serve past one fuel budget: {t}\n", .{err});
+        failures += 1;
+    };
+    serveAwaitingHandler(gpa, io, cli, awaiting) catch |err| {
+        std.debug.print("FAIL  serve a handler that awaits its response's future: {t}\n", .{err});
         failures += 1;
     };
 
@@ -65,7 +72,7 @@ pub fn main(init: std.process.Init) !u8 {
         }
     }
 
-    std.debug.print("serve: {d} services, an idle client, past one fuel budget, {d} refusals; {d} failed\n", .{ services.len, refusals.len, failures });
+    std.debug.print("serve: {d} services, an idle client, past one fuel budget, an awaiting handler, {d} refusals; {d} failed\n", .{ services.len, refusals.len, failures });
     return if (failures == 0) 0 else 1;
 }
 
@@ -204,6 +211,27 @@ fn servePastOneFuelBudget(gpa: std.mem.Allocator, io: std.Io, cli: []const u8, c
         defer gpa.free(body);
         if (status != 200 or body.len != payload.len) {
             std.debug.print("POST /echo #{d}: status {d}, {d} bytes, want 200 and {d}\n", .{ i, status, body.len, payload.len });
+            return error.ResponseMismatch;
+        }
+    }
+    try server.stop(gpa, io);
+}
+
+/// A handler that returns its response and then awaits the future
+/// `response.new` returned: each request on one instance gets that response,
+/// not a 500.
+fn serveAwaitingHandler(gpa: std.mem.Allocator, io: std.Io, cli: []const u8, wasm: []const u8) !void {
+    var server = try Server.start(gpa, io, cli, wasm);
+    errdefer server.deinit(gpa, io);
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    const url = try gpa.print("{s}/", .{server.base});
+    defer gpa.free(url);
+    for (0..2) |i| {
+        const status, const body = try send(gpa, &client, .GET, url, &.{});
+        defer gpa.free(body);
+        if (status != 200 or !std.mem.eql(u8, body, "hello")) {
+            std.debug.print("GET / #{d}: status {d}, body \"{f}\", want 200 and \"hello\"\n", .{ i, status, std.zig.fmtString(body) });
             return error.ResponseMismatch;
         }
     }

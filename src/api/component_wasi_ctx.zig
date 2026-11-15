@@ -90,8 +90,8 @@ pub const PendingClientSend = struct {
     trailers: RequestTrailers = .none,
 };
 pub const RequestTrailers = union(enum) { none, some: u32, err: u8 };
-/// A consumed request's `sent` future, resolved with the value the guest
-/// writes to the `res` future it passed to `consume-body`.
+/// A consumed guest-made request's or response's `sent` future, resolved with
+/// the value the guest writes to the `res` future it passed to `consume-body`.
 pub const SentLink = struct { res: u32, sent_readable: u32, sent_writable: u32 };
 
 pub const WasiP2Ctx = struct {
@@ -377,7 +377,7 @@ pub const WasiP2Ctx = struct {
         udp_receive_complete: *const fn (*WasiP2Ctx, u32, u32) WasiP2Error!void,
         fail_file_stream: *const fn (*WasiP2Ctx, *async_mod.StreamFutureEnd, *FileStreamRole, wasi_p1.Errno) WasiP2Error!u32,
         resolve_send_future: *const fn (*WasiP2Ctx, u32, ?u8) WasiP2Error!void,
-        resolve_http_sent: *const fn (*WasiP2Ctx, *p3http.HttpRequest, ?u8) WasiP2Error!void,
+        resolve_http_sent: *const fn (*WasiP2Ctx, u32, *u32, ?u8) WasiP2Error!void,
         sock_err_code: *const fn (anyerror) u8,
         dir_stream_read: *const fn (*WasiP2Ctx, u32, *async_mod.StreamFutureEnd, u32, u32) WasiP2Error!u32,
     };

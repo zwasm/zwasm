@@ -359,6 +359,10 @@ pub const HttpResponse = struct {
     /// The trailer section a host-sent request's response carried (a fields
     /// rep), handed out by `consume-body`'s host-resolved trailers future.
     trailers_rep: ?u32 = null,
+    /// The future `response.new` returned, as `HttpRequest`'s `sent`; a
+    /// host-built response has none.
+    sent_readable: u32 = 0,
+    sent_writable: u32 = 0,
 };
 
 // ============================================================

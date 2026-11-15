@@ -342,7 +342,8 @@ fn releaseHostEnds(ctx: *wasi_p2.WasiP2Ctx, body_writable: ?u32) void {
 }
 
 /// The response `handle` delivered is the host's: drop it with the body and
-/// trailers ends it still holds. A lent one stays, and keeps its slots.
+/// trailers ends it still holds, and resolve its future `ok` if the drive
+/// ended before `ServiceCapture` did. A lent one stays, and keeps its slots.
 fn dropHostResponse(ctx: *wasi_p2.WasiP2Ctx, handle: u32) void {
     const Ctx = wasi_p2.WasiP2Ctx;
     const rep = ctx.resources.rep(Ctx.HTTP_RESPONSE_RT, handle) catch return;
@@ -353,44 +354,121 @@ fn dropHostResponse(ctx: *wasi_p2.WasiP2Ctx, handle: u32) void {
     wasi_p2.http3DropTransferredEnd(ctx, resp.trailers_future);
     resp.contents_stream = null;
     resp.trailers_future = 0;
+    // EXEMPT-FALLBACK: destructor — only a parked read whose buffer faults fails, and it loses only its answer (D-568)
+    wasi_p2.http3ResolveSent(ctx, resp.sent_readable, &resp.sent_writable, null) catch {};
 }
 
-/// The no-progress hook of `serviceHandle`: once the guest delivered its
-/// response via task.return, register the capture sink on the response's
-/// contents stream — the guest's spawned body writer parks BEFORE the host can
-/// know the stream id, so the registration (which drains the parked write)
-/// must happen inside the drive.
+/// The no-progress hook of `serviceHandle`, in two stages. Once the guest
+/// delivered its response via task.return, register the capture sink on the
+/// response's contents stream — the guest's spawned body writer parks BEFORE
+/// the host can know the stream id, so the registration (which drains the
+/// parked write) must happen inside the drive. Once the body's writer dropped
+/// (or there is no body), the host has the whole response: resolve the future
+/// `response.new` returned `ok`, so a handler awaiting it completes.
 const ServiceCapture = struct {
     wp2: *wasi_p2.WasiP2Ctx,
     capture: *std.ArrayList(u8),
     registered_shared: ?u32 = null,
-    done: bool = false,
+    stage: enum { awaiting_response, taking_body, done } = .awaiting_response,
 
     fn step(ptr: *anyopaque) bool {
         const self: *ServiceCapture = @ptrCast(@alignCast(ptr));
-        if (self.done) return false;
+        if (self.stage == .done) return false;
         if (self.wp2.task_return != 0) return false;
         const payload = self.wp2.task_return_payload orelse return false;
         const rep = self.wp2.resources.rep(wasi_p2.WasiP2Ctx.HTTP_RESPONSE_RT, payload) catch return false;
         if (rep >= self.wp2.http_responses.items.len) return false;
         const resp = &self.wp2.http_responses.items[rep];
-        // Trailers are not read: release the readable so the guest's parked
-        // trailers writer observes DROPPED.
-        if (resp.trailers_future != 0) {
-            wasi_p2.http3DropTransferredEnd(self.wp2, resp.trailers_future);
-            resp.trailers_future = 0;
+        if (self.stage == .awaiting_response) {
+            // Trailers are not read: release the readable so the guest's parked
+            // trailers writer observes DROPPED.
+            if (resp.trailers_future != 0) {
+                wasi_p2.http3DropTransferredEnd(self.wp2, resp.trailers_future);
+                resp.trailers_future = 0;
+            }
+            if (resp.contents_stream) |cs| {
+                const end = self.wp2.streams.get(cs) catch return false;
+                wasi_p2.http3RegisterCaptureSink(self.wp2, end.shared, self.capture) catch return false;
+                self.registered_shared = end.shared;
+                self.stage = .taking_body;
+                return true;
+            }
+        } else {
+            const sid = self.registered_shared orelse return false;
+            const body_done = switch ((self.wp2.shared.get(sid) catch return false).*) {
+                .stream => |st| st.dropped,
+                .future, .subtask => true,
+            };
+            if (!body_done) return false;
         }
-        if (resp.contents_stream) |cs| {
-            const end = self.wp2.streams.get(cs) catch return false;
-            wasi_p2.http3RegisterCaptureSink(self.wp2, end.shared, self.capture) catch return false;
-            self.registered_shared = end.shared;
-        }
-        self.done = true;
+        wasi_p2.http3ResolveSent(self.wp2, resp.sent_readable, &resp.sent_writable, null) catch return false;
+        self.stage = .done;
         return true;
     }
 };
 
 const testing = std.testing;
+
+test "serviceHandle's drive resolves the future response.new returned once it has the whole response, for a read parked before or issued after, a reader that dropped first, and a drive that ended first (#734)" {
+    const rig = try @import("component_wasi_p3_http.zig").Http3Rig.create();
+    defer rig.destroy();
+    const ctx = rig.ctx;
+    const mem = try ctx.memory();
+    const completed = (async_mod.ReturnCode{ .completed = 0 }).encode();
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    ctx.task_return = 0;
+
+    // A body, and a read that parks before the host has it.
+    const parked = try rig.newResponse(true);
+    const w = ctx.http_responses.items[parked.rep].sent_writable;
+    try mem.write(@as(u32, 160), @as(u8, 0xaa));
+    try testing.expectEqual((async_mod.ReturnCode{ .blocked = {} }).encode(), try wasi_ctx.p2FutureCopy(rig.copy_caller, parked.sent, 160));
+    ctx.task_return_payload = parked.handle;
+    var svc: ServiceCapture = .{ .wp2 = ctx, .capture = &body };
+    defer if (svc.registered_shared) |sid| {
+        _ = ctx.host_capture_sinks.remove(sid);
+    };
+    try testing.expect(ServiceCapture.step(&svc));
+    @memcpy(try mem.sliceAt(256, 2), "hi");
+    _ = try wasi_ctx.p2StreamFutureCopy(rig.copy_caller, parked.body.?, 256, 2);
+    try testing.expect(!ServiceCapture.step(&svc));
+    try testing.expect(!(try ctx.streams.get(parked.sent)).hasPendingEvent());
+    try wasi_ctx.p2StreamFutureDrop(rig.copy_caller, parked.body.?);
+    try testing.expect(ServiceCapture.step(&svc));
+    try testing.expectEqualStrings("hi", body.items);
+    try testing.expectEqual(@as(u8, 0), try mem.read(u8, 160));
+    try testing.expectEqual(completed, (try ctx.streams.get(parked.sent)).takePendingEvent().?.payload);
+    try testing.expectError(async_mod.Error.InvalidHandle, ctx.streams.get(w));
+    try testing.expect(!ServiceCapture.step(&svc));
+
+    // No body, and a read issued after.
+    const later = try rig.newResponse(false);
+    ctx.task_return_payload = later.handle;
+    var svc_later: ServiceCapture = .{ .wp2 = ctx, .capture = &body };
+    try testing.expect(ServiceCapture.step(&svc_later));
+    try mem.write(@as(u32, 192), @as(u8, 0xaa));
+    try testing.expectEqual(completed, try wasi_ctx.p2FutureCopy(rig.copy_caller, later.sent, 192));
+    try testing.expectEqual(@as(u8, 0), try mem.read(u8, 192));
+
+    // The guest dropped the future unread: nothing of it is left.
+    const unread = try rig.newResponse(false);
+    const unread_w = ctx.http_responses.items[unread.rep].sent_writable;
+    try wasi_ctx.p2StreamFutureDrop(rig.copy_caller, unread.sent);
+    ctx.task_return_payload = unread.handle;
+    var svc_unread: ServiceCapture = .{ .wp2 = ctx, .capture = &body };
+    try testing.expect(ServiceCapture.step(&svc_unread));
+    try testing.expectError(async_mod.Error.InvalidHandle, ctx.streams.get(unread.sent));
+    try testing.expectError(async_mod.Error.InvalidHandle, ctx.streams.get(unread_w));
+
+    // The drive ended before the body's writer dropped: the host's drop resolves it.
+    const ended = try rig.newResponse(true);
+    dropHostResponse(ctx, ended.handle);
+    try mem.write(@as(u32, 224), @as(u8, 0xaa));
+    try testing.expectEqual(completed, try wasi_ctx.p2FutureCopy(rig.copy_caller, ended.sent, 224));
+    try testing.expectEqual(@as(u8, 0), try mem.read(u8, 224));
+    try testing.expectEqual(@as(u32, 0), ctx.host_sent_futures.count());
+}
 
 test "D-335 unit D-ηB: an async-lifted export that returns EXIT runs end-to-end through the P3 runner" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -1456,6 +1534,32 @@ test "serviceHandle: one instance answers request after request without the ctx 
             try testing.expectEqual(before, held(ctx));
         }
         if (after_first_round) |t| try testing.expectEqual(t, tables(ctx)) else after_first_round = tables(ctx);
+    }
+}
+
+test "serviceHandle: a handler that awaits the future response.new returned completes, and its response is returned (#734)" {
+    const alloc = testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/http_service_await_sent.wasm", alloc, .limited(1 << 20));
+    defer alloc.free(bytes);
+    var eng = try Engine.init(alloc, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(alloc);
+    defer host.deinit();
+    host.io = io;
+    var built = try wasi_p2.buildWasiP2Component(&eng, alloc, bytes, &host, .{});
+    defer built.deinit();
+
+    // Twice on one instance: no end of the first request's future is left.
+    const ends = liveSlots(built.ctx.streams.slots.items);
+    for (0..2) |_| {
+        var resp = try serviceHandle(&built, .{ .method = "GET", .path_with_query = "/", .authority = "localhost" });
+        defer resp.deinit(alloc);
+        try testing.expectEqual(@as(u16, 200), resp.status);
+        try testing.expectEqualStrings("hello", resp.body);
+        try testing.expectEqual(ends, liveSlots(built.ctx.streams.slots.items));
     }
 }
 
