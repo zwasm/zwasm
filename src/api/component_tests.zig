@@ -1441,6 +1441,46 @@ test "0.2 metadata-hash + via-stream: a rust-std wasip2 guest's fs::metadata / F
     try testing.expectEqualStrings("written+more", written);
 }
 
+test "0.2 open-at: a path whose symlink leads above the preopen is refused" {
+    // The guest creates `up -> .` (inside the preopen, so allowed) and reads
+    // `up/../outside.txt`. Resolved component by component, `up` is the root
+    // and `..` from it leaves the preopen, so open-at is err(not-permitted) and
+    // the guest exits 20. Skipped where the host denies unprivileged symlink
+    // creation (Windows without Developer Mode): the guest then exits 10.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "test/component/wasi_p2_path_beneath_rust.wasm", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(bytes);
+
+    try tmp.dir.createDir(io, "pre", std.Io.File.Permissions.default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside.txt", .data = "OUTSIDE" });
+    var pre = try tmp.dir.openDir(io, "pre", .{ .iterate = true });
+    defer pre.close(io);
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    _ = try host.addPreopen(pre.handle, "/");
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    host.stdout_buffer = &capture;
+    var cap_err: std.ArrayList(u8) = .empty;
+    defer cap_err.deinit(testing.allocator);
+    host.stderr_buffer = &cap_err;
+
+    try runWasiP2Main(&eng, testing.allocator, bytes, &host, .{});
+    if (@import("builtin").os.tag == .windows and host.exit_code == 10) return @import("../test_support/skip.zig").phaseEnd(.win64);
+    try testing.expectEqual(@as(?u32, 20), host.exit_code);
+    // rust-std's text for err(not-permitted), not just any failed read.
+    try testing.expectEqualStrings("open: Operation not permitted (os error 63)\n", cap_err.items);
+    try testing.expectEqualStrings("", capture.items);
+}
+
 test "0.2 metadata-hash + metadata-hash-at: the fd route and the path route give one file one identity" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
