@@ -1395,6 +1395,34 @@ test "compute: a throw pops its tag's payload before the stack freezes" {
     try testing.expectEqual(snapshotDigest(&.{0}), live.stack_digest[5]);
 }
 
+test "compute: a catch to a loop carries the loop's params, one to a block fresh results (#369)" {
+    // v0 (the label's param) ; label (param i32) (result i32) ;
+    // try_table (catch 0 0) ; v1 ; throw 0 ; end ; end ; drop ; end.
+    // A catch to the loop lands at its header with v0's slot written, as
+    // `br` writes it, so nothing new is minted; a block gets a merge vreg.
+    const tag_type: zir.FuncType = .{ .params = &.{.i32}, .results = &.{} };
+    for ([_]zir.ZirOp{ .loop, .block }, [_]usize{ 2, 3 }) |label_op, want| {
+        var f = try buildFunc(testing.allocator, &.{
+            .{ .op = .@"i32.const", .payload = 0 },
+            .{ .op = label_op, .extra = 1 | (1 << 8) },
+            .{ .op = .try_table, .payload = 0 },
+            .{ .op = .@"i32.const", .payload = 5 },
+            .{ .op = .throw, .payload = 0 },
+            .{ .op = .end },
+            .{ .op = .end },
+            .{ .op = .drop },
+            .{ .op = .end },
+        });
+        defer f.deinit(testing.allocator);
+        f.eh_landing_pads = try testing.allocator.dupe(zir.LandingPad, &.{.{ .block_idx = 0, .catches_start = 0, .catches_end = 1 }});
+        f.eh_catch_entries = try testing.allocator.dupe(zir.CatchEntry, &.{.{ .kind = .catch_, .tag_idx = 0, .label_idx = 0 }});
+
+        const live = try compute(testing.allocator, &f, &.{}, &.{tag_type}, &.{0}, &.{});
+        defer deinit(testing.allocator, live);
+        try testing.expectEqual(want, live.ranges.len);
+    }
+}
+
 test "compute: classes mark the v128 values a select and a call produce" {
     // local.get 0 (v128) ; local.get 1 (v128) ; local.get 2 (i32) ;
     // select (v128, extra = 0x7B) ; call 0 (v128) -> v128 ; end

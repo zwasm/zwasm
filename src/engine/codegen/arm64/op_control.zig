@@ -228,7 +228,7 @@ pub fn marshalFunctionReturn(ctx: *EmitCtx) Error!void {
 /// free at a control-flow boundary; CMP+B.NE (not CBNZ) per the EmitCindStub
 /// patcher; the CMP's flags don't disturb a following CBNZ (compare-and-branch
 /// on a register, not NZCV).
-fn emitBackEdgeInterruptPoll(ctx: *EmitCtx) Error!void {
+pub fn emitBackEdgeInterruptPoll(ctx: *EmitCtx) Error!void {
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(16, abi.runtime_ptr_save_gpr, jit_abi.interrupt_ptr_off));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbz(16, 4));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImmW(17, 16, 0));

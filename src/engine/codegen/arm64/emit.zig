@@ -810,7 +810,8 @@ pub fn compile(
     // Per-catch landing_pad_pc forward fixups. Each
     // `try_table.emit` appends one per catch clause; the matching
     // catch-label's `end` patches `Builder.entries[i].landing_pad_pc`
-    // to the post-end buf offset.
+    // to the post-end buf offset; a `loop` label's pad there branches
+    // back to the loop's header.
     var landing_pad_fixups: std.ArrayList(exception_table.LandingPadFixup) = .empty;
     defer landing_pad_fixups.deinit(allocator);
 
@@ -1675,7 +1676,12 @@ pub fn compile(
                     //     JMP to the common continuation. exnref push
                     //     (.catch_ref / .catch_all_ref) is v0.2 scope
                     //     per ADR-0120 §3.
+                    //   - a `loop` label: the values go to the loop's
+                    //     params and the prelude ends in a branch to its
+                    //     header, as `br` to the loop does (#369).
                     const popped_depth: u32 = @intCast(labels.items.len);
+                    // emitEndIntra pops the label; a catch to a loop needs its header and params.
+                    const end_loop: ?Label = if (labels.items[labels.items.len - 1].kind == .loop) labels.items[labels.items.len - 1] else null;
                     try op_control.emitEndIntra(&ctx, &ins);
                     if (landing_pad_fixups.items.len > 0) {
                         // Detect if any matching clause needs a prelude.
@@ -1688,6 +1694,11 @@ pub fn compile(
                         while (probe_i < landing_pad_fixups.items.len) : (probe_i += 1) {
                             const fx = landing_pad_fixups.items[probe_i];
                             if (fx.target_labels_depth != popped_depth) continue;
+                            // A loop's pad branches back to its header.
+                            if (end_loop != null) {
+                                any_payload = true;
+                                break;
+                            }
                             const k = eh_builder.entries.items[fx.entry_idx].kind;
                             // D-327: any _ref clause needs the per-clause path to
                             // emit the exnref reify call (even with 0 payload).
@@ -1726,6 +1737,17 @@ pub fn compile(
                             // emit JMP-to-common placeholder, patch
                             // landing_pad_pc. After all matching fixups,
                             // patch JMPs to common_pc = buf.items.len.
+                            // The label's values: a loop's params at its header, else
+                            // the results the end left on top.
+                            const label_vregs: []const u32 = if (end_loop) |*lp| lp.param_top_vregs[0..lp.param_arity] else pushed_vregs.items;
+                            // Decline rather than index past what exists: params `loop` did not capture,
+                            // or a vreg past `alloc.slots`. A param from a block that ends in `unreachable`
+                            // can still be the placeholder vreg 0; the pad then writes that vreg's slot,
+                            // on a path that never runs.
+                            if (end_loop) |lp| {
+                                if (lp.entry_stack_depth < lp.param_arity) return Error.AllocationMissing;
+                                for (label_vregs) |v| if (v >= alloc.slots.len) return Error.AllocationMissing;
+                            }
                             var jmp_placeholders: std.ArrayList(u32) = .empty;
                             defer jmp_placeholders.deinit(allocator);
                             // The block's fall-through path arrives here too and must not run
@@ -1753,8 +1775,8 @@ pub fn compile(
                                 // params (written after) survive. BLR reify_exnref_fn(rt);
                                 // store X0 (= *Exception). Cohort-safe: X19 callee-saved.
                                 if (is_ref) {
-                                    if (pushed_vregs.items.len < 1) return Error.AllocationMissing;
-                                    const exnref_vreg = pushed_vregs.items[pushed_vregs.items.len - 1];
+                                    if (label_vregs.len < 1) return Error.AllocationMissing;
+                                    const exnref_vreg = label_vregs[label_vregs.len - 1];
                                     try gpr.writeU32(allocator, &buf, inst.encOrrReg(0, 31, abi.runtime_ptr_save_gpr)); // MOV X0, X19
                                     try gpr.writeU32(allocator, &buf, inst.encLdrImm(16, abi.runtime_ptr_save_gpr, @intCast(jit_abi.reify_exnref_fn_off)));
                                     try gpr.writeU32(allocator, &buf, inst.encBLR(16));
@@ -1775,10 +1797,10 @@ pub fn compile(
                                         // tag params are the deepest np (base skips the
                                         // exnref slot).
                                         const extra: usize = if (is_ref) 1 else 0;
-                                        if (pushed_vregs.items.len < params.len + extra) return Error.AllocationMissing;
-                                        const base = pushed_vregs.items.len - params.len - extra;
+                                        if (label_vregs.len < params.len + extra) return Error.AllocationMissing;
+                                        const base = label_vregs.len - params.len - extra;
                                         for (params, 0..) |param, k| {
-                                            const target_vreg = pushed_vregs.items[base + k];
+                                            const target_vreg = label_vregs[base + k];
                                             const slot_off: u14 = @intCast(jit_abi.eh_payload_buf_off + k * 8);
                                             switch (param) {
                                                 .f32, .f64 => {
@@ -1800,10 +1822,20 @@ pub fn compile(
                                     }
                                 }
 
-                                // Emit JMP placeholder to common_pc.
-                                const jmp_off: u32 = @intCast(buf.items.len);
-                                try gpr.writeU32(allocator, &buf, inst.encB(0));
-                                try jmp_placeholders.append(allocator, jmp_off);
+                                if (end_loop) |lp| {
+                                    // Wasm 3.0 §3.3.10.6 (try_table) — a catch to a loop is
+                                    // a branch to it: the back-edge poll, then the header,
+                                    // as `br`.
+                                    try op_control.emitBackEdgeInterruptPoll(&ctx);
+                                    const at: u32 = @intCast(buf.items.len);
+                                    const disp_bytes: i32 = @as(i32, @intCast(lp.target_byte_offset)) - @as(i32, @intCast(at));
+                                    try gpr.writeU32(allocator, &buf, inst.encB(@divExact(disp_bytes, 4)));
+                                } else {
+                                    // Emit JMP placeholder to common_pc.
+                                    const jmp_off: u32 = @intCast(buf.items.len);
+                                    try gpr.writeU32(allocator, &buf, inst.encB(0));
+                                    try jmp_placeholders.append(allocator, jmp_off);
+                                }
 
                                 entry.landing_pad_pc = clause_start;
                                 _ = landing_pad_fixups.swapRemove(i);

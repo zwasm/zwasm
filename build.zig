@@ -1477,9 +1477,34 @@ pub fn build(b: *std.Build) void {
     run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/poll_sleep.wasm"));
     run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/f32_param_three_results.wasm"));
     run_cli_usage.addArg(pathFromRoot(b, "test/component/wasi_p2_tcp_rust.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/catch_to_loop.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/catch_to_loop_ref_result.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/catch_to_loop_params.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/catch_to_loop_unset_params.wasm"));
     run_cli_usage.has_side_effects = true;
-    const test_cli_usage_step = b.step("test-cli-usage", "Run `zwasm run` with unknown, misplaced and value-swallowing options and require a usage error (exit 2), and `--` and post-path options to reach the module (issues #236, #232); a SIMD module the interpreter cannot run fails with each engine's reason (#597); `--timeout` fires during a `poll_oneoff` sleep (#598); the JIT refuses an f32 param with three results (#618); a component reaches the network only with --allow-network");
+    const test_cli_usage_step = b.step("test-cli-usage", "Run `zwasm run` with unknown, misplaced and value-swallowing options and require a usage error (exit 2), and `--` and post-path options to reach the module (issues #236, #232); a SIMD module the interpreter cannot run fails with each engine's reason (#597); `--timeout` fires during a `poll_oneoff` sleep (#598); the JIT refuses an f32 param with three results (#618); a component reaches the network only with --allow-network; a catch clause whose label is a loop branches to its header (#369)");
     test_cli_usage_step.dependOn(&run_cli_usage.step);
+
+    // `zig build test-catch-label-matrix` — #369: a `try_table` catch clause and
+    // the label it targets, over the shapes its axes span, built as modules here
+    // and run with `--engine interp` and `--engine jit`; both must print the
+    // value the runner computes, trap where it says, or (the JIT) decline.
+    const catch_matrix_mod = createSanitizedModule(b, sanitize_opts, .{
+        .root_source_file = b.path("test/runners/catch_label_matrix_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    catch_matrix_mod.addImport("spawned_cli", spawned_cli_mod);
+    const catch_matrix_exe = b.addExecutable(.{
+        .name = "zwasm-catch-label-matrix",
+        .root_module = catch_matrix_mod,
+    });
+    const run_catch_matrix = b.addRunArtifact(catch_matrix_exe);
+    run_catch_matrix.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
+    _ = run_catch_matrix.addOutputDirectoryArg("catch_label_matrix");
+    run_catch_matrix.has_side_effects = true;
+    const test_catch_matrix_step = b.step("test-catch-label-matrix", "Run every shape of a try_table catch clause and its label (block or loop, 0-2 labels out, the four clause kinds, no/i32/f64/funcref payload, a loop's result, values from constants or from `unreachable`) on --engine interp and --engine jit, and require the value the runner computes or the trap it predicts; the JIT may decline only a loop param no value was made for (#369)");
+    test_catch_matrix_step.dependOn(&run_catch_matrix.step);
 
     // `zig build test-wasi-p1-official` — the OFFICIAL wasi-testsuite
     // wasm32-wasip1 corpus (D-582). Deliberately NOT in `test-all` yet: the
@@ -1891,6 +1916,7 @@ pub fn build(b: *std.Build) void {
     if (enable_wasi_p3) test_all_step.dependOn(&run_cli_serve.step); // issue #688 zwasm serve answers a wasi:http/service component over HTTP
     test_all_step.dependOn(&run_cli_invalid_module.step); // issue #233 the same verdict from run, run --engine=jit and compile
     test_all_step.dependOn(&run_cli_usage.step); // issues #236 / #232 run's options: unknown = exit 2, `--` ends them
+    test_all_step.dependOn(&run_catch_matrix.step); // #369 catch clause x label shapes, interp vs JIT
     test_all_step.dependOn(&run_spawned_cli_unit.step); // the `--version` mode parser every spawning runner goes through
     test_all_step.dependOn(&run_wasi_p1.step);
     // §9.7 / 7.8 row close (D-045 chunks 1-14 fully discharged):

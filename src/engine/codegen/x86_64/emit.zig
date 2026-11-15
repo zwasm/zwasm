@@ -982,6 +982,8 @@ pub fn compile(
         // of the arm64 emit.zig logic, hoisted above the ctx
         // dispatcher because `.end` is in `collected_x86_64_ctx_ops`.
         const end_pre_pop_depth: u32 = if (ins.op == .end) @intCast(labels.items.len) else 0;
+        // The dispatch pops the label; a catch to a loop needs its header and params.
+        const end_loop: ?Label = if (ins.op == .end and labels.items.len > 0 and labels.items[labels.items.len - 1].kind == .loop) labels.items[labels.items.len - 1] else null;
         if (ins.op == .end and labels.items.len > 0 and open_try_tables.items.len > 0) {
             const top = open_try_tables.items[open_try_tables.items.len - 1];
             if (top.labels_depth == labels.items.len) {
@@ -1010,6 +1012,11 @@ pub fn compile(
                 while (probe_i < landing_pad_fixups.items.len) : (probe_i += 1) {
                     const fx = landing_pad_fixups.items[probe_i];
                     if (fx.target_labels_depth != end_pre_pop_depth) continue;
+                    // A loop's pad branches back to its header.
+                    if (end_loop != null) {
+                        any_payload = true;
+                        break;
+                    }
                     const k = eh_builder.entries.items[fx.entry_idx].kind;
                     // D-327: any _ref clause needs the per-clause path to emit the
                     // exnref reify call (even with 0 payload).
@@ -1040,6 +1047,17 @@ pub fn compile(
                         }
                     }
                 } else {
+                    // The label's values: a loop's params at its header, else the
+                    // results the end left on top.
+                    const label_vregs: []const u32 = if (end_loop) |*lp| lp.param_top_vregs[0..lp.param_arity] else pushed_vregs.items;
+                    // Decline rather than index past what exists: params `loop` did not capture,
+                    // or a vreg past `alloc.slots`. A param from a block that ends in `unreachable`
+                    // can still be the placeholder vreg 0; the pad then writes that vreg's slot,
+                    // on a path that never runs.
+                    if (end_loop) |lp| {
+                        if (lp.entry_stack_depth < lp.param_arity) return Error.AllocationMissing;
+                        for (label_vregs) |v| if (v >= alloc.slots.len) return Error.AllocationMissing;
+                    }
                     var jmp_placeholders: std.ArrayList(u32) = .empty;
                     defer jmp_placeholders.deinit(allocator);
                     // The block's fall-through path arrives here too and must not run
@@ -1065,8 +1083,8 @@ pub fn compile(
                         // caller-saved), so params written after survive. Win64 arg0
                         // = RCX, SysV = RDI (abi.current.entry_arg0_gpr).
                         if (is_ref) {
-                            if (pushed_vregs.items.len < 1) return Error.AllocationMissing;
-                            const exnref_vreg = pushed_vregs.items[pushed_vregs.items.len - 1];
+                            if (label_vregs.len < 1) return Error.AllocationMissing;
+                            const exnref_vreg = label_vregs[label_vregs.len - 1];
                             try buf.appendSlice(allocator, inst.encMovRR(.q, abi.current.entry_arg0_gpr, abi.runtime_ptr_save_gpr).slice());
                             try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.rax, abi.runtime_ptr_save_gpr, @intCast(jit_abi.reify_exnref_fn_off)).slice());
                             // Win64: reifyExnref is a regular C-ABI fn that homes
@@ -1091,10 +1109,10 @@ pub fn compile(
                                 // vregs; for catch_ref the exnref is the TOP result, so
                                 // the base skips it.
                                 const extra: usize = if (is_ref) 1 else 0;
-                                if (pushed_vregs.items.len < params.len + extra) return Error.AllocationMissing;
-                                const base = pushed_vregs.items.len - params.len - extra;
+                                if (label_vregs.len < params.len + extra) return Error.AllocationMissing;
+                                const base = label_vregs.len - params.len - extra;
                                 for (params, 0..) |param, k| {
-                                    const target_vreg = pushed_vregs.items[base + k];
+                                    const target_vreg = label_vregs[base + k];
                                     const off: i32 = @intCast(jit_abi.eh_payload_buf_off + k * 8);
                                     switch (param) {
                                         .f32, .f64 => {
@@ -1113,9 +1131,18 @@ pub fn compile(
                             }
                         }
 
-                        const jmp_off: u32 = @intCast(buf.items.len);
-                        try buf.appendSlice(allocator, inst.encJmpRel32(0).slice());
-                        try jmp_placeholders.append(allocator, jmp_off);
+                        if (end_loop) |lp| {
+                            // Wasm 3.0 §3.3.10.6 (try_table) — a catch to a loop is a
+                            // branch to it: the back-edge poll, then the header, as `br`.
+                            try op_control.emitBackEdgeInterruptPoll(allocator, &buf, &back_edge_interrupt_fixups, &back_edge_fuel_fixups);
+                            const at: u32 = @intCast(buf.items.len);
+                            const disp: i32 = @as(i32, @intCast(lp.target_byte_offset)) - @as(i32, @intCast(at)) - 5;
+                            try buf.appendSlice(allocator, inst.encJmpRel32(disp).slice());
+                        } else {
+                            const jmp_off: u32 = @intCast(buf.items.len);
+                            try buf.appendSlice(allocator, inst.encJmpRel32(0).slice());
+                            try jmp_placeholders.append(allocator, jmp_off);
+                        }
 
                         entry.landing_pad_pc = clause_start;
                         _ = landing_pad_fixups.swapRemove(i);

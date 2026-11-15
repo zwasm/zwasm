@@ -180,6 +180,8 @@ pub const ExceptionTable = struct {
 /// block's `ExceptionTable.Builder` row is appended, patched by
 /// the matching catch-label's `end` op (which writes
 /// `entries[entry_idx].landing_pad_pc = ctx.buf.items.len` post-end).
+/// For a `loop` label the pad written there branches back to the loop's
+/// header with the caught values as its params, as `br` to it does.
 ///
 /// `target_labels_depth` is the value of `ctx.labels.items.len`
 /// AT FIXUP CREATION (= try_table.emit time, AFTER the try_table's
