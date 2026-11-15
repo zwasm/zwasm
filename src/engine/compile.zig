@@ -54,8 +54,8 @@ pub fn boundsChecksMode() BoundsChecks {
 /// AOT-destined call sites stay greppable.
 /// #397 — a const expression's validity is judged once, by the shared
 /// validator (Wasm 3.0 §3.3.13.1); `runner_validate.zig` only evaluates.
-/// `.undeterminable` is the GC shapes that walker does not type: they are
-/// not rejected here, setup evaluates or declines them.
+/// `.undeterminable` is an expression holding more operands at once than
+/// that walker's stack: it is not rejected here, setup evaluates or declines it.
 fn checkConstExpr(expr: []const u8, want: zir.ValType, scope: validator_mod.ConstExprScope) Error!void {
     switch (validator_mod.validateConstExpr(expr, want, scope)) {
         .ok, .undeterminable => {},
