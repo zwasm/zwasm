@@ -12,6 +12,22 @@ const skip = @import("../test_support/skip.zig");
 const runner = @import("runner.zig");
 const compileWasm = runner.compileWasm;
 const JitInstance = runner.JitInstance;
+const frontendValidate = @import("../runtime/instance/instantiate.zig").frontendValidate;
+
+/// A module every path refuses: the front end (`zwasm run` / `compile`, the
+/// C and Zig APIs) and `compileWasm` (the JIT and the spec lane).
+fn expectRefusedOnBothPaths(bytes: []const u8) !void {
+    try testing.expect(!frontendValidate(testing.allocator, bytes));
+    var c = compileWasm(testing.allocator, bytes) catch return;
+    c.deinit(testing.allocator);
+    return error.TestUnexpectedResult;
+}
+
+fn expectAcceptedOnBothPaths(bytes: []const u8) !void {
+    try testing.expect(frontendValidate(testing.allocator, bytes));
+    var c = try compileWasm(testing.allocator, bytes);
+    c.deinit(testing.allocator);
+}
 // ── #397: a const expression reads any immutable global in scope ──
 // Wasm 3.0 §3.3.13.1 (extended-const) lets a global init `global.get` an
 // immutable global declared before it, imported or defined. The JIT's
@@ -125,4 +141,28 @@ test "JitInstance: an active data offset that reads a defined global is valid, a
     var c = try compileWasm(testing.allocator, &data_offset_reads_global);
     c.deinit(testing.allocator);
     try testing.expectError(error.UnsupportedEntrySignature, JitInstance.init(testing.allocator, &data_offset_reads_global));
+}
+
+test "a GC constructor in a global init is typed against its operands, on both paths (#430)" {
+    // (module (type $s (struct (field i32)))
+    //   (global (ref $s) (struct.new $s (ref.null none))))
+    try expectRefusedOnBothPaths(&[_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x5f, 0x01, 0x7f, 0x00, // type: struct (field i32)
+        0x06, 0x0a, 0x01, 0x64, 0x00, 0x00, // global (ref 0) immutable
+        0xd0, 0x71, 0xfb, 0x00, 0x00, 0x0b, // ref.null none; struct.new 0
+    });
+    // (module (type $s (sub (struct (field i32))))
+    //   (type $t (sub $s (struct (field i32) (field i64))))
+    //   (type $h (struct (field (ref $s))))
+    //   (global (ref $h) (struct.new $h (struct.new $t (i32.const 1) (i64.const 2)))))
+    // — a `(ref $t)` operand where the field is `(ref $s)`.
+    try expectAcceptedOnBothPaths(&[_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x15, 0x03, 0x50, 0x00, 0x5f, 0x01, 0x7f,
+        0x00, 0x50, 0x01, 0x00, 0x5f, 0x02, 0x7f, 0x00,
+        0x7e, 0x00, 0x5f, 0x01, 0x64, 0x00, 0x00, 0x06,
+        0x0f, 0x01, 0x64, 0x02, 0x00, 0x41, 0x01, 0x42,
+        0x02, 0xfb, 0x00, 0x01, 0xfb, 0x00, 0x02, 0x0b,
+    });
 }

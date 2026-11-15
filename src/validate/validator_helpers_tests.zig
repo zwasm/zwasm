@@ -63,12 +63,10 @@ test "validateConstExpr: is_const opcode set + arity + global.get mutability (§
     // Trailing bytes after `end`.
     try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0x41, 0x00, 0x0B, 0x41, 0x00 }, .i32, scope));
 
-    // The GC family is admissible per `is_const` and walked for arity, but
-    // not typed here. Every one of its forms yields a reference, so the
-    // verdict splits on what the position expects: a reference is
-    // undeterminable (an incomplete walker must not reject a valid module), a
-    // numeric type is an outright mismatch. `ref.i31` wraps one i32.
-    try testing.expectEqual(validator.ConstExprVerdict.undeterminable, validator.validateConstExpr(&[_]u8{ 0x41, 0x01, 0xFB, 0x1C, 0x0B }, ValType.i31ref, scope));
+    // The GC family is admissible per `is_const`. `ref.i31` wraps one i32
+    // into a `(ref i31)`, which an i31ref position accepts and an i32 one
+    // does not.
+    try testing.expectEqual(validator.ConstExprVerdict.ok, validator.validateConstExpr(&[_]u8{ 0x41, 0x01, 0xFB, 0x1C, 0x0B }, ValType.i31ref, scope));
     try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0x41, 0x01, 0xFB, 0x1C, 0x0B }, .i32, scope));
     // struct.new names a type this (empty) type section does not define.
     try testing.expectEqual(validator.ConstExprVerdict.invalid, validator.validateConstExpr(&[_]u8{ 0xFB, 0x00, 0x03, 0x0B }, ValType.anyref, scope));
@@ -114,4 +112,125 @@ test "validateConstExpr: the readable-global window is positional (§3.3.13.1 co
     // A data or elem offset sees every global.
     const everything: validator.ConstExprScope = .{ .globals = &all, .func_type_indices = &fti, .types = &types };
     try testing.expectEqual(validator.ConstExprVerdict.ok, validator.validateConstExpr(&get1, .i32, everything));
+}
+
+fn concrete(nullable: bool, t: u32) ValType {
+    return .{ .ref = .{ .nullable = nullable, .heap_type = .{ .concrete = t } } };
+}
+
+fn abstract(ht: zir.AbstractHeapType, nullable: bool) ValType {
+    return .{ .ref = zir.RefType.abs(ht, nullable) };
+}
+
+/// 0: (sub (struct (field i32)))           — open, so 4 can extend it
+/// 1: (struct (field (ref 0)))             — a non-defaultable field
+/// 2: (array (mut i8))                     — packed: takes an i32
+/// 3: (array (ref null 0))
+/// 4: (sub 0 (struct (field i32) (field i64)))  — a proper subtype of 0
+/// 5: (array (ref 0))                      — a non-defaultable element
+const gc_type_body = [_]u8{
+    0x06,
+    0x50,
+    0x00,
+    0x5F,
+    0x01,
+    0x7F,
+    0x00,
+    0x5F,
+    0x01,
+    0x64,
+    0x00,
+    0x00,
+    0x5E,
+    0x78,
+    0x01,
+    0x5E,
+    0x63,
+    0x00,
+    0x00,
+    0x50,
+    0x01,
+    0x00,
+    0x5F,
+    0x02,
+    0x7F,
+    0x00,
+    0x7E,
+    0x00,
+    0x5E,
+    0x64,
+    0x00,
+    0x00,
+};
+
+/// `struct.new 4` over (i32.const 1) (i64.const 2): a `(ref 4)`, which is a
+/// proper subtype of `(ref 0)`.
+const s4 = [_]u8{ 0x41, 0x01, 0x42, 0x02, 0xFB, 0x00, 0x04 };
+
+const ok = validator.ConstExprVerdict.ok;
+const invalid = validator.ConstExprVerdict.invalid;
+
+fn gcVerdict(expr: []const u8, expected: ValType) !validator.ConstExprVerdict {
+    var types = try sections.decodeTypes(testing.allocator, &gc_type_body);
+    defer types.deinit();
+    return validator.validateConstExpr(expr, expected, .{ .globals = &.{}, .func_type_indices = &.{}, .types = &types });
+}
+
+test "validateConstExpr: struct.new takes a subtype of each field (#430)" {
+    try testing.expectEqual(ok, try gcVerdict(&(s4 ++ [_]u8{ 0xFB, 0x00, 0x01, 0x0B }), concrete(false, 1)));
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0xD0, 0x71, 0xFB, 0x00, 0x01, 0x0B }, concrete(false, 1))); // nullref into (ref 0)
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0x42, 0x07, 0xFB, 0x00, 0x00, 0x0B }, concrete(false, 0))); // i64 into i32
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0x42, 0x02, 0x41, 0x01, 0xFB, 0x00, 0x04, 0x0B }, concrete(false, 4))); // fields swapped
+}
+
+test "validateConstExpr: a GC constructor is the concrete (ref $t) (#430)" {
+    try testing.expectEqual(ok, try gcVerdict(&(s4 ++ [_]u8{0x0B}), concrete(true, 0)));
+    try testing.expectEqual(ok, try gcVerdict(&(s4 ++ [_]u8{0x0B}), abstract(.struct_, false)));
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0x41, 0x01, 0xFB, 0x00, 0x00, 0x0B }, concrete(false, 4)));
+    try testing.expectEqual(invalid, try gcVerdict(&(s4 ++ [_]u8{0x0B}), abstract(.array, true)));
+    try testing.expectEqual(invalid, try gcVerdict(&(s4 ++ [_]u8{0x0B}), .i32));
+}
+
+test "validateConstExpr: struct.new_default needs every field defaultable (#430)" {
+    try testing.expectEqual(ok, try gcVerdict(&[_]u8{ 0xFB, 0x01, 0x00, 0x0B }, concrete(false, 0)));
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0xFB, 0x01, 0x01, 0x0B }, concrete(false, 1)));
+}
+
+test "validateConstExpr: array.new takes the element type and an i32 length (#430)" {
+    // A packed element takes an i32.
+    try testing.expectEqual(ok, try gcVerdict(&[_]u8{ 0x41, 0x07, 0x41, 0x03, 0xFB, 0x06, 0x02, 0x0B }, concrete(false, 2)));
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0x42, 0x07, 0x41, 0x03, 0xFB, 0x06, 0x02, 0x0B }, concrete(false, 2)));
+    try testing.expectEqual(ok, try gcVerdict(&(s4 ++ [_]u8{ 0x41, 0x03, 0xFB, 0x06, 0x03, 0x0B }), concrete(false, 3)));
+    try testing.expectEqual(invalid, try gcVerdict(&(s4 ++ [_]u8{ 0x42, 0x03, 0xFB, 0x06, 0x03, 0x0B }), concrete(false, 3))); // i64 length
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0x41, 0x00, 0x41, 0x03, 0xFB, 0x06, 0x03, 0x0B }, concrete(false, 3))); // i32 element
+}
+
+test "validateConstExpr: array.new_default needs a defaultable element and an i32 length (#430)" {
+    try testing.expectEqual(ok, try gcVerdict(&[_]u8{ 0x41, 0x03, 0xFB, 0x07, 0x03, 0x0B }, concrete(false, 3)));
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0x41, 0x03, 0xFB, 0x07, 0x05, 0x0B }, concrete(false, 5)));
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0x42, 0x03, 0xFB, 0x07, 0x03, 0x0B }, concrete(false, 3)));
+}
+
+test "validateConstExpr: array.new_fixed takes N operands of the element type (#430)" {
+    try testing.expectEqual(ok, try gcVerdict(&([_]u8{ 0xD0, 0x71 } ++ s4 ++ [_]u8{ 0xFB, 0x08, 0x03, 0x02, 0x0B }), concrete(false, 3)));
+    try testing.expectEqual(invalid, try gcVerdict(&([_]u8{ 0x41, 0x00 } ++ s4 ++ [_]u8{ 0xFB, 0x08, 0x03, 0x02, 0x0B }), concrete(false, 3)));
+    try testing.expectEqual(invalid, try gcVerdict(&(s4 ++ [_]u8{ 0xFB, 0x08, 0x03, 0x02, 0x0B }), concrete(false, 3)));
+}
+
+test "validateConstExpr: any.convert_extern takes the extern hierarchy and keeps nullability (#430)" {
+    try testing.expectEqual(ok, try gcVerdict(&[_]u8{ 0xD0, 0x72, 0xFB, 0x1A, 0x0B }, ValType.anyref)); // noextern <: extern
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0xD0, 0x72, 0xFB, 0x1A, 0x0B }, abstract(.any, false)));
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0xD0, 0x71, 0xFB, 0x1A, 0x0B }, ValType.anyref));
+}
+
+test "validateConstExpr: extern.convert_any takes the any hierarchy and keeps nullability (#430)" {
+    try testing.expectEqual(ok, try gcVerdict(&(s4 ++ [_]u8{ 0xFB, 0x1B, 0x0B }), abstract(.extern_, false)));
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0xD0, 0x72, 0xFB, 0x1B, 0x0B }, abstract(.extern_, true)));
+    try testing.expectEqual(invalid, try gcVerdict(&(s4 ++ [_]u8{ 0xFB, 0x1B, 0x0B }), ValType.anyref));
+}
+
+test "validateConstExpr: ref.i31 takes an i32 and is a (ref i31) (#430)" {
+    try testing.expectEqual(ok, try gcVerdict(&[_]u8{ 0x41, 0x01, 0xFB, 0x1C, 0x0B }, abstract(.eq, false)));
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0x42, 0x01, 0xFB, 0x1C, 0x0B }, ValType.i31ref));
+    try testing.expectEqual(invalid, try gcVerdict(&[_]u8{ 0x41, 0x01, 0xFB, 0x1C, 0x0B }, concrete(true, 0)));
 }

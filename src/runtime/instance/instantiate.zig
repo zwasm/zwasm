@@ -295,8 +295,7 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
                     diagnostic.setDiag(.validate, .other, .unknown, "table init expr is not a valid constant expression (§3.3.13.1)", .{});
                     return false;
                 },
-                // The GC type algebra this walker declines to enter; an
-                // untypeable shape must not be reported as invalid.
+                // Deeper than the walker's stack; not judged here.
                 .undeterminable => {},
             }
         }
@@ -446,7 +445,7 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
                             diagnostic.setDiag(.validate, .other, .unknown, "elem segment offset is not a valid constant expression (§3.3.13.1)", .{});
                             return false;
                         },
-                        // Untypeable by this walker, so not judged here.
+                        // Deeper than the walker's stack; not judged here.
                         .undeterminable => {},
                     }
                 }
@@ -531,7 +530,7 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
                     diagnostic.setDiag(.validate, .other, .unknown, "data segment offset is not a valid constant expression (§3.3.13.1)", .{});
                     return false;
                 },
-                // Untypeable by this walker, so not judged here.
+                // Deeper than the walker's stack; not judged here.
                 .undeterminable => {},
             }
         }
