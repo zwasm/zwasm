@@ -1307,19 +1307,9 @@ pub const Validator = struct {
 
     /// Wasm spec 3.0 §3.3.10.8 — `throw_ref`: re-raise an
     /// exception via an `exnref` on the operand stack.
-    /// Polymorphic-stack from here. v2.0 catalogue can't express
-    /// the (ref null exn) type so we accept any reftype as the
-    /// popped value (same caveat as 10.R-1..5 typed-ref
-    /// catalogue limitation).
+    /// Polymorphic-stack from here.
     fn opThrowRef(self: *Validator) Error!void {
-        const top = try self.popAny();
-        switch (top) {
-            .bot => {},
-            .known => |t| if (!t.isRef()) {
-                self.mismatch = .{ .expected_ref = t };
-                return Error.StackTypeMismatch;
-            },
-        }
+        try self.popExpect(ValType.exnref);
         self.markUnreachable();
     }
 
@@ -1817,22 +1807,35 @@ pub const Validator = struct {
     /// Wasm spec 3.0 §3.3.5.3 — `ref.test heap_type` /
     /// `ref.test_null heap_type`: consume the SLEB128 heap_type
     /// immediate (D-453: a concrete idx ≥ 64 is multi-byte — decode
-    /// to advance pos past the full immediate, not one byte); pop
-    /// reftype; push i32.
+    /// to advance pos past the full immediate, not one byte); pop a
+    /// reference in the target's hierarchy; push i32.
     fn opRefTest(self: *Validator) Error!void {
         // `readTypedRef` validates well-formedness + advances pos past the
-        // full SLEB (the result type itself is unused here — ref.test pushes
-        // i32). `nullable` is immaterial to advancing; pass false.
-        _ = init_expr.readTypedRef(self.body, &self.pos, false) catch return Error.BadValType;
-        const top = try self.popAny();
-        switch (top) {
-            .bot => {},
-            .known => |t| if (!t.isRef()) {
-                self.mismatch = .{ .expected_ref = t };
-                return Error.StackTypeMismatch;
-            },
-        }
+        // full SLEB. `nullable` does not change the hierarchy; pass false.
+        const target = init_expr.readTypedRef(self.body, &self.pos, false) catch return Error.BadValType;
+        try self.popExpect(self.hierarchyTop(target.ref.heap_type));
         try self.pushType(.i32);
+    }
+
+    /// Wasm 3.0 §3.3.5.3 / §3.3.5.4 — a cast's operand is any reference in
+    /// its target's hierarchy, `(ref null top(ht))` (the reference
+    /// interpreter's `top_of_heaptype`). A concrete type's hierarchy is its
+    /// typedef's kind; with no kinds threaded every concrete type is a
+    /// function type, as `subtypeCtx` assumes.
+    fn hierarchyTop(self: *const Validator, ht: zir.HeapType) ValType {
+        const top: zir.AbstractHeapType = switch (ht) {
+            .abstract => |a| switch (a) {
+                .any, .eq, .i31, .struct_, .array, .none => .any,
+                .func, .nofunc => .func,
+                .extern_, .noextern => .extern_,
+                .exn, .noexn => .exn,
+            },
+            .concrete => |idx| if (idx < self.module_types_kinds.len) switch (self.module_types_kinds[idx]) {
+                .func => .func,
+                .structdef, .arraydef => .any,
+            } else .func,
+        };
+        return .{ .ref = zir.RefType.abs(top, true) };
     }
 
     /// Wasm spec 3.0 §3.3.5.4 — `ref.cast (ref ht)` / `ref.cast null
@@ -1854,8 +1857,9 @@ pub const Validator = struct {
         switch (top) {
             .bot => try self.pushBot(),
             .known => |t| {
-                if (!t.isRef()) {
-                    self.mismatch = .{ .expected_ref = t };
+                const want = self.hierarchyTop(target.ref.heap_type);
+                if (!self.subtypeCtx(t, want)) {
+                    self.mismatch = .{ .types = .{ .expected = want, .found = t } };
                     return Error.StackTypeMismatch;
                 }
                 try self.pushType(target);
@@ -2159,19 +2163,9 @@ pub const Validator = struct {
     }
 
     /// Wasm spec 3.0 §3.3.5.6.13 — `array.len`: pop an arrayref
-    /// (`(ref null array)`), push i32. Pre-RTT we accept any
-    /// reftype on the operand (the spec restricts to arrayref-
-    /// subtypes; runtime traps NullReference until array creation
-    /// ops land).
+    /// (`(ref null array)`), push i32.
     fn opArrayLen(self: *Validator) Error!void {
-        const top = try self.popAny();
-        switch (top) {
-            .bot => {},
-            .known => |t| if (!t.isRef()) {
-                self.mismatch = .{ .expected_ref = t };
-                return Error.StackTypeMismatch;
-            },
-        }
+        try self.popExpect(.{ .ref = zir.RefType.abs(.array, true) });
         try self.pushType(.i32);
     }
 
@@ -2234,15 +2228,8 @@ pub const Validator = struct {
         // with a `(ref null $t)` target (nullable ⊄ non-null). All six
         // br_on_cast{,_fail} assert_invalid fixtures hinge on this.
         if (!self.subtypeCtx(rt2, rt1)) return Error.StackTypeMismatch;
-        // Operand: a ref subtype of rt1 (coarse isRef check pre-RTT).
-        const top = try self.popAny();
-        switch (top) {
-            .bot => {},
-            .known => |t| if (!t.isRef()) {
-                self.mismatch = .{ .expected_ref = t };
-                return Error.StackTypeMismatch;
-            },
-        }
+        // Operand: a subtype of rt1.
+        try self.popExpect(rt1);
         const diff: ValType = .{ .ref = .{
             .nullable = ht1_nullable and !ht2_nullable,
             .heap_type = rt1.ref.heap_type,
@@ -2285,20 +2272,12 @@ pub const Validator = struct {
         try self.pushType(.{ .ref = zir.RefType.abs(.i31, false) });
     }
 
-    /// Wasm spec 3.0 §3.x (GC) — `i31.get_s` / `i31.get_u`: pop a
-    /// reftype (must be an i31 ref at runtime; runtime checks
-    /// `isI31Ref` and traps otherwise), push i32. Validator
-    /// shape identical for both ops (sign vs unsign disambiguation
-    /// is runtime-side).
+    /// Wasm spec 3.0 §3.3.5.8 (GC) — `i31.get_s` / `i31.get_u`: pop an
+    /// `i31ref` (`(ref null i31)`; a null traps at runtime), push i32.
+    /// Validator shape identical for both ops (sign vs unsign
+    /// disambiguation is runtime-side).
     fn opI31Get(self: *Validator) Error!void {
-        const top = try self.popAny();
-        switch (top) {
-            .bot => {},
-            .known => |t| if (!t.isRef()) {
-                self.mismatch = .{ .expected_ref = t };
-                return Error.StackTypeMismatch;
-            },
-        }
+        try self.popExpect(ValType.i31ref);
         try self.pushType(.i32);
     }
 
