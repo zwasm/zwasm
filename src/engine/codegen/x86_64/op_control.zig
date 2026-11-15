@@ -421,7 +421,7 @@ pub fn emitLoop(
 ///
 /// `MOV R11,[R15+interrupt_ptr_off]; TEST R11,R11; JZ skip (null = not
 /// configured); MOV R11D,[R11]; TEST R11D,R11D; JNE → fixup list`.
-fn emitBackEdgeInterruptPoll(
+pub fn emitBackEdgeInterruptPoll(
     allocator: Allocator,
     buf: *std.ArrayList(u8),
     back_edge_interrupt_fixups: *std.ArrayList(u32),
