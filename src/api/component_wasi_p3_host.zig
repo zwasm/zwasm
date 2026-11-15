@@ -1749,6 +1749,69 @@ test "0.3 append-via-stream: a write parked before the sink registers lands at t
     try testing.expectEqualStrings("abcX", got);
 }
 
+test "0.3 open-at: a path whose symlink leads above the preopen is refused" {
+    // The 0.3 entries the guest reaches: symlink-at plants `up -> .` (inside
+    // the preopen, so allowed), and open-at of `up/../outside.txt` is
+    // err(not-permitted), since `..` from the root `up` names leaves the
+    // preopen. Skipped where the host denies unprivileged symlink creation
+    // (Windows without Developer Mode).
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try tmp.dir.createDir(io, "pre", std.Io.File.Permissions.default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside.txt", .data = "OUTSIDE" });
+    var pre = try tmp.dir.openDir(io, "pre", .{ .iterate = true });
+    defer pre.close(io);
+    var host = try wasi_host.Host.init(testing.allocator);
+    defer host.deinit();
+    host.io = io;
+    const dirfd = try host.addPreopen(pre.handle, "/");
+    var ctx = try WasiP2Ctx.init(testing.allocator, &host);
+    defer ctx.deinit();
+
+    var eng = try Engine.init(testing.allocator, .{});
+    defer eng.deinit();
+    var mod = try eng.compile("\x00asm\x01\x00\x00\x00\x01\x09\x01\x60\x04\x7f\x7f\x7f\x7f\x01\x7f\x03\x02\x01\x00\x05\x03\x01\x00\x01\x06\x07\x01\x7f\x01\x41\x80\x08\x0b\x07\x19\x02\x06memory\x02\x00\x0ccabi_realloc\x00\x00\x0a\x0d\x01\x0b\x00\x23\x00\x23\x00\x20\x03j\x24\x00\x0b");
+    defer mod.deinit();
+    var lk = eng.linker();
+    defer lk.deinit();
+    var inst = try lk.instantiate(&mod, .{});
+    defer inst.deinit();
+    ctx.mem_instance = &inst;
+    ctx.realloc_instance = &inst;
+    const bytes = (try ctx.memory()).slice();
+    const desc = try ctx.resources.new(WasiP2Ctx.DESCRIPTOR_RT, dirfd);
+    var caller: Caller = .{ .rt = inst.handle.runtime.?, .host_data = &ctx };
+
+    // Strings at 0x100 / 0x110 / 0x120; args records at 0x200; results at 0x300.
+    @memcpy(bytes[0x100..][0..1], ".");
+    @memcpy(bytes[0x110..][0..2], "up");
+    @memcpy(bytes[0x120..][0..17], "up/../outside.txt");
+    // symlink-at: self@0, old-path@4(8), new-path@12(8).
+    std.mem.writeInt(u32, bytes[0x200..][0..4], desc, .little);
+    std.mem.writeInt(u32, bytes[0x204..][0..4], 0x100, .little);
+    std.mem.writeInt(u32, bytes[0x208..][0..4], 1, .little);
+    std.mem.writeInt(u32, bytes[0x20c..][0..4], 0x110, .little);
+    std.mem.writeInt(u32, bytes[0x210..][0..4], 2, .little);
+    _ = try fs3SymlinkAt(&caller, 0x200, 0x300);
+    if (@import("builtin").os.tag == .windows and bytes[0x300] != 0 and bytes[0x304] == errnoToFs3ErrorCode(.acces))
+        return @import("../test_support/skip.zig").phaseEnd(.win64);
+    try testing.expectEqual(@as(u8, 0), bytes[0x300]);
+
+    // open-at: self@0, path-flags@4, path@8(8), open-flags@16, flags@17.
+    @memset(bytes[0x200..0x220], 0);
+    std.mem.writeInt(u32, bytes[0x200..][0..4], desc, .little);
+    std.mem.writeInt(u32, bytes[0x208..][0..4], 0x120, .little);
+    std.mem.writeInt(u32, bytes[0x20c..][0..4], 17, .little);
+    bytes[0x211] = 1; // read
+    _ = try fs3OpenAt(&caller, 0x200, 0x300);
+    try testing.expectEqual(@as(u8, 1), bytes[0x300]);
+    try testing.expectEqual(errnoToFs3ErrorCode(.notcapable), bytes[0x304]);
+}
+
 test "without the network grant, each 0.3 op that reaches the network answers access-denied" {
     const testing = std.testing;
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});

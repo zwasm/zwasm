@@ -224,5 +224,5 @@ Not rewriting keeps every such case correct for free, and keeps trailing
 separators meaningful without a special case.
 
 The walk is lexical, so it cannot see a symlink component that redirects the
-real resolution. That is the follow-time confinement D-315 tracks, and it is
-unchanged.
+real resolution. `beneath.resolve` (`src/wasi/beneath.zig`, D-315) keeps that
+resolution beneath the dirfd.

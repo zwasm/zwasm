@@ -33,6 +33,7 @@ const std = @import("std");
 const p1 = @import("preview1.zig");
 const host_mod = @import("host.zig");
 const path_mod = @import("path.zig");
+const beneath = @import("beneath.zig");
 const dbg = @import("../support/dbg.zig");
 
 const Host = host_mod.Host;
@@ -832,7 +833,8 @@ fn mapOpenError(err: anyerror) p1.Errno {
         error.NameTooLong => .nametoolong,
         error.PathAlreadyExists => .exist,
         error.NoSpaceLeft => .nospc,
-        error.SystemResources, error.SystemFdQuotaExceeded, error.ProcessFdQuotaExceeded => .nfile,
+        error.SystemResources, error.SystemFdQuotaExceeded => .nfile,
+        error.ProcessFdQuotaExceeded => .mfile,
         else => .io,
     };
 }
@@ -1050,22 +1052,19 @@ pub fn fdReaddir(host: *Host, mem: []u8, fd: p1.Fd, buf_ptr: u32, buf_len: u32, 
 ///   (preopens are the only roots) → `notdir` otherwise.
 /// - The path string spans `mem[path_ptr .. path_ptr +
 ///   path_len]`. Out-of-bounds → `fault`.
-/// - Path must be relative and must not ascend past the preopen —
-///   `path.confine` walks the segments with a depth counter, so a
-///   `..` that comes back stays inside and resolves, while an
-///   absolute path or one that would leave returns `notcapable`.
-///   The kernel-side `openat` would also block most escapes, but
-///   the explicit pre-check is part of the WASI security contract.
-/// - Open is delegated to `std.Io.Dir{.fd = slot.host_handle}
-///   .openFile(io, ...)`. Errors map through `mapOpenError`.
+/// - The path resolves beneath the dirfd (`path.resolve`): an absolute
+///   path, or one that leaves it as text or through a symlink, is
+///   `notcapable`, while a `..` that comes back stays inside.
+/// - Open is delegated to `std.Io.Dir.openFile` on the directory that
+///   holds the final component. Errors map through `mapOpenError`.
 ///
 /// On success, a new `.file` (or `.dir`) slot is appended to
 /// `host.fd_table`; the new guest fd is written to
 /// `opened_fd_ptr`. `oflags` CREAT / TRUNC / EXCL / DIRECTORY are
 /// honoured (see the body). `dirflags` bit 0 (LOOKUP_SYMLINK_FOLLOW)
-/// is honoured for the FINAL path component: one that is a symlink is
-/// `loop`, as with POSIX `O_NOFOLLOW`. Intermediate components are
-/// followed either way: confining THOSE is the open half of D-315.
+/// is honoured for the FINAL path component: unset, one that is a
+/// symlink is `loop`, as with POSIX `O_NOFOLLOW`. Intermediate
+/// components are followed, beneath the dirfd.
 pub fn pathOpen(
     host: *Host,
     mem: []u8,
@@ -1079,57 +1078,37 @@ pub fn pathOpen(
     fdflags: p1.Fdflags,
     opened_fd_ptr: u32,
 ) p1.Errno {
-    // Bounds-check the path slice.
-    const path_end = @as(usize, path_ptr) + @as(usize, path_len);
-    if (path_end > mem.len) return .fault;
-    const raw = mem[path_ptr..path_end];
-    // POSIX: the empty path is ENOENT. Must be pre-OS: NT resolves "" against
-    // a RootDirectory handle as the directory itself.
-    if (raw.len == 0) return .noent;
-    const path = raw;
-    const conf = path_mod.confine(path);
-    if (conf != .success) return conf;
-
-    // Resolve dirfd.
-    const dir_slot = host.translateFd(dirfd) orelse return .badf;
-    if (dir_slot.kind != .dir) return .notdir;
     // witx: PATH_OPEN gates the call; PATH_CREATE_FILE and
     // PATH_FILESTAT_SET_SIZE gate the `creat` and `trunc` open-flags.
     var needed: p1.Rights = p1.RIGHTS_PATH_OPEN;
     if ((oflags & p1.OFLAGS_CREAT) != 0) needed |= p1.RIGHTS_PATH_CREATE_FILE;
     if ((oflags & p1.OFLAGS_TRUNC) != 0) needed |= p1.RIGHTS_PATH_FILESTAT_SET_SIZE;
-    if (!dir_slot.has(needed)) return .notcapable;
-    const dir_handle = dir_slot.host_handle orelse return .notdir;
-
-    // Filesystem syscalls require an io context; tests / production
-    // callers must thread one onto the Host before calling.
-    const io = host.io orelse return .nosys;
-
-    const dir: std.Io.Dir = .{ .handle = dir_handle };
-
-    // `dirflags` bit 0 is LOOKUP_SYMLINK_FOLLOW, and it governs the FINAL path
-    // component only — every earlier one is followed either way, which is what
-    // a no-follow `statFile` measures.
-    //
-    // Stat-then-refuse, NOT `std.Io.Dir`'s own `follow_symlinks`, and that is
-    // deliberate. On Windows `follow_symlinks = false` does not merely add
-    // OPEN_REPARSE_POINT: `dirOpenFileWtf16` also flips the handle from
-    // SYNCHRONOUS_NONALERT to ASYNCHRONOUS, and the next `readPositional` on
-    // it reaches `.PENDING => unreachable` inside std. (`openDir`'s Windows
-    // path does not flip the mode, but one mechanism for all three opens beats
-    // two that differ by OS.)
-    //
-    // The cost is a window: the name could become a symlink between the stat
-    // and the open, and that open would follow it. Narrower than the
-    // follow-time gap D-315 already tracks. Revisit if std stops coupling the
-    // reparse flag to the IO mode.
-    // O_CREAT|O_EXCL is the exception: POSIX makes an EXISTING symlink `exist`
-    // there whatever the follow bit says — O_EXCL outranks the nofollow refusal
-    // — and `createFile(.exclusive = true)` already answers exactly that. This
-    // check stands aside rather than shadowing it with `loop`.
+    // O_CREAT|O_EXCL follows no final symlink: POSIX makes an EXISTING one
+    // `exist` whatever the follow bit says — O_EXCL outranks the nofollow
+    // refusal — and `createFile(.exclusive = true)` already answers exactly that.
     const excl_create = (oflags & (p1.OFLAGS_CREAT | p1.OFLAGS_EXCL)) ==
         (p1.OFLAGS_CREAT | p1.OFLAGS_EXCL);
-    if (dirflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW == 0 and !excl_create) {
+    const follow = dirflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0 and !excl_create;
+    var r: path_mod.Resolved = undefined;
+    const re = path_mod.resolve(host, mem, dirfd, path_ptr, path_len, needed, if (follow) .follow_final else .no_follow_final, &r);
+    if (re != .success) return re;
+    defer r.deinit();
+    const dir_slot = host.translateFd(dirfd).?; // `resolve` checked it
+    const io = r.io;
+    const dir = r.b.dir;
+    const path = r.b.name;
+
+    // Unfollowed, a final symlink is `loop`. Stat-then-refuse, NOT
+    // `std.Io.Dir`'s own `follow_symlinks`: on Windows `follow_symlinks =
+    // false` also flips the handle from SYNCHRONOUS_NONALERT to ASYNCHRONOUS,
+    // and the next `readPositional` on it reaches `.PENDING => unreachable`
+    // inside std. On POSIX no open below follows a final symlink: `openFile`
+    // and `openDir` pass no-follow, and an O_CREAT open first tries
+    // `createFile(.exclusive = true)`, which follows no final symlink, and
+    // reopens a name that already exists no-follow (`beneath.createNoFollow`).
+    // On Windows the name could become a symlink between this stat and the
+    // open.
+    if (!follow and !excl_create) {
         if (dir.statFile(io, path, .{ .follow_symlinks = false })) |st| {
             if (st.kind == .sym_link) return .loop;
         } else |_| {
@@ -1145,8 +1124,9 @@ pub fn pathOpen(
         return openDirSlot(host, io, dir, dir_slot, path, fs_rights_base, fs_rights_inheriting, fdflags, mem, opened_fd_ptr, .reject_write);
 
     // WASI `oflags` select create/trunc/excl; `fs_rights_base` selects the
-    // access mode. O_CREAT → createFile (a `std::fs::File::create` guest);
-    // else openFile read-only / read-write per RIGHTS_FD_WRITE.
+    // access mode. O_CREAT (a `std::fs::File::create` guest) → `createFile`
+    // on Windows or with O_EXCL, else `beneath.createNoFollow`; otherwise
+    // openFile read-only / read-write per RIGHTS_FD_WRITE.
     const wants_write = (fs_rights_base & p1.RIGHTS_FD_WRITE) != 0;
     // O_TRUNC resizes the file, so the handle must be writable even when the
     // guest asked for no FD_WRITE right (official `truncation_rights`).
@@ -1158,14 +1138,26 @@ pub fn pathOpen(
     // `truncation_rights` was red; wasmtime 47.0.3 answers `acces` too
     // (measured on a 0444 file).
     const needs_writable_handle = wants_write or (oflags & p1.OFLAGS_TRUNC) != 0;
-    const file = if ((oflags & p1.OFLAGS_CREAT) != 0)
-        dir.createFile(io, path, .{
-            .read = true,
-            .truncate = (oflags & p1.OFLAGS_TRUNC) != 0,
-            .exclusive = (oflags & p1.OFLAGS_EXCL) != 0,
-        }) catch |err| return mapOpenError(err)
-    else blk: {
-        const f = dir.openFile(io, path, .{ .mode = if (needs_writable_handle) .read_write else .read_only }) catch |err| {
+    const file = if ((oflags & p1.OFLAGS_CREAT) != 0) blk: {
+        const trunc = (oflags & p1.OFLAGS_TRUNC) != 0;
+        if (@import("builtin").os.tag == .windows or excl_create)
+            break :blk dir.createFile(io, path, .{ .read = true, .truncate = trunc, .exclusive = excl_create }) catch |err| return mapOpenError(err);
+        const c = beneath.createNoFollow(io, dir, path) catch |err| return mapOpenError(err);
+        // O_TRUNC is ignored on a FIFO or a terminal, as the kernel does for
+        // an open that carries it: only a regular file is truncated.
+        if (c.existed and trunc) {
+            const st = c.file.stat(io) catch |err| {
+                c.file.close(io);
+                return mapOpenError(err);
+            };
+            if (st.kind == .file) c.file.setLength(io, 0) catch |err| {
+                c.file.close(io);
+                return mapSetLengthError(err);
+            };
+        }
+        break :blk c.file;
+    } else blk: {
+        const f = dir.openFile(io, path, .{ .mode = if (needs_writable_handle) .read_write else .read_only, .follow_symlinks = @import("builtin").os.tag == .windows }) catch |err| {
             // POSIX-style guests (Go's os.Open before ReadDir) open a
             // directory read-only WITHOUT OFLAGS_DIRECTORY; mirror the
             // kernel by falling back to a directory open. wasmtime answers
@@ -1220,7 +1212,7 @@ fn openDirSlot(
     opened_fd_ptr: u32,
     policy: WriteRightPolicy,
 ) p1.Errno {
-    const sub = dir.openDir(io, path, .{ .iterate = true }) catch |err| return mapOpenError(err);
+    const sub = dir.openDir(io, path, .{ .iterate = true, .follow_symlinks = false }) catch |err| return mapOpenError(err);
     // A directory cannot be opened for writing, and preview1 says so through
     // the requested rights rather than a mode flag. The check has to come
     // AFTER the open: a missing path is `noent` and a regular file is its own
@@ -1312,22 +1304,13 @@ pub fn fdFilestatGet(host: *Host, mem: []u8, fd: p1.Fd, filestat_ptr: u32) p1.Er
 /// `notdir`; an absolute path, or one whose `..` ascends past the preopen →
 /// `notcapable`. A balanced `..` resolves.
 pub fn pathUnlinkFile(host: *Host, mem: []u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
-    const raw = sliceMemConst(mem, path_ptr, path_len) orelse return .fault;
-    // POSIX: the empty path is ENOENT. Must be pre-OS: NT resolves "" against
-    // a RootDirectory handle as the directory itself (delete would hit the dir).
-    if (raw.len == 0) return .noent;
-    const path = raw;
-    const conf = path_mod.confine(path);
-    if (conf != .success) return conf;
-    const dir_slot = host.translateFd(dirfd) orelse return .badf;
-    if (dir_slot.kind != .dir) return .notdir;
-    if (!dir_slot.has(p1.RIGHTS_PATH_UNLINK_FILE)) return .notcapable;
-    const dir_handle = dir_slot.host_handle orelse return .notdir;
-    const io = host.io orelse return .nosys;
-    const dir: std.Io.Dir = .{ .handle = dir_handle };
-    const trailing = path_mod.unlinkTrailingSlashErrno(dir, io, path);
+    var r: path_mod.Resolved = undefined;
+    const re = path_mod.resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_UNLINK_FILE, .never, &r);
+    if (re != .success) return re;
+    defer r.deinit();
+    const trailing = path_mod.unlinkTrailingSlashErrno(r.b.dir, r.io, r.b.name);
     if (trailing != .success) return trailing;
-    dir.deleteFile(io, path) catch |err| return mapOpenError(err);
+    r.b.dir.deleteFile(r.io, r.b.name) catch |err| return mapOpenError(err);
     return .success;
 }
 
@@ -1949,6 +1932,11 @@ test "fdAdvise: valid advice on a stdio fd is spipe; invalid advice is inval; ba
     // valid advice on stdout → spipe (not a seekable file).
     try testing.expectEqual(p1.Errno.spipe, fdAdvise(&h, 1, 0, 0, 0));
     try testing.expectEqual(p1.Errno.badf, fdAdvise(&h, 999, 0, 0, 3));
+}
+
+test "mapOpenError: running out of file descriptors is mfile / nfile" {
+    try testing.expectEqual(p1.Errno.mfile, mapOpenError(error.ProcessFdQuotaExceeded));
+    try testing.expectEqual(p1.Errno.nfile, mapOpenError(error.SystemFdQuotaExceeded));
 }
 
 test "pathOpen: rejects parent-escape and absolute paths with notcapable" {

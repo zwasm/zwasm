@@ -1,7 +1,8 @@
 //! WASI 0.1 `path_*` handlers (D-278): filesystem operations relative to a
 //! preopen `.dir` fd. Each resolves the dirfd + bounds-checks the guest path
-//! + confines it to the preopen (`confine`: a balanced `..` resolves, one that
-//! ascends past the root does not), then delegates to the cross-platform `std.Io.Dir`
+//! + checks it as text (`confine`: a balanced `..` resolves, one that ascends
+//! past the root does not), resolves it beneath the dirfd (`beneath.zig`), then
+//! delegates to the cross-platform `std.Io.Dir`
 //! API (NOT `std.posix.*` — those hardcode POSIX `c_int` fds and break Win64;
 //! see lesson windowsmini-reconciliation).
 //!
@@ -12,6 +13,7 @@ const builtin = @import("builtin");
 
 const p1 = @import("preview1.zig");
 const host_mod = @import("host.zig");
+const beneath = @import("beneath.zig");
 
 const Host = host_mod.Host;
 
@@ -38,8 +40,11 @@ fn sliceMemConst(mem: []const u8, ptr: u32, len: u32) ?[]const u8 {
 /// path would silently turn into a successful open of `f`.
 ///
 /// The walk is lexical, so it cannot see a symlink component that redirects
-/// the real resolution; that is the follow-time confinement D-315 tracks, and
-/// it is unchanged by this.
+/// the real resolution; `beneath.resolve` is what keeps that beneath the root.
+/// For the same reason it can refuse a path that resolves inside:
+/// `l/../../f` with `l -> a/b` ascends past the root as text. Admitting it
+/// means leaving `..` to `beneath.resolve` alone, which widens what every
+/// path call accepts, so it is a change of its own.
 pub fn confine(path: []const u8) p1.Errno {
     if (path.len == 0) return .noent;
     if (isSep(path[0])) return .notcapable;
@@ -67,16 +72,16 @@ pub fn confine(path: []const u8) p1.Errno {
 /// path is a separator too, so `..\..\x` must count as two ascents rather
 /// than one opaque component (#262). On POSIX a backslash is an ordinary
 /// filename byte and stays opaque.
-const separators: []const u8 = if (builtin.os.tag == .windows) "/\\" else "/";
+pub const separators: []const u8 = if (builtin.os.tag == .windows) "/\\" else "/";
 
-fn isSep(c: u8) bool {
+pub fn isSep(c: u8) bool {
     return std.mem.findScalar(u8, separators, c) != null;
 }
 
 /// `C:x` is drive-relative on NT and resolves against that drive's current
 /// directory, not the preopen, and `C:\x` is absolute; nothing the guest can
 /// name that way stays inside. On POSIX a colon is an ordinary byte.
-fn hasDrivePrefix(path: []const u8) bool {
+pub fn hasDrivePrefix(path: []const u8) bool {
     return builtin.os.tag == .windows and path.len >= 2 and path[1] == ':' and std.ascii.isAlphabetic(path[0]);
 }
 
@@ -89,12 +94,11 @@ fn hasDrivePrefix(path: []const u8) bool {
 /// wrote it — `confine` has passed it, so it is relative and stays inside, but
 /// it may still carry `.` and `..`, which the depth walk below folds.
 ///
-/// Following a PRE-EXISTING on-disk symlink that escapes is the separate
-/// follow-time confinement (RESOLVE_BENEATH / component walk) tracked by D-315;
-/// this lexical check is sound and matches the WASI host policy for creation.
+/// `pathSymlink` checks with `targetEscapesFrom`, from the depth of the
+/// directory the link really lands in (`beneath.Resolved.depth`), which a
+/// symlink earlier in `link_sub` can make differ from this lexical depth.
+/// Following a symlink that escapes is refused at resolution either way.
 fn symlinkTargetEscapes(link_sub: []const u8, target: []const u8) bool {
-    if (target.len > 0 and isSep(target[0])) return true; // absolute target
-    if (hasDrivePrefix(target)) return true;
     // Depth of the directory containing the link, relative to the preopen root.
     var depth: usize = 0;
     var lit = std.mem.tokenizeAny(u8, link_sub, separators);
@@ -107,6 +111,15 @@ fn symlinkTargetEscapes(link_sub: []const u8, target: []const u8) bool {
         depth += 1;
     }
     if (depth > 0) depth -= 1; // drop the link's own final component
+    return targetEscapesFrom(depth, target);
+}
+
+/// Whether `target`, resolved from a directory `depth` levels below the
+/// preopen root, ascends above the root (or is absolute).
+fn targetEscapesFrom(parent_depth: usize, target: []const u8) bool {
+    if (target.len > 0 and isSep(target[0])) return true; // absolute target
+    if (hasDrivePrefix(target)) return true;
+    var depth = parent_depth;
     var tit = std.mem.tokenizeAny(u8, target, separators);
     while (tit.next()) |seg| {
         if (std.mem.eql(u8, seg, ".")) continue;
@@ -170,13 +183,27 @@ pub fn unlinkTrailingSlashErrno(dir: std.Io.Dir, io: std.Io, path: []const u8) p
     return if (st.kind == .directory) .isdir else .notdir;
 }
 
-const Resolved = struct { dir: std.Io.Dir, sub: []const u8 };
+/// A guest path resolved beneath its dirfd: the operation runs on
+/// `(b.dir, b.name)`. `guest` is the path as the guest wrote it, which the
+/// dotted-final guards read. Release with `deinit` once `resolve` succeeded.
+pub const Resolved = struct {
+    b: beneath.Resolved,
+    guest: []const u8,
+    io: std.Io,
+    alloc: std.mem.Allocator,
 
-/// Resolve `(dirfd, path_ptr, path_len)` to a host `Dir` + bounded guest path,
-/// and check that `needed` — the right the witx doc comment names for the
-/// calling operation — is present in the dirfd's `fs_rights_base`. Returns the
-/// errno on failure (`.success` when `out` is populated).
-fn resolve(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32, needed: p1.Rights, out: *Resolved) p1.Errno {
+    pub fn deinit(self: *Resolved) void {
+        self.b.deinit(self.alloc, self.io);
+    }
+};
+
+/// Resolve `(dirfd, path_ptr, path_len)` beneath the dirfd's directory
+/// (`beneath.resolve`), after checking that `needed` — the right the witx doc
+/// comment names for the calling operation — is present in the dirfd's
+/// `fs_rights_base`. Every WASI 0.1, 0.2 and 0.3 call that takes a guest path
+/// comes through here. Returns the errno on failure (`.success` when `out` is
+/// populated).
+pub fn resolve(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32, needed: p1.Rights, follow: beneath.Follow, out: *Resolved) p1.Errno {
     const path = sliceMemConst(mem, path_ptr, path_len) orelse return .fault;
     // POSIX: the empty path resolves to nothing (ENOENT). Guarded here because
     // std.Io panics on the resulting EINVAL in debug builds ("programmer bug").
@@ -187,13 +214,16 @@ fn resolve(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: 
     if (slot.kind != .dir) return .notdir;
     if (!slot.has(needed)) return .notcapable;
     const handle = slot.host_handle orelse return .notdir;
-    out.* = .{ .dir = .{ .handle = handle }, .sub = path };
-    return .success;
+    const io = host.io orelse return .nosys;
+    out.guest = path;
+    out.io = io;
+    out.alloc = host.alloc;
+    return beneath.resolve(host.alloc, io, .{ .handle = handle }, path, follow, &out.b);
 }
 
 /// Map a `std.Io.Dir`/`File` filesystem error to a WASI errno. The arms cover
 /// the union of the create/delete/rename/link/readlink/stat error sets.
-fn mapDirErr(err: anyerror) p1.Errno {
+pub fn mapDirErr(err: anyerror) p1.Errno {
     return switch (err) {
         error.FileNotFound => .noent,
         // NT invalid object names ("" / reserved chars) have no WASI errno of
@@ -211,6 +241,9 @@ fn mapDirErr(err: anyerror) p1.Errno {
         error.ReadOnlyFileSystem => .rofs,
         error.FileBusy => .busy,
         error.RenameAcrossMountPoints => .xdev,
+        // The walk holds one handle per directory it passes through.
+        error.ProcessFdQuotaExceeded => .mfile,
+        error.SystemFdQuotaExceeded => .nfile,
         else => .io,
     };
 }
@@ -223,10 +256,10 @@ fn mapDirErr(err: anyerror) p1.Errno {
 /// to the preopen `dirfd` (`std.Io.Dir.createDir`).
 pub fn pathCreateDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_CREATE_DIRECTORY, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_CREATE_DIRECTORY, .no_follow_final, &r);
     if (e != .success) return e;
-    const io = host.io orelse return .nosys;
-    r.dir.createDir(io, r.sub, std.Io.File.Permissions.default_dir) catch |err| return mapDirErr(err);
+    defer r.deinit();
+    r.b.dir.createDir(r.io, r.b.name, std.Io.File.Permissions.default_dir) catch |err| return mapDirErr(err);
     return .success;
 }
 
@@ -234,13 +267,16 @@ pub fn pathCreateDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr:
 /// relative to `dirfd` (`std.Io.Dir.deleteDir`; non-empty → `notempty`).
 pub fn pathRemoveDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_REMOVE_DIRECTORY, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_REMOVE_DIRECTORY, .never, &r);
     if (e != .success) return e;
-    const io = host.io orelse return .nosys;
+    defer r.deinit();
     // rmdir on a path whose last component is `.` is EINVAL per POSIX; guarded
     // because std.Io panics on that errno in debug builds (see the helper).
-    if (endsInDotComponent(r.sub)) return .inval;
-    r.dir.deleteDir(io, r.sub) catch |err| return mapDirErr(err);
+    if (endsInDotComponent(r.guest)) return .inval;
+    // A final `..` resolves to the directory itself (`.`), which holds the
+    // component the walk came through, so it is never empty.
+    if (finalComponentIs(r.guest, .dot_or_dotdot)) return .notempty;
+    r.b.dir.deleteDir(r.io, r.b.name) catch |err| return mapDirErr(err);
     return .success;
 }
 
@@ -253,20 +289,21 @@ pub fn pathRemoveDirectory(host: *Host, mem: []const u8, dirfd: p1.Fd, path_ptr:
 /// resolved + escape-guarded.
 pub fn pathRename(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_ptr: u32, old_len: u32, new_dirfd: p1.Fd, new_ptr: u32, new_len: u32) p1.Errno {
     var ro: Resolved = undefined;
-    const e1 = resolve(host, mem, old_dirfd, old_ptr, old_len, p1.RIGHTS_PATH_RENAME_SOURCE, &ro);
+    const e1 = resolve(host, mem, old_dirfd, old_ptr, old_len, p1.RIGHTS_PATH_RENAME_SOURCE, .never, &ro);
     if (e1 != .success) return e1;
+    defer ro.deinit();
     var rn: Resolved = undefined;
-    const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_RENAME_TARGET, &rn);
+    const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_RENAME_TARGET, .never, &rn);
     if (e2 != .success) return e2;
-    const io = host.io orelse return .nosys;
+    defer rn.deinit();
     // POSIX makes `rename` EINVAL when either side's final component is `.` or
     // `..`, and `std.Io` turns EINVAL into a debug panic. Linux hides this by
     // answering EBUSY; macOS and Windows do not — measured, both abort the
     // runtime from a guest calling `path_rename("a/.", …)` (#265). Answering
     // `inval` here gives all three the errno POSIX names.
-    if (finalComponentIs(ro.sub, .dot_or_dotdot) or
-        finalComponentIs(rn.sub, .dot_or_dotdot)) return .inval;
-    ro.dir.rename(ro.sub, rn.dir, rn.sub, io) catch |err| return mapDirErr(err);
+    if (finalComponentIs(ro.guest, .dot_or_dotdot) or
+        finalComponentIs(rn.guest, .dot_or_dotdot)) return .inval;
+    ro.b.dir.rename(ro.b.name, rn.b.dir, rn.b.name, ro.io) catch |err| return mapDirErr(err);
     return .success;
 }
 
@@ -275,16 +312,18 @@ pub fn pathRename(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_ptr: u32, 
 /// (`std.Io.Dir.hardLink`). `old_flags` bit 0 = follow-symlinks.
 pub fn pathLink(host: *Host, mem: []const u8, old_dirfd: p1.Fd, old_flags: u32, old_ptr: u32, old_len: u32, new_dirfd: p1.Fd, new_ptr: u32, new_len: u32) p1.Errno {
     var ro: Resolved = undefined;
-    const e1 = resolve(host, mem, old_dirfd, old_ptr, old_len, p1.RIGHTS_PATH_LINK_SOURCE, &ro);
-    if (e1 != .success) return e1;
-    var rn: Resolved = undefined;
-    const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_LINK_TARGET, &rn);
-    if (e2 != .success) return e2;
-    const io = host.io orelse return .nosys;
     const follow = old_flags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0;
-    if (builtin.os.tag == .windows) return winPathLink(ro.dir, ro.sub, rn.dir, rn.sub, follow);
-    ro.dir.hardLink(ro.sub, rn.dir, rn.sub, io, .{
-        .follow_symlinks = follow,
+    const e1 = resolve(host, mem, old_dirfd, old_ptr, old_len, p1.RIGHTS_PATH_LINK_SOURCE, if (follow) .follow_final else .no_follow_final, &ro);
+    if (e1 != .success) return e1;
+    defer ro.deinit();
+    var rn: Resolved = undefined;
+    const e2 = resolve(host, mem, new_dirfd, new_ptr, new_len, p1.RIGHTS_PATH_LINK_TARGET, .no_follow_final, &rn);
+    if (e2 != .success) return e2;
+    defer rn.deinit();
+    // A followed final symlink is already resolved, so the host follows none.
+    if (builtin.os.tag == .windows) return winPathLink(ro.b.dir, ro.b.name, rn.b.dir, rn.b.name, false);
+    ro.b.dir.hardLink(ro.b.name, rn.b.dir, rn.b.name, ro.io, .{
+        .follow_symlinks = false,
     }) catch |err| return mapDirErr(err);
     return .success;
 }
@@ -403,16 +442,16 @@ fn winPathLink(old_dir: std.Io.Dir, old_sub: []const u8, new_dir: std.Io.Dir, ne
 /// `path_symlink(target, target_len, dirfd, link_path, link_path_len) → errno`
 /// — create a symlink at `link_path` (relative to `dirfd`, escape-guarded)
 /// whose contents are `target`. The target is escape-checked against the
-/// preopen root (`symlinkTargetEscapes`): a guest cannot plant a symlink that
-/// points outside the sandbox (`notcapable`).
+/// preopen root from the directory the link lands in (`targetEscapesFrom`): a
+/// guest cannot plant a symlink that points outside the sandbox (`notcapable`).
 pub fn pathSymlink(host: *Host, mem: []const u8, target_ptr: u32, target_len: u32, dirfd: p1.Fd, path_ptr: u32, path_len: u32) p1.Errno {
     const target = sliceMemConst(mem, target_ptr, target_len) orelse return .fault;
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_SYMLINK, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_SYMLINK, .no_follow_final, &r);
     if (e != .success) return e;
-    if (symlinkTargetEscapes(r.sub, target)) return .notcapable;
-    const io = host.io orelse return .nosys;
-    r.dir.symLink(io, target, r.sub, .{}) catch |err| return mapDirErr(err);
+    defer r.deinit();
+    if (targetEscapesFrom(r.b.depth, target)) return .notcapable;
+    r.b.dir.symLink(r.io, target, r.b.name, .{}) catch |err| return mapDirErr(err);
     return .success;
 }
 
@@ -427,10 +466,10 @@ pub fn pathReadlink(host: *Host, mem: []u8, dirfd: p1.Fd, path_ptr: u32, path_le
         break :blk mem[buf_ptr..end];
     };
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_READLINK, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_READLINK, .no_follow_final, &r);
     if (e != .success) return e;
-    const io = host.io orelse return .nosys;
-    const n = r.dir.readLink(io, r.sub, buf) catch |err| return mapDirErr(err);
+    defer r.deinit();
+    const n = r.b.dir.readLink(r.io, r.b.name, buf) catch |err| return mapDirErr(err);
     std.mem.writeInt(u32, mem[bufused_ptr..][0..4], @intCast(n), .little);
     return .success;
 }
@@ -450,6 +489,12 @@ fn filetypeFromKind(kind: std.Io.File.Kind) p1.Filetype {
     };
 }
 
+/// `lookupflags` bit 0 (LOOKUP_SYMLINK_FOLLOW) as a resolution of the final
+/// component; resolution then leaves nothing for the host to follow.
+fn followOf(lookupflags: u32) beneath.Follow {
+    return if (lookupflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0) .follow_final else .no_follow_final;
+}
+
 fn setTimestampOf(flags: p1.Fstflags, now_bit: p1.Fstflags, set_bit: p1.Fstflags, ns: u64) std.Io.File.SetTimestamp {
     if (flags & now_bit != 0) return .now;
     if (flags & set_bit != 0) return .{ .new = std.Io.Timestamp.fromNanoseconds(@intCast(ns)) };
@@ -466,10 +511,10 @@ pub fn pathFilestatGet(host: *Host, mem: []u8, dirfd: p1.Fd, lookupflags: u32, p
         break :blk mem[filestat_ptr..end];
     };
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_FILESTAT_GET, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_FILESTAT_GET, followOf(lookupflags), &r);
     if (e != .success) return e;
-    const io = host.io orelse return .nosys;
-    const st = r.dir.statFile(io, r.sub, .{ .follow_symlinks = lookupflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0 }) catch |err| return mapDirErr(err);
+    defer r.deinit();
+    const st = r.b.dir.statFile(r.io, r.b.name, .{ .follow_symlinks = false }) catch |err| return mapDirErr(err);
     const atim_ns: i96 = if (st.atime) |a| a.nanoseconds else st.mtime.nanoseconds;
     const fs: p1.Filestat = .{
         .dev = 0,
@@ -492,27 +537,28 @@ pub fn pathFilestatSetTimes(host: *Host, mem: []const u8, dirfd: p1.Fd, lookupfl
     if (fst_flags & p1.FSTFLAGS_ATIM != 0 and fst_flags & p1.FSTFLAGS_ATIM_NOW != 0) return .inval;
     if (fst_flags & p1.FSTFLAGS_MTIM != 0 and fst_flags & p1.FSTFLAGS_MTIM_NOW != 0) return .inval;
     var r: Resolved = undefined;
-    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_FILESTAT_SET_TIMES, &r);
+    const e = resolve(host, mem, dirfd, path_ptr, path_len, p1.RIGHTS_PATH_FILESTAT_SET_TIMES, followOf(lookupflags), &r);
     if (e != .success) return e;
-    const io = host.io orelse return .nosys;
+    defer r.deinit();
+    const io = r.io;
     const atime = setTimestampOf(fst_flags, p1.FSTFLAGS_ATIM_NOW, p1.FSTFLAGS_ATIM, atim);
     const mtime = setTimestampOf(fst_flags, p1.FSTFLAGS_MTIM_NOW, p1.FSTFLAGS_MTIM, mtim);
     // Pre-probe existence: Threaded's setTimestamps op treats ENOENT as an
     // UNEXPECTED errno (posix.unexpectedErrno → error.Unexpected → `.io`),
     // losing the `noent` the guest is owed for a missing path.
-    r.dir.access(io, r.sub, .{}) catch |err| return mapDirErr(err);
+    _ = r.b.dir.statFile(io, r.b.name, .{ .follow_symlinks = false }) catch |err| return mapDirErr(err);
     if (comptime builtin.os.tag == .windows) {
         // Zig 0.16 std has NO `dirSetTimestamps` on Windows (`@panic("TODO")`)
         // — it would crash the runtime. Open the file and use the
         // cross-platform `File.setTimestamps` (verified on Win64 via
-        // `fd_filestat_set_times`); the symlink-follow nuance is lost on this
-        // path (openFile follows by default).
-        var file = r.dir.openFile(io, r.sub, .{ .mode = .read_write }) catch |err| return mapDirErr(err);
+        // `fd_filestat_set_times`). Not following: a followed final symlink is
+        // already resolved, and an unfollowed one is the object to stamp.
+        var file = r.b.dir.openFile(io, r.b.name, .{ .mode = .read_write, .follow_symlinks = false }) catch |err| return mapDirErr(err);
         defer file.close(io);
         file.setTimestamps(io, .{ .access_timestamp = atime, .modify_timestamp = mtime }) catch |err| return mapDirErr(err);
     } else {
-        r.dir.setTimestamps(io, r.sub, .{
-            .follow_symlinks = lookupflags & p1.LOOKUPFLAGS_SYMLINK_FOLLOW != 0,
+        r.b.dir.setTimestamps(io, r.b.name, .{
+            .follow_symlinks = false,
             .access_timestamp = atime,
             .modify_timestamp = mtime,
         }) catch |err| return mapDirErr(err);
@@ -528,6 +574,14 @@ const testing = std.testing;
 
 fn writeGuestPath(mem: []u8, off: usize, name: []const u8) void {
     @memcpy(mem[off .. off + name.len], name);
+}
+
+test "mapDirErr: running out of file descriptors is mfile / nfile, not io" {
+    // `beneath.resolve` holds one handle per directory passed through, so a
+    // deep enough path reaches the process's descriptor limit. Only the mapping
+    // is checked.
+    try testing.expectEqual(p1.Errno.mfile, mapDirErr(error.ProcessFdQuotaExceeded));
+    try testing.expectEqual(p1.Errno.nfile, mapDirErr(error.SystemFdQuotaExceeded));
 }
 
 test "pathCreateDirectory / pathRemoveDirectory: round-trip on a real preopen" {

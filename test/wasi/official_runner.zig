@@ -121,12 +121,12 @@ const KnownEntry = struct { name: []const u8, exp: Expectation };
 ///
 /// **This table describes CI's windows-2022 runner, deliberately, and no other
 /// Windows host.** D-583 also records `path_symlink_trailing_slashes` failing
-/// on a Windows 11 host, where it makes eight. An exact-match table cannot
-/// describe both counts at once: listing eight reds windows-2022 with a
-/// ratchet flip, listing seven reds Windows 11 with an unexpected failure.
+/// on a Windows 11 host, one more than here. An exact-match table cannot
+/// describe both hosts at once: listing it reds windows-2022 with a ratchet
+/// flip, leaving it out reds Windows 11 with an unexpected failure.
 /// The gate exists to hold CI, so CI's host is the one it is written for —
 /// an extra failure on a local Windows 11 box is that box disagreeing with
-/// the runner, not the ratchet being wrong. Do not add the eighth entry to
+/// the runner, not the ratchet being wrong. Do not add that entry to
 /// make a local run quiet.
 ///
 /// linux and macOS are empty — baseline 0, so every test there is `.match`
@@ -134,12 +134,8 @@ const KnownEntry = struct { name: []const u8, exp: Expectation };
 const known_table: []const KnownEntry = switch (builtin.os.tag) {
     .windows => &.{
         .{ .name = "fd_readdir", .exp = .{ .known_failure = "D-583" } },
-        .{ .name = "nofollow_errors", .exp = .{ .known_failure = "D-583" } },
-        .{ .name = "path_exists", .exp = .{ .known_failure = "D-583" } },
         .{ .name = "path_link", .exp = .{ .known_failure = "D-583" } },
         .{ .name = "readlink", .exp = .{ .known_failure = "D-583" } },
-        .{ .name = "symlink_create", .exp = .{ .known_failure = "D-583" } },
-        .{ .name = "symlink_filestat", .exp = .{ .known_failure = "D-583" } },
     },
     else => &.{},
 };
