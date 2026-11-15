@@ -104,6 +104,7 @@ const p2StreamFutureDrop = ctx_mod.p2StreamFutureDrop;
 pub const http3DropTransferredEnd = http3_host.http3DropTransferredEnd;
 pub const pollPendingClientSends = http3_host.pollPendingClientSends;
 pub const http3RegisterCaptureSink = http3_host.http3RegisterCaptureSink;
+pub const http3ResolveSent = http3_host.http3ResolveSent;
 
 pub fn p2GetStdout(caller: *Caller) WasiP2Error!u32 {
     const ctx = caller.data(WasiP2Ctx);
@@ -492,6 +493,8 @@ fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
                     resp.trailers_rep = null;
                     ctx.p3().drop_transferred_end(ctx, resp.trailers_future);
                     if (resp.contents_stream) |s| ctx.p3().drop_transferred_end(ctx, s);
+                    // Untransmitted: its future resolves ok, as an unsent request's `sent`.
+                    try ctx.p3().resolve_http_sent(ctx, resp.sent_readable, &resp.sent_writable, null);
                     p2http.releaseResponse(ctx, h.rep);
                 }
             },
@@ -507,7 +510,7 @@ fn p2ResourceDrop(caller: *Caller, self_handle: u32) WasiP2Error!void {
                     ctx.p3().drop_transferred_end(ctx, req.trailers_future);
                     if (req.contents_stream) |s| ctx.p3().drop_transferred_end(ctx, s);
                     // Unsent: `sent` resolves ok, as wasmtime's does.
-                    try ctx.p3().resolve_http_sent(ctx, req, null);
+                    try ctx.p3().resolve_http_sent(ctx, req.sent_readable, &req.sent_writable, null);
                     p2http.releaseRequest(ctx, h.rep);
                     req.deinit(ctx.alloc);
                 }
@@ -603,6 +606,32 @@ test "a 0.3 request dropped unsent resolves its sent future ok, and an unread an
     try ctx_mod.p2StreamFutureDrop(&copy_caller, sent[1]);
     try testing.expectEqual(@as(u32, 0), ctx.host_sent_futures.count());
     try testing.expectError(async_mod.Error.InvalidHandle, ctx.streams.get(sent[1]));
+}
+
+test "a 0.3 response dropped untransmitted resolves the future response.new returned ok, for a read parked before or issued after (#734)" {
+    const testing = std.testing;
+    const rig = try http3_host.Http3Rig.create();
+    defer rig.destroy();
+    const ctx = rig.ctx;
+    p3h.installP3Hooks(ctx);
+    const mem = try ctx.memory();
+    const completed = (async_mod.ReturnCode{ .completed = 0 }).encode();
+
+    const parked = try rig.newResponse(true);
+    try mem.write(@as(u32, 64), @as(u8, 0xaa));
+    try testing.expectEqual((async_mod.ReturnCode{ .blocked = {} }).encode(), try ctx_mod.p2FutureCopy(rig.copy_caller, parked.sent, 64));
+    try p2ResourceDrop(rig.caller, parked.handle);
+    try testing.expectEqual(@as(u8, 0), try mem.read(u8, 64));
+    try testing.expectEqual(completed, (try ctx.streams.get(parked.sent)).takePendingEvent().?.payload);
+
+    const later = try rig.newResponse(false);
+    const w = ctx.http_responses.items[later.rep].sent_writable;
+    try p2ResourceDrop(rig.caller, later.handle);
+    try testing.expectError(async_mod.Error.InvalidHandle, ctx.streams.get(w));
+    try mem.write(@as(u32, 96), @as(u8, 0xaa));
+    try testing.expectEqual(completed, try ctx_mod.p2FutureCopy(rig.copy_caller, later.sent, 96));
+    try testing.expectEqual(@as(u8, 0), try mem.read(u8, 96));
+    try testing.expectEqual(@as(u32, 0), ctx.host_sent_futures.count());
 }
 
 test "0.2 append-via-stream: two append streams on one file each write at the end the other left" {

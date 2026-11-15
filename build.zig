@@ -1401,6 +1401,7 @@ pub fn build(b: *std.Build) void {
     run_cli_serve.addArtifactArg(exe_rs); // the CLI under test (ADR-0177 floor)
     run_cli_serve.addArg(pathFromRoot(b, "test/component/wasip3_official"));
     run_cli_serve.addArg(pathFromRoot(b, "test/edge_cases/p10/clang_smoke/loop_sum.wasm"));
+    run_cli_serve.addArg(pathFromRoot(b, "test/component/http_service_await_sent.wasm"));
     run_cli_serve.has_side_effects = true;
     const test_cli_serve_step = b.step("test-cli-serve", "Serve each vendored wasi:http/service component with `zwasm serve`, send its manifest's requests over HTTP and require the responses, a clean SIGINT stop, and the refusals (issue #688)");
     if (enable_wasi_p3) test_cli_serve_step.dependOn(&run_cli_serve.step);
