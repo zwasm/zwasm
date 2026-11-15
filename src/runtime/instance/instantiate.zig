@@ -450,6 +450,25 @@ pub fn frontendValidate(alloc: std.mem.Allocator, binary: []const u8) bool {
                     }
                 }
             }
+            // §3.4.9 `check_elem` — every item is a constant expression of
+            // the segment's element type, in any mode. An item sees every
+            // global, as the offset does.
+            const item_scope: validator.ConstExprScope = .{
+                .globals = global_entries,
+                .func_type_indices = func_type_indices,
+                .types = &types_owned,
+            };
+            for (seg.item_src) |item| {
+                switch (validator.validateConstExpr(item, seg.elem_type, item_scope)) {
+                    .ok => {},
+                    .invalid => {
+                        diagnostic.setDiag(.validate, .other, .unknown, "elem segment item is not a constant expression of the segment's type (§3.4.9)", .{});
+                        return false;
+                    },
+                    // Deeper than the walker's stack; not judged here.
+                    .undeterminable => {},
+                }
+            }
             for (seg.funcidxs) |fidx| {
                 // ref.null entries encoded as maxInt(u32) per the
                 // element decoder; skip those.

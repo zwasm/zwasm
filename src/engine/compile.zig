@@ -565,6 +565,8 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
                     const off_vt = elemOffsetValType(imports_buf, empty_tables_buf, seg.tableidx);
                     try checkConstExpr(seg.offset_expr, off_vt, offset_scope_empty);
                 }
+                // §3.4.9 — each item, in any mode, at the segment's type.
+                for (seg.item_src) |item| try checkConstExpr(item, seg.elem_type, offset_scope_empty);
             }
         }
 
@@ -827,6 +829,8 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
                 const off_vt = elemOffsetValType(imports_buf, tables_buf, seg.tableidx);
                 try checkConstExpr(seg.offset_expr, off_vt, offset_scope);
             }
+            // §3.4.9 — each item, in any mode, at the segment's type.
+            for (seg.item_src) |item| try checkConstExpr(item, seg.elem_type, offset_scope);
         }
     }
     // §3.3.13.1 — a table's own init expr sees the imported globals only:
