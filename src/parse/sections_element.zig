@@ -45,6 +45,11 @@ pub const ElementSegment = struct {
     /// evaluated to Values at instantiate via `evalGlobalInitGc`. Populated
     /// instead of `funcidxs` when a flag-5 segment's items start with 0xFB.
     item_exprs: []const []const u8 = &.{},
+    /// The bytes of each item expression, `end` included, for the
+    /// expression forms (flags 4-7) — whichever of `funcidxs` / `item_exprs`
+    /// carries the evaluated form. What validation types against
+    /// `elem_type` (§3.4.9 `check_elem`). Empty for the funcidx forms.
+    item_src: []const []const u8 = &.{},
 };
 
 pub const Elements = struct {
@@ -165,13 +170,15 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
                 const n = try leb128.readUleb128(u32, body, &pos);
                 try sections.checkVecCount(n, body, pos); // ≥1 byte/elem — reject oversized count pre-alloc
                 const funcs = try alloc.alloc(u32, n);
-                for (funcs) |*f| f.* = try readFuncrefInitExpr(body, &pos, .funcref);
+                const src = try alloc.alloc([]const u8, n);
+                for (funcs, src) |*f, *sx| f.* = try readItem(body, &pos, .funcref, sx);
                 e.* = .{
                     .kind = .active,
                     .tableidx = 0,
                     .offset_expr = expr,
                     .elem_type = .funcref,
                     .funcidxs = funcs,
+                    .item_src = src,
                 };
             },
             2 => {
@@ -219,11 +226,12 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
                         try init_expr.scanInitExpr(body, &pos);
                         ex.* = body[s..pos];
                     }
-                    e.* = .{ .kind = .passive, .elem_type = reftype_vt, .item_exprs = exprs };
+                    e.* = .{ .kind = .passive, .elem_type = reftype_vt, .item_exprs = exprs, .item_src = exprs };
                 } else {
                     const funcs = try alloc.alloc(u32, n);
-                    for (funcs) |*f| f.* = try readFuncrefInitExpr(body, &pos, reftype_vt);
-                    e.* = .{ .kind = .passive, .elem_type = reftype_vt, .funcidxs = funcs };
+                    const src = try alloc.alloc([]const u8, n);
+                    for (funcs, src) |*f, *sx| f.* = try readItem(body, &pos, reftype_vt, sx);
+                    e.* = .{ .kind = .passive, .elem_type = reftype_vt, .funcidxs = funcs, .item_src = src };
                 }
             },
             6 => {
@@ -242,13 +250,15 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
                 const n = try leb128.readUleb128(u32, body, &pos);
                 try sections.checkVecCount(n, body, pos); // ≥1 byte/elem — reject oversized count pre-alloc
                 const funcs = try alloc.alloc(u32, n);
-                for (funcs) |*f| f.* = try readFuncrefInitExpr(body, &pos, reftype_vt);
+                const src = try alloc.alloc([]const u8, n);
+                for (funcs, src) |*f, *sx| f.* = try readItem(body, &pos, reftype_vt, sx);
                 e.* = .{
                     .kind = .active,
                     .tableidx = tableidx,
                     .offset_expr = expr,
                     .elem_type = reftype_vt,
                     .funcidxs = funcs,
+                    .item_src = src,
                 };
             },
             7 => {
@@ -262,8 +272,9 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
                 const n = try leb128.readUleb128(u32, body, &pos);
                 try sections.checkVecCount(n, body, pos); // ≥1 byte/elem — reject oversized count pre-alloc
                 const funcs = try alloc.alloc(u32, n);
-                for (funcs) |*f| f.* = try readFuncrefInitExpr(body, &pos, reftype_vt);
-                e.* = .{ .kind = .declarative, .elem_type = reftype_vt, .funcidxs = funcs };
+                const src = try alloc.alloc([]const u8, n);
+                for (funcs, src) |*f, *sx| f.* = try readItem(body, &pos, reftype_vt, sx);
+                e.* = .{ .kind = .declarative, .elem_type = reftype_vt, .funcidxs = funcs, .item_src = src };
             },
             else => return sections.Error.InvalidFunctype,
         }
@@ -271,6 +282,14 @@ pub fn decodeElement(parent_alloc: Allocator, body: []const u8) sections.Error!E
 
     if (pos != body.len) return sections.Error.TrailingBytes;
     return .{ .arena = arena, .items = items };
+}
+
+/// `readFuncrefInitExpr`, also recording the item's bytes in `src`.
+fn readItem(body: []const u8, pos: *usize, expected: ValType, src: *[]const u8) sections.Error!u32 {
+    const start = pos.*;
+    const idx = try readFuncrefInitExpr(body, pos, expected);
+    src.* = body[start..pos.*];
+    return idx;
 }
 
 /// Decode one funcref/externref init expression appearing in
@@ -320,9 +339,9 @@ fn readFuncrefInitExpr(body: []const u8, pos: *usize, expected: ValType) section
             break :blk std.math.maxInt(u32);
         },
         0x23 => blk: {
-            // global.get produces the imported global's type. Strict
-            // per-global type check is deferred to compileWasm
-            // (validator owns the globals index space); decoder only
+            // global.get produces the global's type. Validation types the
+            // item (`item_src`) against the segment's type, since the
+            // validator owns the globals index space; the decoder only
             // ensures the marker is structurally valid.
             const n = try leb128.readUleb128(u32, body, pos);
             if (n >= 0x80000000) return sections.Error.InvalidFunctype;
