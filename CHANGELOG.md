@@ -10,6 +10,76 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-11-15
+
+### Changed
+
+- **zwasm is built and tested with Zig 0.17.1** (#727). Zig 0.17.0 still
+  builds the package and does not refuse its `minimum_zig_version` of 0.17.1,
+  but CI no longer runs it.
+
+### Fixed
+
+- **A `wasi:http` request goes out with only the guest's headers, `host` and
+  its framing** (#711). The host added `user-agent`, `accept-encoding` and
+  `connection: keep-alive` the guest did not set, and a guest that set
+  `user-agent` or `accept-encoding` itself sent that header twice.
+
+- **A `wasi:http` 0.3 handler that awaits the future `response.new` returns
+  completes** (#734). Nothing resolved it, so the handler failed with
+  `AsyncDeadlock` and `zwasm serve` answered 500. It now resolves `ok` once the
+  host has the whole response or the response is dropped, and with what the
+  guest writes to `res` when the guest passes its own response to `consume-body`.
+
+- **A `wasi:http` response with a `content-encoding` std's HTTP client does not
+  decode no longer stops the call** (#738). A zstd or compress response failed
+  only after the peer closed the connection; it now reaches the guest undecoded.
+  A br response fails at once with `HTTP-response-content-coding`, and any head
+  the client cannot parse closes the connection rather than waiting on it.
+
+### Security
+
+- **On the JIT, a catch clause whose label is a `loop` branches to the loop's
+  header, as `br` to that label does** (#369).
+  [GHSA-3983-xv7h-r8vx](https://github.com/zwasm/zwasm/security/advisories/GHSA-3983-xv7h-r8vx).
+
+- **The validator types each operand of a GC constructor in a constant
+  expression, and each element segment item, against the type its position
+  requires** (#430, #285). A module whose operand or item does not fit, as
+  the spec's constant-expression typing and `check_elem` require, is rejected.
+  [GHSA-rg2g-8x8j-3pm9](https://github.com/zwasm/zwasm/security/advisories/GHSA-rg2g-8x8j-3pm9).
+
+- **A constant expression's value has all 16 bytes defined, so `zwasm compile`
+  gives the same `.cwasm` bytes for the same module.** Above the value's own
+  bytes the slot is zero, for globals, tables and element items on both engines.
+  [GHSA-gj6g-62gx-5cwf](https://github.com/zwasm/zwasm/security/advisories/GHSA-gj6g-62gx-5cwf).
+
+- **The validator checks the reference operand of `throw_ref`, `ref.test`,
+  `ref.cast`, `array.len`, `br_on_cast` and `i31.get` against its spec type**
+  (#322): `exnref`, the cast target's hierarchy, `arrayref`, `rt1` and
+  `i31ref`. A module whose operand is outside it is rejected.
+  [GHSA-fv27-pjx7-p4m3](https://github.com/zwasm/zwasm/security/advisories/GHSA-fv27-pjx7-p4m3).
+
+- **A WASI path is resolved one component at a time and stays beneath its
+  preopen.** A path that leaves it, as text or through a symlink, is refused
+  (`notcapable` on 0.1, `not-permitted` on 0.2 and 0.3), and a new symlink's
+  target is checked from the directory the link lands in.
+  [GHSA-vh35-jrc2-qj4q](https://github.com/zwasm/zwasm/security/advisories/GHSA-vh35-jrc2-qj4q).
+
+### Documentation
+
+- **`SECURITY.md` says when a security fix is released.** A sandbox,
+  isolation or grant breach, or memory unsafety in the host, gets a release
+  of its own. A host process that stops cleanly, or a limit that does not
+  hold, rides the next release, at most 30 days after the fix reaches `main`.
+
+### Known limitations
+
+- **`--timeout` and `Instance.interrupt` do not stop a guest inside a host call
+  that blocks** (#732). A preview1 `fd_read` of a silent stdin outlasts them; a
+  preview1 `poll_oneoff` clock wait is interrupted. A WASI 0.2 / 0.3 clock wait
+  and a 0.2 socket read outlast them too (#730).
+
 ## [2.11.1] - 2026-11-12
 
 ### Fixed
