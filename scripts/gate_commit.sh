@@ -120,7 +120,7 @@ fi
 
 # --- gate: zig fmt (always) ---------------------------------------------
 
-echo "[gate_commit] zig fmt --check src/ docs/examples/ bench/latency/ tools/ ..."
+echo "[gate_commit] zig fmt --check src/ docs/examples/ bench/latency/ tools/ build.zig test/ ..."
 if [ -d src ] && [ -n "$(find src -name '*.zig' 2>/dev/null | head -1)" ]; then
     zig fmt --check src/
     # docs/examples/ carries committable .zig consumers (zig_dep / zig_host); keep
@@ -142,6 +142,9 @@ if [ -d src ] && [ -n "$(find src -name '*.zig' 2>/dev/null | head -1)" ]; then
     if [ -d tools ] && [ -n "$(find tools -name '*.zig' 2>/dev/null | head -1)" ]; then
         zig fmt --check --exclude tools/lint/zig-pkg tools/
     fi
+    # build.zig and test/: the compiler still accepts a builtin that `zig fmt`
+    # rewrites, so no other gate sees one.
+    zig fmt --check build.zig test/
 else
     echo "(no src/*.zig yet — skipping fmt)"
 fi

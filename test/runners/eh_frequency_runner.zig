@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("[eh_frequency_runner] skeleton (EH codegen SHIPPED 2026-05-28; benchmark scaffolding pending Phase 8b)\n", .{});
     inline for (.{ ThrowRate.p0, .p1, .p50, .p100 }) |rate| {
         inline for (.{ CatchDepth.d1, .d10, .d100 }) |depth| {
-            try stdout.print("  [SKIP-P10-EH-BENCH-GAP] throw_rate={s} catch_depth={d} — awaits Phase 8b bench infra (ADR-0012 §3 + design plan §3.4)\n", .{ @tagName(rate), @intFromEnum(depth) });
+            try stdout.print("  [SKIP-P10-EH-BENCH-GAP] throw_rate={s} catch_depth={d} — awaits Phase 8b bench infra (ADR-0012 §3 + design plan §3.4)\n", .{ @tagName(rate), @backingInt(depth) });
         }
     }
     try stdout.flush();
