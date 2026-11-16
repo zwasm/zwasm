@@ -1119,7 +1119,11 @@ pub fn emitElse(
     }
     const lbl_idx = labels.items.len - 1;
     const arity: u32 = labels.items[lbl_idx].result_arity;
-    if (arity > 0 and pushed_vregs.items.len >= arity) {
+    // Counted from the if's own base (#739): a then-arm that ended in a
+    // terminator short of its results is dead, and what lies below the base
+    // belongs to the enclosing frame. Liveness's `.else` counts the same way.
+    const frame_base: usize = @as(usize, labels.items[lbl_idx].entry_stack_depth) -| @as(usize, labels.items[lbl_idx].param_arity);
+    if (arity > 0 and pushed_vregs.items.len >= frame_base + arity) {
         const base = pushed_vregs.items.len - arity;
         var i: u32 = 0;
         while (i < arity) : (i += 1) {
@@ -1307,17 +1311,27 @@ pub fn emitEndIntra(
     if (lbl.kind == .if_then and lbl.param_arity > 0 and !lbl.merge_captured) {
         if (lbl.param_arity != lbl.result_arity) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:implicit-else-arity-mismatch", 0);
         const arity: u32 = lbl.result_arity;
-        if (pushed_vregs.items.len < arity) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:implicit-else-short-stack", 0);
-        const top_base = pushed_vregs.items.len - arity;
-        var i: u32 = 0;
-        while (i < arity) : (i += 1) {
-            const src_vreg = pushed_vregs.items[top_base + i];
-            const dst_vreg = lbl.param_top_vregs[i];
-            try emitMergeMov(allocator, buf, alloc, spill_base_off, func, src_vreg, dst_vreg);
-        }
-        var j: u32 = 0;
-        while (j < arity) : (j += 1) {
-            pushed_vregs.items[top_base + j] = lbl.param_top_vregs[j];
+        const frame_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
+        if (pushed_vregs.items.len < frame_base) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:implicit-else-short-stack", 0);
+        if (pushed_vregs.items.len < frame_base + arity) {
+            // The then-arm ended in a terminator short of its results, so
+            // only the implicit else reaches here: the params are the
+            // result as they stand, with no MOV (#739). Liveness's
+            // implicit-else arm does the same.
+            pushed_vregs.shrinkRetainingCapacity(frame_base);
+            try pushed_vregs.appendSlice(allocator, lbl.param_top_vregs[0..arity]);
+        } else {
+            const top_base = pushed_vregs.items.len - arity;
+            var i: u32 = 0;
+            while (i < arity) : (i += 1) {
+                const src_vreg = pushed_vregs.items[top_base + i];
+                const dst_vreg = lbl.param_top_vregs[i];
+                try emitMergeMov(allocator, buf, alloc, spill_base_off, func, src_vreg, dst_vreg);
+            }
+            var j: u32 = 0;
+            while (j < arity) : (j += 1) {
+                pushed_vregs.items[top_base + j] = lbl.param_top_vregs[j];
+            }
         }
     }
     const target: u32 = @intCast(buf.items.len);

@@ -113,6 +113,12 @@ const Frame = struct {
     // capture skips loops.
     is_loop: bool,
     merge_captured: bool,
+    // An `if` frame passed its `.else`. The emit tells the implicit else
+    // apart by its label kind (`.if_then` against `.else_open`); this is
+    // the same fact for the `.end` arms below. A then-arm short of its
+    // results captures nothing at `.else` (#739), so `merge_captured`
+    // alone does not say it.
+    saw_else: bool = false,
     param_vregs: [8]u32,
     // D-093 (d-11) — if/block result-merge survival. emit's per-arch
     // `.else` (if) / first br-or-br_if (block) captures the top
@@ -372,7 +378,7 @@ pub fn compute(
                             sim_stack[base + i] = fr.merge_vregs[i];
                         }
                     }
-                } else if (fr.is_if and !fr.merge_captured and fr.param_arity > 0 and fr.result_arity > 0) {
+                } else if (fr.is_if and !fr.saw_else and !fr.merge_captured and fr.param_arity > 0 and fr.result_arity > 0) {
                     // D-093 (d-13) — implicit-else (no `.else`).
                     // Canonical post-if vreg is `param_vregs[i]`
                     // (Wasm spec §3.4.4 requires param == result
@@ -570,11 +576,16 @@ pub fn compute(
             if (block_stack_len > 0) {
                 const fr = &block_stack[block_stack_len - 1];
                 if (fr.is_if) {
+                    fr.saw_else = true;
                     // D-093 (d-12) — capture top `result_arity`
                     // vregs as the merge target (mirrors emit's
                     // `.else` `merge_top_vregs` capture). At .end
                     // these become the canonical post-if vregs.
-                    if (fr.result_arity > 0 and sim_len >= @as(usize, fr.result_arity)) {
+                    // Counted from the if's own base, as the emit does
+                    // (#739): a then-arm short of its results is dead
+                    // and captures nothing.
+                    const frame_base: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
+                    if (fr.result_arity > 0 and sim_len >= frame_base + @as(usize, fr.result_arity)) {
                         const base = sim_len - @as(usize, fr.result_arity);
                         var i: u32 = 0;
                         while (i < fr.result_arity) : (i += 1) {
@@ -593,7 +604,7 @@ pub fn compute(
                     // `entry_depth` and then pushing left this side
                     // `param_arity` too deep through every `if (param T...)`
                     // else arm. Same base the `.end` arms above compute.
-                    sim_len = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
+                    sim_len = frame_base;
                     var i: u32 = 0;
                     while (i < fr.param_arity) : (i += 1) {
                         if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
@@ -1161,6 +1172,90 @@ test "compute: br_on_non_null captures the block's merge vregs with the ref on t
     try testing.expectEqual(@as(usize, 4), live.ranges.len);
     try testing.expectEqual(@as(u32, 8), live.ranges[1].last_use_pc);
     try testing.expectEqual(@as(u32, 9), live.ranges[0].last_use_pc);
+}
+
+test "compute: an else after a then-arm short of its results captures nothing (#739)" {
+    // i32.const 5 ; if (result i32) unreachable else i32.const 7 end ; i32.sub
+    // The then-arm leaves nothing above the if's base, so it is dead: the
+    // else arm's v2 is the result, and v0 (below the if) is not.
+    dbg.initFromEnv("liveverify");
+    defer dbg.resetForTest();
+    var f = try buildFuncWithParams(testing.allocator, &.{.i32}, &.{
+        .{ .op = .@"i32.const", .payload = 5 }, // 0: v0
+        .{ .op = .@"local.get", .payload = 0 }, // 1: v1, the condition
+        .{ .op = .@"if", .extra = 1 }, // 2
+        .{ .op = .@"unreachable" }, // 3
+        .{ .op = .@"else" }, // 4
+        .{ .op = .@"i32.const", .payload = 7 }, // 5: v2
+        .{ .op = .end }, // 6
+        .{ .op = .@"i32.sub" }, // 7
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(snapshotDigest(&.{ 0, 2 }), live.stack_digest[7]);
+    try testing.expectEqual(@as(u32, 7), live.ranges[2].last_use_pc);
+}
+
+test "compute: an implicit else after a then-arm short of its results keeps the params (#739)" {
+    // i32.const 5 ; i32.const 7 ; if (param i32) (result i32) drop unreachable end ; i32.sub
+    // The then-arm is dead, so the param v1 is the result, above v0.
+    dbg.initFromEnv("liveverify");
+    defer dbg.resetForTest();
+    var f = try buildFuncWithParams(testing.allocator, &.{.i32}, &.{
+        .{ .op = .@"i32.const", .payload = 5 }, // 0: v0
+        .{ .op = .@"i32.const", .payload = 7 }, // 1: v1, the if's param
+        .{ .op = .@"local.get", .payload = 0 }, // 2: v2, the condition
+        .{ .op = .@"if", .extra = 1 | (1 << 8) }, // 3
+        .{ .op = .drop }, // 4
+        .{ .op = .@"unreachable" }, // 5
+        .{ .op = .end }, // 6
+        .{ .op = .@"i32.sub" }, // 7
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(snapshotDigest(&.{ 0, 1 }), live.stack_digest[7]);
+    try testing.expectEqual(@as(u32, 7), live.ranges[1].last_use_pc);
+}
+
+test "compute: an explicit else after a then-arm short of its results keeps its own results (#739)" {
+    // i32.const 10 ; i32.const 20 ; i32.const 30 ;
+    // if (param i32) (result i32 i32) drop unreachable else drop i32.const 7 i32.const 8 end
+    // The then-arm captured nothing, but the frame has an `else`, so its
+    // results v4, v5 reach the `.end`, not the params.
+    dbg.initFromEnv("liveverify");
+    defer dbg.resetForTest();
+    var f = try buildFuncWithParams(testing.allocator, &.{.i32}, &.{
+        .{ .op = .@"i32.const", .payload = 10 }, // 0: v0
+        .{ .op = .@"i32.const", .payload = 20 }, // 1: v1
+        .{ .op = .@"i32.const", .payload = 30 }, // 2: v2, the if's param
+        .{ .op = .@"local.get", .payload = 0 }, // 3: v3, the condition
+        .{ .op = .@"if", .extra = 2 | (1 << 8) }, // 4
+        .{ .op = .drop }, // 5
+        .{ .op = .@"unreachable" }, // 6
+        .{ .op = .@"else" }, // 7
+        .{ .op = .drop }, // 8
+        .{ .op = .@"i32.const", .payload = 7 }, // 9: v4
+        .{ .op = .@"i32.const", .payload = 8 }, // 10: v5
+        .{ .op = .end }, // 11
+        .{ .op = .@"i32.add" }, // 12
+        .{ .op = .@"i32.add" }, // 13
+        .{ .op = .@"i32.add" }, // 14
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(snapshotDigest(&.{ 0, 1, 4, 5 }), live.stack_digest[12]);
 }
 
 test "compute: br_on_cast captures at the label depth in the payload's low 32 bits (#400)" {
