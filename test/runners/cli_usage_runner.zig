@@ -8,6 +8,7 @@
 //! An f32 param with three results is refused by the JIT, not misread (#618).
 //! A component reaches the host's network only with `--allow-network`.
 //! A catch clause whose label is a loop branches to the loop's header (#369).
+//! `throw_ref` of a null exnref traps on every engine, caught or not (#745).
 //!
 //! Usage: `zig build test-cli-usage` /
 //!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>
@@ -15,7 +16,7 @@
 //!         <poll_sleep.wasm> <f32_param_three_results.wasm>
 //!         <wasi_p2_tcp_rust.wasm> <catch_to_loop.wasm>
 //!         <catch_to_loop_ref_result.wasm> <catch_to_loop_params.wasm>
-//!         <catch_to_loop_unset_params.wasm>`
+//!         <catch_to_loop_unset_params.wasm> <throw_ref_null.wasm>`
 
 const std = @import("std");
 const spawned_cli = @import("spawned_cli");
@@ -44,9 +45,10 @@ const Row = struct {
 /// Stand-ins for the module paths, in argument order: a `_start` that does
 /// nothing, one that echoes argv[1..] a line each, one SIMD op, a SIMD module
 /// the JIT declines, #596's select, a 5 s sleep in `poll_oneoff`, #618's
-/// `(f32) -> (i32 i32 i32)`, a Rust wasip2 TCP client, and #369's catch
+/// `(f32) -> (i32 i32 i32)`, a Rust wasip2 TCP client, #369's catch
 /// clauses that target a loop: without params, with a result, with params,
-/// and with a param the stack never held a value for.
+/// and with a param the stack never held a value for, and #745's `throw_ref`
+/// of a null exnref under each kind of clause.
 const M = "<module>";
 const E = "<argv_echo>";
 const S = "<simd_op>";
@@ -59,7 +61,8 @@ const L = "<catch_to_loop>";
 const R = "<catch_to_loop_ref_result>";
 const Q = "<catch_to_loop_params>";
 const U = "<catch_to_loop_unset_params>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U };
+const N = "<throw_ref_null>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, N };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -71,6 +74,21 @@ fn onEngines(comptime engines: []const []const []const u8, comptime module: []co
     for (engines, &r) |e, *row| row.* = .{ .args = &(.{"run"} ++ e[0..e.len].* ++ .{ "--invoke", name, module }), .exit = 0, .stdout = .{ .is = out } };
     return r;
 }
+
+/// Every export of `throw_ref_null.wat` on each engine setting: exit 1 with
+/// `null_reference`, and nothing printed, since no clause catches it.
+const throw_ref_rows = blk: {
+    const exports = [_][]const u8{ "plain", "catch_all", "catch_all_ref", "catch_tag_i32", "catch_tag_funcref", "catch_ref_tag_i32" };
+    var out: [all_engines.len * exports.len]Row = undefined;
+    for (all_engines, 0..) |engine, i| {
+        for (exports, 0..) |name, j| {
+            const args = [_][]const u8{"run"} ++ engine[0..engine.len].* ++ [_][]const u8{ "--invoke", name, N };
+            out[i * exports.len + j] = .{ .args = &args, .exit = 1, .stdout = .{ .is = "" }, .stderr = .{ .has = "trap kind=null_reference" } };
+        }
+    }
+    const final = out;
+    break :blk final;
+};
 
 const rows = [_]Row{
     .{ .args = &.{ "run", "--bogus", M }, .exit = 2, .stderr = .{ .has = "unknown option '--bogus'" } },
@@ -109,7 +127,7 @@ const rows = [_]Row{
     // without it the run ends after 10^8 iterations and prints the count.
     .{ .args = &.{ "run", "--timeout", "500", "--engine", "jit", "--invoke", "catch_all_spin=100000000", L }, .exit = 1, .stderr = .{ .has = "interrupted" } },
     .{ .args = &.{ "run", "--fuel", "100000", "--engine", "jit", "--invoke", "catch_all_spin=100000000", L }, .exit = 1, .stderr = .{ .has = "all fuel consumed" } },
-};
+} ++ throw_ref_rows;
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;

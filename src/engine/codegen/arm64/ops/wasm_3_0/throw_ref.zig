@@ -2,11 +2,12 @@
 //! + ADR-0114 D2 + ADR-0119.
 //!
 //! Wasm spec 3.0 §3.3.10.8. Pop the exnref (a `*Exception` handle the
-//! JIT reified at a catch_ref/catch_all_ref landing pad, D-327), read its
-//! tag_idx + payload back into the JIT payload-staging buffer via the
-//! `rethrowFromExnref` helper, then re-enter the throw dispatcher exactly
-//! as a fresh `throw` of that tag — giving the round-trip identity Wasm
-//! `throw_ref` requires (ADR-0120 D6).
+//! JIT reified at a catch_ref/catch_all_ref landing pad, D-327); a null one
+//! traps `null_reference` here, before any handler is looked up. Otherwise
+//! read its tag_idx + payload back into the JIT payload-staging buffer via
+//! the `rethrowFromExnref` helper, then re-enter the throw dispatcher
+//! exactly as a fresh `throw` of that tag — giving the round-trip identity
+//! Wasm `throw_ref` requires (ADR-0120 D6).
 //!
 //! Zone 2 (`src/engine/codegen/arm64/ops/`).
 
@@ -50,6 +51,11 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     if (ctx.pushed_vregs.items.len < 1) return ctx_mod.Error.AllocationMissing;
     const exn_vreg = ctx.pushed_vregs.pop().?;
     const exn_reg = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, exn_vreg, 0);
+    // Null exnref → CMP; B.EQ → the null_reference stub (code 10), as the interpreter traps (#745).
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCmpImmX(exn_reg, 0));
+    const null_fixup: u32 = @intCast(ctx.buf.items.len);
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encBCond(.eq, 0));
+    try ctx.null_ref_fixups.append(ctx.allocator, null_fixup);
     if (exn_reg != 1) try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrReg(1, 31, exn_reg)); // MOV X1, exn_reg
     // arg0 = rt (X0 = X19); call rethrowFromExnref → W0 = tag_idx, payload
     // restored into eh_payload_buf. X0 survives the trampoline call below
