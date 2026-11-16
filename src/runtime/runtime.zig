@@ -374,6 +374,8 @@ pub const Runtime = struct {
     /// `checkNativeStackLimit` (captures the RUNNING thread's stack);
     /// `0` once computed means the platform query is unsupported →
     /// the check is skipped and `max_frame_depth` is the only guard.
+    /// The limit is the first calling thread's and is not recomputed
+    /// when the instance is called from another thread (#695).
     native_stack_limit: ?usize = null,
 
     /// ADR-0179 #3a: cooperative interruption flag, host-owned (lives on the
