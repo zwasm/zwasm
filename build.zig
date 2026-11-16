@@ -84,11 +84,11 @@ pub fn build(b: *std.Build) void {
     // strips the whole `src/feature/component/` + P2-host subsystem (~156 KB
     // of a 1.9 MB ReleaseFast binary, measured at ADR-0182) via the same
     // comptime fences that read `enable_component`.
-    const enable_component = @intFromEnum(wasi_level) >= @intFromEnum(WasiLevel.p2);
+    const enable_component = @backingInt(wasi_level) >= @backingInt(WasiLevel.p2);
     // ADR-0193 P3 — the P3/async host (component_wasi_p3.zig + component/async.zig)
     // compiles only at `wasi_level >= .p3`, the default. `-Dwasi=p2` opts out of
     // async — a p2 build emits zero p3-async symbols (DCE-assertable).
-    const enable_wasi_p3 = @intFromEnum(wasi_level) >= @intFromEnum(WasiLevel.p3);
+    const enable_wasi_p3 = @backingInt(wasi_level) >= @backingInt(WasiLevel.p3);
 
     const options = b.addOptions();
     options.addOption(WasmLevel, "wasm_level", wasm_level);
@@ -467,7 +467,7 @@ pub fn build(b: *std.Build) void {
     // separate root of `src/zwasm.zig` rooting its own executable — never
     // co-compiled with `core` in one exe, so the ADR-0028 dual-
     // `build_options`-root hazard does not apply.
-    const comp_wasi_level: WasiLevel = if (@intFromEnum(wasi_level) >= @intFromEnum(WasiLevel.p2)) wasi_level else .p2;
+    const comp_wasi_level: WasiLevel = if (@backingInt(wasi_level) >= @backingInt(WasiLevel.p2)) wasi_level else .p2;
     const comp_options = b.addOptions();
     comp_options.addOption(WasmLevel, "wasm_level", wasm_level);
     comp_options.addOption(WasiLevel, "wasi_level", comp_wasi_level);
@@ -475,7 +475,7 @@ pub fn build(b: *std.Build) void {
     comp_options.addOption(bool, "trace_ringbuffer", trace_ringbuffer);
     comp_options.addOption(bool, "trace_stackprobe", trace_stackprobe);
     comp_options.addOption(bool, "enable_component", true);
-    comp_options.addOption(bool, "enable_wasi_p3", @intFromEnum(comp_wasi_level) >= @intFromEnum(WasiLevel.p3));
+    comp_options.addOption(bool, "enable_wasi_p3", @backingInt(comp_wasi_level) >= @backingInt(WasiLevel.p3));
     comp_options.addOption([]const u8, "version", zon.version);
     const comp_options_mod = comp_options.createModule();
     const core_comp = b.createModule(.{
@@ -1947,7 +1947,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_threads_assert.step); // §17.4 D-301 atomics corpus
     test_all_step.dependOn(&run_comp_spec_assert.step); // E1 Component Model spec corpus (ADR-0170)
     test_all_step.dependOn(&run_p2_tests.step); // ADR-0193 — unit tests of the -Dwasi=p2 build
-    if (@intFromEnum(wasi_level) < @intFromEnum(WasiLevel.p3)) test_all_step.dependOn(&run_p3_tests.step);
+    if (@backingInt(wasi_level) < @backingInt(WasiLevel.p3)) test_all_step.dependOn(&run_p3_tests.step);
     // ADR-0174 win-harden-I: assert the resource runners FAIL on a missing
     // corpus root (no silent "0 manifests" skip) on EVERY host incl. the Windows host.
     test_all_step.dependOn(&run_simd_absent.step);

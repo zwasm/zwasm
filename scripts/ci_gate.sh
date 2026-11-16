@@ -43,7 +43,7 @@ echo "[ci_gate] host: $(uname -s) — zig $(zig version)"
 if [ "${ZWASM_CI_CORE:-1}" = "0" ]; then
     echo "[ci_gate] core gate skipped (ZWASM_CI_CORE=0)"
 else
-    echo "[ci_gate] (1/3) zig fmt --check src/ bench/latency/ tools/"
+    echo "[ci_gate] (1/3) zig fmt --check src/ bench/latency/ tools/ build.zig test/"
     zig fmt --check src/
     # bench/latency/ is compiled by step 3 but lives outside src/, so without this
     # it would be the one Zig file in the tree whose formatting can drift silently.
@@ -54,6 +54,9 @@ else
     # and `zig fmt` recurses into it (it skips .zig-cache on its own, not this),
     # so without it a zlinter/zls bump could red this gate on a vendored file.
     zig fmt --check --exclude tools/lint/zig-pkg tools/
+    # build.zig and test/ are compiled by step 2, but the compiler still accepts
+    # a builtin that `zig fmt` rewrites, so this is the only step that sees one.
+    zig fmt --check build.zig test/
 
     echo "[ci_gate] (2/3) zig build test-all"
     # `--summary all` prints each step's own wall time (zig records
