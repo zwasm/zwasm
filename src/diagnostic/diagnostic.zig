@@ -9,8 +9,8 @@
 //!
 //! Phase 1 ships:
 //!   * `Kind` enum (initial tag set covering the six runWasm-
-//!     boundary error tags + the 12 spec-text trap kinds
-//!     already in `c_api/trap_surface.zig:TrapKind`).
+//!     boundary error tags + the 11 spec-text trap kinds
+//!     already in `api/trap_surface.zig:TrapKind`).
 //!   * `Phase` enum (parse / validate / instantiate / execute
 //!     / wasi, plus `unknown`).
 //!   * `Location` tagged union (only the `unknown` variant in
@@ -62,9 +62,10 @@ pub const Kind = enum(u32) {
     instance_alloc_failed = 4,
     no_func_export = 5,
 
-    // 11 spec-text trap kinds (mirror `c_api/trap_surface.zig:TrapKind`).
-    // M4 drops the duplicate and aliases this side as the source of
-    // truth.
+    // 11 spec-text trap kinds: the first 11 of
+    // `api/trap_surface.zig:TrapKind`, whose later members have no tag
+    // here. M4 drops the duplicate and aliases this side as the source
+    // of truth.
     binding_error = 100,
     unreachable_ = 101,
     div_by_zero = 102,

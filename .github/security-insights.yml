@@ -2,7 +2,7 @@
 # that state policy; it does not restate them. SECURITY.md is the policy.
 header:
   schema-version: 2.2.0
-  last-updated: '2026-11-12'
+  last-updated: '2026-11-16'
   last-reviewed: '2026-11-12'
   url: https://raw.githubusercontent.com/zwasm/zwasm/main/.github/security-insights.yml
 
@@ -70,7 +70,7 @@ repository:
       self:
         name: Threat model
         evidence: https://github.com/zwasm/zwasm/blob/main/docs/threat_model.md
-        date: '2026-11-10'
+        date: '2026-10-24'
         comment: Trust boundaries, what counts as a vulnerability, and the runtime's maturity.
     tools:
       - name: zig build test-fuzz / test-fuzz-exec

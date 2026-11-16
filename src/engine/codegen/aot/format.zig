@@ -207,7 +207,7 @@ pub const CwasmFuncMeta = struct {
 pub const CwasmReloc = struct {
     code_offset: u32,
     target_func_idx: u32,
-    kind: u8, // reloc_kind_direct_call (0) for v0.1
+    kind: u8, // reloc_kind_direct_call (0), the only kind so far
 };
 
 // =====================================================================

@@ -1572,9 +1572,6 @@ fn decodeExportSection(arena: Allocator, out: *std.ArrayList(Export), body: []co
     if (pos != body.len) return Error.TrailingBytes;
 }
 
-/// `opts ::= vec(canonopt)` (`Binary.md`). Decodes the canonical-ABI options;
-/// async (0x06) / callback (0x07) defer to the async phase.
-
 // ---- nested-component scan (resource-generativity rule input) ----
 
 /// Recursively scan a nested component's binary for type-sort OUTER
@@ -1634,6 +1631,8 @@ fn scanNestedComponent(a: std.mem.Allocator, bytes: []const u8, budget: *u32) Er
     };
 }
 
+/// `opts ::= vec(canonopt)` (`Binary.md`). Decodes the canonical-ABI options
+/// into `CanonOpts`; an unknown tag is `InvalidCanon`.
 fn decodeCanonOpts(body: []const u8, pos: *usize) Error!CanonOpts {
     var opts: CanonOpts = .{};
     const count = try leb128.readUleb128(u32, body, pos);

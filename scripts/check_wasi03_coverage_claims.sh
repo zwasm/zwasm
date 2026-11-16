@@ -4,7 +4,7 @@
 #
 # As of ADR-0205 (the wasi03-full campaign) zwasm serves ALL SIX WASI 0.3.0
 # proposals — cli / clocks / random / filesystem / sockets / http — with the
-# official `wasm32-wasip3` corpus 45/45 green. "http / sockets data-plane is
+# vendored official `wasm32-wasip3` corpus green. "http / sockets data-plane is
 # pending" prose survived the campaign in README + migration doc; an ungated
 # coverage claim rots exactly like the D-312 compiler-rt lie and the #163
 # default-engine lie (lesson 2026-08-03-ungated-negative-doc-claim-…).
