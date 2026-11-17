@@ -57,7 +57,8 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
 
     // Branch-taken (null) path: place label's k expected values, then
     // unconditional JMP rel32 → label fixup.
-    _ = try op_control.captureOrEmitBlockMergeMovCtx(ctx, tgt_idx);
+    // The condition was tested above; nothing but the flags is read after.
+    _ = try op_control.captureOrEmitBlockMergeMovCtx(ctx, tgt_idx, null);
     const jmp_at: u32 = @intCast(ctx.buf.items.len);
     try ctx.buf.appendSlice(ctx.allocator, inst.encJmpRel32(0).slice());
     try ctx.labels.items[tgt_idx].pending.append(ctx.allocator, .{ .byte_offset = jmp_at, .insn_size = 5 });

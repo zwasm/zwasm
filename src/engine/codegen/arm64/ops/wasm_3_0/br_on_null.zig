@@ -34,9 +34,9 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     const xn = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src, 0);
 
     // Null-flag in a RESERVED scratch (W16/IP0 — NOT an allocatable vreg
-    // home, so it survives branchOnReg's merge MOVs and does not clobber
-    // the ref): CMP Xn,#0 (X-form — funcref is u64) ; CSET W16, EQ → 1 iff
-    // null. CMP only READS Xn, so when `src` is register-resident the ref
+    // home, so it does not clobber the ref; branchOnReg reads it before it
+    // emits a merge move, which may park in X16): CMP Xn,#0 (X-form —
+    // funcref is u64) ; CSET W16, EQ → 1 iff null. CMP only READS Xn, so when `src` is register-resident the ref
     // value stays live in Xn for the non-null fall-through push below
     // (CSET-into-Xn would have destroyed it — the block-path regression).
     // `branchOnReg` branches when the reg != 0 (= null).

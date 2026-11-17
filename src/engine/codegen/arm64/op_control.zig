@@ -53,10 +53,14 @@ const Error = ctx_mod.Error;
 /// ≤ 4. 8 is generous and keeps the Label struct compact.
 const merge_top_vregs_cap: u8 = 8;
 
-// Merge-MOV + ParallelMove helpers extracted to
-// `op_control_merge_mov.zig` per ADR-0093. Cross-file references
-// use `merge_mov.X` syntax.
+// Merge-move helpers extracted to `op_control_merge_mov.zig` per
+// ADR-0093. Cross-file references use `merge_mov.X` syntax.
 const merge_mov = @import("op_control_merge_mov.zig");
+
+comptime {
+    // A label's values are one `emitMergeMoves` set.
+    std.debug.assert(merge_top_vregs_cap <= @import("../shared/parallel_move.zig").cap);
+}
 
 /// `block` — push a forward-resolving label frame.
 pub fn emitBlock(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
@@ -282,14 +286,7 @@ pub fn emitBr(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
         const param_arity = ctx.labels.items[tgt_idx].param_arity;
         if (param_arity > 0 and ctx.pushed_vregs.items.len >= param_arity) {
             const base = ctx.pushed_vregs.items.len - param_arity;
-            var i: u32 = 0;
-            while (i < param_arity) : (i += 1) {
-                const src_vreg = ctx.pushed_vregs.items[base + i];
-                const dst_vreg = ctx.labels.items[tgt_idx].param_top_vregs[i];
-                if (src_vreg != dst_vreg) {
-                    try merge_mov.emitMergeMov(ctx, src_vreg, dst_vreg, 1, 0);
-                }
-            }
+            try merge_mov.emitMergeMoves(ctx, ctx.pushed_vregs.items[base..][0..param_arity], ctx.labels.items[tgt_idx].param_top_vregs[0..param_arity], null);
         }
         // D-314 — back-edge poll before the unconditional backward B (an
         // infinite `(loop (br 0))` is caught here, the prologue poll can't).
@@ -306,7 +303,7 @@ pub fn emitBr(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
     // br captures top arity vregs as merge target (no MOV); a
     // SUBSEQUENT br emits MOVs from current top → merge regs so
     // both paths converge on the same physical regs.
-    _ = try merge_mov.captureOrEmitBlockMergeMov(ctx, tgt_idx);
+    _ = try merge_mov.captureOrEmitBlockMergeMov(ctx, tgt_idx, null);
     const fixup_at: u32 = @intCast(ctx.buf.items.len);
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(0));
     try ctx.labels.items[tgt_idx].pending.append(ctx.allocator, .{ .byte_offset = fixup_at, .kind = .b_uncond });
@@ -356,16 +353,10 @@ pub fn branchOnReg(ctx: *EmitCtx, ins: *const ZirInstr, wn: inst.Xn) Error!void 
         const param_arity = ctx.labels.items[tgt_idx].param_arity;
         if (param_arity > 0 and ctx.pushed_vregs.items.len >= param_arity) {
             const cbz_at: u32 = @intCast(ctx.buf.items.len);
+            // `wn` is read by this CBZ and not after: the moves may write it.
             try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbzW(wn, 0));
             const base = ctx.pushed_vregs.items.len - param_arity;
-            var i: u32 = 0;
-            while (i < param_arity) : (i += 1) {
-                const src_vreg = ctx.pushed_vregs.items[base + i];
-                const dst_vreg = ctx.labels.items[tgt_idx].param_top_vregs[i];
-                if (src_vreg != dst_vreg) {
-                    try merge_mov.emitMergeMov(ctx, src_vreg, dst_vreg, 1, 0);
-                }
-            }
+            try merge_mov.emitMergeMoves(ctx, ctx.pushed_vregs.items[base..][0..param_arity], ctx.labels.items[tgt_idx].param_top_vregs[0..param_arity], null);
             // D-314 — back-edge poll runs only when the branch is TAKEN
             // (inside the cond≠0 region), before the backward B.
             try emitBackEdgeInterruptPoll(ctx);
@@ -403,8 +394,9 @@ pub fn branchOnReg(ctx: *EmitCtx, ins: *const ZirInstr, wn: inst.Xn) Error!void 
         ctx.labels.items[tgt_idx].merge_captured;
     if (tgt_is_block_with_capture) {
         const cbz_at: u32 = @intCast(ctx.buf.items.len);
+        // `wn` is read by this CBZ and not after: the moves may write it.
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbzW(wn, 0));
-        _ = try merge_mov.captureOrEmitBlockMergeMov(ctx, tgt_idx);
+        _ = try merge_mov.captureOrEmitBlockMergeMov(ctx, tgt_idx, null);
         const b_at: u32 = @intCast(ctx.buf.items.len);
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(0));
         try ctx.labels.items[tgt_idx].pending.append(ctx.allocator, .{ .byte_offset = b_at, .kind = .b_uncond });
@@ -414,8 +406,9 @@ pub fn branchOnReg(ctx: *EmitCtx, ins: *const ZirInstr, wn: inst.Xn) Error!void 
         return;
     }
     // First br_if to a block or `if` with results: capture the merge
-    // target (no MOV). A frame with no results captures nothing.
-    _ = try merge_mov.captureOrEmitBlockMergeMov(ctx, tgt_idx);
+    // target (no MOV). A frame with no results captures nothing. The CBNZ
+    // below still reads `wn`, so a move here would be refused.
+    _ = try merge_mov.captureOrEmitBlockMergeMov(ctx, tgt_idx, wn);
     const fixup_at: u32 = @intCast(ctx.buf.items.len);
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbnzW(wn, 0));
     try ctx.labels.items[tgt_idx].pending.append(ctx.allocator, .{ .byte_offset = fixup_at, .kind = .cbnz_w });
@@ -448,14 +441,7 @@ fn emitBranchToDepth(ctx: *EmitCtx, depth: u32) Error!void {
         const param_arity = ctx.labels.items[tgt_idx].param_arity;
         if (param_arity > 0 and ctx.pushed_vregs.items.len >= param_arity) {
             const base = ctx.pushed_vregs.items.len - param_arity;
-            var i: u32 = 0;
-            while (i < param_arity) : (i += 1) {
-                const src_vreg = ctx.pushed_vregs.items[base + i];
-                const dst_vreg = ctx.labels.items[tgt_idx].param_top_vregs[i];
-                if (src_vreg != dst_vreg) {
-                    try merge_mov.emitMergeMov(ctx, src_vreg, dst_vreg, 1, 0);
-                }
-            }
+            try merge_mov.emitMergeMoves(ctx, ctx.pushed_vregs.items[base..][0..param_arity], ctx.labels.items[tgt_idx].param_top_vregs[0..param_arity], null);
         }
         // D-314 — back-edge poll before the backward B (a br_table whose
         // taken case/default is a loop header is a back edge too; without
@@ -478,7 +464,7 @@ fn emitBranchToDepth(ctx: *EmitCtx, depth: u32) Error!void {
     // fixup. br_table dispatches multiple cases through this
     // helper; per-case CMP+B.NE-skip in emitBrTable is patched
     // with variable disp to cover the MOVs + B span.
-    _ = try merge_mov.captureOrEmitBlockMergeMov(ctx, tgt_idx);
+    _ = try merge_mov.captureOrEmitBlockMergeMov(ctx, tgt_idx, null);
     const fixup_at: u32 = @intCast(ctx.buf.items.len);
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(0));
     try ctx.labels.items[tgt_idx].pending.append(ctx.allocator, .{ .byte_offset = fixup_at, .kind = .b_uncond });
@@ -622,12 +608,7 @@ pub fn emitElse(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
             }
             ctx.labels.items[lbl_idx].merge_captured = true;
         } else {
-            var i: u32 = 0;
-            while (i < arity) : (i += 1) {
-                const src_vreg = ctx.pushed_vregs.items[base + i];
-                const merge_vreg = ctx.labels.items[lbl_idx].merge_top_vregs[i];
-                if (src_vreg != merge_vreg) try merge_mov.emitMergeMov(ctx, src_vreg, merge_vreg, 1, 0);
-            }
+            try merge_mov.emitMergeMoves(ctx, ctx.pushed_vregs.items[base..][0..arity], ctx.labels.items[lbl_idx].merge_top_vregs[0..arity], null);
         }
     }
     const b_byte: u32 = @intCast(ctx.buf.items.len);
@@ -757,29 +738,13 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
                 try ctx.pushed_vregs.append(ctx.allocator, lbl.merge_top_vregs[i]);
             }
         } else {
-            const top_base = ctx.pushed_vregs.items.len - arity;
-            const dead_fallthrough = blk: {
-                var i: u32 = 0;
-                while (i < arity) : (i += 1) {
-                    if (ctx.pushed_vregs.items[top_base + i] != lbl.merge_top_vregs[i]) break :blk false;
-                }
-                break :blk true;
-            };
-            if (!dead_fallthrough) {
-                var i: u32 = 0;
-                while (i < arity) : (i += 1) {
-                    const src_vreg = ctx.pushed_vregs.items[top_base + i];
-                    const merge_vreg = lbl.merge_top_vregs[i];
-                    try merge_mov.emitMergeMov(ctx, src_vreg, merge_vreg, 1, 0);
-                }
-            }
-            // Overwrite top arity slots with merge_top_vregs so the
-            // downstream truncate (and consumers reading via
-            // pushed_vregs) see the canonical merge result.
-            var i: u32 = 0;
-            while (i < arity) : (i += 1) {
-                ctx.pushed_vregs.items[top_base + i] = lbl.merge_top_vregs[i];
-            }
+            // Shape (b) takes no move: each value already is its merge
+            // vreg. Then the top arity slots become merge_top_vregs so the
+            // downstream truncate (and consumers reading via pushed_vregs)
+            // see the canonical merge result.
+            const top = ctx.pushed_vregs.items[ctx.pushed_vregs.items.len - arity ..];
+            try merge_mov.emitMergeMoves(ctx, top, lbl.merge_top_vregs[0..arity], null);
+            @memcpy(top, lbl.merge_top_vregs[0..arity]);
         }
     }
 
@@ -797,15 +762,10 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
         const frame_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
         if (!arm_dead) {
             if (ctx.pushed_vregs.items.len < frame_base + arity) return Error.UnsupportedOp;
-            // Pop in reverse (top = else_{N-1}); emitMergeMov dispatches on
-            // the merge vreg's shape, so a v128 result takes the vector path.
-            var i: u32 = arity;
-            while (i > 0) {
-                i -= 1;
-                const else_result = ctx.pushed_vregs.pop().?;
-                const merge_vreg = lbl.merge_top_vregs[i];
-                if (else_result != merge_vreg) try merge_mov.emitMergeMov(ctx, else_result, merge_vreg, 1, 0);
-            }
+            // emitMergeMov dispatches on the merge vreg's shape, so a v128
+            // result takes the vector path.
+            const top = ctx.pushed_vregs.items[ctx.pushed_vregs.items.len - arity ..];
+            try merge_mov.emitMergeMoves(ctx, top, lbl.merge_top_vregs[0..arity], null);
         }
         if (ctx.pushed_vregs.items.len > frame_base) ctx.pushed_vregs.shrinkRetainingCapacity(frame_base);
         try ctx.pushed_vregs.appendSlice(ctx.allocator, lbl.merge_top_vregs[0..arity]);
@@ -829,19 +789,11 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
             try ctx.pushed_vregs.appendSlice(ctx.allocator, lbl.param_top_vregs[0..arity]);
         } else {
             if (ctx.pushed_vregs.items.len < frame_base + arity) return Error.UnsupportedOp;
-            const top_base = ctx.pushed_vregs.items.len - arity;
-            var i: u32 = 0;
-            while (i < arity) : (i += 1) {
-                const src_vreg = ctx.pushed_vregs.items[top_base + i];
-                const dst_vreg = lbl.param_top_vregs[i];
-                if (src_vreg != dst_vreg) try merge_mov.emitMergeMov(ctx, src_vreg, dst_vreg, 1, 0);
-            }
-            // Replace top arity vregs with param_top_vregs so post-if
+            // Then the top arity vregs become param_top_vregs so post-if
             // consumers read the canonical merged slot.
-            var j: u32 = 0;
-            while (j < arity) : (j += 1) {
-                ctx.pushed_vregs.items[top_base + j] = lbl.param_top_vregs[j];
-            }
+            const top = ctx.pushed_vregs.items[ctx.pushed_vregs.items.len - arity ..];
+            try merge_mov.emitMergeMoves(ctx, top, lbl.param_top_vregs[0..arity], null);
+            @memcpy(top, lbl.param_top_vregs[0..arity]);
         }
     } else if (lbl.kind == .if_then and lbl.merge_captured) {
         // An `if` without params or an else returns nothing, so no `br`
