@@ -205,12 +205,10 @@ test "compile: call N — void callee pushes no result vreg" {
 // When a callee's signature has > 7 int params (X1..X7 exhausted)
 // or > 8 fp params (V0..V7 exhausted), the overflow args land in
 // the caller's pre-allocated outgoing-args region at the BOTTOM of
-// the frame: `[SP, #(K*8)]` where K is the NSAA index. Locals and
+// the frame: `[SP, #off]`, `off` per `abi.ArgCursor`. Locals and
 // spills shift upward by `local_base_off = max_stack_arg_bytes`
-// across the function. The callee's d-7 overflow-load (`[X29, #16
-// + 8*K]`) is unchanged: caller's `[SP, #(K*8)]` and callee's
-// `[X29, #(16+8*K)]` reference the same byte address per AAPCS64
-// §6.4.2 stage C.13/C.14.
+// across the function. The caller's `[SP, #off]` and the callee's
+// `[X29, #(16 + off)]` are the same byte address.
 
 test "compile: call N — 8 i32 args, 8th arg spills to caller stack [SP, #0] (STR W)" {
     const sig: zir.FuncType = .{ .params = &.{}, .results = &.{.i32} };

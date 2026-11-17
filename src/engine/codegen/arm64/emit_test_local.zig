@@ -347,11 +347,9 @@ test "compile: f32.const emits emitConstU32 + FMOV S, W" {
 }
 
 // AAPCS64 stack-arg lowering on the callee side.
-// Prologue accepts > 7 params by loading the overflow args from
-// `[X29, #(16 + 8*K)]` (K = 0-based NSAA index) into the local
-// slot at `[SP, #(p_idx*8)]`. Caller-side stack-arg marshal
-// remains capped at the marshalCallArgs `arg_vregs[8]` limit
-// (chunk d-8 will lift that with FP-relative spill addressing).
+// Prologue accepts > 7 params by loading each stack arg from
+// `[X29, #(16 + off)]` (`off` per `abi.ArgCursor`) into the local
+// slot at `[SP, #(p_idx*8)]`.
 
 test "compile: function with 8 i32 params lowers param[7] from caller stack" {
     // 8 i32 params: X1..X7 hold params 0..6 (7 regs), param 7

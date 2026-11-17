@@ -27,8 +27,8 @@
 //! caller's pre-allocated outgoing-args region per AAPCS64 §6.4.2.
 //! This region sits at the BOTTOM of the
 //! caller's frame: locals + spills shift up by `local_base_off`
-//! so `[SP, #(K*8)]` for K = 0..n_stack_args-1 is reserved for
-//! outgoing args and the callee reads them at `[X29, #(16+8*K)]`.
+//! so `[SP, #0..)` is reserved for outgoing args and the callee
+//! reads them at `[X29, #16..)`; `abi.ArgCursor` owns the offsets.
 //! No SP movement around BL/BLR is needed — the region stays
 //! allocated for the function's lifetime. Reftype params (funcref
 //! / externref) ride the i64 X-form gpr-class path per ADR-0061
@@ -37,7 +37,6 @@
 //! Zone 2 (`src/engine/codegen/arm64/`).
 
 const dbg = @import("../../../support/dbg.zig");
-const builtin = @import("builtin");
 
 const zir = @import("../../../ir/zir.zig");
 const inst = @import("inst.zig");
@@ -126,29 +125,6 @@ fn homedCallerSavedSpillReload(ctx: *EmitCtx, dir: SpillDir) Error!void {
     }
 }
 
-/// ADR-0069: per-call overflow-args byte
-/// count, mirroring `marshalCallArgs`'s allocation logic. Returns
-/// the size of the `[SP, #0..N-1]` overflow region this call's
-/// stack args occupy. The MEMORY-class return buffer (when the
-/// callee triggers it) sits immediately above at
-/// `[SP, #N..N + n_results*8 - 1]`. v128 args are excluded
-/// (current callees' v128 args ride V0..V7 in-pool; future
-/// overflow-v128 needs its own 16 B aligned slot accounting).
-pub fn computeCallOverflowBytes(callee_sig: FuncType) u32 {
-    var n_int: u32 = 0;
-    var n_fp: u32 = 0;
-    for (callee_sig.params) |p| {
-        switch (p) {
-            .i32, .i64, .ref => n_int += 1,
-            .f32, .f64 => n_fp += 1,
-            .v128 => {},
-        }
-    }
-    const n_int_overflow: u32 = if (n_int > 7) n_int - 7 else 0;
-    const n_fp_overflow: u32 = if (n_fp > 8) n_fp - 8 else 0;
-    return (n_int_overflow + n_fp_overflow) * 8;
-}
-
 /// Wasm spec §3.4.7 (call N) — direct call. Looks up
 /// `func_sigs[N]` for the callee signature, marshals args, emits
 /// BL placeholder + CallFixup, captures the result.
@@ -178,7 +154,7 @@ pub fn emitCall(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
     // result via `[X8, #(i*8)]`. After return, this caller reads
     // results back from the same buffer in `captureCallResult`.
     const memory_class_return: bool = callee_sig.results.len > 2;
-    const return_buffer_off: u32 = if (memory_class_return) computeCallOverflowBytes(callee_sig) else 0;
+    const return_buffer_off: u32 = if (memory_class_return) abi.callReturnBufferOff(abi.stack_arg_packing, callee_sig) else 0;
     if (memory_class_return) {
         if (return_buffer_off > 4095) return Error.UnsupportedOp; // imm12 budget
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(8, 31, @intCast(return_buffer_off)));
@@ -345,7 +321,7 @@ fn emitCallIndirectSubtype(
     // Marshal args now (trampoline done → no marshalled-arg clobber).
     try marshalCallArgs(ctx, callee_sig);
     const memory_class_return: bool = callee_sig.results.len > 2;
-    const return_buffer_off: u32 = if (memory_class_return) computeCallOverflowBytes(callee_sig) else 0;
+    const return_buffer_off: u32 = if (memory_class_return) abi.callReturnBufferOff(abi.stack_arg_packing, callee_sig) else 0;
     if (memory_class_return) {
         if (return_buffer_off > 4095) return Error.UnsupportedOp;
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(8, 31, @intCast(return_buffer_off)));
@@ -401,7 +377,7 @@ pub fn emitCallIndirect(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
     // X1..X7 / V0..V7 arg shuffling; X16/X17 used later for sig +
     // funcptr work are caller-saved scratch disjoint from X8.
     const memory_class_return: bool = callee_sig.results.len > 2;
-    const return_buffer_off: u32 = if (memory_class_return) computeCallOverflowBytes(callee_sig) else 0;
+    const return_buffer_off: u32 = if (memory_class_return) abi.callReturnBufferOff(abi.stack_arg_packing, callee_sig) else 0;
     if (memory_class_return) {
         if (return_buffer_off > 4095) return Error.UnsupportedOp;
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(8, 31, @intCast(return_buffer_off)));
@@ -581,7 +557,7 @@ pub fn emitCallRef(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
     try marshalCallArgs(ctx, callee_sig);
 
     const memory_class_return: bool = callee_sig.results.len > 2;
-    const return_buffer_off: u32 = if (memory_class_return) computeCallOverflowBytes(callee_sig) else 0;
+    const return_buffer_off: u32 = if (memory_class_return) abi.callReturnBufferOff(abi.stack_arg_packing, callee_sig) else 0;
     if (memory_class_return) {
         if (return_buffer_off > 4095) return Error.UnsupportedOp;
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(8, 31, @intCast(return_buffer_off)));
@@ -619,12 +595,10 @@ pub fn emitCallRef(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
 
 /// Wasm spec §3.4.7 (call N) — marshal call arguments per AAPCS64
 /// §6.4.2. Pop N arg vregs in REVERSE stack order (top = arg N-1)
-/// then emit MOV/FMOV from each arg's home register into X1..X7
-/// (per ADR-0017 X0 reserved for runtime_ptr) or V0..V7. Args that
-/// overflow the int (X1..X7, 7 slots) or fp (V0..V7, 8 slots) pools
-/// land in the caller's pre-allocated outgoing-args region at
-/// `[SP, #(K*8)]` for K = NSAA index. The
-/// callee reads them at `[X29, #(16 + 8*K)]`.
+/// then move each from its home to where `abi.ArgCursor` places it:
+/// X1..X7 (per ADR-0017 X0 reserved for runtime_ptr), V0..V7, or the
+/// caller's pre-allocated outgoing-args region at `[SP, #off]`, which
+/// the callee reads at `[X29, #(16 + off)]`.
 ///
 /// **No source-clobber risk by construction**: vregs are allocated
 /// out of `[X9..X15, X19..X28]` (GPR pool) and `[V16..V30]` (FP
@@ -639,6 +613,12 @@ pub fn emitCallRef(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
 // layout; tail-call just teardowns the caller's frame before B-jumping.
 // SIBLING-PUB: op_tail_call.zig (per ADR-0112 D3)
 pub fn marshalCallArgs(ctx: *EmitCtx, callee_sig: FuncType) Error!void {
+    return marshalCallArgsPacked(ctx, abi.stack_arg_packing, callee_sig);
+}
+
+/// `marshalCallArgs` with the packing as a parameter, so a test on any host
+/// can run the marshaller under either (#425).
+pub fn marshalCallArgsPacked(ctx: *EmitCtx, packing: abi.StackArgPacking, callee_sig: FuncType) Error!void {
     const n_args: u32 = @intCast(callee_sig.params.len);
     if (n_args == 0) return;
     if (ctx.pushed_vregs.items.len < n_args) return Error.AllocationMissing;
@@ -660,121 +640,71 @@ pub fn marshalCallArgs(ctx: *EmitCtx, callee_sig: FuncType) Error!void {
         arg_vregs[i] = ctx.pushed_vregs.pop().?;
     }
 
-    var gpr_arg_slot: inst.Xn = 1;
-    var fp_arg_slot: inst.Vn = 0;
-    // Per-call NSAA byte cursor (caller-side). Mirror of arm64
-    // emit.zig prologue's stack-arg byte cursor.
-    //
-    // Standard AAPCS64: every scalar overflow consumes 8 bytes
-    // regardless of width; v128 consumes 16 with 16-byte align.
-    //
-    // **Apple arm64 (macOS/iOS/watchOS/tvOS)** per Apple's
-    // "Writing ARM64 Code for Apple Platforms": stack overflow
-    // args use their NATURAL size with natural alignment, so
-    // consecutive i32+f32 pack into 4+4=8 bytes (not 8+8).
-    const apple_natural_packing: bool = builtin.target.os.tag == .macos or
-        builtin.target.os.tag == .ios or
-        builtin.target.os.tag == .watchos or
-        builtin.target.os.tag == .tvos;
-    var stack_byte_off: u32 = 0;
+    // The stack-offset caps below are each STR form's scaled imm12 reach.
+    var cursor: abi.ArgCursor = .{ .packing = packing };
     var k: u32 = 0;
     while (k < n_args) : (k += 1) {
         const src_vreg = arg_vregs[k];
-        switch (callee_sig.params[k]) {
+        const ty = callee_sig.params[k];
+        const loc = cursor.next(ty);
+        switch (ty) {
             .i32 => {
                 const ws = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, 0);
-                if (gpr_arg_slot >= 8) {
-                    const slot_size: u32 = if (apple_natural_packing) 4 else 8;
-                    const align_mask: u32 = slot_size - 1;
-                    stack_byte_off = (stack_byte_off + align_mask) & ~align_mask;
-                    if (stack_byte_off > 16380) return Error.UnsupportedOp;
-                    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrImmW(ws, 31, @intCast(stack_byte_off)));
-                    stack_byte_off += slot_size;
-                } else {
-                    if (ws != gpr_arg_slot) {
-                        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrRegW(gpr_arg_slot, 31, ws));
-                    }
-                    gpr_arg_slot += 1;
-                }
-            },
-            .i64 => {
-                const xs = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, 0);
-                if (gpr_arg_slot >= 8) {
-                    stack_byte_off = (stack_byte_off + 7) & ~@as(u32, 7);
-                    if (stack_byte_off > 32760) return Error.UnsupportedOp;
-                    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrImm(xs, 31, @intCast(stack_byte_off)));
-                    stack_byte_off += 8;
-                } else {
-                    if (xs != gpr_arg_slot) {
-                        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrReg(gpr_arg_slot, 31, xs));
-                    }
-                    gpr_arg_slot += 1;
-                }
-            },
-            .f32 => {
-                const vs = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, 0);
-                if (fp_arg_slot >= abi.fp_arg_regs) {
-                    const slot_size: u32 = if (apple_natural_packing) 4 else 8;
-                    const align_mask: u32 = slot_size - 1;
-                    stack_byte_off = (stack_byte_off + align_mask) & ~align_mask;
-                    if (stack_byte_off > 16380) return Error.UnsupportedOp;
-                    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrSImm(vs, 31, @intCast(stack_byte_off)));
-                    stack_byte_off += slot_size;
-                } else {
-                    if (vs != fp_arg_slot) {
-                        try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovSReg(fp_arg_slot, vs));
-                    }
-                    fp_arg_slot += 1;
-                }
-            },
-            .f64 => {
-                const vs = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, 0);
-                if (fp_arg_slot >= abi.fp_arg_regs) {
-                    stack_byte_off = (stack_byte_off + 7) & ~@as(u32, 7);
-                    if (stack_byte_off > 32760) return Error.UnsupportedOp;
-                    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrDImm(vs, 31, @intCast(stack_byte_off)));
-                    stack_byte_off += 8;
-                } else {
-                    if (vs != fp_arg_slot) {
-                        try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovDReg(fp_arg_slot, vs));
-                    }
-                    fp_arg_slot += 1;
-                }
-            },
-            // Caller-side v128 arg marshal per
-            // AAPCS64 §6.4 SIMD calling convention. Mirror of
-            // the callee-side param-marshal (V0..V7 are
-            // SIMD arg regs; overflow goes to caller's outgoing
-            // args region with 16-byte alignment per §6.4.2
-            // stage C.4).
-            .v128 => {
-                const vs = try gpr.qLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, 0);
-                if (fp_arg_slot >= abi.fp_arg_regs) {
-                    stack_byte_off = (stack_byte_off + 15) & ~@as(u32, 15);
-                    if (stack_byte_off > 65520) return Error.UnsupportedOp;
-                    try gpr.writeU32(ctx.allocator, ctx.buf, inst_neon.encStrQImm(vs, 31, @intCast(stack_byte_off)));
-                    stack_byte_off += 16;
-                } else {
-                    if (vs != fp_arg_slot) {
-                        try gpr.writeU32(ctx.allocator, ctx.buf, inst_neon.encMovV16B(fp_arg_slot, vs));
-                    }
-                    fp_arg_slot += 1;
+                switch (loc) {
+                    .stack => |off| {
+                        if (off > 16380) return Error.UnsupportedOp;
+                        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrImmW(ws, 31, @intCast(off)));
+                    },
+                    .gpr => |x| if (ws != x) try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrRegW(x, 31, ws)),
+                    .fpr => unreachable,
                 }
             },
             // D-093: reftype params share the i64 X-form
             // marshal path (8-byte gpr-class slot per ADR-0061).
-            .ref => {
+            .i64, .ref => {
                 const xs = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, 0);
-                if (gpr_arg_slot >= 8) {
-                    stack_byte_off = (stack_byte_off + 7) & ~@as(u32, 7);
-                    if (stack_byte_off > 32760) return Error.UnsupportedOp;
-                    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrImm(xs, 31, @intCast(stack_byte_off)));
-                    stack_byte_off += 8;
-                } else {
-                    if (xs != gpr_arg_slot) {
-                        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrReg(gpr_arg_slot, 31, xs));
-                    }
-                    gpr_arg_slot += 1;
+                switch (loc) {
+                    .stack => |off| {
+                        if (off > 32760) return Error.UnsupportedOp;
+                        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrImm(xs, 31, @intCast(off)));
+                    },
+                    .gpr => |x| if (xs != x) try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrReg(x, 31, xs)),
+                    .fpr => unreachable,
+                }
+            },
+            .f32 => {
+                const vs = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, 0);
+                switch (loc) {
+                    .stack => |off| {
+                        if (off > 16380) return Error.UnsupportedOp;
+                        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrSImm(vs, 31, @intCast(off)));
+                    },
+                    .fpr => |v| if (vs != v) try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovSReg(v, vs)),
+                    .gpr => unreachable,
+                }
+            },
+            .f64 => {
+                const vs = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, 0);
+                switch (loc) {
+                    .stack => |off| {
+                        if (off > 32760) return Error.UnsupportedOp;
+                        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrDImm(vs, 31, @intCast(off)));
+                    },
+                    .fpr => |v| if (vs != v) try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovDReg(v, vs)),
+                    .gpr => unreachable,
+                }
+            },
+            // AAPCS64 §6.4 SIMD calling convention: V0..V7, then a
+            // 16-byte, 16-aligned stack slot (§6.4.2 stage C.4).
+            .v128 => {
+                const vs = try gpr.qLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, 0);
+                switch (loc) {
+                    .stack => |off| {
+                        if (off > 65520) return Error.UnsupportedOp;
+                        try gpr.writeU32(ctx.allocator, ctx.buf, inst_neon.encStrQImm(vs, 31, @intCast(off)));
+                    },
+                    .fpr => |v| if (vs != v) try gpr.writeU32(ctx.allocator, ctx.buf, inst_neon.encMovV16B(v, vs)),
+                    .gpr => unreachable,
                 }
             },
         }

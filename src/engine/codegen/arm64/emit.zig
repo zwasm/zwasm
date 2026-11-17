@@ -38,7 +38,6 @@
 const std = @import("std");
 const liveness_parity = @import("../shared/liveness_parity.zig");
 const dbg = @import("../../../support/dbg.zig");
-const builtin = @import("builtin");
 
 const zir = @import("../../../ir/zir.zig");
 const sections = @import("../../../parse/sections.zig");
@@ -204,16 +203,11 @@ pub fn compile(
     //   arg-reg counter.
     // - Per-class stores: i32 → STR W, i64 → STR X, f32 → STR S,
     //   f64 → STR D. v128 / refs still surface as UnsupportedOp.
-    // - AAPCS64 §6.4.2 stack-arg lowering: when
-    //   a class would overflow (int > X7 or fp > V7), the arg
-    //   (and every subsequent arg of the SAME class) lands on
-    //   the caller's stack at `[X29, #16 + 8*stack_arg_idx]`
-    //   (the +16 skips the saved FP/LR pair pushed by the
-    //   `STP X29,X30,[SP,#-16]!` prologue). Per AAPCS64 each
-    //   class tracks its own overflow point independently;
-    //   they share one NSAA stream. Loaded into X16 (GPR
-    //   scratch) / V16 (FP scratch) and re-stored to the
-    //   local-slot at `[SP, p_idx*8]`.
+    // - AAPCS64 §6.4.2 stack-arg lowering: an arg past its
+    //   class's registers is read from the caller's stack at
+    //   `[X29, #16 + off]`, `off` per `abi.ArgCursor` (the +16
+    //   skips the saved FP/LR pair), loaded into X16 / V16 and
+    //   re-stored to its local slot.
     for (func.sig.params) |p| {
         switch (p) {
             // D-093: reftype params share the i64 gpr-class
@@ -268,8 +262,8 @@ pub fn compile(
     const buffer_write: bool = alloc.result_abi == .buffer_write;
     const indirect_result_slot_bytes: u32 = if (return_is_memory_class or buffer_write) 8 else 0;
     // Outgoing args (caller-side stack args)
-    // occupy the BOTTOM of the frame so the callee reads them at
-    // `[X29, #16 + 8*K]` (per AAPCS64 §6.4.2 stage C.13/C.14).
+    // occupy the BOTTOM of the frame so the callee reads them from
+    // `[X29, #16]` upward, at the offsets `abi.ArgCursor` gives.
     // Locals + spills shift upward by `local_base_off`.
     //   [SP + 0 .. outgoing_max-1]                     outgoing args
     //   [SP + outgoing_max .. +locals_bytes-1]         locals
@@ -280,7 +274,7 @@ pub fn compile(
     // _idx]` is 16-aligned (`encStrQImm` / `encLdrQImm` reject
     // misaligned imm12). The 0-7 byte rounding waste is bounded
     // and amortised against the v128-bearing path.
-    const outgoing_max_raw: u32 = computeOutgoingMaxBytes(func, func_sigs, module_types, num_imports);
+    const outgoing_max_raw: u32 = computeOutgoingMaxBytes(abi.stack_arg_packing, func, func_sigs, module_types, num_imports);
     const outgoing_max_bytes: u32 = if (layout.v128_count > 0) (outgoing_max_raw + 15) & ~@as(u32, 15) else outgoing_max_raw;
     const local_base_off: u32 = outgoing_max_bytes;
     const spill_base_off: u32 = local_base_off + locals_bytes;
@@ -458,27 +452,11 @@ pub fn compile(
         // checks `p_idx < num_params` and exits immediately since
         // p_idx now equals num_params.
     }
-    var int_arg_idx: u5 = 1; // X0 = runtime ptr; user int args from X1
-    var fp_arg_idx: u5 = 0; // V0..V7 for FP args
-    // Overflow-args byte cursor in the caller's outgoing-args
-    // region; reads at `[X29, #(16 + stack_byte_off)]` with +16
-    // skipping the saved FP/LR pair pushed by the prologue's
-    // pre-index STP.
-    //
-    // Standard AAPCS64 (Arm IHI 0055 §6.4.2 stage C.13/C.14):
-    // every scalar overflow consumes 8 bytes regardless of width.
-    //
-    // **Apple arm64 (macOS / iOS / watchOS / tvOS)**: per Apple's
-    // "Writing ARM64 Code for Apple Platforms" — stack overflow
-    // args use their NATURAL size with natural alignment, NOT a
-    // uniform 8-byte stride. Consecutive i32 + f32 thus pack into
-    // 4+4 bytes, not 8+8. The `apple_natural_packing` flag picks
-    // the appropriate cursor advance.
-    const apple_natural_packing: bool = builtin.target.os.tag == .macos or
-        builtin.target.os.tag == .ios or
-        builtin.target.os.tag == .watchos or
-        builtin.target.os.tag == .tvos;
-    var stack_byte_off: u32 = 0;
+    // Where each remaining param arrives is `abi.ArgCursor`'s — the rule the
+    // caller's `marshalCallArgs` walks. A stack param is read at
+    // `[X29, #(16 + off)]`, the +16 skipping the FP/LR pair the prologue's
+    // pre-index STP pushed.
+    var cursor: abi.ArgCursor = .{ .packing = abi.stack_arg_packing };
     while (p_idx < num_params) : (p_idx += 1) {
         // Param slot lives at
         // `[SP, #(local_base_off + layout.offsets[p_idx])]`. The
@@ -500,87 +478,56 @@ pub fn compile(
         const param_off_w: u14 = if (param_ty == .i32 or param_ty == .f32) @intCast(param_off_u) else 0;
         const param_off_x: u15 = if (param_ty == .i64 or param_ty == .f64 or param_ty == .ref) @intCast(param_off_u) else 0;
         const param_off_v128: u16 = if (param_ty == .v128) @intCast(param_off_u) else 0;
+        const loc = cursor.next(param_ty);
+        const stack_off_u: u32 = switch (loc) {
+            .stack => |off| 16 + off,
+            .gpr, .fpr => 0,
+        };
+        if (stack_off_u > (if (param_ty == .v128) @as(u32, 65520) else 32760)) return Error.UnsupportedOp;
         switch (param_ty) {
-            .i32 => {
-                if (int_arg_idx > 7) {
-                    const slot_size: u32 = if (apple_natural_packing) 4 else 8;
-                    const align_mask: u32 = slot_size - 1;
-                    stack_byte_off = (stack_byte_off + align_mask) & ~align_mask;
-                    const stack_off_u: u32 = 16 + stack_byte_off;
-                    if (stack_off_u > 32760) return Error.UnsupportedOp;
-                    const stack_off_w: u14 = @intCast(stack_off_u);
-                    try gpr.writeU32(allocator, &buf, inst.encLdrImmW(16, 29, stack_off_w));
+            .i32 => switch (loc) {
+                .stack => {
+                    try gpr.writeU32(allocator, &buf, inst.encLdrImmW(16, 29, @intCast(stack_off_u)));
                     try gpr.writeU32(allocator, &buf, inst.encStrImmW(16, 31, param_off_w));
-                    stack_byte_off += slot_size;
-                } else {
-                    try gpr.writeU32(allocator, &buf, inst.encStrImmW(int_arg_idx, 31, param_off_w));
-                    int_arg_idx += 1;
-                }
+                },
+                .gpr => |x| try gpr.writeU32(allocator, &buf, inst.encStrImmW(x, 31, param_off_w)),
+                .fpr => unreachable,
             },
             // D-093: reftype params share the i64 X-form
             // marshal path (8-byte gpr-class slot per ADR-0061).
-            .i64, .ref => {
-                if (int_arg_idx > 7) {
-                    stack_byte_off = (stack_byte_off + 7) & ~@as(u32, 7);
-                    const stack_off_u: u32 = 16 + stack_byte_off;
-                    if (stack_off_u > 32760) return Error.UnsupportedOp;
-                    const stack_off: u15 = @intCast(stack_off_u);
-                    try gpr.writeU32(allocator, &buf, inst.encLdrImm(16, 29, stack_off));
+            .i64, .ref => switch (loc) {
+                .stack => {
+                    try gpr.writeU32(allocator, &buf, inst.encLdrImm(16, 29, @intCast(stack_off_u)));
                     try gpr.writeU32(allocator, &buf, inst.encStrImm(16, 31, param_off_x));
-                    stack_byte_off += 8;
-                } else {
-                    try gpr.writeU32(allocator, &buf, inst.encStrImm(int_arg_idx, 31, param_off_x));
-                    int_arg_idx += 1;
-                }
+                },
+                .gpr => |x| try gpr.writeU32(allocator, &buf, inst.encStrImm(x, 31, param_off_x)),
+                .fpr => unreachable,
             },
-            .f32 => {
-                if (fp_arg_idx > 7) {
-                    const slot_size: u32 = if (apple_natural_packing) 4 else 8;
-                    const align_mask: u32 = slot_size - 1;
-                    stack_byte_off = (stack_byte_off + align_mask) & ~align_mask;
-                    const stack_off_u: u32 = 16 + stack_byte_off;
-                    if (stack_off_u > 32760) return Error.UnsupportedOp;
-                    const stack_off: u14 = @intCast(stack_off_u);
-                    try gpr.writeU32(allocator, &buf, inst.encLdrSImm(16, 29, stack_off));
+            .f32 => switch (loc) {
+                .stack => {
+                    try gpr.writeU32(allocator, &buf, inst.encLdrSImm(16, 29, @intCast(stack_off_u)));
                     try gpr.writeU32(allocator, &buf, inst.encStrSImm(16, 31, param_off_w));
-                    stack_byte_off += slot_size;
-                } else {
-                    try gpr.writeU32(allocator, &buf, inst.encStrSImm(fp_arg_idx, 31, param_off_w));
-                    fp_arg_idx += 1;
-                }
+                },
+                .fpr => |v| try gpr.writeU32(allocator, &buf, inst.encStrSImm(v, 31, param_off_w)),
+                .gpr => unreachable,
             },
-            .f64 => {
-                if (fp_arg_idx > 7) {
-                    stack_byte_off = (stack_byte_off + 7) & ~@as(u32, 7);
-                    const stack_off_u: u32 = 16 + stack_byte_off;
-                    if (stack_off_u > 32760) return Error.UnsupportedOp;
-                    const stack_off: u15 = @intCast(stack_off_u);
-                    try gpr.writeU32(allocator, &buf, inst.encLdrDImm(16, 29, stack_off));
+            .f64 => switch (loc) {
+                .stack => {
+                    try gpr.writeU32(allocator, &buf, inst.encLdrDImm(16, 29, @intCast(stack_off_u)));
                     try gpr.writeU32(allocator, &buf, inst.encStrDImm(16, 31, param_off_x));
-                    stack_byte_off += 8;
-                } else {
-                    try gpr.writeU32(allocator, &buf, inst.encStrDImm(fp_arg_idx, 31, param_off_x));
-                    fp_arg_idx += 1;
-                }
+                },
+                .fpr => |v| try gpr.writeU32(allocator, &buf, inst.encStrDImm(v, 31, param_off_x)),
+                .gpr => unreachable,
             },
-            // v128 param marshal per AAPCS64
-            // §6.4 SIMD calling convention. v128 args arrive in
-            // V0..V7; stash via `STR Q V<n>, [SP, #param_off_v128]`.
-            // Overflow path per §6.4.2 stage C.4: align next stack
-            // arg to 16, then load 16 bytes.
-            .v128 => {
-                if (fp_arg_idx > 7) {
-                    stack_byte_off = (stack_byte_off + 15) & ~@as(u32, 15);
-                    const stack_off_u: u32 = 16 + stack_byte_off;
-                    if (stack_off_u > 65520) return Error.UnsupportedOp;
-                    const stack_off: u16 = @intCast(stack_off_u);
-                    try gpr.writeU32(allocator, &buf, inst_neon.encLdrQImm(16, 29, stack_off));
+            // v128 param per AAPCS64 §6.4 SIMD calling convention: V0..V7,
+            // then a 16-byte, 16-aligned stack slot (§6.4.2 stage C.4).
+            .v128 => switch (loc) {
+                .stack => {
+                    try gpr.writeU32(allocator, &buf, inst_neon.encLdrQImm(16, 29, @intCast(stack_off_u)));
                     try gpr.writeU32(allocator, &buf, inst_neon.encStrQImm(16, 31, param_off_v128));
-                    stack_byte_off += 16;
-                } else {
-                    try gpr.writeU32(allocator, &buf, inst_neon.encStrQImm(fp_arg_idx, 31, param_off_v128));
-                    fp_arg_idx += 1;
-                }
+                },
+                .fpr => |v| try gpr.writeU32(allocator, &buf, inst_neon.encStrQImm(v, 31, param_off_v128)),
+                .gpr => unreachable,
             },
         }
     }
