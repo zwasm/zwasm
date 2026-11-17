@@ -10,7 +10,9 @@
 //! A catch clause whose label is a loop branches to the loop's header (#369).
 //! An `if` whose then-arm ends in `unreachable` returns the else arm's value
 //! on every engine (#739). A block that closes short of its f64 result
-//! before any vreg exists traps on every engine (#399).
+//! before any vreg exists traps on every engine (#399). An `if` with no else
+//! whose then arm branches to the `if`'s own label gives its params on cond=0
+//! and the branch's values on cond=1, on every engine.
 //!
 //! Usage: `zig build test-cli-usage` /
 //!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>
@@ -19,7 +21,7 @@
 //!         <wasi_p2_tcp_rust.wasm> <catch_to_loop.wasm>
 //!         <catch_to_loop_ref_result.wasm> <catch_to_loop_params.wasm>
 //!         <catch_to_loop_unset_params.wasm> <if_dead_then_arm.wasm>
-//!         <short_frame_f64.wasm>`
+//!         <short_frame_f64.wasm> <if_branch_own_label.wasm>`
 
 const std = @import("std");
 const spawned_cli = @import("spawned_cli");
@@ -50,7 +52,8 @@ const Row = struct {
 /// the JIT declines, #596's select, a 5 s sleep in `poll_oneoff`, #618's
 /// `(f32) -> (i32 i32 i32)`, a Rust wasip2 TCP client, #369's catch clauses
 /// that target a loop (without params, with a result, with params, and with a
-/// param the stack never held a value for), #739's two `if`s, and #399's block.
+/// param the stack never held a value for), #739's two `if`s, #399's block, and
+/// an `if` with no else whose then arm branches to its own label.
 const M = "<module>";
 const E = "<argv_echo>";
 const S = "<simd_op>";
@@ -65,7 +68,8 @@ const Q = "<catch_to_loop_params>";
 const U = "<catch_to_loop_unset_params>";
 const I = "<if_dead_then>";
 const B = "<short_frame>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B };
+const O = "<if_branch_own_label>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -140,7 +144,12 @@ const rows = [_]Row{
     onEngines(&all_engines, R, "test", "42\n") ++
     onEngines(jit_engines, Q, "payload_to_loop", "3\n") ++
     onEngines(jit_engines, Q, "f64_payload_to_loop", "4.5\n") ++
-    onEngines(&all_engines, Q, "catch_ref_to_loop", "10\n") ++ [_]Row{
+    onEngines(&all_engines, Q, "catch_ref_to_loop", "10\n") ++
+    // cond=0: the params are the results. cond=1: the branch carries them.
+    onEngines(&all_engines, O, "i32_result=0", "150\n") ++
+    onEngines(&all_engines, O, "i32_result=1", "107\n") ++
+    onEngines(&all_engines, O, "ref_result=0", "100\n") ++
+    onEngines(&all_engines, O, "ref_result=1", "101\n") ++ [_]Row{
     // The pad's back-edge poll stops a loop re-entered only through its catch;
     // without it the run ends after 10^8 iterations and prints the count.
     .{ .args = &.{ "run", "--timeout", "500", "--engine", "jit", "--invoke", "catch_all_spin=100000000", L }, .exit = 1, .stderr = .{ .has = "interrupted" } },

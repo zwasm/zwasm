@@ -47,6 +47,15 @@ const End = enum {
     /// `return` with the top param (an i32), after the same pushed-and-dropped
     /// constant.
     ret_param,
+    /// The results, `br 0`: a branch to the frame's own label. Odd-numbered
+    /// values, so a ref result is null where the `if`'s ref param is not.
+    br_self,
+    /// The same with `br_table`, its index a constant.
+    brt_self,
+    /// One more value above the params, `br 0`: the branch carries the top
+    /// params and that value, each one slot below where it sat (as a then
+    /// arm, on an `if` with no else).
+    br_self_shift,
     /// The results, `br_if 0` on local 1, drop them, `unreachable`.
     brif_dead,
     /// The results, `br_if 0` on local 1, fall through with them.
@@ -248,6 +257,21 @@ fn emitArm(out: *std.ArrayList(u8), a: std.mem.Allocator, sh: Shape, end: End, t
                 try out.append(a, 0x0f); // return
             }
         },
+        .br_self, .brt_self => {
+            try drops(out, a, sh.params);
+            var i: u8 = 0;
+            while (i < sh.results) : (i += 1) try pushConst(out, a, sh.ty, tag * 16 + 1 + 2 * @as(u32, i));
+            if (end == .br_self) {
+                try out.appendSlice(a, &.{ 0x0c, 0x00 }); // br 0
+            } else {
+                try pushConst(out, a, .i32, 0);
+                try out.appendSlice(a, &.{ 0x0e, 0x01, 0x00, 0x00 }); // br_table [0] default 0
+            }
+        },
+        .br_self_shift => {
+            try pushConst(out, a, sh.ty, tag * 16 + 3);
+            try out.appendSlice(a, &.{ 0x0c, 0x00 }); // br 0
+        },
         .brif_dead, .brif_live => {
             try drops(out, a, sh.params);
             try pushResults(out, a, sh, sh.results, tag);
@@ -325,7 +349,8 @@ fn validArm(sh: Shape, end: End) bool {
         .drop0 => sh.params >= 1, // with no params it is `short0`
         .brif_param => sh.kind != .loop and sh.params >= 1 and sh.params == sh.results and sh.pty == .same,
         .br_out, .brt_out => sh.kind == .if_ and sh.outer_skip,
-        .brif_dead, .brif_live, .brif_twice, .brif_replace => sh.kind != .loop, // br_if 0 in a loop is a back edge
+        .br_self_shift => sh.kind == .if_ and sh.pty == .same and sh.params >= 1 and sh.results >= 1 and sh.params + 1 >= sh.results,
+        .br_self, .brt_self, .brif_dead, .brif_live, .brif_twice, .brif_replace => sh.kind != .loop, // a branch to a loop's label is a back edge
         .catch_self => sh.kind != .loop, // the catch would branch to the header
         .normal, .short0, .other1, .over, .ret, .br_fn, .brt_fn => true,
     };
@@ -337,6 +362,7 @@ fn build(a: std.mem.Allocator, sh: Shape) !?[]u8 {
     if (sh.pty == .other and sh.params == 0) return null; // no params: `other` is `same`
     if (sh.kind == .if_ and sh.else_ == null and (sh.params != sh.results or sh.pty != .same)) return null;
     if (!validArm(sh, sh.body)) return null;
+    if (sh.body == .br_self_shift and sh.else_ != null) return null;
     if (sh.else_) |e| if (!validArm(sh, e)) return null;
     // ref.func needs func 0 declared; keep the ref family small.
     if (sh.ty == .ref and (sh.results > 1 or sh.enclosing > 1)) return null;
@@ -628,11 +654,9 @@ test "jit vs interp: control-frame shapes around an arm that ends early agree (#
     // Every shape the generator emits must validate and run on the interpreter;
     // a nonzero count means a module the comparison silently skipped.
     try testing.expectEqual(@as(u32, 0), report.invalid);
-    // The declines are one shape, an `if (param)(result)` with no else whose
-    // `br_if 0` names a merge other than its params (liveness and both emits
-    // refuse it). A shape that moves from agreeing to declining, or the
-    // reverse, changes this count.
-    try testing.expectEqual(@as(u32, 112), report.declined);
+    // The JIT declines none of these shapes. One that moves from agreeing to
+    // declining changes this count.
+    try testing.expectEqual(@as(u32, 0), report.declined);
     try testing.expect(report.shapes > 1000);
     try testing.expect(report.value_agree > 1000);
     try testing.expect(report.trap_agree > 0);

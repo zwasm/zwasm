@@ -572,11 +572,14 @@ pub fn emitIf(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
             param_top_vregs[i] = ctx.pushed_vregs.items[base + i];
         }
     }
+    const params_are_merge = zir.ifParamsAreMerge(ctx.func, ins.*);
     try ctx.labels.append(ctx.allocator, .{
         .kind = .if_then,
         .target_byte_offset = 0,
         .pending = .empty,
         .if_skip_byte = skip_byte,
+        .merge_top_vregs = if (params_are_merge) param_top_vregs else undefined,
+        .merge_captured = params_are_merge,
         .result_arity = ar.results,
         .param_arity = ar.params,
         // D-093: entry_stack_depth measured AFTER popping
@@ -810,12 +813,10 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
     // D-093 — implicit else. `(if (param T1..TK) (result T1..TK))` without
     // an `.else` validates per Wasm spec §3.4.4 (params == results): the
     // cond=0 path skips to `target_byte` with the params as the result, so
-    // the params' vregs are the merge. A live then arm moves its results into
-    // them before `target_byte` (cond=0's CBZ jumps past the MOVs); a dead one
-    // (`arm_dead`) reaches the `end` only through a `br`, if at all (#739). A
-    // `br` that carried the params themselves named the same merge; one that
-    // carried other vregs would need the params moved on the skip path,
-    // which is not emitted, so that shape declines.
+    // the params' vregs are the merge (emitIf named them). A live then arm
+    // moves its results into them before `target_byte` (cond=0's CBZ jumps
+    // past the MOVs); a dead one (`arm_dead`) reaches the `end` only through a
+    // `br`, if at all (#739), and the `br` moved what it carried into them.
     if (lbl.kind == .if_then and lbl.param_arity > 0) {
         resolved = true;
         if (lbl.param_arity != lbl.result_arity) return Error.UnsupportedOp;
