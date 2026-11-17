@@ -9,7 +9,8 @@
 //! A component reaches the host's network only with `--allow-network`.
 //! A catch clause whose label is a loop branches to the loop's header (#369).
 //! An `if` whose then-arm ends in `unreachable` returns the else arm's value
-//! on every engine (#739).
+//! on every engine (#739). A block that closes short of its f64 result
+//! before any vreg exists traps on every engine (#399).
 //!
 //! Usage: `zig build test-cli-usage` /
 //!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>
@@ -17,7 +18,8 @@
 //!         <poll_sleep.wasm> <f32_param_three_results.wasm>
 //!         <wasi_p2_tcp_rust.wasm> <catch_to_loop.wasm>
 //!         <catch_to_loop_ref_result.wasm> <catch_to_loop_params.wasm>
-//!         <catch_to_loop_unset_params.wasm> <if_dead_then_arm.wasm>`
+//!         <catch_to_loop_unset_params.wasm> <if_dead_then_arm.wasm>
+//!         <short_frame_f64.wasm>`
 
 const std = @import("std");
 const spawned_cli = @import("spawned_cli");
@@ -48,7 +50,7 @@ const Row = struct {
 /// the JIT declines, #596's select, a 5 s sleep in `poll_oneoff`, #618's
 /// `(f32) -> (i32 i32 i32)`, a Rust wasip2 TCP client, #369's catch clauses
 /// that target a loop (without params, with a result, with params, and with a
-/// param the stack never held a value for), and #739's two `if`s.
+/// param the stack never held a value for), #739's two `if`s, and #399's block.
 const M = "<module>";
 const E = "<argv_echo>";
 const S = "<simd_op>";
@@ -62,7 +64,8 @@ const R = "<catch_to_loop_ref_result>";
 const Q = "<catch_to_loop_params>";
 const U = "<catch_to_loop_unset_params>";
 const I = "<if_dead_then>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I };
+const B = "<short_frame>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -96,9 +99,12 @@ const rows = [_]Row{
     // the peer; a listener row would hang on accept once the gate broke.
     .{ .args = &.{ "run", T, "1" }, .exit = 1, .stderr = .{ .has = "connect failed: Os { code: 2, kind: PermissionDenied" } },
     .{ .args = &.{ "run", "--allow-network", T, "1" }, .exit = 1, .stderr = .{ .has = "connect failed: Os { code: 14, kind: ConnectionRefused" } },
-    // The JIT declines a catch whose loop param has no vreg; the default engine falls back.
+    // A catch whose loop param the stack never held a value for: the JIT once
+    // declined it (the param was the placeholder vreg), but since #399 the
+    // frame mints a real vreg for it, so the JIT runs the shape and traps on
+    // the `unreachable` it reaches, as the interpreter does.
     .{ .args = &.{ "run", "--engine", "interp", U }, .exit = 1, .stderr = .{ .has = "trap kind=unreachable_" } },
-    .{ .args = &.{ "run", "--engine", "jit", U }, .exit = 1, .stderr = .{ .has = "AllocationMissing" } },
+    .{ .args = &.{ "run", "--engine", "jit", U }, .exit = 1, .stderr = .{ .has = "trap kind=unreachable_" } },
     .{ .args = &.{ "run", U }, .exit = 1, .stderr = .{ .has = "trap kind=unreachable_" } },
     .{ .args = &.{ "run", "--engine", "interp", "--invoke", "else_arm=0", I }, .exit = 0, .stdout = .{ .is = "-2\n" } },
     .{ .args = &.{ "run", "--engine", "jit", "--invoke", "else_arm=0", I }, .exit = 0, .stdout = .{ .is = "-2\n" } },
@@ -115,6 +121,15 @@ const rows = [_]Row{
     .{ .args = &.{ "run", "--engine", "interp", "--invoke", "implicit_else=0", I }, .exit = 0, .stdout = .{ .is = "-2\n" } },
     .{ .args = &.{ "run", "--engine", "jit", "--invoke", "implicit_else=0", I }, .exit = 0, .stdout = .{ .is = "-2\n" } },
     .{ .args = &.{ "run", "--invoke", "implicit_else=0", I }, .exit = 0, .stdout = .{ .is = "-2\n" } },
+    .{ .args = &.{ "run", "--engine", "interp", "--invoke", "f", B }, .exit = 1, .stderr = .{ .has = "kind=unreachable" } },
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "f", B }, .exit = 1, .stderr = .{ .has = "kind=unreachable" } },
+    .{ .args = &.{ "run", "--invoke", "f", B }, .exit = 1, .stderr = .{ .has = "kind=unreachable" } },
+    .{ .args = &.{ "run", "--engine", "interp", "--invoke", "else_short=1", B }, .exit = 0, .stdout = .{ .is = "17\n" } },
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "else_short=1", B }, .exit = 0, .stdout = .{ .is = "17\n" } },
+    .{ .args = &.{ "run", "--invoke", "else_short=1", B }, .exit = 0, .stdout = .{ .is = "17\n" } },
+    .{ .args = &.{ "run", "--engine", "interp", "--invoke", "else_unreachable=1", B }, .exit = 0, .stdout = .{ .is = "115\n" } },
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "else_unreachable=1", B }, .exit = 0, .stdout = .{ .is = "115\n" } },
+    .{ .args = &.{ "run", "--invoke", "else_unreachable=1", B }, .exit = 0, .stdout = .{ .is = "115\n" } },
 } ++ onEngines(&all_engines, L, "catch_to_loop", "3\n") ++
     onEngines(&all_engines, L, "catch_to_block", "1\n") ++
     onEngines(&all_engines, L, "catch_all_to_loop", "3\n") ++

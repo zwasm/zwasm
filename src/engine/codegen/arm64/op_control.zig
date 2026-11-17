@@ -175,7 +175,9 @@ pub fn marshalFunctionReturn(ctx: *EmitCtx) Error!void {
     for (ctx.func.sig.results, 0..) |result_kind, i| {
         const src_vreg = ctx.pushed_vregs.items[result_base + i];
         if (src_vreg >= ctx.alloc.slots.len) {
-            // D-093: dead-fall-through placeholder; skip.
+            // D-093: a result vreg with no slot entry. The `.end` pad
+            // that produced one mints a real vreg since #399; the guard
+            // stays.
             switch (result_kind) {
                 .i32, .i64, .ref => n_gpr += 1,
                 .f32, .f64, .v128 => n_fp += 1,
@@ -602,7 +604,8 @@ pub fn emitElse(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
     // terminator short of its results is dead, and what lies below the base
     // belongs to the enclosing frame. Liveness's `.else` counts the same way.
     const frame_base: usize = @as(usize, ctx.labels.items[lbl_idx].entry_stack_depth) -| @as(usize, ctx.labels.items[lbl_idx].param_arity);
-    if (arity > 0 and ctx.pushed_vregs.items.len >= frame_base + arity) {
+    const then_short = ctx.pushed_vregs.items.len < frame_base + arity;
+    if (arity > 0 and !then_short) {
         const base = ctx.pushed_vregs.items.len - arity;
         var i: u32 = 0;
         while (i < arity) : (i += 1) {
@@ -619,13 +622,15 @@ pub fn emitElse(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
     // types pushed back onto the stack (same view the then-arm
     // had at entry). Truncate to `entry_stack_depth - param_arity`
     // (= state BEFORE params were placed), then push the captured
-    // `param_top_vregs` back.
-    if (lbl.param_arity > 0) {
+    // `param_top_vregs` back. A dead then-arm's leftovers above the base
+    // go too, as liveness's `.else` drops them for every `if`: kept, the
+    // else arm's `.end` would mint fewer vregs than liveness does (#399).
+    if (lbl.param_arity > 0 or then_short) {
         const entry_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
         if (ctx.pushed_vregs.items.len > entry_base) {
             ctx.pushed_vregs.shrinkRetainingCapacity(entry_base);
         }
-        while (ctx.pushed_vregs.items.len < entry_base) {
+        while (lbl.param_arity > 0 and ctx.pushed_vregs.items.len < entry_base) {
             // Defensive — should not fire (validator guarantees
             // the operand-stack depth at .else matches the
             // entry-base + result_arity shape); padding here
@@ -768,9 +773,24 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
             }
             break :blk true;
         };
+        const else_frame_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
+        const else_short = ctx.pushed_vregs.items.len < else_frame_base + arity;
         if (dead_else) {
             // Merge targets already on top of stack from the
             // then arm. Skip MOVs; B fixups patched below.
+        } else if (else_short) {
+            // The else arm ended in a terminator short of its results (#739):
+            // it produced no live result to move, so the then-arm's captured
+            // merge vregs are the `if`'s result. Restore them above the frame
+            // base, as the then-short path does. Without this the branch below
+            // pops the params / enclosing values as if they were else results.
+            if (ctx.pushed_vregs.items.len > else_frame_base) {
+                ctx.pushed_vregs.shrinkRetainingCapacity(else_frame_base);
+            }
+            var j: u32 = 0;
+            while (j < arity) : (j += 1) {
+                try ctx.pushed_vregs.append(ctx.allocator, lbl.merge_top_vregs[j]);
+            }
         } else if (lbl.param_arity > 0) {
             // D-093 — `if (param T1..TK)` case: emitElse
             // truncated the phantom V_then_result below the
@@ -941,18 +961,24 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
     if (ctx.pushed_vregs.items.len > new_len) {
         ctx.pushed_vregs.shrinkRetainingCapacity(new_len);
     }
-    // D-093: `.loop` fall-through dead — pad with
-    // placeholder vreg 0 so the downstream post-loop pop
-    // doesn't underflow. Extended (D-130) to all
-    // block kinds: a block can become dead via `unreachable`
-    // / `br_table` inside its body without any `br` having
-    // captured a merge target (e.g. `unreached-valid.wast`
-    // `meet-bottom`: br_table-in-dead-code emits nothing, the
-    // merge-MOV mechanism never fires, and the block's `.end`
-    // sees pushed_vregs.len < entry + result_arity). Pad with
-    // vreg 0 (recognised as the dead-fall-through
-    // placeholder by marshalFunctionReturn / `.drop` etc.).
-    while (ctx.pushed_vregs.items.len < new_len) {
-        try ctx.pushed_vregs.append(ctx.allocator, 0);
+    // D-093 / D-130: a body that ended in a terminator short of its results
+    // (`unreachable`, a dead `br_table`, ... in any block kind; e.g.
+    // `unreached-valid.wast` `meet-bottom`) leaves the frame short. Mint a
+    // fresh vreg for each missing result, below the survivors: the values a
+    // body left before its terminator are the top results (the validator's
+    // order). No code computes them, since that `.end` is unreachable.
+    // Liveness mints the same ids at this pc (#399).
+    if (ctx.pushed_vregs.items.len < new_len) {
+        if (ctx.pushed_vregs.items.len < entry_base) return Error.UnsupportedOp;
+        const k = ctx.pushed_vregs.items.len - entry_base;
+        const m = new_len - ctx.pushed_vregs.items.len;
+        try ctx.pushed_vregs.resize(ctx.allocator, new_len);
+        std.mem.copyBackwards(u32, ctx.pushed_vregs.items[entry_base + m .. new_len], ctx.pushed_vregs.items[entry_base .. entry_base + k]);
+        for (ctx.pushed_vregs.items[entry_base .. entry_base + m]) |*slot| {
+            const v = ctx.next_vreg.*;
+            ctx.next_vreg.* += 1;
+            if (v >= ctx.alloc.slots.len) return Error.SlotOverflow;
+            slot.* = v;
+        }
     }
 }

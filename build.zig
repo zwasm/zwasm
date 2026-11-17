@@ -1482,8 +1482,9 @@ pub fn build(b: *std.Build) void {
     run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/catch_to_loop_params.wasm"));
     run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/catch_to_loop_unset_params.wasm"));
     run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/if_dead_then_arm.wasm"));
+    run_cli_usage.addArg(pathFromRoot(b, "test/runners/fixtures/cli_usage/short_frame_f64.wasm"));
     run_cli_usage.has_side_effects = true;
-    const test_cli_usage_step = b.step("test-cli-usage", "Run `zwasm run` with unknown, misplaced and value-swallowing options and require a usage error (exit 2), and `--` and post-path options to reach the module (issues #236, #232); a SIMD module the interpreter cannot run fails with each engine's reason (#597); `--timeout` fires during a `poll_oneoff` sleep (#598); the JIT refuses an f32 param with three results (#618); a component reaches the network only with --allow-network; a catch clause whose label is a loop branches to its header (#369); an `if` whose then-arm ends in `unreachable` returns the else arm's value on every engine (#739)");
+    const test_cli_usage_step = b.step("test-cli-usage", "Run `zwasm run` with unknown, misplaced and value-swallowing options and require a usage error (exit 2), and `--` and post-path options to reach the module (issues #236, #232); a SIMD module the interpreter cannot run fails with each engine's reason (#597); `--timeout` fires during a `poll_oneoff` sleep (#598); the JIT refuses an f32 param with three results (#618); a component reaches the network only with --allow-network; a catch clause whose label is a loop branches to its header (#369); an `if` whose then-arm ends in `unreachable` returns the else arm's value on every engine (#739); a block that closes short of its result before any vreg exists traps on every engine (#399)");
     test_cli_usage_step.dependOn(&run_cli_usage.step);
 
     // `zig build test-catch-label-matrix` — #369: a `try_table` catch clause and

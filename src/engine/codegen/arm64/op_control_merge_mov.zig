@@ -271,7 +271,7 @@ pub fn captureOrEmitBlockMergeMov(ctx: *EmitCtx, tgt_idx: usize) Error!bool {
 }
 
 /// Unpack `(param_arity, result_arity)` from a block-open
-/// ZirInstr's `extra` field. Per lower.zig's `readBlockArity`
+/// ZirInstr's `extra` field. Per lower.zig's `readBlockType`
 /// the packing is `(params << 8) | results`, both u8.
 // SIBLING-PUB: op_control.zig (per ADR-0093 extraction)
 pub fn unpackBlockArity(extra: u32) struct { params: u8, results: u8 } {

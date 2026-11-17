@@ -180,10 +180,10 @@ test "lower: structref blocktype (0x6B) lowers with arity 1 (10.G cycle 144)" {
     defer f.deinit(testing.allocator);
 
     // Wasm 3.0 GC §5.3.4: 0x6B = structref single-byte blocktype.
-    // Pre-fix readBlockArity rejected SLEB -21 as BadBlockType (sibling
+    // Pre-fix the lowerer's blocktype decoder rejected SLEB -21 as BadBlockType (sibling
     // of validator.readBlockType). unreachable body keeps the block
     // dead so no ref.null lowering is needed — the opener still records
-    // arity via readBlockArity.
+    // arity via readBlockType.
     //   0x02 0x6B — block (result structref)
     //   0x00      — unreachable
     //   0x0B 0x0B — end block ; end fn

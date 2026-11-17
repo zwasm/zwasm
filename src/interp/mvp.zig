@@ -177,7 +177,7 @@ fn blockOp(c: *InterpCtx, instr: *const ZirInstr) linksection(dispatch.text_sect
     if (instr.payload >= fnz.blocks.items.len) return Trap.Unreachable;
     const blk = fnz.blocks.items[instr.payload];
     // `instr.extra` packs (params << 8) | results for typeidx
-    // blocktypes (per lower.zig readBlockArity — the high byte feeds
+    // blocktypes (per lower.zig readBlockType — the high byte feeds
     // the JIT's end-of-block height calc). The interp's label arity is
     // the RESULT count (low byte); a param-carrying block (e.g.
     // try_table (param i32)) would otherwise set arity = 0x100 and trip
