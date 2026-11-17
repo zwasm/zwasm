@@ -913,11 +913,12 @@ pub fn compile(
         // D-596 — liveness's operand-stack simulation must still agree with
         // what this loop does to `pushed_vregs`. Off unless the diagnostic is.
         if (parity_on) {
-            liveness_parity.check(func, pc, ins.op, pushed_vregs.items, labels.items);
+            liveness_parity.check(func, pc, ins.op, pushed_vregs.items);
         }
         // `end` / `else` always exit the dead region — emit's own
         // bookkeeping (label-stack pop / arm switch) must run.
         // Mirror of arm64/emit.zig:381-414.
+        ctx.arm_dead = zir.armDeadAt(func, pc);
         if (ins.op == .end or ins.op == .@"else") {
             dead_code = false;
         }
@@ -1051,9 +1052,9 @@ pub fn compile(
                     // results the end left on top.
                     const label_vregs: []const u32 = if (end_loop) |*lp| lp.param_top_vregs[0..lp.param_arity] else pushed_vregs.items;
                     // Decline rather than index past what exists: params `loop` did not capture,
-                    // or a vreg past `alloc.slots`. A result a block minted for a body that ends
-                    // in `unreachable` (#399) is a real vreg this path never computes; declining
-                    // when it is past `alloc.slots` stays correct.
+                    // or a vreg past `alloc.slots`. A result a frame minted for a body that ends
+                    // in a terminator (#399) is a real vreg, and this path writes the payload into
+                    // it; declining when it is past `alloc.slots` stays correct.
                     if (end_loop) |lp| {
                         if (lp.entry_stack_depth < lp.param_arity) return Error.AllocationMissing;
                         for (label_vregs) |v| if (v >= alloc.slots.len) return Error.AllocationMissing;

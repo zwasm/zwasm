@@ -79,17 +79,14 @@ pub fn takeResiduals() u32 {
 
 /// Compare the operand stack entering instr `pc`. Prints, counts and returns
 /// on a mismatch — the print is a diagnostic mirroring `ZWASM_DEBUG=regverify`,
-/// the count is the lane's (ADR-0226).
-///
-/// `labels` is the emit's own label stack; both arches' `Label` carries the
-/// same `kind` / `merge_captured` / `result_arity` / `param_arity` /
-/// `entry_stack_depth` fields, so `anytype` fits both without a shared type.
+/// the count is the lane's (ADR-0226). The two stacks compare as they stand:
+/// emitElse starts every else arm at the frame's base, as liveness's `.else`
+/// does.
 pub fn check(
     func: *const zir.ZirFunc,
     pc: usize,
     op: zir.ZirOp,
     pushed_vregs: []const u32,
-    labels: anytype,
 ) void {
     if (!compiled_in) return;
     const lv = func.liveness orelse return;
@@ -101,20 +98,6 @@ pub fn check(
         if (len == expect.len) return; // deeper than liveness can model
         expect[len] = v;
         len += 1;
-    }
-    // Delete each else-arm's captured merge vregs, outermost frame first —
-    // every deletion shifts the inner frames' recorded bases down by `removed`.
-    var removed: usize = 0;
-    for (labels) |lb| {
-        if (lb.kind != .else_open or !lb.merge_captured or lb.result_arity == 0) continue;
-        if (lb.param_arity != 0) continue; // emitElse already dropped them
-        const base: usize = @as(usize, lb.entry_stack_depth) -| @as(usize, lb.param_arity);
-        const at: usize = base -| removed;
-        const n: usize = lb.result_arity;
-        if (at + n > len) continue;
-        std.mem.copyForwards(u32, expect[at .. len - n], expect[at + n .. len]);
-        len -= n;
-        removed += n;
     }
 
     if (len == lv.stack_depth[pc] and digest(expect[0..len]) == lv.stack_digest[pc]) return;
