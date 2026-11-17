@@ -1,4 +1,4 @@
-/* zwasm v2 — C-API conformance: a GC heap-cap trap is OUT_OF_MEMORY (#361)
+/* zwasm v2 — C-API conformance: a GC heap-cap trap is OUT_OF_MEMORY (#361, #364)
  *
  *   (module
  *     (type $a (array (mut i32)))
@@ -9,9 +9,10 @@
  * The array asks for ~8 GiB, past the GC heap's 4 GiB cap. The condition is
  * an allocation failure, and the C surface reports it as
  * ZWASM_TRAP_OUT_OF_MEMORY — the same answer the Zig API gives — never as a
- * binding error, which would tell the host its own import wiring broke.
- * Interpreter only: the JIT does not trap on the cap at all (#364), and this
- * case grows a JIT lane when that lands.
+ * binding error, which would tell the host its own import wiring broke. Both
+ * engines report it: the interpreter since #361, the JIT since #364 (before
+ * which the JIT did not trap on the cap at all, returned a null ref and ran
+ * on).
  */
 
 #include <stdio.h>
@@ -29,44 +30,56 @@ static const uint8_t kGuest[] = {
     0x2a, 0x0b,
 };
 
+/* Instantiate `module` on `engine`, call `huge`, and require the trap kind to
+ * be ZWASM_TRAP_OUT_OF_MEMORY. Returns 0 on success, 1 on any mismatch. */
+static int check_engine(wasm_store_t* store, wasm_module_t* module, uint8_t engine, const char* label) {
+    wasm_extern_vec_t imports = { 0, NULL };
+    wasm_trap_t* itrap = NULL;
+    wasm_instance_t* instance = zwasm_instance_new_ex(store, module, &imports, &itrap, engine);
+    if (itrap) wasm_trap_delete(itrap);
+    if (!instance) { fprintf(stderr, "%s: instantiate failed\n", label); return 1; }
+
+    int rc = 1;
+    wasm_extern_vec_t exports = { 0, NULL };
+    wasm_instance_exports(instance, &exports);
+    if (exports.size < 1) { fprintf(stderr, "%s: missing export\n", label); goto done; }
+
+    wasm_val_t res[1];
+    wasm_val_vec_t no_args = { 0, NULL };
+    wasm_val_vec_t results = { 1, res };
+    wasm_trap_t* trap = wasm_func_call(wasm_extern_as_func(exports.data[0]), &no_args, &results);
+    if (!trap) { fprintf(stderr, "%s: huge did not trap\n", label); goto done; }
+    int32_t kind = zwasm_trap_kind(trap);
+    wasm_trap_delete(trap);
+    if (kind != ZWASM_TRAP_OUT_OF_MEMORY) {
+        fprintf(stderr, "%s: kind=%d, want ZWASM_TRAP_OUT_OF_MEMORY (%d)\n", label, (int) kind, ZWASM_TRAP_OUT_OF_MEMORY);
+        goto done;
+    }
+    printf("%s: gc heap cap -> OUT_OF_MEMORY — ok\n", label);
+    rc = 0;
+
+done:
+    wasm_extern_vec_delete(&exports);
+    wasm_instance_delete(instance);
+    return rc;
+}
+
 int main(void) {
     int rc = 1;
     wasm_engine_t* engine = wasm_engine_new();
     wasm_store_t* store = engine ? wasm_store_new(engine) : NULL;
     wasm_module_t* module = NULL;
-    wasm_instance_t* instance = NULL;
-    wasm_extern_vec_t exports = { 0, NULL };
     if (!engine || !store) { fputs("engine/store new failed\n", stderr); goto cleanup; }
 
     wasm_byte_vec_t binary = { sizeof(kGuest), (wasm_byte_t*) kGuest };
     module = wasm_module_new(store, &binary);
     if (!module) { fputs("wasm_module_new failed\n", stderr); goto cleanup; }
 
-    wasm_extern_vec_t imports = { 0, NULL };
-    wasm_trap_t* itrap = NULL;
-    instance = zwasm_instance_new_ex(store, module, &imports, &itrap, ZWASM_ENGINE_INTERP);
-    if (itrap) wasm_trap_delete(itrap);
-    if (!instance) { fputs("instantiate failed\n", stderr); goto cleanup; }
-    wasm_instance_exports(instance, &exports);
-    if (exports.size < 1) { fputs("missing export\n", stderr); goto cleanup; }
-
-    wasm_val_t res[1];
-    wasm_val_vec_t no_args = { 0, NULL };
-    wasm_val_vec_t results = { 1, res };
-    wasm_trap_t* trap = wasm_func_call(wasm_extern_as_func(exports.data[0]), &no_args, &results);
-    if (!trap) { fputs("huge did not trap\n", stderr); goto cleanup; }
-    int32_t kind = zwasm_trap_kind(trap);
-    wasm_trap_delete(trap);
-    if (kind != ZWASM_TRAP_OUT_OF_MEMORY) {
-        fprintf(stderr, "kind=%d, want ZWASM_TRAP_OUT_OF_MEMORY (%d)\n", (int) kind, ZWASM_TRAP_OUT_OF_MEMORY);
-        goto cleanup;
-    }
-    puts("gc heap cap → OUT_OF_MEMORY — ok");
+    if (check_engine(store, module, ZWASM_ENGINE_INTERP, "interp")) goto cleanup;
+    if (check_engine(store, module, ZWASM_ENGINE_JIT, "jit")) goto cleanup;
     rc = 0;
 
 cleanup:
-    wasm_extern_vec_delete(&exports);
-    if (instance) wasm_instance_delete(instance);
     if (module) wasm_module_delete(module);
     if (store) wasm_store_delete(store);
     if (engine) wasm_engine_delete(engine);

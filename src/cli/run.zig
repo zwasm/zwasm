@@ -318,6 +318,7 @@ fn setDeclineDiag(note: decline_note.Note, tail: []const u8) void {
         .overflow_words => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} overflow argument word{s}{s}", .{ note.op, n, if (n == 1) "" else "s", tail }),
         .simd_args => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} floating-point or vector arguments — more than the register bank carries{s}", .{ note.op, n, tail }),
         .memory_class_results => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with a {d}-result callee{s}", .{ note.op, n, tail }),
+        .v128_array_element => diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with a v128 element{s}", .{ note.op, tail }),
     }
 }
 

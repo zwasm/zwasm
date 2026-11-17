@@ -55,6 +55,7 @@ pub const InitArgs = struct {
     null_ref_fixups: *std.ArrayList(u32),
     cast_fail_fixups: *std.ArrayList(u32),
     uncaught_exc_fixups: *std.ArrayList(u32),
+    oom_fixups: *std.ArrayList(u32),
     oob_fixups: *std.ArrayList(u32),
     oobtable_fixups: *std.ArrayList(u32),
     cind_sig_fixups: *std.ArrayList(u32),
@@ -173,6 +174,10 @@ pub const EmitCtx = struct {
     /// the zwasm_throw trampoline returns `.uncaught`) fixups → code 12 =
     /// uncaught_exception. Was mis-routed to `unreach_fixups` (code 5).
     uncaught_exc_fixups: *std.ArrayList(u32),
+    /// #364 — a GC allocation helper returned 0 (`JE rel32`, 6-byte, on the
+    /// `TEST EAX,EAX` after the alloc CALL) → code 20 = out_of_memory. One per
+    /// array.new* / struct.new* emit.
+    oom_fixups: *std.ArrayList(u32),
     /// ADR-0164 A3 / D-292 — memory load/store/bulk-memory out-of-bounds
     /// (`JA rel32`, 6-byte) fixups, demuxed out of `bounds_fixups` so oob_memory
     /// reaches a dedicated trap stub recording code 6. Other `bounds_fixups`
@@ -398,6 +403,7 @@ pub const EmitCtx = struct {
             .null_ref_fixups = args.null_ref_fixups,
             .cast_fail_fixups = args.cast_fail_fixups,
             .uncaught_exc_fixups = args.uncaught_exc_fixups,
+            .oom_fixups = args.oom_fixups,
             .oob_fixups = args.oob_fixups,
             .bounds_elided = args.bounds_elided,
             .unaligned_atomic_fixups = args.unaligned_atomic_fixups,

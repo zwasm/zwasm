@@ -29,6 +29,10 @@ pub const Reason = union(enum) {
     simd_args: u32,
     /// The callee's result count, above the 2 that return in registers.
     memory_class_results: u32,
+    /// #364 — `array.new` with a v128 element: the fill marshals the init
+    /// through a general register, so a 16-byte element has no path (D-495).
+    /// The JIT declines rather than mis-marshalling; the interpreter runs it.
+    v128_array_element,
 };
 
 pub const Note = struct {

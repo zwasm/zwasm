@@ -170,6 +170,7 @@ pub fn jitTrapCode(code: u32) ?TrapKind {
         // (D-292) rather than absorbing traps the codegen never emitted.
         18 => .wasi_exit, // `wasi/jit_dispatch.zig` proc_exit
         19 => .binding_error, // `api/jit_host_bridge.zig` trapResult
+        20 => .out_of_memory, // #364 — GC alloc helper returned 0 (heap-cap / bad typeidx / unmaterialised substrate); both arches' GC-alloc emits
         else => null, // 0 unmarked / 1 generic — still-shared bounds kinds (D-293)
     };
 }
@@ -609,6 +610,10 @@ test "jitTrapCode: precise codes map to interp-parity kinds; generic bucket is n
     // bounds_fixups kinds (null_reference / cast_failure / array_oob; see D-293).
     try testing.expect(jitTrapCode(0) == null);
     try testing.expect(jitTrapCode(1) == null);
+    // #364 — a failed GC allocation on the JIT surfaces out_of_memory (code 20),
+    // the same kind the interp reaches through error.OutOfHeap.
+    try testing.expectEqual(TrapKind.out_of_memory, jitTrapCode(20).?);
+    try testing.expectEqual(TrapKind.out_of_memory, mapInterpTrap(error.OutOfHeap));
     // Precise codes reuse the interp message table — true parity.
     try testing.expectEqualStrings("indirect call type mismatch", trapMessageFor(jitTrapCode(3).?));
 }

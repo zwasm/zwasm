@@ -776,6 +776,9 @@ pub fn compile(
     // D-292 C — throw / throw_ref uncaught exception (code 12 = uncaught_exception).
     var uncaught_exc_fixups: std.ArrayList(u32) = .empty;
     defer uncaught_exc_fixups.deinit(allocator);
+    // #364 — GC allocation helper returned 0 (code 20 = out_of_memory).
+    var oom_fixups: std.ArrayList(u32) = .empty;
+    defer oom_fixups.deinit(allocator);
     // ADR-0164 A3 / D-292 — memory oob (code 6) demuxed from bounds_fixups.
     var oob_fixups: std.ArrayList(u32) = .empty;
     defer oob_fixups.deinit(allocator);
@@ -870,6 +873,7 @@ pub fn compile(
         .null_ref_fixups = &null_ref_fixups,
         .cast_fail_fixups = &cast_fail_fixups,
         .uncaught_exc_fixups = &uncaught_exc_fixups,
+        .oom_fixups = &oom_fixups,
         .oob_fixups = &oob_fixups,
         .unaligned_atomic_fixups = &unaligned_atomic_fixups,
         .back_edge_interrupt_fixups = &back_edge_interrupt_fixups,

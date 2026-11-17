@@ -142,6 +142,9 @@ pub const EmitCtx = struct {
     /// the trap stub after `zwasm_throw` returns `.uncaught` → code 12 =
     /// uncaught_exception) fixups, demuxed out of `bounds_fixups`.
     uncaught_exc_fixups: *std.ArrayList(u32),
+    /// #364 — GC allocation helper returned 0 (B.EQ on the W0 zero-check →
+    /// code 20 = out_of_memory) fixups, one per array.new* / struct.new* emit.
+    oom_fixups: *std.ArrayList(u32),
     /// ADR-0164 A3 / D-292 — memory load/store/bulk-memory out-of-bounds
     /// (B.HI → code 6) fixups, demuxed out of `bounds_fixups` so oob_memory
     /// reaches a dedicated trap stub. Other `bounds_fixups` kinds (oob_table /
