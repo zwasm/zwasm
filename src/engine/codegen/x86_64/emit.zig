@@ -1157,6 +1157,95 @@ pub fn compile(
                     }
                 }
             }
+            // Wasm 3.0 §3.3.10.6 (try_table) + §4.4.8 — a catch whose label is
+            // the function's own (target_labels_depth 0) is a `br` to the
+            // function body: the function returns the delivered values. This
+            // fires only at the function-level `end` (`end_pre_pop_depth == 0`,
+            // no enclosing block label), where `emitEndInter` has already laid
+            // the normal return. An outermost block's `end` also leaves `labels`
+            // empty after its pop, but its depth is 1, so it is excluded here and
+            // the function-label fixup stays pending until this true end. Append
+            // one pad per such clause, after the normal return so the
+            // fall-through never enters it, marshalling the payload into the ABI
+            // return registers and running the epilogue.
+            if (ins.op == .end and end_pre_pop_depth == 0 and landing_pad_fixups.items.len > 0) {
+                var i: usize = 0;
+                while (i < landing_pad_fixups.items.len) {
+                    const fx = landing_pad_fixups.items[i];
+                    if (fx.target_labels_depth != 0) {
+                        i += 1;
+                        continue;
+                    }
+                    const entry = &eh_builder.entries.items[fx.entry_idx];
+                    // This pad marshals into the register-class return ABI; a
+                    // memory-class / buffer-write return (> 2 results) wants the
+                    // indirect result buffer instead, so decline it to the interp.
+                    if (return_is_memory_class or buffer_write) return Error.UnsupportedOp;
+                    const clause_start: u32 = @intCast(buf.items.len);
+                    const is_ref = entry.kind == .catch_ref or entry.kind == .catch_all_ref;
+                    // The delivered values ARE the function's results, so marshal
+                    // the payload straight into the ABI return registers rather
+                    // than through the fall-through result vregs — those are dead
+                    // (unallocated) whenever the body reaches its end only by the
+                    // throw. Reg assignment mirrors `marshalReturnRegs`: results
+                    // in order, gpr {RAX,RDX} / xmm {XMM0,XMM1}, cap two per class.
+                    const gpr_result_regs = [_]abi.Gpr{ .rax, .rdx };
+                    const xmm_result_regs = [_]abi.Xmm{ .xmm0, .xmm1 };
+                    if (is_ref) {
+                        // Reify the exnref FIRST (the call clobbers caller-saved),
+                        // then move it from RAX to its return register before the
+                        // param loads overwrite RAX/RDX. It is the last result, a
+                        // ref, so its gpr index = the count of gpr-class params.
+                        try buf.appendSlice(allocator, inst.encMovRR(.q, abi.current.entry_arg0_gpr, abi.runtime_ptr_save_gpr).slice());
+                        try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.rax, abi.runtime_ptr_save_gpr, @intCast(jit_abi.reify_exnref_fn_off)).slice());
+                        try op_call.emitShadowAlloc(allocator, &buf, outgoing_max_bytes);
+                        try buf.appendSlice(allocator, inst.encCallReg(.rax).slice());
+                        try op_call.emitShadowFree(allocator, &buf, outgoing_max_bytes);
+                        var exn_gpr_idx: u8 = 0;
+                        if (entry.tag_idx) |t| for (ctx.tagParams(t)) |p| switch (p) {
+                            .i32, .i64, .ref => exn_gpr_idx += 1,
+                            else => {},
+                        };
+                        if (exn_gpr_idx < gpr_result_regs.len and gpr_result_regs[exn_gpr_idx] != abi.return_gpr) {
+                            try buf.appendSlice(allocator, inst.encMovRR(.q, gpr_result_regs[exn_gpr_idx], abi.return_gpr).slice());
+                        }
+                    }
+                    // No homed-local reload here (unlike the intra-block pad): the
+                    // function returns at once, so its locals are dead, and the
+                    // epilogue's callee-saved-home restore gives the caller its
+                    // registers back. The return regs are caller-saved, untouched.
+                    if (entry.kind == .catch_ or entry.kind == .catch_ref) {
+                        const tag_idx = entry.tag_idx orelse return Error.UnsupportedOp;
+                        var gpr_used: u8 = 0;
+                        var xmm_used: u8 = 0;
+                        for (ctx.tagParams(tag_idx), 0..) |param, k| {
+                            const off: i32 = @intCast(jit_abi.eh_payload_buf_off + k * 8);
+                            switch (param) {
+                                .f32, .f64 => {
+                                    // > 2 register-class results already declined above
+                                    // (return_is_memory_class), so the cap is never hit;
+                                    // decline rather than silently drop a result if it is.
+                                    if (xmm_used >= xmm_result_regs.len) return Error.UnsupportedOp;
+                                    const sse_kind: inst.SseScalarKind = if (param == .f32) .f32 else .f64;
+                                    try buf.appendSlice(allocator, inst.encMovssMovsdXmmMemBaseDisp32(sse_kind, false, xmm_result_regs[xmm_used], abi.runtime_ptr_save_gpr, off).slice());
+                                    xmm_used += 1;
+                                },
+                                .i32, .i64, .ref => {
+                                    if (gpr_used >= gpr_result_regs.len) return Error.UnsupportedOp;
+                                    try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(gpr_result_regs[gpr_used], abi.runtime_ptr_save_gpr, off).slice());
+                                    gpr_used += 1;
+                                },
+                                // v128 in an exception payload (8-byte slot) cannot
+                                // reach a 16-byte XMM return; decline to the interp.
+                                .v128 => return Error.UnsupportedOp,
+                            }
+                        }
+                    }
+                    try op_control.emitEpilogue(allocator, &buf, alloc, frame_bytes, uses_runtime_ptr, ctx.homing, home_save_base_disp);
+                    entry.landing_pad_pc = clause_start;
+                    _ = landing_pad_fixups.swapRemove(i);
+                }
+            }
             continue;
         }
         switch (ins.op) {
