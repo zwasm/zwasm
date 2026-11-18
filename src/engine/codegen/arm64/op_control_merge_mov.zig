@@ -1,18 +1,17 @@
-//! Parallel-move + merge-MOV helpers for ARM64 control-flow
-//! emit handlers — extracted from `op_control.zig` per ADR-0093.
+//! Merge-move helpers for ARM64 control-flow emit handlers —
+//! extracted from `op_control.zig` per ADR-0093.
 //!
-//! Private helper cluster: `ParallelMove` struct + cycle-aware
-//! batch resolver + per-move emitter + branch-merge capturer +
-//! arity unpacker. Used only by `op_control.zig`'s emit handlers
-//! (block / loop / br / br_if / br_table / if / else / end).
-//! Pub-ified for cross-file access; no external callers — pub
-//! surface bounded to op_control.zig's internal use.
-//!
-//! See lesson `2026-05-18-parallel-move-cycle-in-if-merge.md`
-//! (D-147) for the cycle-aware resolver design.
+//! Private helper cluster: the parallel assignment an edge makes into
+//! a merge (`emitMergeMoves`) + per-move emitter + branch-merge
+//! capturer + arity unpacker. Used only by `op_control.zig`'s emit
+//! handlers (block / loop / br / br_if / br_table / if / else / end)
+//! and the `br_on_*` ops. Pub-ified for cross-file access.
 //!
 //! Zone 2 (`src/engine/codegen/arm64/`).
 
+const std = @import("std");
+
+const zir = @import("../../../ir/zir.zig");
 const ctx_mod = @import("ctx.zig");
 const abi = @import("abi.zig");
 const inst = @import("inst.zig");
@@ -20,80 +19,134 @@ const inst_fp = @import("inst_fp.zig");
 const gpr = @import("gpr.zig");
 const inst_neon = @import("inst_neon.zig");
 const regalloc = @import("../shared/regalloc.zig");
+const parallel_move = @import("../shared/parallel_move.zig");
+const dbg = @import("../../../support/dbg.zig");
 
+const Allocator = std.mem.Allocator;
+const ZirFunc = zir.ZirFunc;
 const EmitCtx = ctx_mod.EmitCtx;
 const Error = ctx_mod.Error;
 
-const merge_top_vregs_cap: u8 = 8;
+/// The park registers a set of merge moves breaks a cycle through. Neither
+/// is in the regalloc pool or a spill stage (`emitMergeMov` stages through
+/// those), and a set runs between ops on the path that leaves for the merge,
+/// so nothing else holds them.
+const park_gpr: inst.Xn = 16;
+const park_v: inst.Vn = 31;
 
-/// D-147 / lesson `2026-05-18-parallel-move-cycle-in-if-merge.md`:
-/// resolve a batch of GPR register-to-register merge moves
-/// (cycle-aware), breaking any cycle via X16 (IP0; caller-saved,
-/// outside the regalloc pool and outside the `abi.spill_stage_gprs`
-/// X14/X15 cohort — safe scratch for the duration of the merge
-/// batch).
-///
-/// Algorithm: iterate until empty. At each step, find a LEAF (a
-/// pending move whose destination register is no other pending
-/// move's source). Emit it and remove. If no leaf exists →
-/// CYCLE: save one pending move's dst to X16, rewrite all pending
-/// sources that referred to that register to use X16 instead.
-/// Re-iterate (a leaf will now exist because the cycle is broken).
-///
-/// Cost: 1 extra MOV per cycle (regardless of cycle length).
-/// O(N²) loop is fine for N ≤ `merge_top_vregs_cap` = 8.
-// Same-file helper; not called outside this module (per ADR-0094 audit).
-fn resolveAndEmitMergeMovsRegBatch(ctx: *EmitCtx, moves: []ParallelMove) Error!void {
-    var pending: u32 = 0;
-    for (moves) |m| {
-        if (!m.done) pending += 1;
+comptime {
+    for (abi.allocatable_gprs ++ abi.spill_stage_gprs) |r| {
+        if (r == park_gpr) @compileError("park_gpr is a pool or spill-stage register");
     }
-    while (pending > 0) {
-        var leaf_idx: ?usize = null;
-        for (moves, 0..) |m, i| {
-            if (m.done) continue;
-            var has_user = false;
-            for (moves, 0..) |o, j| {
-                if (i == j or o.done) continue;
-                if (m.dst_reg == o.src_reg) {
-                    has_user = true;
-                    break;
-                }
-            }
-            if (!has_user) {
-                leaf_idx = i;
-                break;
-            }
-        }
-        if (leaf_idx) |idx| {
-            const m = moves[idx];
-            try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrReg(m.dst_reg, 31, m.src_reg));
-            moves[idx].done = true;
-            pending -= 1;
-        } else {
-            // Cycle. Save first pending move's dst to X16; rewrite
-            // any pending move whose src is that register to use X16.
-            for (moves, 0..) |m, i| {
-                if (m.done) continue;
-                const cycle_dst = m.dst_reg;
-                try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrReg(16, 31, cycle_dst));
-                for (moves, 0..) |o, j| {
-                    if (o.done or j == i) continue;
-                    if (o.src_reg == cycle_dst) moves[j].src_reg = 16;
-                }
-                break;
-            }
-            // No move removed this iteration; loop will find the leaf next.
-        }
+    for (abi.allocatable_v_regs ++ abi.fp_spill_stage_vregs) |r| {
+        if (r == park_v) @compileError("park_v is a pool or spill-stage register");
     }
 }
 
+/// The spill stages one merge move goes through: source, destination.
+const stage_src: u8 = 1;
+const stage_dst: u8 = 0;
+
+/// `emitMergeMov` picks the register class from the merge vreg, for both
+/// operands.
+fn mergeInV(alloc: regalloc.Allocation, func: *const ZirFunc, merge_vreg: u32) bool {
+    return alloc.shapeTag(merge_vreg) == .v128 or regalloc.vregClass(func, merge_vreg) == .fpr;
+}
+
+/// The place `vreg` lives in, as a `parallel_move` key: equal for one
+/// register or one spill cell, unequal otherwise.
+fn placeKey(alloc: regalloc.Allocation, vreg: u32, v: bool) Error!u64 {
+    return switch (alloc.slot(vreg, if (v) .fpr else .gpr)) {
+        .spill => |off| (2 << 32) | @as(u64, off),
+        .reg => |id| if (v)
+            (1 << 32) | @as(u64, abi.fpSlotToReg(id) orelse return Error.SlotOverflow)
+        else
+            abi.slotToReg(id) orelse return Error.SlotOverflow,
+    };
+}
+
+/// Move `srcs[i]` into `dsts[i]` for every i as one parallel assignment: no
+/// move reads a place an earlier one wrote. Every edge that delivers values
+/// to a merge (a frame's merge vregs, or the params of a loop or of an `if`
+/// with no else) moves them through here. Mirror of x86_64's
+/// `emitMergeMoves`.
+///
+/// Besides its destinations a set writes the park registers and the spill
+/// stages. `read_after` names a register the caller reads after the set, on
+/// the path that runs it (a branch condition it has not tested yet); a set
+/// that would write it is refused. A caller that has consumed its condition
+/// passes null: `br_on_null` hands `branchOnReg` its condition in X16, the
+/// GPR park, and `branchOnReg` tests it before any move.
 // SIBLING-PUB: op_control.zig (per ADR-0093 extraction)
-pub const ParallelMove = struct {
-    src_reg: inst.Xn,
-    dst_reg: inst.Xn,
-    done: bool,
-};
+pub fn emitMergeMoves(ctx: *EmitCtx, srcs: []const u32, dsts: []const u32, read_after: ?inst.Xn) Error!void {
+    return moveSet(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, ctx.func, srcs, dsts, read_after);
+}
+
+fn moveSet(
+    allocator: Allocator,
+    buf: *std.ArrayList(u8),
+    alloc: regalloc.Allocation,
+    spill_base_off: u32,
+    func: *const ZirFunc,
+    srcs: []const u32,
+    dsts: []const u32,
+    read_after: ?inst.Xn,
+) Error!void {
+    var from: [parallel_move.cap]u32 = undefined;
+    var to: [parallel_move.cap]u32 = undefined;
+    var src_keys: [parallel_move.cap]u64 = undefined;
+    var dst_keys: [parallel_move.cap]u64 = undefined;
+    var n: usize = 0;
+    for (srcs, dsts) |src, dst| {
+        if (src == dst) continue;
+        const v = mergeInV(alloc, func, dst);
+        const src_key = try placeKey(alloc, src, v);
+        const dst_key = try placeKey(alloc, dst, v);
+        if (src_key == dst_key) continue;
+        if (n == parallel_move.cap) {
+            dbg.print("codegen", "arm64/op_control_merge_mov: more than {d} merge moves in one set\n", .{parallel_move.cap});
+            return Error.UnsupportedOp;
+        }
+        from[n] = src;
+        to[n] = dst;
+        src_keys[n] = src_key;
+        dst_keys[n] = dst_key;
+        n += 1;
+    }
+    if (n == 0) return;
+    if (read_after) |r| {
+        if (r == park_gpr or std.mem.findScalar(inst.Xn, &abi.spill_stage_gprs, r) != null or
+            std.mem.findScalar(u64, dst_keys[0..n], r) != null)
+        {
+            dbg.print("codegen", "arm64/op_control_merge_mov: merge moves would write X{d}, read after them\n", .{r});
+            return Error.UnsupportedOp;
+        }
+    }
+    var steps_buf: [2 * parallel_move.cap]parallel_move.Step = undefined;
+    const steps = parallel_move.schedule(src_keys[0..n], dst_keys[0..n], &steps_buf) catch |err| switch (err) {
+        error.RepeatedDestination, error.ParkHeld => {
+            dbg.print("codegen", "arm64/op_control_merge_mov: merge moves are not a parallel assignment ({s})\n", .{@errorName(err)});
+            return Error.UnsupportedOp;
+        },
+    };
+    var parked: [parallel_move.cap]bool = @splat(false);
+    for (steps) |step| switch (step) {
+        .park => |i| {
+            if (alloc.shapeTag(to[i]) == .v128) {
+                const src_v = try gpr.qLoadSpilled(allocator, buf, alloc, spill_base_off, from[i], stage_src);
+                try gpr.writeU32(allocator, buf, inst_neon.encMovV16B(park_v, src_v));
+            } else if (mergeInV(alloc, func, to[i])) {
+                const src_v = try gpr.fpLoadSpilled(allocator, buf, alloc, spill_base_off, from[i], stage_src);
+                try gpr.writeU32(allocator, buf, inst_fp.encFmovDReg(park_v, src_v));
+            } else {
+                const src_r = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, from[i], stage_src);
+                try gpr.writeU32(allocator, buf, inst.encOrrReg(park_gpr, 31, src_r));
+            }
+            parked[i] = true;
+        },
+        .move => |i| try emitMergeMov(allocator, buf, alloc, spill_base_off, func, if (parked[i]) null else from[i], to[i]),
+    };
+}
 
 /// D-097 (ADR-0060 follow-up): unified merge-MOV dispatcher.
 ///
@@ -114,34 +167,38 @@ pub const ParallelMove = struct {
 /// register pool so concurrent loads + defs of the same class
 /// never alias (R10/R11 on x86_64, X14/X15 on arm64; V29/V30
 /// for FP / v128 stage on arm64; XMM14/XMM15 on x86_64).
-// SIBLING-PUB: op_control.zig (per ADR-0093 extraction)
-pub fn emitMergeMov(
-    ctx: *EmitCtx,
-    src_vreg: u32,
+///
+/// One move of an `emitMergeMoves` set; a null `src_vreg` reads the park
+/// register.
+fn emitMergeMov(
+    allocator: Allocator,
+    buf: *std.ArrayList(u8),
+    alloc: regalloc.Allocation,
+    spill_base_off: u32,
+    func: *const ZirFunc,
+    src_vreg: ?u32,
     merge_vreg: u32,
-    stage_src: u8,
-    stage_dst: u8,
 ) Error!void {
-    if (ctx.alloc.shapeTag(merge_vreg) == .v128) {
-        const src_v = try gpr.qLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, stage_src);
-        const merge_v = try gpr.qDefSpilled(ctx.alloc, merge_vreg, stage_dst);
+    if (alloc.shapeTag(merge_vreg) == .v128) {
+        const src_v = if (src_vreg) |v| try gpr.qLoadSpilled(allocator, buf, alloc, spill_base_off, v, stage_src) else park_v;
+        const merge_v = try gpr.qDefSpilled(alloc, merge_vreg, stage_dst);
         if (merge_v != src_v) {
-            try gpr.writeU32(ctx.allocator, ctx.buf, inst_neon.encMovV16B(merge_v, src_v));
+            try gpr.writeU32(allocator, buf, inst_neon.encMovV16B(merge_v, src_v));
         }
-        try gpr.qStoreSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, merge_vreg, stage_dst);
+        try gpr.qStoreSpilled(allocator, buf, alloc, spill_base_off, merge_vreg, stage_dst);
         return;
     }
-    if (regalloc.vregClass(ctx.func, merge_vreg) == .fpr) {
-        const src_v = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, stage_src);
-        const merge_v = try gpr.fpDefSpilled(ctx.alloc, merge_vreg, stage_dst);
+    if (regalloc.vregClass(func, merge_vreg) == .fpr) {
+        const src_v = if (src_vreg) |v| try gpr.fpLoadSpilled(allocator, buf, alloc, spill_base_off, v, stage_src) else park_v;
+        const merge_v = try gpr.fpDefSpilled(alloc, merge_vreg, stage_dst);
         if (merge_v != src_v) {
-            try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovDReg(merge_v, src_v));
+            try gpr.writeU32(allocator, buf, inst_fp.encFmovDReg(merge_v, src_v));
         }
-        try gpr.fpStoreSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, merge_vreg, stage_dst);
+        try gpr.fpStoreSpilled(allocator, buf, alloc, spill_base_off, merge_vreg, stage_dst);
         return;
     }
-    const src_r = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, src_vreg, stage_src);
-    const merge_r = try gpr.gprDefSpilled(ctx.alloc, merge_vreg, stage_dst);
+    const src_r = if (src_vreg) |v| try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, v, stage_src) else park_gpr;
+    const merge_r = try gpr.gprDefSpilled(alloc, merge_vreg, stage_dst);
     if (merge_r != src_r) {
         // X-form (64-bit) ORR — preserves all 64 bits. W-form would
         // truncate upper 32 bits on i64 vregs; for i32 the upper
@@ -151,9 +208,9 @@ pub fn emitMergeMov(
         // wrong for i64. The implicit-else path had to
         // re-derive the same fix locally; the unified merge
         // helper now applies it everywhere.)
-        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrReg(merge_r, 31, src_r));
+        try gpr.writeU32(allocator, buf, inst.encOrrReg(merge_r, 31, src_r));
     }
-    try gpr.gprStoreSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, merge_vreg, stage_dst);
+    try gpr.gprStoreSpilled(allocator, buf, alloc, spill_base_off, merge_vreg, stage_dst);
 }
 
 /// Block-merge mechanism for forward `br` / `br_if` to a
@@ -181,7 +238,7 @@ pub fn emitMergeMov(
 /// No-op when the target is not `.block` or `result_arity ==
 /// 0` (legacy single-arm shapes).
 // SIBLING-PUB: op_control.zig, br_on_null.zig, br_on_non_null.zig (per ADR-0093 extraction; ops/wasm_3_0/br_on_null.zig sibling — same merge semantics for the null-branch path; br_on_non_null.zig — label expects k+1 values including the ref)
-pub fn captureOrEmitBlockMergeMov(ctx: *EmitCtx, tgt_idx: usize) Error!bool {
+pub fn captureOrEmitBlockMergeMov(ctx: *EmitCtx, tgt_idx: usize, read_after: ?inst.Xn) Error!bool {
     const arity: u32 = ctx.labels.items[tgt_idx].result_arity;
     if (arity == 0) return false;
     // D-096: br inside if-arm targets the if-frame. The br
@@ -205,68 +262,7 @@ pub fn captureOrEmitBlockMergeMov(ctx: *EmitCtx, tgt_idx: usize) Error!bool {
     }
 
     const base = ctx.pushed_vregs.items.len - arity;
-    // D-147 / lesson `2026-05-18-parallel-move-cycle-in-if-merge.md`:
-    // if all moves are GPR reg-to-reg (no FP / v128 / spilled
-    // participants), route them through the parallel-move resolver
-    // so cyclic dependencies via LIFO slot reuse don't clobber
-    // still-needed sources. Otherwise fall back to per-move
-    // sequential emit (existing behaviour; FP / spill paths
-    // historically passed because their cycle patterns weren't
-    // exercised by the spec corpus).
-    var moves_buf: [merge_top_vregs_cap]ParallelMove = undefined;
-    var n_moves: u32 = 0;
-    var all_gpr_reg_to_reg = true;
-    {
-        var k: u32 = 0;
-        while (k < arity) : (k += 1) {
-            const src_vreg = ctx.pushed_vregs.items[base + k];
-            const merge_vreg = ctx.labels.items[tgt_idx].merge_top_vregs[k];
-            if (src_vreg == merge_vreg) continue;
-            if (ctx.alloc.shapeTag(merge_vreg) == .v128) {
-                all_gpr_reg_to_reg = false;
-                break;
-            }
-            if (regalloc.vregClass(ctx.func, merge_vreg) == .fpr) {
-                all_gpr_reg_to_reg = false;
-                break;
-            }
-            const src_slot = ctx.alloc.slot(src_vreg, .gpr);
-            const merge_slot = ctx.alloc.slot(merge_vreg, .gpr);
-            const src_reg: inst.Xn = switch (src_slot) {
-                .reg => |id| abi.slotToReg(id) orelse {
-                    all_gpr_reg_to_reg = false;
-                    break;
-                },
-                .spill => {
-                    all_gpr_reg_to_reg = false;
-                    break;
-                },
-            };
-            const dst_reg: inst.Xn = switch (merge_slot) {
-                .reg => |id| abi.slotToReg(id) orelse {
-                    all_gpr_reg_to_reg = false;
-                    break;
-                },
-                .spill => {
-                    all_gpr_reg_to_reg = false;
-                    break;
-                },
-            };
-            if (src_reg == dst_reg) continue;
-            moves_buf[n_moves] = .{ .src_reg = src_reg, .dst_reg = dst_reg, .done = false };
-            n_moves += 1;
-        }
-    }
-    if (all_gpr_reg_to_reg) {
-        try resolveAndEmitMergeMovsRegBatch(ctx, moves_buf[0..n_moves]);
-    } else {
-        var i: u32 = 0;
-        while (i < arity) : (i += 1) {
-            const src_vreg = ctx.pushed_vregs.items[base + i];
-            const merge_vreg = ctx.labels.items[tgt_idx].merge_top_vregs[i];
-            try emitMergeMov(ctx, src_vreg, merge_vreg, 1, 0);
-        }
-    }
+    try emitMergeMoves(ctx, ctx.pushed_vregs.items[base..][0..arity], ctx.labels.items[tgt_idx].merge_top_vregs[0..arity], read_after);
     return true;
 }
 
@@ -279,4 +275,95 @@ pub fn unpackBlockArity(extra: u32) struct { params: u8, results: u8 } {
         .params = @intCast((extra >> 8) & 0xFF),
         .results = @intCast(extra & 0xFF),
     };
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+const testing = std.testing;
+
+fn funcWithClasses(classes: []const zir.RegClass) ZirFunc {
+    var f = ZirFunc.init(0, .{ .params = &.{}, .results = &.{} }, &.{});
+    f.liveness = .{ .classes = classes };
+    return f;
+}
+
+fn expectWords(want: []const u32, got: []const u8) !void {
+    try testing.expectEqual(want.len * 4, got.len);
+    for (want, 0..) |w, i| try testing.expectEqual(w, std.mem.readInt(u32, got[i * 4 ..][0..4], .little));
+}
+
+test "moveSet: two GPRs that trade places go through X16" {
+    var f = funcWithClasses(&.{ .gpr, .gpr });
+    defer f.deinit(testing.allocator);
+    const alloc: regalloc.Allocation = .{ .slots = &.{ 0, 1 }, .n_slots = 2 };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try moveSet(testing.allocator, &buf, alloc, 32, &f, &.{ 0, 1 }, &.{ 1, 0 }, null);
+
+    const a = abi.allocatable_gprs[0];
+    const b = abi.allocatable_gprs[1];
+    try expectWords(&.{
+        inst.encOrrReg(16, 31, b),
+        inst.encOrrReg(b, 31, a),
+        inst.encOrrReg(a, 31, 16),
+    }, buf.items);
+}
+
+test "moveSet: two spilled f64s that trade places go through V31" {
+    var f = funcWithClasses(&.{ .fpr, .fpr });
+    defer f.deinit(testing.allocator);
+    // Slot ids 13 and 14 are past the thirteen V homes: spill cells at 80 and 96.
+    const alloc: regalloc.Allocation = .{ .slots = &.{ 13, 14 }, .n_slots = 15 };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try moveSet(testing.allocator, &buf, alloc, 32, &f, &.{ 0, 1 }, &.{ 1, 0 }, null);
+
+    try expectWords(&.{
+        inst.encLdrDImm(30, 31, 128),
+        inst_fp.encFmovDReg(31, 30),
+        inst.encLdrDImm(30, 31, 112),
+        inst_fp.encFmovDReg(29, 30),
+        inst.encStrDImm(29, 31, 128),
+        inst_fp.encFmovDReg(29, 31),
+        inst.encStrDImm(29, 31, 112),
+    }, buf.items);
+}
+
+test "moveSet: two spilled v128s that trade places go through V31" {
+    var f = funcWithClasses(&.{ .simd, .simd });
+    defer f.deinit(testing.allocator);
+    const alloc: regalloc.Allocation = .{ .slots = &.{ 13, 14 }, .n_slots = 15, .shape_tags = &.{ .v128, .v128 } };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try moveSet(testing.allocator, &buf, alloc, 32, &f, &.{ 0, 1 }, &.{ 1, 0 }, null);
+
+    try expectWords(&.{
+        inst_neon.encLdrQImm(30, 31, 128),
+        inst_neon.encMovV16B(31, 30),
+        inst_neon.encLdrQImm(30, 31, 112),
+        inst_neon.encMovV16B(29, 30),
+        inst_neon.encStrQImm(29, 31, 128),
+        inst_neon.encMovV16B(29, 31),
+        inst_neon.encStrQImm(29, 31, 112),
+    }, buf.items);
+}
+
+test "moveSet: a set that would write a register the caller reads after it is refused" {
+    var f = funcWithClasses(&.{ .gpr, .gpr });
+    defer f.deinit(testing.allocator);
+    const alloc: regalloc.Allocation = .{ .slots = &.{ 0, 1 }, .n_slots = 2 };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    // The park, the spill stages, and the destination's own register.
+    for ([_]inst.Xn{ park_gpr, abi.allocatable_gprs[1] } ++ abi.spill_stage_gprs) |written| {
+        try testing.expectError(Error.UnsupportedOp, moveSet(testing.allocator, &buf, alloc, 32, &f, &.{0}, &.{1}, written));
+    }
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
+    // A set with nothing to move writes nothing; a register outside the set is not written.
+    try moveSet(testing.allocator, &buf, alloc, 32, &f, &.{ 0, 1 }, &.{ 0, 1 }, park_gpr);
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
+    try moveSet(testing.allocator, &buf, alloc, 32, &f, &.{0}, &.{1}, abi.allocatable_gprs[2]);
+    try testing.expect(buf.items.len > 0);
 }

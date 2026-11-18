@@ -14,7 +14,10 @@
 //! on every engine (#739). A block that closes short of its f64 result
 //! before any vreg exists traps on every engine (#399). An `if` with no else
 //! whose then arm branches to the `if`'s own label gives its params on cond=0
-//! and the branch's values on cond=1, on every engine.
+//! and the branch's values on cond=1, on every engine. Two edges into one
+//! merge whose values sit in each other's places each deliver their own
+//! values: a block's and an `if`'s on every engine, a loop's on the JIT;
+//! the edge may be a `br_on_*`.
 //!
 //! Usage: `zig build test-cli-usage` /
 //!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>
@@ -24,9 +27,11 @@
 //!         <catch_to_loop_ref_result.wasm> <catch_to_loop_params.wasm>
 //!         <catch_to_loop_unset_params.wasm> <if_dead_then_arm.wasm>
 //!         <short_frame_f64.wasm> <if_branch_own_label.wasm> <catch_to_func.wasm>
-//!         <catch_all_to_func.wasm>`
+//!         <catch_all_to_func.wasm> <merge_moves.wasm> <merge_moves_v128.wasm>
+//!         <merge_moves_br_on.wasm> <merge_moves_br_on_null_loop.wasm>`
 
 const std = @import("std");
+const builtin = @import("builtin");
 const spawned_cli = @import("spawned_cli");
 
 const Match = union(enum) {
@@ -55,8 +60,11 @@ const Row = struct {
 /// the JIT declines, #596's select, a 5 s sleep in `poll_oneoff`, #618's
 /// `(f32) -> (i32 i32 i32)`, a Rust wasip2 TCP client, #369's catch clauses
 /// that target a loop (without params, with a result, with params, and with a
-/// param the stack never held a value for), #739's two `if`s, #399's block, and
-/// an `if` with no else whose then arm branches to its own label.
+/// param the stack never held a value for), #739's two `if`s, #399's block,
+/// an `if` with no else whose then arm branches to its own label, two catch
+/// clauses that target the function's label, and frames whose edges deliver
+/// values that sit in each other's places (the v128 loop in a module of its
+/// own, and the `br_on_*` edges in two more).
 const M = "<module>";
 const E = "<argv_echo>";
 const S = "<simd_op>";
@@ -74,7 +82,11 @@ const B = "<short_frame>";
 const O = "<if_branch_own_label>";
 const C = "<catch_to_func>";
 const A = "<catch_all_to_func>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A };
+const G = "<merge_moves>";
+const W = "<merge_moves_v128>";
+const K = "<merge_moves_br_on>";
+const N = "<merge_moves_br_on_null_loop>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -86,6 +98,23 @@ fn onEngines(comptime engines: []const []const []const u8, comptime module: []co
     for (engines, &r) |e, *row| row.* = .{ .args = &(.{"run"} ++ e[0..e.len].* ++ .{ "--invoke", name, module }), .exit = 0, .stdout = .{ .is = out } };
     return r;
 }
+
+/// `onEngines` for each `{ invocation, output }` of `list`.
+fn eachOn(comptime engines: []const []const []const u8, comptime module: []const u8, comptime list: []const [2][]const u8) [engines.len * list.len]Row {
+    var r: [engines.len * list.len]Row = undefined;
+    for (list, 0..) |c, i| r[i * engines.len ..][0..engines.len].* = onEngines(engines, module, c[0], c[1]);
+    return r;
+}
+
+/// `merge_moves_br_on_null_loop`: the same back edge as a `br_on_null`,
+/// whose condition arm64 holds in the register the moves park in. The x86_64
+/// JIT declines `br_on_null` to a loop.
+const null_loop_rows = if (builtin.cpu.arch == .x86_64) [_]Row{
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "null_loop=1", N }, .exit = 1, .stderr = .{ .has = "UnsupportedOp" } },
+} else eachOn(jit_engines, N, &.{
+    .{ "null_loop=1", "292236\n" },     .{ "null_loop=0", "223629\n" },
+    .{ "null_loop_f64=1", "292236\n" }, .{ "null_loop_f64=0", "223629\n" },
+});
 
 const rows = [_]Row{
     .{ .args = &.{ "run", "--bogus", M }, .exit = 2, .stderr = .{ .has = "unknown option '--bogus'" } },
@@ -160,7 +189,55 @@ const rows = [_]Row{
     // payload (77); the `catch_all` form returns with no values (exit 0, no
     // output).
     onEngines(&all_engines, C, "D1", "77\n") ++
-    onEngines(&all_engines, A, "D1", "") ++ [_]Row{
+    onEngines(&all_engines, A, "D1", "") ++
+    // `merge_moves`: each export folds its frame's results as r0 + 100*r1
+    // (+ 10000*r2). A block's fall-through leaves [22 29 36] where its
+    // `br_if` carries [29 36 57]; the same with two f64s.
+    onEngines(&all_engines, G, "block=0", "362922\n") ++
+    onEngines(&all_engines, G, "block=1", "573629\n") ++
+    onEngines(&all_engines, G, "block_f64=0", "2922\n") ++
+    onEngines(&all_engines, G, "block_f64=1", "5729\n") ++
+    // A then arm reaches `else` with [22 29] after its `br_if` carried [29 57].
+    onEngines(&all_engines, G, "if_then=1,0", "2922\n") ++
+    onEngines(&all_engines, G, "if_then=1,1", "5729\n") ++
+    // An else arm reaches `end` with [29 57] where the then arm's `br_if`
+    // carries [22 29].
+    onEngines(&all_engines, G, "if_else=0,0", "5729\n") ++
+    onEngines(&all_engines, G, "if_else=1,1", "2922\n") ++
+    // An else arm's `br_if` carries [22 29] where the then arm's `br` carries
+    // [29 57], as f64.
+    onEngines(&all_engines, G, "if_f64=0,1", "2922\n") ++
+    onEngines(&all_engines, G, "if_f64=1,0", "5729\n") ++
+    // A loop's back edge carries [29 57] into its params [22 29]; then one
+    // that carries the params back in each other's place, as i32 and as v128.
+    onEngines(jit_engines, G, "loop=1", "5729\n") ++
+    onEngines(jit_engines, G, "loop=0", "2922\n") ++
+    onEngines(jit_engines, G, "loop_swap=1", "2922\n") ++
+    onEngines(jit_engines, G, "loop_swap=0", "2229\n") ++
+    onEngines(jit_engines, W, "loop_swap=1", "2922\n") ++
+    onEngines(jit_engines, W, "loop_swap=0", "2229\n") ++
+    // `merge_moves_br_on`: a `br_on_*` is the edge. Into a block (c, n): taken
+    // (0,1) it carries [22 29 ..] into the merge a `br_if` named with
+    // [29 57 ..]; not taken (0,0) the body leaves [3 4 ..]. A null reference
+    // result adds 1000000.
+    eachOn(&all_engines, K, &.{
+        .{ "null_block=0,1", "2922\n" },             .{ "null_block=0,0", "403\n" },
+        .{ "non_null_block=0,1", "2922\n" },         .{ "non_null_block=0,0", "1000403\n" },
+        .{ "cast_block=0,1", "2922\n" },             .{ "cast_block=0,0", "1000403\n" },
+        .{ "cast_fail_block=0,1", "1002922\n" },     .{ "cast_fail_block=0,0", "403\n" },
+        .{ "null_block_f64=0,1", "2922\n" },         .{ "null_block_f64=0,0", "403\n" },
+        .{ "non_null_block_f64=0,1", "2922\n" },     .{ "non_null_block_f64=0,0", "1000403\n" },
+        .{ "cast_block_f64=0,1", "2922\n" },         .{ "cast_block_f64=0,0", "1000403\n" },
+        .{ "cast_fail_block_f64=0,1", "1002922\n" }, .{ "cast_fail_block_f64=0,0", "403\n" },
+    }) ++
+    // As a loop's back edge, taken once (1) or not (0), it carries
+    // [22 29 36] back rotated by one; the moves form a cycle.
+    eachOn(jit_engines, K, &.{
+        .{ "cast_loop=1", "1292236\n" },         .{ "cast_loop=0", "1223629\n" },
+        .{ "cast_fail_loop=1", "292236\n" },     .{ "cast_fail_loop=0", "223629\n" },
+        .{ "cast_loop_f64=1", "1292236\n" },     .{ "cast_loop_f64=0", "1223629\n" },
+        .{ "cast_fail_loop_f64=1", "292236\n" }, .{ "cast_fail_loop_f64=0", "223629\n" },
+    }) ++ null_loop_rows ++ [_]Row{
     // The pad's back-edge poll stops a loop re-entered only through its catch;
     // without it the run ends after 10^8 iterations and prints the count.
     .{ .args = &.{ "run", "--timeout", "500", "--engine", "jit", "--invoke", "catch_all_spin=100000000", L }, .exit = 1, .stderr = .{ .has = "interrupted" } },

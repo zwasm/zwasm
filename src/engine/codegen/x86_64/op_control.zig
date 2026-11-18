@@ -27,6 +27,7 @@ const std = @import("std");
 
 const zir = @import("../../../ir/zir.zig");
 const regalloc = @import("../shared/regalloc.zig");
+const parallel_move = @import("../shared/parallel_move.zig");
 const ctx_mod = @import("ctx.zig");
 const inst = @import("inst.zig");
 const rbp_disp = @import("rbp_disp.zig");
@@ -112,84 +113,134 @@ pub fn emitLoopCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!void {
 /// `arm64/op_control.zig:merge_top_vregs_cap`.
 const merge_top_vregs_cap: u8 = 8;
 
-/// D-147 / lesson `2026-05-18-parallel-move-cycle-in-if-merge.md`:
-/// x86_64 mirror of arm64's `resolveAndEmitMergeMovsRegBatch`.
-/// Resolves a batch of GPR register-to-register merge moves with
-/// cycle detection; breaks cycles via **RAX** (caller-saved return
-/// reg, outside both the regalloc pool and `abi.spill_stage_gprs`
-/// R10/R11 — safe scratch for the duration of the merge batch
-/// since no calls fire between MOVs). Algorithm + correctness
-/// argument identical to the arm64 helper.
-fn resolveAndEmitMergeMovsRegBatchX86(
-    allocator: Allocator,
-    buf: *std.ArrayList(u8),
-    moves: []ParallelMoveX86,
-) Error!void {
-    var pending: u32 = 0;
-    for (moves) |m| {
-        if (!m.done) pending += 1;
+comptime {
+    // A label's values are one `emitMergeMoves` set.
+    std.debug.assert(merge_top_vregs_cap <= parallel_move.cap);
+}
+
+/// The park registers a set of merge moves breaks a cycle through. Neither
+/// is in the regalloc pool or a spill stage (`emitMergeMov` stages through
+/// those), and a set runs between ops on the path that leaves for the merge,
+/// so nothing else holds them.
+const park_gpr: abi.Gpr = .rax;
+const park_xmm: abi.Xmm = .xmm7;
+
+comptime {
+    for (abi.allocatable_gprs ++ abi.spill_stage_gprs) |r| {
+        if (r == park_gpr) @compileError("park_gpr is a pool or spill-stage register");
     }
-    while (pending > 0) {
-        var leaf_idx: ?usize = null;
-        for (moves, 0..) |m, i| {
-            if (m.done) continue;
-            var has_user = false;
-            for (moves, 0..) |o, j| {
-                if (i == j or o.done) continue;
-                if (m.dst_reg == o.src_reg) {
-                    has_user = true;
-                    break;
-                }
-            }
-            if (!has_user) {
-                leaf_idx = i;
-                break;
-            }
-        }
-        if (leaf_idx) |idx| {
-            const m = moves[idx];
-            try buf.appendSlice(allocator, inst.encMovRR(.q, m.dst_reg, m.src_reg).slice());
-            moves[idx].done = true;
-            pending -= 1;
-        } else {
-            // Cycle. Save first pending move's dst to RAX; rewrite
-            // any pending move whose src is that register to use RAX.
-            for (moves, 0..) |m, i| {
-                if (m.done) continue;
-                const cycle_dst = m.dst_reg;
-                try buf.appendSlice(allocator, inst.encMovRR(.q, .rax, cycle_dst).slice());
-                for (moves, 0..) |o, j| {
-                    if (o.done or j == i) continue;
-                    if (o.src_reg == cycle_dst) moves[j].src_reg = .rax;
-                }
-                break;
-            }
-        }
+    for (abi.allocatable_xmms ++ abi.fp_spill_stage_xmms) |r| {
+        if (r == park_xmm) @compileError("park_xmm is a pool or spill-stage register");
     }
 }
 
-const ParallelMoveX86 = struct {
-    src_reg: abi.Gpr,
-    dst_reg: abi.Gpr,
-    done: bool,
-};
+/// `emitMergeMov` picks the register class from the merge vreg, for both
+/// operands.
+fn mergeInXmm(alloc: regalloc.Allocation, func: *const ZirFunc, merge_vreg: u32) bool {
+    return alloc.shapeTag(merge_vreg) == .v128 or regalloc.vregClass(func, merge_vreg) == .fpr;
+}
+
+/// The place `vreg` lives in, as a `parallel_move` key: equal for one
+/// register or one spill cell, unequal otherwise.
+fn placeKey(alloc: regalloc.Allocation, vreg: u32, xmm: bool) Error!u64 {
+    return switch (alloc.slot(vreg, if (xmm) .fpr else .gpr)) {
+        .spill => |off| (2 << 32) | @as(u64, off),
+        .reg => |id| if (xmm)
+            (1 << 32) | @as(u64, @backingInt(abi.fpSlotToReg(id) orelse return Error.SlotOverflow))
+        else
+            @backingInt(abi.slotToReg(id) orelse return Error.SlotOverflow),
+    };
+}
+
+/// Move `srcs[i]` into `dsts[i]` for every i as one parallel assignment: no
+/// move reads a place an earlier one wrote. Every edge that delivers values
+/// to a merge (a frame's merge vregs, or the params of a loop or of an `if`
+/// with no else) moves them through here. Mirror of arm64's `emitMergeMoves`.
+///
+/// Besides its destinations a set writes the park registers and the spill
+/// stages. `read_after` names a register the caller reads after the set, on
+/// the path that runs it (a branch condition it has not tested yet); a set
+/// that would write it is refused. A caller that has consumed its condition
+/// passes null: `br_on_cast` hands `branchOnReg` its condition in RAX, the
+/// GPR park, and `branchOnReg` tests it before any move.
+fn emitMergeMoves(
+    allocator: Allocator,
+    buf: *std.ArrayList(u8),
+    alloc: regalloc.Allocation,
+    spill_base_off: u32,
+    func: *const ZirFunc,
+    srcs: []const u32,
+    dsts: []const u32,
+    read_after: ?abi.Gpr,
+) Error!void {
+    var from: [parallel_move.cap]u32 = undefined;
+    var to: [parallel_move.cap]u32 = undefined;
+    var src_keys: [parallel_move.cap]u64 = undefined;
+    var dst_keys: [parallel_move.cap]u64 = undefined;
+    var n: usize = 0;
+    for (srcs, dsts) |src, dst| {
+        if (src == dst) continue;
+        const xmm = mergeInXmm(alloc, func, dst);
+        const src_key = try placeKey(alloc, src, xmm);
+        const dst_key = try placeKey(alloc, dst, xmm);
+        if (src_key == dst_key) continue;
+        if (n == parallel_move.cap) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:merge-moves-full", 0);
+        from[n] = src;
+        to[n] = dst;
+        src_keys[n] = src_key;
+        dst_keys[n] = dst_key;
+        n += 1;
+    }
+    if (n == 0) return;
+    if (read_after) |r| {
+        if (r == park_gpr or std.mem.findScalar(abi.Gpr, &abi.spill_stage_gprs, r) != null or
+            std.mem.findScalar(u64, dst_keys[0..n], @backingInt(r)) != null)
+        {
+            return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:merge-moves-write-read-after", 0);
+        }
+    }
+    var steps_buf: [2 * parallel_move.cap]parallel_move.Step = undefined;
+    const steps = parallel_move.schedule(src_keys[0..n], dst_keys[0..n], &steps_buf) catch |err| switch (err) {
+        error.RepeatedDestination => return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:merge-moves-repeated-destination", 0),
+        error.ParkHeld => return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:merge-moves-park-held", 0),
+    };
+    var parked: [parallel_move.cap]bool = @splat(false);
+    for (steps) |step| switch (step) {
+        .park => |i| {
+            if (mergeInXmm(alloc, func, to[i])) {
+                const x = if (alloc.shapeTag(to[i]) == .v128)
+                    try gpr.xmmLoadSpilledV128(allocator, buf, alloc, spill_base_off, from[i], 0)
+                else
+                    try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, from[i], 0);
+                try buf.appendSlice(allocator, inst.encMovapsXmmXmm(park_xmm, x).slice());
+            } else {
+                const r = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, from[i], 0);
+                try buf.appendSlice(allocator, inst.encMovRR(.q, park_gpr, r).slice());
+            }
+            parked[i] = true;
+        },
+        .move => |i| try emitMergeMov(allocator, buf, alloc, spill_base_off, func, if (parked[i]) null else from[i], to[i]),
+    };
+}
 
 /// D-097 / d-17: unified merge-MOV dispatcher (x86_64 counterpart
 /// of `arm64/op_control.zig:emitMergeMov`). See that file for the
 /// rationale; behaviour is identical modulo the per-arch encoder
 /// names (resolveXmm/MOVAPS for v128 reg-reg; xmmLoad/Def/Store
 /// + MOVSD for FP scalar; gprLoad/Def/Store + 64-bit MOV for GPR).
+/// One move of an `emitMergeMoves` set; a null `src_vreg` reads the park
+/// register.
 fn emitMergeMov(
     allocator: Allocator,
     buf: *std.ArrayList(u8),
     alloc: regalloc.Allocation,
     spill_base_off: u32,
     func: *const ZirFunc,
-    src_vreg: u32,
+    src_vreg: ?u32,
     merge_vreg: u32,
 ) Error!void {
     if (alloc.shapeTag(merge_vreg) == .v128) {
-        const src_x = try gpr.xmmLoadSpilledV128(allocator, buf, alloc, spill_base_off, src_vreg, 0);
+        const src_x = if (src_vreg) |v| try gpr.xmmLoadSpilledV128(allocator, buf, alloc, spill_base_off, v, 0) else park_xmm;
         const merge_x = try gpr.xmmDefSpilledV128(alloc, merge_vreg, 1);
         if (merge_x != src_x) {
             try buf.appendSlice(allocator, inst.encMovapsXmmXmm(merge_x, src_x).slice());
@@ -198,7 +249,7 @@ fn emitMergeMov(
         return;
     }
     if (regalloc.vregClass(func, merge_vreg) == .fpr) {
-        const src_x = try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
+        const src_x = if (src_vreg) |v| try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, v, 0) else park_xmm;
         const merge_x = try gpr.xmmDefSpilled(alloc, merge_vreg, 1);
         if (merge_x != src_x) {
             try buf.appendSlice(allocator, inst.encMovapsXmmXmm(merge_x, src_x).slice());
@@ -206,7 +257,7 @@ fn emitMergeMov(
         try gpr.xmmStoreSpilled(allocator, buf, alloc, spill_base_off, merge_vreg, 1);
         return;
     }
-    const src_r = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
+    const src_r = if (src_vreg) |v| try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, v, 0) else park_gpr;
     const merge_r = try gpr.gprDefSpilled(alloc, merge_vreg, 1);
     if (merge_r != src_r) {
         // 64-bit MOV — preserves all 64 bits. Pre-d-17 the
@@ -245,6 +296,7 @@ fn captureOrEmitBlockMergeMov(
     spill_base_off: u32,
     func: *const ZirFunc,
     tgt_idx: usize,
+    read_after: ?abi.Gpr,
 ) Error!bool {
     const arity: u32 = labels.items[tgt_idx].result_arity;
     if (arity == 0) return false;
@@ -264,64 +316,7 @@ fn captureOrEmitBlockMergeMov(
     }
 
     const base = pushed_vregs.items.len - arity;
-    // D-147 / lesson `2026-05-18-parallel-move-cycle-in-if-merge.md`
-    // (arm64 mirror): when all moves are GPR reg-to-reg, route them
-    // through the cycle-aware parallel-move resolver so LIFO slot
-    // reuse + sequential emit don't clobber still-needed sources.
-    var moves_buf: [merge_top_vregs_cap]ParallelMoveX86 = undefined;
-    var n_moves: u32 = 0;
-    var all_gpr_reg_to_reg = true;
-    {
-        var k: u32 = 0;
-        while (k < arity) : (k += 1) {
-            const src_vreg = pushed_vregs.items[base + k];
-            const merge_vreg = labels.items[tgt_idx].merge_top_vregs[k];
-            if (src_vreg == merge_vreg) continue;
-            if (alloc.shapeTag(merge_vreg) == .v128) {
-                all_gpr_reg_to_reg = false;
-                break;
-            }
-            if (regalloc.vregClass(func, merge_vreg) == .fpr) {
-                all_gpr_reg_to_reg = false;
-                break;
-            }
-            const src_slot = alloc.slot(src_vreg, .gpr);
-            const merge_slot = alloc.slot(merge_vreg, .gpr);
-            const src_reg: abi.Gpr = switch (src_slot) {
-                .reg => |id| abi.slotToReg(id) orelse {
-                    all_gpr_reg_to_reg = false;
-                    break;
-                },
-                .spill => {
-                    all_gpr_reg_to_reg = false;
-                    break;
-                },
-            };
-            const dst_reg: abi.Gpr = switch (merge_slot) {
-                .reg => |id| abi.slotToReg(id) orelse {
-                    all_gpr_reg_to_reg = false;
-                    break;
-                },
-                .spill => {
-                    all_gpr_reg_to_reg = false;
-                    break;
-                },
-            };
-            if (src_reg == dst_reg) continue;
-            moves_buf[n_moves] = .{ .src_reg = src_reg, .dst_reg = dst_reg, .done = false };
-            n_moves += 1;
-        }
-    }
-    if (all_gpr_reg_to_reg) {
-        try resolveAndEmitMergeMovsRegBatchX86(allocator, buf, moves_buf[0..n_moves]);
-    } else {
-        var i: u32 = 0;
-        while (i < arity) : (i += 1) {
-            const src_vreg = pushed_vregs.items[base + i];
-            const merge_vreg = labels.items[tgt_idx].merge_top_vregs[i];
-            try emitMergeMov(allocator, buf, alloc, spill_base_off, func, src_vreg, merge_vreg);
-        }
-    }
+    try emitMergeMoves(allocator, buf, alloc, spill_base_off, func, pushed_vregs.items[base..][0..arity], labels.items[tgt_idx].merge_top_vregs[0..arity], read_after);
     return true;
 }
 
@@ -332,7 +327,7 @@ fn captureOrEmitBlockMergeMov(
 /// the full `emitBrIf` conversion to `(ctx, ins)` shape. Mirror of
 /// `arm64/op_control_merge_mov.zig::captureOrEmitBlockMergeMov`'s
 /// public surface.
-pub fn captureOrEmitBlockMergeMovCtx(ctx: *ctx_mod.EmitCtx, tgt_idx: usize) Error!bool {
+pub fn captureOrEmitBlockMergeMovCtx(ctx: *ctx_mod.EmitCtx, tgt_idx: usize, read_after: ?abi.Gpr) Error!bool {
     return captureOrEmitBlockMergeMov(
         ctx.allocator,
         ctx.buf,
@@ -342,6 +337,7 @@ pub fn captureOrEmitBlockMergeMovCtx(ctx: *ctx_mod.EmitCtx, tgt_idx: usize) Erro
         ctx.spill_base_off,
         ctx.func,
         tgt_idx,
+        read_after,
     );
 }
 
@@ -503,14 +499,7 @@ pub fn emitBr(
         const param_arity = labels.items[tgt_idx].param_arity;
         if (param_arity > 0 and pushed_vregs.items.len >= param_arity) {
             const base = pushed_vregs.items.len - param_arity;
-            var i: u32 = 0;
-            while (i < param_arity) : (i += 1) {
-                const src_vreg = pushed_vregs.items[base + i];
-                const dst_vreg = labels.items[tgt_idx].param_top_vregs[i];
-                if (src_vreg != dst_vreg) {
-                    try emitMergeMov(allocator, buf, alloc, spill_base_off, func, src_vreg, dst_vreg);
-                }
-            }
+            try emitMergeMoves(allocator, buf, alloc, spill_base_off, func, pushed_vregs.items[base..][0..param_arity], labels.items[tgt_idx].param_top_vregs[0..param_arity], null);
         }
         // D-314 — back-edge poll before the unconditional backward JMP (an
         // infinite `(loop (br 0))` is caught here, the prologue poll can't).
@@ -527,7 +516,7 @@ pub fn emitBr(
     // MOVs land before the JMP placeholder; the fall-through
     // is dead per lower.zig unreachable-tracking so the MOVs
     // only execute when control reaches the br.
-    _ = try captureOrEmitBlockMergeMov(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, tgt_idx);
+    _ = try captureOrEmitBlockMergeMov(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, tgt_idx, null);
     const at: u32 = @intCast(buf.items.len);
     try buf.appendSlice(allocator, inst.encJmpRel32(0).slice());
     try labels.items[tgt_idx].pending.append(allocator, .{ .byte_offset = at, .insn_size = 5 });
@@ -792,14 +781,7 @@ fn emitBrTableJmp(
         const param_arity = labels.items[tgt_idx].param_arity;
         if (param_arity > 0 and pushed_vregs.items.len >= param_arity) {
             const base = pushed_vregs.items.len - param_arity;
-            var i: u32 = 0;
-            while (i < param_arity) : (i += 1) {
-                const src_vreg = pushed_vregs.items[base + i];
-                const dst_vreg = labels.items[tgt_idx].param_top_vregs[i];
-                if (src_vreg != dst_vreg) {
-                    try emitMergeMov(allocator, buf, alloc, spill_base_off, func, src_vreg, dst_vreg);
-                }
-            }
+            try emitMergeMoves(allocator, buf, alloc, spill_base_off, func, pushed_vregs.items[base..][0..param_arity], labels.items[tgt_idx].param_top_vregs[0..param_arity], null);
         }
         // D-314 — back-edge poll before the backward JMP. Sits inside the
         // per-case JNE-skipped body (the caller's variable-disp patch covers
@@ -818,7 +800,7 @@ fn emitBrTableJmp(
     // emitBranchToDepth). Caller (emitBrTable) patches the
     // per-case JNE-skip disp after this returns so it covers
     // MOVs + JMP.
-    _ = try captureOrEmitBlockMergeMov(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, tgt_idx);
+    _ = try captureOrEmitBlockMergeMov(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, tgt_idx, null);
     const at: u32 = @intCast(buf.items.len);
     try buf.appendSlice(allocator, inst.encJmpRel32(0).slice());
     try labels.items[tgt_idx].pending.append(allocator, .{ .byte_offset = at, .insn_size = 5 });
@@ -982,6 +964,8 @@ pub fn branchOnReg(
         return;
     }
     if (depth > labels.items.len) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:178", 0);
+    // `cond_r` is read here, before any merge move, and only the flags are
+    // read after: the moves below may write it (`emitMergeMoves`).
     try buf.appendSlice(allocator, inst.encTestRR(.d, cond_r, cond_r).slice());
     const tgt_idx = labels.items.len - 1 - depth;
     if (labels.items[tgt_idx].kind == .loop) {
@@ -993,14 +977,7 @@ pub fn branchOnReg(
             const je_at: usize = buf.items.len;
             try buf.appendSlice(allocator, inst.encJccRel32(.e, 0).slice());
             const base = pushed_vregs.items.len - param_arity;
-            var i: u32 = 0;
-            while (i < param_arity) : (i += 1) {
-                const src_vreg = pushed_vregs.items[base + i];
-                const dst_vreg = labels.items[tgt_idx].param_top_vregs[i];
-                if (src_vreg != dst_vreg) {
-                    try emitMergeMov(allocator, buf, alloc, spill_base_off, func, src_vreg, dst_vreg);
-                }
-            }
+            try emitMergeMoves(allocator, buf, alloc, spill_base_off, func, pushed_vregs.items[base..][0..param_arity], labels.items[tgt_idx].param_top_vregs[0..param_arity], null);
             // D-314 — back-edge poll runs only when the branch is TAKEN
             // (inside the JE-skipped cond≠0 region), after the merge MOVs
             // (R11 free again), before the backward JMP. Flags are dead here.
@@ -1046,7 +1023,7 @@ pub fn branchOnReg(
     if (tgt_is_block_with_capture) {
         const je_at: u32 = @intCast(buf.items.len);
         try buf.appendSlice(allocator, inst.encJccRel32(.e, 0).slice());
-        _ = try captureOrEmitBlockMergeMov(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, tgt_idx);
+        _ = try captureOrEmitBlockMergeMov(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, tgt_idx, null);
         const jmp_at: u32 = @intCast(buf.items.len);
         try buf.appendSlice(allocator, inst.encJmpRel32(0).slice());
         try labels.items[tgt_idx].pending.append(allocator, .{ .byte_offset = jmp_at, .insn_size = 5 });
@@ -1056,7 +1033,7 @@ pub fn branchOnReg(
         @memcpy(buf.items[je_at .. je_at + patched.len], patched.slice());
         return;
     }
-    _ = try captureOrEmitBlockMergeMov(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, tgt_idx);
+    _ = try captureOrEmitBlockMergeMov(allocator, buf, alloc, pushed_vregs, labels, spill_base_off, func, tgt_idx, null);
     const at: u32 = @intCast(buf.items.len);
     try buf.appendSlice(allocator, inst.encJccRel32(.ne, 0).slice());
     try labels.items[tgt_idx].pending.append(allocator, .{ .byte_offset = at, .insn_size = 6 });
@@ -1164,12 +1141,7 @@ pub fn emitElse(
             }
             labels.items[lbl_idx].merge_captured = true;
         } else {
-            var i: u32 = 0;
-            while (i < arity) : (i += 1) {
-                const src_vreg = pushed_vregs.items[base + i];
-                const merge_vreg = labels.items[lbl_idx].merge_top_vregs[i];
-                if (src_vreg != merge_vreg) try emitMergeMov(allocator, buf, alloc, spill_base_off, func, src_vreg, merge_vreg);
-            }
+            try emitMergeMoves(allocator, buf, alloc, spill_base_off, func, pushed_vregs.items[base..][0..arity], labels.items[lbl_idx].merge_top_vregs[0..arity], null);
         }
     }
     const jmp_at: u32 = @intCast(buf.items.len);
@@ -1267,26 +1239,11 @@ pub fn emitEndIntra(
                 try pushed_vregs.append(allocator, lbl.merge_top_vregs[i]);
             }
         } else {
-            const top_base = pushed_vregs.items.len - arity;
-            const dead_fallthrough = blk: {
-                var i: u32 = 0;
-                while (i < arity) : (i += 1) {
-                    if (pushed_vregs.items[top_base + i] != lbl.merge_top_vregs[i]) break :blk false;
-                }
-                break :blk true;
-            };
-            if (!dead_fallthrough) {
-                var i: u32 = 0;
-                while (i < arity) : (i += 1) {
-                    const src_vreg = pushed_vregs.items[top_base + i];
-                    const merge_vreg = lbl.merge_top_vregs[i];
-                    try emitMergeMov(allocator, buf, alloc, spill_base_off, func, src_vreg, merge_vreg);
-                }
-            }
-            var i: u32 = 0;
-            while (i < arity) : (i += 1) {
-                pushed_vregs.items[top_base + i] = lbl.merge_top_vregs[i];
-            }
+            // A value that already is its merge vreg (the capturing `br`
+            // left it on top) takes no move.
+            const top = pushed_vregs.items[pushed_vregs.items.len - arity ..];
+            try emitMergeMoves(allocator, buf, alloc, spill_base_off, func, top, lbl.merge_top_vregs[0..arity], null);
+            @memcpy(top, lbl.merge_top_vregs[0..arity]);
         }
     }
 
@@ -1306,16 +1263,10 @@ pub fn emitEndIntra(
             if (pushed_vregs.items.len < frame_base + arity) {
                 return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:else-results-short", 0);
             }
-            // Pop in reverse (top = else_{N-1}). (D-080) emitMergeMov
-            // dispatches on the merge vreg's shape, so a v128 result takes
-            // the XMM path.
-            var i: u32 = arity;
-            while (i > 0) {
-                i -= 1;
-                const else_result = pushed_vregs.pop().?;
-                const merge_vreg = lbl.merge_top_vregs[i];
-                if (else_result != merge_vreg) try emitMergeMov(allocator, buf, alloc, spill_base_off, func, else_result, merge_vreg);
-            }
+            // (D-080) emitMergeMov dispatches on the merge vreg's shape, so
+            // a v128 result takes the XMM path.
+            const top = pushed_vregs.items[pushed_vregs.items.len - arity ..];
+            try emitMergeMoves(allocator, buf, alloc, spill_base_off, func, top, lbl.merge_top_vregs[0..arity], null);
         }
         if (pushed_vregs.items.len > frame_base) pushed_vregs.shrinkRetainingCapacity(frame_base);
         try pushed_vregs.appendSlice(allocator, lbl.merge_top_vregs[0..arity]);
@@ -1342,17 +1293,9 @@ pub fn emitEndIntra(
             try pushed_vregs.appendSlice(allocator, lbl.param_top_vregs[0..arity]);
         } else {
             if (pushed_vregs.items.len < frame_base + arity) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:implicit-else-then-short", 0);
-            const top_base = pushed_vregs.items.len - arity;
-            var i: u32 = 0;
-            while (i < arity) : (i += 1) {
-                const src_vreg = pushed_vregs.items[top_base + i];
-                const dst_vreg = lbl.param_top_vregs[i];
-                if (src_vreg != dst_vreg) try emitMergeMov(allocator, buf, alloc, spill_base_off, func, src_vreg, dst_vreg);
-            }
-            var j: u32 = 0;
-            while (j < arity) : (j += 1) {
-                pushed_vregs.items[top_base + j] = lbl.param_top_vregs[j];
-            }
+            const top = pushed_vregs.items[pushed_vregs.items.len - arity ..];
+            try emitMergeMoves(allocator, buf, alloc, spill_base_off, func, top, lbl.param_top_vregs[0..arity], null);
+            @memcpy(top, lbl.param_top_vregs[0..arity]);
         }
     } else if (lbl.kind == .if_then and lbl.merge_captured) {
         // An `if` without params or an else returns nothing, so no `br`
@@ -1982,4 +1925,100 @@ pub fn emitDropCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!void {
     _ = ins;
     if (ctx.pushed_vregs.items.len < 1) return Error.AllocationMissing;
     _ = ctx.pushed_vregs.pop().?;
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+const testing = std.testing;
+
+fn funcWithClasses(classes: []const zir.RegClass) ZirFunc {
+    var f = ZirFunc.init(0, .{ .params = &.{}, .results = &.{} }, &.{});
+    f.liveness = .{ .classes = classes };
+    return f;
+}
+
+test "emitMergeMoves: two GPRs that trade places go through RAX" {
+    var f = funcWithClasses(&.{ .gpr, .gpr });
+    defer f.deinit(testing.allocator);
+    const alloc: regalloc.Allocation = .{ .slots = &.{ 0, 1 }, .n_slots = 2 };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try emitMergeMoves(testing.allocator, &buf, alloc, 64, &f, &.{ 0, 1 }, &.{ 1, 0 }, null);
+
+    const a = abi.allocatable_gprs[0];
+    const b = abi.allocatable_gprs[1];
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(testing.allocator);
+    try want.appendSlice(testing.allocator, inst.encMovRR(.q, .rax, b).slice());
+    try want.appendSlice(testing.allocator, inst.encMovRR(.q, b, a).slice());
+    try want.appendSlice(testing.allocator, inst.encMovRR(.q, a, .rax).slice());
+    try testing.expectEqualSlices(u8, want.items, buf.items);
+}
+
+test "emitMergeMoves: two spilled f64s that trade places go through XMM7" {
+    var f = funcWithClasses(&.{ .fpr, .fpr });
+    defer f.deinit(testing.allocator);
+    // Slot ids 6 and 7 are past the six XMM homes: spill cells at 0 and 16.
+    const alloc: regalloc.Allocation = .{ .slots = &.{ 6, 7 }, .n_slots = 8, .max_reg_slots_gpr = 8, .max_reg_slots_fp = 6 };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try emitMergeMoves(testing.allocator, &buf, alloc, 64, &f, &.{ 0, 1 }, &.{ 1, 0 }, null);
+
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(testing.allocator);
+    try want.appendSlice(testing.allocator, inst.encLoadXmmF64MemRBP(.xmm14, -80).slice());
+    try want.appendSlice(testing.allocator, inst.encMovapsXmmXmm(.xmm7, .xmm14).slice());
+    try want.appendSlice(testing.allocator, inst.encLoadXmmF64MemRBP(.xmm14, -64).slice());
+    try want.appendSlice(testing.allocator, inst.encMovapsXmmXmm(.xmm15, .xmm14).slice());
+    try want.appendSlice(testing.allocator, inst.encStoreXmmF64MemRBP(-80, .xmm15).slice());
+    try want.appendSlice(testing.allocator, inst.encMovapsXmmXmm(.xmm15, .xmm7).slice());
+    try want.appendSlice(testing.allocator, inst.encStoreXmmF64MemRBP(-64, .xmm15).slice());
+    try testing.expectEqualSlices(u8, want.items, buf.items);
+}
+
+test "emitMergeMoves: two spilled v128s that trade places go through XMM7" {
+    var f = funcWithClasses(&.{ .simd, .simd });
+    defer f.deinit(testing.allocator);
+    const alloc: regalloc.Allocation = .{
+        .slots = &.{ 6, 7 },
+        .n_slots = 8,
+        .max_reg_slots_gpr = 8,
+        .max_reg_slots_fp = 6,
+        .shape_tags = &.{ .v128, .v128 },
+    };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try emitMergeMoves(testing.allocator, &buf, alloc, 64, &f, &.{ 0, 1 }, &.{ 1, 0 }, null);
+
+    // A 16-byte cell starts 8 below the 8-byte one at its offset.
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(testing.allocator);
+    try want.appendSlice(testing.allocator, inst.encLoadXmmV128MemRBP(.xmm14, -88).slice());
+    try want.appendSlice(testing.allocator, inst.encMovapsXmmXmm(.xmm7, .xmm14).slice());
+    try want.appendSlice(testing.allocator, inst.encLoadXmmV128MemRBP(.xmm14, -72).slice());
+    try want.appendSlice(testing.allocator, inst.encMovapsXmmXmm(.xmm15, .xmm14).slice());
+    try want.appendSlice(testing.allocator, inst.encStoreXmmV128MemRBP(-88, .xmm15).slice());
+    try want.appendSlice(testing.allocator, inst.encMovapsXmmXmm(.xmm15, .xmm7).slice());
+    try want.appendSlice(testing.allocator, inst.encStoreXmmV128MemRBP(-72, .xmm15).slice());
+    try testing.expectEqualSlices(u8, want.items, buf.items);
+}
+
+test "emitMergeMoves: a set that would write a register the caller reads after it is refused" {
+    var f = funcWithClasses(&.{ .gpr, .gpr });
+    defer f.deinit(testing.allocator);
+    const alloc: regalloc.Allocation = .{ .slots = &.{ 0, 1 }, .n_slots = 2 };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    // The park, the spill stages, and the destination's own register.
+    for ([_]abi.Gpr{ park_gpr, abi.allocatable_gprs[1] } ++ abi.spill_stage_gprs) |written| {
+        try testing.expectError(Error.UnsupportedOp, emitMergeMoves(testing.allocator, &buf, alloc, 64, &f, &.{0}, &.{1}, written));
+    }
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
+    // A set with nothing to move writes nothing; a register outside the set is not written.
+    try emitMergeMoves(testing.allocator, &buf, alloc, 64, &f, &.{ 0, 1 }, &.{ 0, 1 }, park_gpr);
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
+    try emitMergeMoves(testing.allocator, &buf, alloc, 64, &f, &.{0}, &.{1}, abi.allocatable_gprs[2]);
+    try testing.expect(buf.items.len > 0);
 }

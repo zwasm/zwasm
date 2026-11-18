@@ -325,6 +325,7 @@ test {
     _ = @import("cli/compile.zig");
     _ = @import("engine/codegen/shared/reg_class.zig");
     _ = @import("engine/codegen/shared/regalloc.zig");
+    _ = @import("engine/codegen/shared/parallel_move.zig");
     _ = @import("engine/codegen/arm64/inst.zig");
     _ = @import("engine/codegen/arm64/inst_neon.zig");
     _ = @import("engine/codegen/arm64/inst_neon_arith.zig");
@@ -336,6 +337,7 @@ test {
     _ = @import("engine/codegen/arm64/abi.zig");
     _ = @import("engine/codegen/arm64/emit.zig");
     _ = @import("engine/codegen/arm64/emit_test.zig");
+    _ = @import("engine/codegen/arm64/op_control_merge_mov.zig");
     _ = @import("engine/codegen/x86_64/reg_class.zig");
     _ = @import("engine/codegen/x86_64/inst.zig");
     _ = @import("engine/codegen/x86_64/inst_sse.zig");
@@ -357,6 +359,7 @@ test {
     _ = @import("engine/codegen/x86_64/op_simd_float_test.zig");
     _ = @import("engine/codegen/x86_64/emit.zig");
     _ = @import("engine/codegen/x86_64/emit_test.zig");
+    _ = @import("engine/codegen/x86_64/op_control.zig");
     _ = @import("platform/jit_mem.zig");
     _ = @import("platform/guarded_mem.zig");
     _ = @import("platform/trap_registry.zig");

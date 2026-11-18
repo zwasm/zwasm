@@ -64,7 +64,8 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // didn't pop). merge_mov sees k+1 values including ref + writes
     // MOVs into label-expected positions. Then unconditional B → label
     // fixup.
-    _ = try merge_mov.captureOrEmitBlockMergeMov(ctx, tgt_idx);
+    // The condition was tested above; nothing but the flags is read after.
+    _ = try merge_mov.captureOrEmitBlockMergeMov(ctx, tgt_idx, null);
     const b_at: u32 = @intCast(ctx.buf.items.len);
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(0));
     try ctx.labels.items[tgt_idx].pending.append(ctx.allocator, .{ .byte_offset = b_at, .kind = .b_uncond });
