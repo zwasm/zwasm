@@ -17,7 +17,8 @@
 //! and the branch's values on cond=1, on every engine. Two edges into one
 //! merge whose values sit in each other's places each deliver their own
 //! values: a block's and an `if`'s on every engine, a loop's on the JIT;
-//! the edge may be a `br_on_*`.
+//! the edge may be a `br_on_*`. `br_on_null` to a loop branches when its
+//! operand is null, with and without a fuel budget.
 //!
 //! Usage: `zig build test-cli-usage` /
 //!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>
@@ -28,7 +29,8 @@
 //!         <catch_to_loop_unset_params.wasm> <if_dead_then_arm.wasm>
 //!         <short_frame_f64.wasm> <if_branch_own_label.wasm> <catch_to_func.wasm>
 //!         <catch_all_to_func.wasm> <merge_moves.wasm> <merge_moves_v128.wasm>
-//!         <merge_moves_br_on.wasm> <merge_moves_br_on_null_loop.wasm>`
+//!         <merge_moves_br_on.wasm> <merge_moves_br_on_null_loop.wasm>
+//!         <br_on_null_loop.wasm>`
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -64,7 +66,8 @@ const Row = struct {
 /// an `if` with no else whose then arm branches to its own label, two catch
 /// clauses that target the function's label, and frames whose edges deliver
 /// values that sit in each other's places (the v128 loop in a module of its
-/// own, and the `br_on_*` edges in two more).
+/// own, and the `br_on_*` edges in two more), and a loop with no params
+/// whose back edge is a `br_on_null`.
 const M = "<module>";
 const E = "<argv_echo>";
 const S = "<simd_op>";
@@ -86,7 +89,8 @@ const G = "<merge_moves>";
 const W = "<merge_moves_v128>";
 const K = "<merge_moves_br_on>";
 const N = "<merge_moves_br_on_null_loop>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N };
+const Y = "<br_on_null_loop>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -115,6 +119,21 @@ const null_loop_rows = if (builtin.cpu.arch == .x86_64) [_]Row{
     .{ "null_loop=1", "292236\n" },     .{ "null_loop=0", "223629\n" },
     .{ "null_loop_f64=1", "292236\n" }, .{ "null_loop_f64=0", "223629\n" },
 });
+
+/// The engines with a fuel budget, which a loop's back edge polls.
+const metered_engines = [_][]const []const u8{ &.{ "--fuel", "100000", "--engine", "interp" }, &.{ "--fuel", "100000", "--engine", "jit" }, &.{ "--fuel", "100000" } };
+
+/// `br_on_null_loop`: `br_on_null` as the back edge of a loop with no params.
+/// `passes` returns how many times the body ran: the edge is taken once when
+/// its argument is set. The x86_64 JIT declines `br_on_null` to a loop, and
+/// the default engine then runs the interpreter.
+const null_back_edge_passes = [_][2][]const u8{ .{ "passes=1", "2\n" }, .{ "passes=0", "1\n" } };
+const null_back_edge_rows = if (builtin.cpu.arch == .x86_64)
+    eachOn(&.{ all_engines[0], all_engines[2], metered_engines[0], metered_engines[2] }, Y, &null_back_edge_passes) ++ [_]Row{
+        .{ .args = &.{ "run", "--engine", "jit", "--invoke", "passes=1", Y }, .exit = 1, .stderr = .{ .has = "UnsupportedOp" } },
+    }
+else
+    eachOn(&(all_engines ++ metered_engines), Y, &null_back_edge_passes);
 
 const rows = [_]Row{
     .{ .args = &.{ "run", "--bogus", M }, .exit = 2, .stderr = .{ .has = "unknown option '--bogus'" } },
@@ -237,7 +256,7 @@ const rows = [_]Row{
         .{ "cast_fail_loop=1", "292236\n" },     .{ "cast_fail_loop=0", "223629\n" },
         .{ "cast_loop_f64=1", "1292236\n" },     .{ "cast_loop_f64=0", "1223629\n" },
         .{ "cast_fail_loop_f64=1", "292236\n" }, .{ "cast_fail_loop_f64=0", "223629\n" },
-    }) ++ null_loop_rows ++ [_]Row{
+    }) ++ null_loop_rows ++ null_back_edge_rows ++ [_]Row{
     // The pad's back-edge poll stops a loop re-entered only through its catch;
     // without it the run ends after 10^8 iterations and prints the count.
     .{ .args = &.{ "run", "--timeout", "500", "--engine", "jit", "--invoke", "catch_all_spin=100000000", L }, .exit = 1, .stderr = .{ .has = "interrupted" } },
