@@ -100,9 +100,9 @@ fn emitDeriveFuncptrFromFuncref(
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encMovzImm16(dst_reg, 0));
     const end_byte: u32 = @intCast(ctx.buf.items.len);
 
-    const cbz_disp = @divExact(@as(i32, @intCast(null_arm)) - @as(i32, @intCast(cbz_at)), 4);
+    const cbz_disp = try gpr.rel(i19, cbz_at, null_arm);
     std.mem.writeInt(u32, ctx.buf.items[cbz_at..][0..4], inst.encCbz(val_reg, cbz_disp), .little);
-    const b_disp = @divExact(@as(i32, @intCast(end_byte)) - @as(i32, @intCast(b_at)), 4);
+    const b_disp = try gpr.rel(i26, b_at, end_byte);
     std.mem.writeInt(u32, ctx.buf.items[b_at..][0..4], inst.encB(b_disp), .little);
 }
 
@@ -129,9 +129,9 @@ fn emitDeriveTypeidxFromFuncref(
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encMovnImmW(dst_w, 0));
     const end_byte: u32 = @intCast(ctx.buf.items.len);
 
-    const cbz_disp = @divExact(@as(i32, @intCast(null_arm)) - @as(i32, @intCast(cbz_at)), 4);
+    const cbz_disp = try gpr.rel(i19, cbz_at, null_arm);
     std.mem.writeInt(u32, ctx.buf.items[cbz_at..][0..4], inst.encCbz(val_reg, cbz_disp), .little);
-    const b_disp = @divExact(@as(i32, @intCast(end_byte)) - @as(i32, @intCast(b_at)), 4);
+    const b_disp = try gpr.rel(i26, b_at, end_byte);
     std.mem.writeInt(u32, ctx.buf.items[b_at..][0..4], inst.encB(b_disp), .little);
 }
 
@@ -257,7 +257,7 @@ pub fn emitTableSet(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(14, 14, @intCast(@as(u32, tableidx) * jit_abi.table_jit_ci_size + 8)));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrWRegLsl2(15, 14, 17));
     const end_byte: u32 = @intCast(ctx.buf.items.len);
-    const skip_disp = @divExact(@as(i32, @intCast(end_byte)) - @as(i32, @intCast(skip_at)), 4);
+    const skip_disp = try gpr.rel(i19, skip_at, end_byte);
     std.mem.writeInt(u32, ctx.buf.items[skip_at..][0..4], inst.encCbz(14, skip_disp), .little);
 }
 
@@ -443,7 +443,7 @@ pub fn emitTableFill(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(sx10, 10, @intCast(@as(u32, tableidx) * jit_abi.table_jit_ci_size + 8)));
     {
         const after_setup: u32 = @intCast(ctx.buf.items.len);
-        const disp = @divExact(@as(i32, @intCast(after_setup)) - @as(i32, @intCast(skip_setup_at)), 4);
+        const disp = try gpr.rel(i19, skip_setup_at, after_setup);
         std.mem.writeInt(u32, ctx.buf.items[skip_setup_at..][0..4], inst.encCbz(sx9, disp), .little);
     }
 
@@ -468,23 +468,17 @@ pub fn emitTableFill(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrWRegLsl2(sx13, 10, 17));
     {
         const after_skip: u32 = @intCast(ctx.buf.items.len);
-        const disp = @divExact(@as(i32, @intCast(after_skip)) - @as(i32, @intCast(fill_skip_at)), 4);
+        const disp = try gpr.rel(i19, fill_skip_at, after_skip);
         std.mem.writeInt(u32, ctx.buf.items[fill_skip_at..][0..4], inst.encCbz(sx9, disp), .little);
     }
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(17, 17, 1));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(14, 14, 1));
-    const back_disp_words: i32 = @divExact(
-        @as(i32, @intCast(loop_start)) - @as(i32, @intCast(ctx.buf.items.len)),
-        4,
-    );
+    const back_disp_words = try gpr.rel(i19, ctx.buf.items.len, loop_start);
     try gpr.writeU32(ctx.allocator, ctx.buf, if (idx64) inst.encCbnz(14, back_disp_words) else inst.encCbnzW(14, back_disp_words));
 
     // Step F: patch the n==0 skip target.
     const end_byte: u32 = @intCast(ctx.buf.items.len);
-    const skip_disp_words: i19 = @intCast(@divExact(
-        @as(i32, @intCast(end_byte)) - @as(i32, @intCast(skip_at)),
-        4,
-    ));
+    const skip_disp_words = try gpr.rel(i19, skip_at, end_byte);
     std.mem.writeInt(u32, ctx.buf.items[skip_at..][0..4], if (idx64) inst.encCbz(14, skip_disp_words) else inst.encCbzW(14, skip_disp_words), .little);
 }
 
@@ -626,15 +620,12 @@ pub fn emitTableCopy(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrWRegLsl2(15, 8, 17));
         {
             const after_skip: u32 = @intCast(ctx.buf.items.len);
-            const disp = @divExact(@as(i32, @intCast(after_skip)) - @as(i32, @intCast(bwd_skip_at)), 4);
+            const disp = try gpr.rel(i19, bwd_skip_at, after_skip);
             std.mem.writeInt(u32, ctx.buf.items[bwd_skip_at..][0..4], inst.encCbz(sx9, disp), .little);
         }
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(14, 14, 1));
         {
-            const back: i32 = @divExact(
-                @as(i32, @intCast(bwd_loop_start)) - @as(i32, @intCast(ctx.buf.items.len)),
-                4,
-            );
+            const back = try gpr.rel(i19, ctx.buf.items.len, bwd_loop_start);
             try gpr.writeU32(ctx.allocator, ctx.buf, if (n64) inst.encCbnz(14, back) else inst.encCbnzW(14, back));
         }
         const bwd_end_jmp_at: u32 = @intCast(ctx.buf.items.len);
@@ -643,10 +634,7 @@ pub fn emitTableCopy(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
         // .fwd: patch the B.LS to land here.
         const fwd_byte: u32 = @intCast(ctx.buf.items.len);
         {
-            const disp: i32 = @divExact(
-                @as(i32, @intCast(fwd_byte)) - @as(i32, @intCast(fwd_at)),
-                4,
-            );
+            const disp = try gpr.rel(i19, fwd_at, fwd_byte);
             std.mem.writeInt(u32, ctx.buf.items[fwd_at..][0..4], inst.encBCond(.ls, disp), .little);
         }
         const fwd_loop_start: u32 = @intCast(ctx.buf.items.len);
@@ -661,27 +649,21 @@ pub fn emitTableCopy(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrWRegLsl2(15, 8, 17));
         {
             const after_skip: u32 = @intCast(ctx.buf.items.len);
-            const disp = @divExact(@as(i32, @intCast(after_skip)) - @as(i32, @intCast(fwd_skip_at)), 4);
+            const disp = try gpr.rel(i19, fwd_skip_at, after_skip);
             std.mem.writeInt(u32, ctx.buf.items[fwd_skip_at..][0..4], inst.encCbz(sx9, disp), .little);
         }
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(17, 17, 1));
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(16, 16, 1));
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(14, 14, 1));
         {
-            const back: i32 = @divExact(
-                @as(i32, @intCast(fwd_loop_start)) - @as(i32, @intCast(ctx.buf.items.len)),
-                4,
-            );
+            const back = try gpr.rel(i19, ctx.buf.items.len, fwd_loop_start);
             try gpr.writeU32(ctx.allocator, ctx.buf, if (n64) inst.encCbnz(14, back) else inst.encCbnzW(14, back));
         }
 
         // Patch the bwd→end jump.
         const end_byte: u32 = @intCast(ctx.buf.items.len);
         {
-            const disp: i32 = @divExact(
-                @as(i32, @intCast(end_byte)) - @as(i32, @intCast(bwd_end_jmp_at)),
-                4,
-            );
+            const disp = try gpr.rel(i26, bwd_end_jmp_at, end_byte);
             std.mem.writeInt(u32, ctx.buf.items[bwd_end_jmp_at..][0..4], inst.encB(disp), .little);
         }
     } else {
@@ -698,27 +680,21 @@ pub fn emitTableCopy(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrWRegLsl2(15, 8, 17));
         {
             const after_skip: u32 = @intCast(ctx.buf.items.len);
-            const disp = @divExact(@as(i32, @intCast(after_skip)) - @as(i32, @intCast(xt_skip_at)), 4);
+            const disp = try gpr.rel(i19, xt_skip_at, after_skip);
             std.mem.writeInt(u32, ctx.buf.items[xt_skip_at..][0..4], inst.encCbz(sx9, disp), .little);
         }
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(17, 17, 1));
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(16, 16, 1));
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(14, 14, 1));
         {
-            const back: i32 = @divExact(
-                @as(i32, @intCast(fwd_loop_start)) - @as(i32, @intCast(ctx.buf.items.len)),
-                4,
-            );
+            const back = try gpr.rel(i19, ctx.buf.items.len, fwd_loop_start);
             try gpr.writeU32(ctx.allocator, ctx.buf, if (n64) inst.encCbnz(14, back) else inst.encCbnzW(14, back));
         }
     }
 
     // Patch the n==0 skip.
     const end_byte: u32 = @intCast(ctx.buf.items.len);
-    const skip_disp: i19 = @intCast(@divExact(
-        @as(i32, @intCast(end_byte)) - @as(i32, @intCast(skip_at)),
-        4,
-    ));
+    const skip_disp = try gpr.rel(i19, skip_at, end_byte);
     std.mem.writeInt(u32, ctx.buf.items[skip_at..][0..4], if (n64) inst.encCbz(14, skip_disp) else inst.encCbzW(14, skip_disp), .little);
 }
 
@@ -850,24 +826,18 @@ pub fn emitTableInit(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrWRegLsl2(sx10, 13, 17));
     {
         const after_skip: u32 = @intCast(ctx.buf.items.len);
-        const disp = @divExact(@as(i32, @intCast(after_skip)) - @as(i32, @intCast(init_skip_at)), 4);
+        const disp = try gpr.rel(i19, init_skip_at, after_skip);
         std.mem.writeInt(u32, ctx.buf.items[init_skip_at..][0..4], inst.encCbz(sx9, disp), .little);
     }
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(17, 17, 1));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(16, 16, 1));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(14, 14, 1));
     {
-        const back: i32 = @divExact(
-            @as(i32, @intCast(loop_start)) - @as(i32, @intCast(ctx.buf.items.len)),
-            4,
-        );
+        const back = try gpr.rel(i19, ctx.buf.items.len, loop_start);
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbnzW(14, back));
     }
 
     const end_byte: u32 = @intCast(ctx.buf.items.len);
-    const skip_disp: i19 = @intCast(@divExact(
-        @as(i32, @intCast(end_byte)) - @as(i32, @intCast(skip_at)),
-        4,
-    ));
+    const skip_disp = try gpr.rel(i19, skip_at, end_byte);
     std.mem.writeInt(u32, ctx.buf.items[skip_at..][0..4], inst.encCbzW(14, skip_disp), .little);
 }

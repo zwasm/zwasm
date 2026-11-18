@@ -318,6 +318,7 @@ fn setDeclineDiag(note: decline_note.Note, tail: []const u8) void {
         .overflow_words => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} overflow argument word{s}{s}", .{ note.op, n, if (n == 1) "" else "s", tail }),
         .simd_args => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} floating-point or vector arguments — more than the register bank carries{s}", .{ note.op, n, tail }),
         .memory_class_results => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with a {d}-result callee{s}", .{ note.op, n, tail }),
+        .out_of_reach => |r| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile code that puts an instruction {d} bytes from its target: its {s} field reaches {d}{s}", .{ r.distance, note.op, r.reach, tail }),
     }
 }
 
@@ -1874,6 +1875,78 @@ test "a declined tail call is reported by op, and the default engine still runs 
     const code = try runWasmCaptured(testing.allocator, testing.io, &tail_three_results_wasm, &.{}, &capture, "go");
     try testing.expectEqual(@as(u8, 0), code);
     try testing.expectEqualStrings("6\n", capture.items);
+}
+
+/// `(module (memory 1) (func (export "go") (result i32)
+///    block i32.const 1 br_if 0 <copies × memory.copy of 0 bytes> end
+///    i32.const 42))`
+/// built in memory: the JIT inlines `memory.copy` (about 200 bytes of arm64
+/// code each), so a 56 KB module puts a megabyte of code behind one branch.
+fn branchOverCopiesWasm(alloc: std.mem.Allocator, copies: u32) ![]u8 {
+    const copy = [_]u8{ 0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x0a, 0x00, 0x00 };
+    const head = [_]u8{ 0x00, 0x02, 0x40, 0x41, 0x01, 0x0d, 0x00 }; // no locals; block; i32.const 1; br_if 0
+    const tail = [_]u8{ 0x0b, 0x41, 0x2a, 0x0b }; // end; i32.const 42; end
+    const body_len: u32 = @intCast(head.len + copies * copy.len + tail.len);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, &.{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: () -> i32
+        0x03, 0x02, 0x01, 0x00, // function
+        0x05, 0x03, 0x01, 0x00, 0x01, // memory 1
+        0x07, 0x06, 0x01, 0x02, 0x67, 0x6f, 0x00, 0x00, // export "go"
+        0x0a, // code
+    });
+    var body_len_leb: [5]u8 = undefined;
+    const body_len_bytes = uleb(&body_len_leb, body_len);
+    var section_len_leb: [5]u8 = undefined;
+    try out.appendSlice(alloc, uleb(&section_len_leb, 1 + @as(u32, @intCast(body_len_bytes.len)) + body_len));
+    try out.append(alloc, 0x01);
+    try out.appendSlice(alloc, body_len_bytes);
+    try out.appendSlice(alloc, &head);
+    for (0..copies) |_| try out.appendSlice(alloc, &copy);
+    try out.appendSlice(alloc, &tail);
+    return out.toOwnedSlice(alloc);
+}
+
+fn uleb(buf: *[5]u8, value: u32) []const u8 {
+    var v = value;
+    var n: usize = 0;
+    while (true) : (n += 1) {
+        const low: u8 = @truncate(v & 0x7f);
+        v >>= 7;
+        buf[n] = if (v == 0) low else low | 0x80;
+        if (v == 0) return buf[0 .. n + 1];
+    }
+}
+
+test "a function longer than a conditional branch reaches: arm64's JIT declines it and the default engine returns its value" {
+    const builtin = @import("builtin");
+    const runner = @import("../engine/runner.zig");
+    const wasm = try branchOverCopiesWasm(testing.allocator, 5600);
+    defer testing.allocator.free(wasm);
+
+    if (builtin.cpu.arch == .aarch64) {
+        // Compile only: the decline comes before any of the function runs.
+        try testing.expectError(error.UnsupportedOp, runner.JitInstance.init(testing.allocator, wasm));
+        try testing.expectError(error.UnsupportedOp, runWasmJit(testing.allocator, testing.io, wasm, "go", &.{}, &.{}, &.{}, &.{}, .{}));
+        const msg = diagnostic.lastDiagnostic().?.message();
+        try testing.expect(std.mem.find(u8, msg, "imm19 field reaches 1048572") != null);
+    } else {
+        // rel32 reaches across the function, so x86_64 compiles and runs it.
+        var jit_out: std.ArrayList(u8) = .empty;
+        defer jit_out.deinit(testing.allocator);
+        const code = try runWasmJitCaptured(testing.allocator, testing.io, wasm, "go", &.{}, &.{}, &.{}, &.{}, .{}, &jit_out, null, .none);
+        try testing.expectEqual(@as(u8, 0), code);
+        try testing.expectEqualStrings("42\n", jit_out.items);
+    }
+
+    var capture: std.ArrayList(u8) = .empty;
+    defer capture.deinit(testing.allocator);
+    const code = try runWasmCaptured(testing.allocator, testing.io, wasm, &.{}, &capture, "go");
+    try testing.expectEqual(@as(u8, 0), code);
+    try testing.expectEqualStrings("42\n", capture.items);
 }
 
 test "runWasmCapturedFull: max_output_bytes caps the C-API capture path too" {

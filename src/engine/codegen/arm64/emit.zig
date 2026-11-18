@@ -1829,8 +1829,7 @@ pub fn compile(
                                     // as `br`.
                                     try op_control.emitBackEdgeInterruptPoll(&ctx, null);
                                     const at: u32 = @intCast(buf.items.len);
-                                    const disp_bytes: i32 = @as(i32, @intCast(lp.target_byte_offset)) - @as(i32, @intCast(at));
-                                    try gpr.writeU32(allocator, &buf, inst.encB(@divExact(disp_bytes, 4)));
+                                    try gpr.writeU32(allocator, &buf, inst.encB(try gpr.rel(i26, at, lp.target_byte_offset)));
                                 } else {
                                     // Emit JMP placeholder to common_pc.
                                     const jmp_off: u32 = @intCast(buf.items.len);
@@ -1845,9 +1844,7 @@ pub fn compile(
                             // Patch all JMPs to common_pc.
                             const common_pc: u32 = @intCast(buf.items.len);
                             for (jmp_placeholders.items) |jmp_off| {
-                                const disp_bytes: i32 = @intCast(@as(i64, common_pc) - @as(i64, jmp_off));
-                                const disp_words: i32 = @divExact(disp_bytes, 4);
-                                const enc = inst.encB(disp_words);
+                                const enc = inst.encB(try gpr.rel(i26, jmp_off, common_pc));
                                 std.mem.writeInt(u32, buf.items[jmp_off..][0..4], enc, .little);
                             }
                         }
@@ -1889,10 +1886,7 @@ pub fn compile(
                 try gpr.writeU32(allocator, &buf, encLdpFpLrPostIdx());
                 try gpr.writeU32(allocator, &buf, inst.encRet(abi.link_register));
                 for (return_fixups.items) |fx_byte| {
-                    const disp_words: i32 = @divExact(
-                        @as(i32, @intCast(epilogue_byte)) - @as(i32, @intCast(fx_byte)),
-                        4,
-                    );
+                    const disp_words = try gpr.rel(i26, fx_byte, epilogue_byte);
                     std.mem.writeInt(u32, buf.items[fx_byte..][0..4], inst.encB(disp_words), .little);
                 }
 
@@ -1973,7 +1967,7 @@ pub fn compile(
                             }
                         }
                         const at: u32 = @intCast(buf.items.len);
-                        const disp_words: i32 = @divExact(@as(i32, @intCast(epilogue_byte)) - @as(i32, @intCast(at)), 4);
+                        const disp_words = try gpr.rel(i26, at, epilogue_byte);
                         try gpr.writeU32(allocator, &buf, inst.encB(disp_words));
                         entry.landing_pad_pc = clause_start;
                         _ = landing_pad_fixups.swapRemove(i);
@@ -2012,10 +2006,6 @@ pub fn compile(
                     try gpr.writeU32(allocator, &buf, encLdpFpLrPostIdx());
                     try gpr.writeU32(allocator, &buf, inst.encRet(abi.link_register));
                     for (bounds_fixups.items) |fx_byte| {
-                        const disp_words: i32 = @divExact(
-                            @as(i32, @intCast(trap_byte)) - @as(i32, @intCast(fx_byte)),
-                            4,
-                        );
                         const orig = std.mem.readInt(u32, buf.items[fx_byte..][0..4], .little);
                         // Distinguish the placeholder shape by opcode:
                         //   bits 31..26 == 0b000101 → unconditional B
@@ -2023,10 +2013,10 @@ pub fn compile(
                         //   bits 31..24 == 0x54     → B.cond (bounds /
                         //                  sig-mismatch / trap variants).
                         const new_word: u32 = if ((orig >> 26) == 0b000101)
-                            inst.encB(disp_words)
+                            inst.encB(try gpr.rel(i26, fx_byte, trap_byte))
                         else blk: {
                             const cond: inst.Cond = @fromBackingInt(@intCast(@as(u4, @intCast(orig & 0xF))));
-                            break :blk inst.encBCond(cond, disp_words);
+                            break :blk inst.encBCond(cond, try gpr.rel(i19, fx_byte, trap_byte));
                         };
                         std.mem.writeInt(u32, buf.items[fx_byte..][0..4], new_word, .little);
                     }
@@ -2078,19 +2068,15 @@ pub fn compile(
                         try gpr.writeU32(a, b, encLdpFpLrPostIdx());
                         try gpr.writeU32(a, b, inst.encRet(abi.link_register));
                         for (fixups) |fx_byte| {
-                            const disp_words: i32 = @divExact(
-                                @as(i32, @intCast(stub_byte)) - @as(i32, @intCast(fx_byte)),
-                                4,
-                            );
                             const orig = std.mem.readInt(u32, b.items[fx_byte..][0..4], .little);
                             // Opcode-shape dispatch (mirror of the generic stub patch):
                             //   bits 31..26 == 0b000101 → unconditional B (`unreachable`);
                             //   else                    → B.cond (call_indirect variants).
                             const new_word: u32 = if ((orig >> 26) == 0b000101)
-                                inst.encB(disp_words)
+                                inst.encB(try gpr.rel(i26, fx_byte, stub_byte))
                             else blk: {
                                 const cond: inst.Cond = @fromBackingInt(@intCast(@as(u4, @intCast(orig & 0xF))));
-                                break :blk inst.encBCond(cond, disp_words);
+                                break :blk inst.encBCond(cond, try gpr.rel(i19, fx_byte, stub_byte));
                             };
                             std.mem.writeInt(u32, b.items[fx_byte..][0..4], new_word, .little);
                         }
@@ -2170,12 +2156,8 @@ pub fn compile(
                     // its const-pool entry (signed offset / 4 bytes).
                     for (simd_const_fixups.items) |fx| {
                         const target_byte: u32 = pool_byte + fx.const_idx * 16;
-                        const disp_words: i32 = @divExact(
-                            @as(i32, @intCast(target_byte)) - @as(i32, @intCast(fx.byte_offset)),
-                            4,
-                        );
                         const orig = std.mem.readInt(u32, buf.items[fx.byte_offset..][0..4], .little);
-                        const patched = inst_neon.patchLdrLiteralQImm19(orig, @intCast(disp_words));
+                        const patched = inst_neon.patchLdrLiteralQImm19(orig, try gpr.rel(i19, fx.byte_offset, target_byte));
                         std.mem.writeInt(u32, buf.items[fx.byte_offset..][0..4], patched, .little);
                     }
                 }

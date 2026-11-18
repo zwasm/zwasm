@@ -1343,7 +1343,9 @@ pub fn compileWasm(allocator: Allocator, wasm_bytes: []const u8) Error!CompiledW
     // out. Only exported funcs are host-invocable, so gate on the export set
     // to avoid emitting a thunk per internal function. `emit` still returns
     // UnsupportedOp for shapes it can't lower (FP, v128, >7 params); the
-    // linker skips those (NO_THUNK), so over-requesting here is harmless.
+    // linker skips those (NO_THUNK), so over-requesting here is harmless
+    // for a shape. A wrapper whose call cannot reach its body declines the
+    // module (DisplacementOverflow), requested by an entry or not.
     var exported_funcs: std.AutoHashMap(u32, void) = .init(allocator);
     defer exported_funcs.deinit();
     if (module.find(.@"export")) |es| {
