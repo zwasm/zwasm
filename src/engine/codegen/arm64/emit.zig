@@ -1827,7 +1827,7 @@ pub fn compile(
                                     // Wasm 3.0 §3.3.10.6 (try_table) — a catch to a loop is
                                     // a branch to it: the back-edge poll, then the header,
                                     // as `br`.
-                                    try op_control.emitBackEdgeInterruptPoll(&ctx);
+                                    try op_control.emitBackEdgeInterruptPoll(&ctx, null);
                                     const at: u32 = @intCast(buf.items.len);
                                     const disp_bytes: i32 = @as(i32, @intCast(lp.target_byte_offset)) - @as(i32, @intCast(at));
                                     try gpr.writeU32(allocator, &buf, inst.encB(@divExact(disp_bytes, 4)));

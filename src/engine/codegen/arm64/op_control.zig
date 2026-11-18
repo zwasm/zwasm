@@ -57,6 +57,19 @@ const merge_top_vregs_cap: u8 = 8;
 // ADR-0093. Cross-file references use `merge_mov.X` syntax.
 const merge_mov = @import("op_control_merge_mov.zig");
 
+/// The registers the back-edge poll writes.
+pub const poll_scratch = [_]inst.Xn{ 16, 17 };
+
+pub fn pollWrites(r: inst.Xn) bool {
+    return std.mem.findScalar(inst.Xn, &poll_scratch, r) != null;
+}
+
+comptime {
+    for (abi.allocatable_gprs ++ abi.spill_stage_gprs) |r| {
+        if (pollWrites(r)) @compileError("the back-edge poll writes a pool or spill-stage register");
+    }
+}
+
 comptime {
     // A label's values are one `emitMergeMoves` set.
     std.debug.assert(merge_top_vregs_cap <= @import("../shared/parallel_move.zig").cap);
@@ -230,15 +243,27 @@ pub fn marshalFunctionReturn(ctx: *EmitCtx) Error!void {
 /// backward branch (to a `loop` header) so the host flag is checked every
 /// iteration — the prologue poll alone misses a tight `(loop)` with no calls.
 /// `LDR X16←interrupt_ptr; CBZ +4 (skip when null); LDR W17←[X16]; CMP W17,WZR;
-/// B.NE → back_edge_interrupt_fixups`. X16/X17 = IP0/IP1 caller-saved scratch,
-/// free at a control-flow boundary; CMP+B.NE (not CBNZ) per the EmitCindStub
+/// B.NE → back_edge_interrupt_fixups`. CMP+B.NE (not CBNZ) per the EmitCindStub
 /// patcher; the CMP's flags don't disturb a following CBNZ (compare-and-branch
 /// on a register, not NZCV).
-pub fn emitBackEdgeInterruptPoll(ctx: *EmitCtx) Error!void {
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(16, abi.runtime_ptr_save_gpr, jit_abi.interrupt_ptr_off));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbz(16, 4));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImmW(17, 16, 0));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCmpRegW(17, 31));
+///
+/// The poll writes `poll_scratch` (X16/X17 = IP0/IP1), which no vreg lives in.
+/// `read_after` names a register the caller reads after the poll (a branch
+/// condition it has not tested yet); a poll that would write it is refused.
+/// `branchOnReg` reads a condition held in one of them before it polls.
+pub fn emitBackEdgeInterruptPoll(ctx: *EmitCtx, read_after: ?inst.Xn) Error!void {
+    if (read_after) |r| {
+        if (pollWrites(r)) {
+            dbg.print("codegen", "arm64/op_control: the back-edge poll would write X{d}, read after it\n", .{r});
+            return Error.UnsupportedOp;
+        }
+    }
+    const a = poll_scratch[0];
+    const b = poll_scratch[1];
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(a, abi.runtime_ptr_save_gpr, jit_abi.interrupt_ptr_off));
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbz(a, 4));
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImmW(b, a, 0));
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCmpRegW(b, 31));
     const fixup_at: u32 = @intCast(ctx.buf.items.len);
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encBCond(.ne, 0));
     try ctx.back_edge_interrupt_fixups.append(ctx.allocator, fixup_at);
@@ -247,12 +272,12 @@ pub fn emitBackEdgeInterruptPoll(ctx: *EmitCtx) Error!void {
     // CBZ W16, +6 (unmetered); LDR X17 ← fuel_cell; SUB X17, #1; STR X17;
     // CMP X17, XZR; B.MI → back_edge_fuel_fixups` (code 17, POST-frame stub).
     // 7 instrs / 28 bytes; total back-edge poll block = 48 bytes.
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImmW(16, abi.runtime_ptr_save_gpr, jit_abi.fuel_metered_off));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbzW(16, 6));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(17, abi.runtime_ptr_save_gpr, jit_abi.fuel_cell_off));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(17, 17, 1));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrImm(17, abi.runtime_ptr_save_gpr, jit_abi.fuel_cell_off));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCmpRegX(17, 31));
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImmW(a, abi.runtime_ptr_save_gpr, jit_abi.fuel_metered_off));
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbzW(a, 6));
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(b, abi.runtime_ptr_save_gpr, jit_abi.fuel_cell_off));
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(b, b, 1));
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrImm(b, abi.runtime_ptr_save_gpr, jit_abi.fuel_cell_off));
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCmpRegX(b, 31));
     const fuel_fixup_at: u32 = @intCast(ctx.buf.items.len);
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encBCond(.mi, 0));
     try ctx.back_edge_fuel_fixups.append(ctx.allocator, fuel_fixup_at);
@@ -290,7 +315,7 @@ pub fn emitBr(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
         }
         // D-314 — back-edge poll before the unconditional backward B (an
         // infinite `(loop (br 0))` is caught here, the prologue poll can't).
-        try emitBackEdgeInterruptPoll(ctx);
+        try emitBackEdgeInterruptPoll(ctx, null);
         const fixup_at: u32 = @intCast(ctx.buf.items.len);
         const tgt_byte = ctx.labels.items[tgt_idx].target_byte_offset;
         const disp_words: i32 = @as(i32, @intCast(tgt_byte)) -
@@ -320,12 +345,14 @@ pub fn emitBrIf(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
     try branchOnReg(ctx, ins, wn);
 }
 
-/// Conditional-branch-to-label body shared by `br_if` and `br_on_cast`:
-/// branch to the label at `ins.payload` depth when `wn != 0`. Five cases —
-/// conditional function-return (depth == labels.len), loop+param, loop-direct,
-/// forward block-with-captured-merge, forward simple. The caller supplies the
-/// condition already loaded in `wn`: `br_if` pops the operand; `br_on_cast`
-/// passes the `jitGcRefTest` result (and `br_on_cast_fail` inverts it first).
+/// Conditional-branch-to-label body shared by `br_if`, `br_on_null` and
+/// `br_on_cast`: branch to the label at `ins.payload` depth when `wn != 0`.
+/// Five cases — conditional function-return (depth == labels.len), loop that
+/// reads its condition first (params to move, or a condition the poll
+/// writes), loop-direct, forward block-with-captured-merge, forward simple.
+/// The caller supplies the condition already loaded in `wn`: `br_if` pops the
+/// operand; `br_on_null` passes its null flag; `br_on_cast` passes the
+/// `jitGcRefTest` result (and `br_on_cast_fail` inverts it first).
 pub fn branchOnReg(ctx: *EmitCtx, ins: *const ZirInstr, wn: inst.Xn) Error!void {
     if (ins.payload == ctx.labels.items.len) {
         // Conditional return: CBZ cond, skip ; marshal ; B
@@ -346,20 +373,24 @@ pub fn branchOnReg(ctx: *EmitCtx, ins: *const ZirInstr, wn: inst.Xn) Error!void 
     if (ins.payload > ctx.labels.items.len) return Error.UnsupportedOp;
     const tgt_idx = ctx.labels.items.len - 1 - ins.payload;
     if (ctx.labels.items[tgt_idx].kind == .loop) {
-        // D-099: loop with params — MOVs must run only when
-        // cond ≠ 0 (= when the back-branch is taken). Without
-        // params, fall through to the simpler CBNZ-direct shape
-        // since no MOVs are needed.
+        // D-099: loop with params — MOVs must run only when cond ≠ 0 (= when
+        // the back-branch is taken), so the condition is read first:
+        //   CBZ wn, skip ; moves ; poll ; B header ; skip:
+        // A condition in a register the poll writes (`br_on_null` passes
+        // X16) is read first the same way. `wn` is not read after the CBZ:
+        // the moves and the poll may write it.
         const param_arity = ctx.labels.items[tgt_idx].param_arity;
-        if (param_arity > 0 and ctx.pushed_vregs.items.len >= param_arity) {
+        const carries = param_arity > 0 and ctx.pushed_vregs.items.len >= param_arity;
+        if (carries or pollWrites(wn)) {
             const cbz_at: u32 = @intCast(ctx.buf.items.len);
-            // `wn` is read by this CBZ and not after: the moves may write it.
             try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbzW(wn, 0));
-            const base = ctx.pushed_vregs.items.len - param_arity;
-            try merge_mov.emitMergeMoves(ctx, ctx.pushed_vregs.items[base..][0..param_arity], ctx.labels.items[tgt_idx].param_top_vregs[0..param_arity], null);
+            if (carries) {
+                const base = ctx.pushed_vregs.items.len - param_arity;
+                try merge_mov.emitMergeMoves(ctx, ctx.pushed_vregs.items[base..][0..param_arity], ctx.labels.items[tgt_idx].param_top_vregs[0..param_arity], null);
+            }
             // D-314 — back-edge poll runs only when the branch is TAKEN
             // (inside the cond≠0 region), before the backward B.
-            try emitBackEdgeInterruptPoll(ctx);
+            try emitBackEdgeInterruptPoll(ctx, null);
             const b_at: u32 = @intCast(ctx.buf.items.len);
             const tgt_byte = ctx.labels.items[tgt_idx].target_byte_offset;
             const disp_words: i32 = @as(i32, @intCast(tgt_byte)) -
@@ -373,7 +404,7 @@ pub fn branchOnReg(ctx: *EmitCtx, ins: *const ZirInstr, wn: inst.Xn) Error!void 
         }
         // D-314 — back-edge poll before the conditional backward CBNZ. Runs
         // each iteration check (one harmless extra poll on the exit pass).
-        try emitBackEdgeInterruptPoll(ctx);
+        try emitBackEdgeInterruptPoll(ctx, wn);
         const fixup_at: u32 = @intCast(ctx.buf.items.len);
         const tgt_byte = ctx.labels.items[tgt_idx].target_byte_offset;
         const disp_words: i32 = @as(i32, @intCast(tgt_byte)) -
@@ -449,7 +480,7 @@ fn emitBranchToDepth(ctx: *EmitCtx, depth: u32) Error!void {
         // the per-case B.NE-skipped body; the poll's CMP clobbers NZCV but
         // the next case re-CMPs, and X16/X17 never hold the br_table index
         // (allocatable pool + X14/X15 stages only).
-        try emitBackEdgeInterruptPoll(ctx);
+        try emitBackEdgeInterruptPoll(ctx, null);
         const fixup_at: u32 = @intCast(ctx.buf.items.len);
         const tgt_byte = ctx.labels.items[tgt_idx].target_byte_offset;
         const disp_words: i32 = @as(i32, @intCast(tgt_byte)) -
@@ -890,4 +921,16 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
             slot.* = v;
         }
     }
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+const testing = std.testing;
+
+test "pollWrites: the back-edge poll's two scratch registers, and no other" {
+    try testing.expect(pollWrites(16));
+    try testing.expect(pollWrites(17));
+    for ([_]inst.Xn{ 0, 14, 15 } ++ abi.allocatable_gprs) |r| try testing.expect(!pollWrites(r));
 }

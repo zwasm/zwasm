@@ -399,6 +399,9 @@ pub fn emitLoop(
     });
 }
 
+/// The register the back-edge poll writes.
+const poll_scratch: abi.Gpr = .r11;
+
 /// ADR-0179 #3a / D-314 — loop back-edge cooperative-interruption poll.
 /// Mirrors the PROLOGUE poll (emit.zig) but its JNE fixup routes to a
 /// POST-frame interrupted stub (`emitTrapExitStub`, code 16, full
@@ -417,18 +420,23 @@ pub fn emitLoop(
 ///
 /// `MOV R11,[R15+interrupt_ptr_off]; TEST R11,R11; JZ skip (null = not
 /// configured); MOV R11D,[R11]; TEST R11D,R11D; JNE → fixup list`.
+///
+/// `read_after` names a register the caller reads after the poll (a branch
+/// condition it tests again); a poll that would write it is refused.
 pub fn emitBackEdgeInterruptPoll(
     allocator: Allocator,
     buf: *std.ArrayList(u8),
     back_edge_interrupt_fixups: *std.ArrayList(u32),
     back_edge_fuel_fixups: *std.ArrayList(u32),
+    read_after: ?abi.Gpr,
 ) Error!void {
-    try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.r11, abi.runtime_ptr_save_gpr, @intCast(jit_abi.interrupt_ptr_off)).slice());
-    try buf.appendSlice(allocator, inst.encTestRR(.q, .r11, .r11).slice());
+    if (read_after == poll_scratch) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:poll-writes-read-after", 0);
+    try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(poll_scratch, abi.runtime_ptr_save_gpr, @intCast(jit_abi.interrupt_ptr_off)).slice());
+    try buf.appendSlice(allocator, inst.encTestRR(.q, poll_scratch, poll_scratch).slice());
     const skip_at: u32 = @intCast(buf.items.len);
     try buf.appendSlice(allocator, inst.encJccRel32(.e, 0).slice());
-    try buf.appendSlice(allocator, inst.encMovR32FromMemDisp32(.r11, .r11, 0).slice());
-    try buf.appendSlice(allocator, inst.encTestRR(.d, .r11, .r11).slice());
+    try buf.appendSlice(allocator, inst.encMovR32FromMemDisp32(poll_scratch, poll_scratch, 0).slice());
+    try buf.appendSlice(allocator, inst.encTestRR(.d, poll_scratch, poll_scratch).slice());
     const fixup_at: u32 = @intCast(buf.items.len);
     try buf.appendSlice(allocator, inst.encJccRel32(.ne, 0).slice());
     try back_edge_interrupt_fixups.append(allocator, fixup_at);
@@ -441,8 +449,8 @@ pub fn emitBackEdgeInterruptPoll(
     // TEST; JZ skip (unmetered); SUB QWORD [R15+fuel_cell_off], 1 (sets SF);
     // JS → back_edge_fuel_fixups` (code 17, POST-frame emitTrapExitStub).
     // 30 bytes; total back-edge poll block = 62 bytes.
-    try buf.appendSlice(allocator, inst.encMovR32FromMemDisp32(.r11, abi.runtime_ptr_save_gpr, @intCast(jit_abi.fuel_metered_off)).slice());
-    try buf.appendSlice(allocator, inst.encTestRR(.d, .r11, .r11).slice());
+    try buf.appendSlice(allocator, inst.encMovR32FromMemDisp32(poll_scratch, abi.runtime_ptr_save_gpr, @intCast(jit_abi.fuel_metered_off)).slice());
+    try buf.appendSlice(allocator, inst.encTestRR(.d, poll_scratch, poll_scratch).slice());
     const fuel_skip_at: u32 = @intCast(buf.items.len);
     try buf.appendSlice(allocator, inst.encJccRel32(.e, 0).slice());
     try buf.appendSlice(allocator, inst.encSubMem64Disp32Imm8(abi.runtime_ptr_save_gpr, @intCast(jit_abi.fuel_cell_off), 1).slice());
@@ -503,7 +511,7 @@ pub fn emitBr(
         }
         // D-314 — back-edge poll before the unconditional backward JMP (an
         // infinite `(loop (br 0))` is caught here, the prologue poll can't).
-        try emitBackEdgeInterruptPoll(allocator, buf, back_edge_interrupt_fixups, back_edge_fuel_fixups);
+        try emitBackEdgeInterruptPoll(allocator, buf, back_edge_interrupt_fixups, back_edge_fuel_fixups, null);
         const at: u32 = @intCast(buf.items.len);
         const tgt_byte = labels.items[tgt_idx].target_byte_offset;
         const disp: i32 = @as(i32, @intCast(tgt_byte)) -
@@ -788,7 +796,7 @@ fn emitBrTableJmp(
         // the poll bytes); the live br_table index is an allocated reg or
         // R10, never the poll's R11; the next case re-CMPs so the poll's
         // flag clobber is harmless.
-        try emitBackEdgeInterruptPoll(allocator, buf, back_edge_interrupt_fixups, back_edge_fuel_fixups);
+        try emitBackEdgeInterruptPoll(allocator, buf, back_edge_interrupt_fixups, back_edge_fuel_fixups, null);
         const at: u32 = @intCast(buf.items.len);
         const tgt_byte = labels.items[tgt_idx].target_byte_offset;
         const disp: i32 = @as(i32, @intCast(tgt_byte)) -
@@ -981,7 +989,7 @@ pub fn branchOnReg(
             // D-314 — back-edge poll runs only when the branch is TAKEN
             // (inside the JE-skipped cond≠0 region), after the merge MOVs
             // (R11 free again), before the backward JMP. Flags are dead here.
-            try emitBackEdgeInterruptPoll(allocator, buf, back_edge_interrupt_fixups, back_edge_fuel_fixups);
+            try emitBackEdgeInterruptPoll(allocator, buf, back_edge_interrupt_fixups, back_edge_fuel_fixups, null);
             const back_at: u32 = @intCast(buf.items.len);
             const tgt_byte = labels.items[tgt_idx].target_byte_offset;
             const back_disp: i32 = @as(i32, @intCast(tgt_byte)) -
@@ -999,7 +1007,7 @@ pub fn branchOnReg(
         // the shared TEST above is left in place for the forward paths.
         // Runs on every pass (one harmless extra poll on the exit pass) —
         // same semantics as the arm64 CBNZ-path poll.
-        try emitBackEdgeInterruptPoll(allocator, buf, back_edge_interrupt_fixups, back_edge_fuel_fixups);
+        try emitBackEdgeInterruptPoll(allocator, buf, back_edge_interrupt_fixups, back_edge_fuel_fixups, cond_r);
         try buf.appendSlice(allocator, inst.encTestRR(.d, cond_r, cond_r).slice());
         const at: u32 = @intCast(buf.items.len);
         const tgt_byte = labels.items[tgt_idx].target_byte_offset;
@@ -2020,5 +2028,20 @@ test "emitMergeMoves: a set that would write a register the caller reads after i
     try emitMergeMoves(testing.allocator, &buf, alloc, 64, &f, &.{ 0, 1 }, &.{ 0, 1 }, park_gpr);
     try testing.expectEqual(@as(usize, 0), buf.items.len);
     try emitMergeMoves(testing.allocator, &buf, alloc, 64, &f, &.{0}, &.{1}, abi.allocatable_gprs[2]);
+    try testing.expect(buf.items.len > 0);
+}
+
+test "emitBackEdgeInterruptPoll: a poll that would write a register read after it is refused" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var interrupt_fixups: std.ArrayList(u32) = .empty;
+    defer interrupt_fixups.deinit(testing.allocator);
+    var fuel_fixups: std.ArrayList(u32) = .empty;
+    defer fuel_fixups.deinit(testing.allocator);
+    try testing.expectError(Error.UnsupportedOp, emitBackEdgeInterruptPoll(testing.allocator, &buf, &interrupt_fixups, &fuel_fixups, poll_scratch));
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
+    // RAX (`br_on_cast`'s condition) and R10 (a spilled `br_if` condition) survive it.
+    try emitBackEdgeInterruptPoll(testing.allocator, &buf, &interrupt_fixups, &fuel_fixups, .rax);
+    try emitBackEdgeInterruptPoll(testing.allocator, &buf, &interrupt_fixups, &fuel_fixups, .r10);
     try testing.expect(buf.items.len > 0);
 }
