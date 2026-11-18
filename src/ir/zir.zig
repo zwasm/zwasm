@@ -413,6 +413,17 @@ pub fn armDeadAt(func: *const ZirFunc, pc: usize) bool {
     return pc > 0 and isTerminator(func.instrs.items[pc - 1].op);
 }
 
+/// Wasm spec §3.4.4 (if) — whether the `if` at `instr` has params and no
+/// else. Its else arm is then empty, so the cond=0 edge reaches the `end`
+/// with the params as the results: their vregs are the frame's merge, and a
+/// branch to the `if` moves what it carries into them. The emit and liveness
+/// both read it at `.if`.
+pub fn ifParamsAreMerge(func: *const ZirFunc, instr: ZirInstr) bool {
+    const params = (instr.extra >> 8) & 0xFF;
+    const results = instr.extra & 0xFF;
+    return params > 0 and params == results and func.blocks.items[instr.payload].else_inst == null;
+}
+
 pub const ZirInstr = struct {
     op: ZirOp,
     payload: u64 = 0,

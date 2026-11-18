@@ -69,14 +69,10 @@ pub const Label = struct {
     if_skip_byte: ?u32 = null,
     merge_top_vregs: [8]u32 = undefined,
     result_arity: u8 = 0,
-    /// emitElse sets this `true` only when the actual capture
-    /// of `result_arity` then-arm vregs succeeded (= operand
-    /// stack had enough entries). emitEndIntra reads it to
-    /// distinguish "merge needed AND captured" from "skip
-    /// merge" (the latter happens when `if` ran in a dead-code
-    /// zone or the then-arm broke out before pushing — the
-    /// validator's polymorphic-stack discipline leaves the
-    /// operand stack short of `arity`).
+    /// Whether `merge_top_vregs` names the frame's merge. Set by the
+    /// first edge into the frame's `end` (a branch, or a live then arm
+    /// at `else`), or by emitIf for an `if` with params and no else,
+    /// whose params are the merge.
     merge_captured: bool = false,
     /// D-093 (d-1) — `pushed_vregs.items.len` snapshot at
     /// emitBlock / emitLoop / emitIf, used by emitEndIntra to

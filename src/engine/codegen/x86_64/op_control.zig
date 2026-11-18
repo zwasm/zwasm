@@ -1069,6 +1069,7 @@ pub fn emitIf(
     labels: *std.ArrayList(Label),
     spill_base_off: u32,
     arity_extra: u32,
+    params_are_merge: bool,
 ) Error!void {
     if (pushed_vregs.items.len < 1) return Error.AllocationMissing;
     const ar = unpackBlockArity(arity_extra);
@@ -1095,6 +1096,8 @@ pub fn emitIf(
         .target_byte_offset = 0,
         .pending = .empty,
         .if_skip_byte = skip_at,
+        .merge_top_vregs = if (params_are_merge) param_top_vregs else undefined,
+        .merge_captured = params_are_merge,
         .result_arity = ar.results,
         .param_arity = ar.params,
         // D-093 (d-1): measured AFTER popping cond_v, matches
@@ -1307,12 +1310,10 @@ pub fn emitEndIntra(
     // D-093 (d-13) — implicit else. `(if (param T1..TK) (result T1..TK))`
     // without `.else` validates per Wasm spec §3.4.4 (param == result): the
     // cond=0 path skips to the `end` with the params as the result, so the
-    // params' vregs are the merge. A live then arm moves its results into
-    // them before the target, which cond=0's Jcc skips; a dead one
-    // (`arm_dead`) reaches the `end` only through a `br`, if at all (#739). A
-    // `br` that carried the params themselves named the same merge; one that
-    // carried other vregs would need the params moved on the skip path, which
-    // is not emitted, so that shape declines.
+    // params' vregs are the merge (emitIf named them). A live then arm moves
+    // its results into them before the target, which cond=0's Jcc skips; a
+    // dead one (`arm_dead`) reaches the `end` only through a `br`, if at all
+    // (#739), and the `br` moved what it carried into them.
     if (lbl.kind == .if_then and lbl.param_arity > 0) {
         resolved = true;
         if (lbl.param_arity != lbl.result_arity) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:implicit-else-arity-mismatch", 0);
@@ -1446,6 +1447,7 @@ pub fn emitIfCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!void {
         ctx.labels,
         ctx.spill_base_off,
         ins.extra,
+        zir.ifParamsAreMerge(ctx.func, ins.*),
     );
 }
 
