@@ -157,7 +157,8 @@ fn pushMerge(
 ///
 /// An `if` frame captures the same way: the emit's helper takes the
 /// first edge into an `if`'s `end` too (D-096), whether it is a `br` from
-/// an arm or the then arm's fall-through at `.else`.
+/// an arm or the then arm's fall-through at `.else`. One with params and no
+/// else is already captured at `.if` (`zir.ifParamsAreMerge`).
 ///
 /// No-op for: `loop` targets (backward branch — no forward
 /// merge), function-level escapes (depth ≥ stack), zero-result
@@ -444,8 +445,8 @@ pub fn compute(
                     // §3.4.4 requires param == result, and the params' vregs
                     // are the merge: a live then arm's results are moved into
                     // them, so this `.end` is their last read; a dead one left
-                    // nothing that reaches here (#739). A `br` that carried
-                    // other vregs than the params is a shape the emit declines.
+                    // nothing that reaches here (#739). A `br` moved what it
+                    // carried into them (`.if` named them the merge).
                     resolved = true;
                     if (fr.param_arity != fr.result_arity) return Error.UnsupportedOp;
                     if (fr.merge_captured and !std.mem.eql(u32, fr.merge_vregs[0..arity], fr.param_vregs[0..arity])) return Error.UnsupportedOp;
@@ -655,15 +656,16 @@ pub fn compute(
                     param_vregs[i] = sim_stack[base + i];
                 }
             }
+            const params_are_merge = zir.ifParamsAreMerge(func, instr);
             block_stack[block_stack_len] = .{
                 .entry_depth = @intCast(sim_len),
                 .param_arity = param_arity,
                 .result_arity = result_arity,
                 .is_if = true,
                 .is_loop = false,
-                .merge_captured = false,
+                .merge_captured = params_are_merge,
                 .param_vregs = param_vregs,
-                .merge_vregs = undefined,
+                .merge_vregs = if (params_are_merge) param_vregs else undefined,
             };
             block_stack_len += 1;
             continue;
@@ -1231,6 +1233,7 @@ test "compute: an implicit else after a then-arm short of its results keeps the 
         .{ .op = .end },
     });
     defer f.deinit(testing.allocator);
+    try f.blocks.append(testing.allocator, .{ .kind = .if_then, .start_inst = 3, .end_inst = 6 });
 
     const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
