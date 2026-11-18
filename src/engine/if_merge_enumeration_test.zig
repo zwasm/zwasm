@@ -14,7 +14,9 @@
 //!
 //! A loop with params is checked against the value the generator computes
 //! (`loopValue`), since the interpreter traps on one (#244); it takes only
-//! the arms that function knows.
+//! the arms that function knows. Every loop also runs on the JIT a second
+//! time without fuel metering, which a back edge polls, and must give what
+//! the metered run gave.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -128,6 +130,13 @@ const End = enum {
     /// The same with `br_on_cast_fail`, on a reference that is null when
     /// local 1 is set.
     loop_cast_fail_rot,
+    /// The same with `br_on_non_null`, on a reference that is an i31 when
+    /// local 1 is set. With no params the loop carries the reference alone.
+    loop_non_null_rot,
+    /// `br_on_null` as the back edge of a loop that has no params, on a
+    /// reference that is null when local 1 is set, taken at most once. Each
+    /// pass adds 7 to local 2 first, so the number of passes is in the fold.
+    loop_null,
 };
 
 /// An arm whose edge delivers values to places other than where they sat.
@@ -145,18 +154,23 @@ fn loopRotates(e: End) bool {
     return e == .loop_rot or e == .loop_br_rot or e == .loop_brt_rot or brOnLoop(e);
 }
 
-/// A loop arm whose back edge is a `br_on_*`.
+/// A loop arm whose back edge is a `br_on_*` and carries values.
 fn brOnLoop(e: End) bool {
-    return e == .loop_null_rot or castLoop(e);
+    return e == .loop_null_rot or refTail(e);
 }
 
 /// One whose loop carries an i31ref above its other params and results.
+fn refTail(e: End) bool {
+    return castLoop(e) or e == .loop_non_null_rot;
+}
+
+/// One whose back edge is `br_on_cast` or `br_on_cast_fail`.
 fn castLoop(e: End) bool {
     return e == .loop_cast_rot or e == .loop_cast_fail_rot;
 }
 
 fn loopOnly(e: End) bool {
-    return e == .loop_br_shift or e == .loop_brt_shift or loopRotates(e);
+    return e == .loop_br_shift or e == .loop_brt_shift or e == .loop_null or loopRotates(e);
 }
 
 /// The arms paired with only `partners` and each other, to bound the sweep.
@@ -298,17 +312,17 @@ fn localGet(out: *std.ArrayList(u8), a: std.mem.Allocator, idx: u32) !void {
 
 // Blocktype: the short single-byte form, or type index 1 (the frame's type).
 fn writeBlockType(out: *std.ArrayList(u8), a: std.mem.Allocator, sh: Shape) !void {
-    if (sh.params == 0 and sh.results == 0) {
-        try out.append(a, 0x40);
-    } else if (sh.params == 0 and sh.results == 1) {
-        try out.append(a, valByte(sh.ty));
-    } else {
+    if (needsTypeIndex(sh)) {
         try sleb(out, a, 1);
+    } else if (sh.results == 0) {
+        try out.append(a, 0x40);
+    } else {
+        try out.append(a, valByte(sh.ty));
     }
 }
 
 fn needsTypeIndex(sh: Shape) bool {
-    return !(sh.params == 0 and (sh.results == 0 or sh.results == 1));
+    return refTail(sh.body) or !(sh.params == 0 and (sh.results == 0 or sh.results == 1));
 }
 
 fn drops(out: *std.ArrayList(u8), a: std.mem.Allocator, n: u8) !void {
@@ -498,10 +512,19 @@ fn emitArm(out: *std.ArrayList(u8), a: std.mem.Allocator, sh: Shape, end: End, t
                 try out.appendSlice(a, &.{ 0x0d, 0x00 }); // br_if 0
             }
         },
-        .loop_null_rot, .loop_cast_rot, .loop_cast_fail_rot => {
+        .loop_null => {
+            try out.appendSlice(a, &.{ 0x20, 0x02, 0x41, 0x07, 0x6a, 0x21, 0x02 }); // local 2 += 7
+            try out.appendSlice(a, &.{ 0xd0, 0x6c, 0x41, 0x05, 0xfb, 0x1c }); // ref.null i31 ; i32.const 5 ; ref.i31
+            try localGet(out, a, 1);
+            try out.appendSlice(a, &.{ 0x1c, 0x01, 0x6c }); // select (result i31ref): null when local 1 is set
+            try out.appendSlice(a, &take_once);
+            try out.appendSlice(a, &.{ 0xd5, 0x00, 0x1a }); // br_on_null 0 ; drop
+            try pushResults(out, a, sh, sh.results, tag);
+        },
+        .loop_null_rot, .loop_cast_rot, .loop_cast_fail_rot, .loop_non_null_rot => {
             const ref_local: u32 = 3 + @as(u32, sh.params);
             try out.appendSlice(a, &.{ 0x10, 0x01 }); // call 1
-            if (castLoop(end)) {
+            if (refTail(end)) {
                 try out.append(a, 0x21); // local.set: the carried reference
                 try uleb(out, a, ref_local);
             }
@@ -512,7 +535,7 @@ fn emitArm(out: *std.ArrayList(u8), a: std.mem.Allocator, sh: Shape, end: End, t
             const some_i31 = [_]u8{ 0x41, 0x05, 0xfb, 0x1c }; // i32.const 5 ; ref.i31
             const null_i31 = [_]u8{ 0xd0, 0x6c }; // ref.null i31
             // `select` gives its first operand when local 1 is set.
-            try out.appendSlice(a, if (end == .loop_cast_rot) &(some_i31 ++ null_i31) else &(null_i31 ++ some_i31));
+            try out.appendSlice(a, if (end == .loop_cast_rot or end == .loop_non_null_rot) &(some_i31 ++ null_i31) else &(null_i31 ++ some_i31));
             try localGet(out, a, 1);
             try out.appendSlice(a, &.{ 0x1c, 0x01, 0x6c }); // select (result i31ref)
             try out.appendSlice(a, &take_once);
@@ -520,8 +543,10 @@ fn emitArm(out: *std.ArrayList(u8), a: std.mem.Allocator, sh: Shape, end: End, t
                 try out.appendSlice(a, &.{ 0x10, 0x01, 0xd5, 0x00, 0x1a }); // call 1 ; br_on_null 0 ; drop
             } else if (end == .loop_cast_rot) {
                 try out.appendSlice(a, &.{ 0xfb, 0x18, 0x01, 0x00, 0x6c, 0x6c }); // br_on_cast 0 i31ref (ref i31)
-            } else {
+            } else if (end == .loop_cast_fail_rot) {
                 try out.appendSlice(a, &.{ 0xfb, 0x19, 0x01, 0x00, 0x6c, 0x6c }); // br_on_cast_fail
+            } else {
+                try out.appendSlice(a, &.{ 0xd6, 0x00 }); // br_on_non_null 0: falls through without the reference
             }
             if (castLoop(end)) {
                 try out.append(a, 0x21);
@@ -531,6 +556,7 @@ fn emitArm(out: *std.ArrayList(u8), a: std.mem.Allocator, sh: Shape, end: End, t
             i = 0;
             while (i < sh.params) : (i += 1) try localGet(out, a, 3 + i);
             if (castLoop(end)) try localGet(out, a, ref_local);
+            if (end == .loop_non_null_rot) try out.appendSlice(a, &.{ 0xd0, 0x6c }); // ref.null i31
         },
         .nest_brif => {
             try drops(out, a, sh.params);
@@ -603,9 +629,10 @@ fn loopValue(sh: Shape, in: [2]i32) i32 {
         const from: usize = if (in[1] != 0) 1 else 0;
         @memcpy(res[0..r], vals[from..][0..r]);
     }
-    // A cast loop's reference result is folded first: 1 when it is null,
-    // which `br_on_cast` leaves when it falls through.
-    var acc: i32 = if (sh.body == .loop_cast_rot) 1 else 0;
+    // A carried reference result is folded first: 1 when it is null, which
+    // `br_on_cast` and `br_on_non_null` leave when they fall through. (No JIT
+    // runs `loop_non_null_rot` yet, so its value here has met no run.)
+    var acc: i32 = if (sh.body == .loop_cast_rot or sh.body == .loop_non_null_rot) 1 else 0;
     var i: usize = r;
     while (i > 0) {
         i -= 1;
@@ -646,6 +673,8 @@ fn validArm(sh: Shape, end: End) bool {
         .rot_brif, .rot_brif_again => same_count and sh.kind != .loop,
         // One reference type per frame: the i31ref these carry or test.
         .loop_null_rot, .loop_cast_rot, .loop_cast_fail_rot => same_count and sh.kind == .loop and sh.ty != .ref,
+        .loop_non_null_rot => sh.kind == .loop and sh.params == sh.results and sh.pty == .same and sh.ty != .ref,
+        .loop_null => sh.kind == .loop and sh.params == 0 and sh.ty != .ref,
         .nest_brif => sh.kind != .loop,
         .br_self, .brt_self, .brif_dead, .brif_live, .brif_twice, .brif_replace => sh.kind != .loop, // a branch to a loop's label is a back edge
         .catch_self => sh.kind != .loop, // the catch would branch to the header
@@ -683,7 +712,7 @@ fn build(a: std.mem.Allocator, sh: Shape) !?[]u8 {
 
     var p: u8 = 0;
     while (p < sh.params) : (p += 1) try pushConst(&body, a, paramTy(sh), 50 + p);
-    const ref_tail = castLoop(sh.body);
+    const ref_tail = refTail(sh.body);
     if (ref_tail) try body.appendSlice(a, &.{ 0xd0, 0x6c }); // ref.null i31
     switch (sh.kind) {
         .if_ => {
@@ -811,6 +840,9 @@ fn section(mod: *std.ArrayList(u8), a: std.mem.Allocator, id: u8, payload: []con
 
 // --- running ---------------------------------------------------------------
 
+/// The fuel the engines run with; a loop also runs on the JIT without metering.
+const metered: zwasm.Module.Budget = .{ .limited = zwasm.Module.default_fuel };
+
 const inputs = [_][2]i32{ .{ 0, 0 }, .{ 1, 0 }, .{ 0, 1 }, .{ 1, 1 } };
 
 const RunResult = union(enum) {
@@ -820,14 +852,19 @@ const RunResult = union(enum) {
 };
 
 // One compile and instantiation per engine, then every input.
-fn runAll(bytes: []const u8, use_jit: bool) [inputs.len]RunResult {
+fn runAll(bytes: []const u8, use_jit: bool, fuel: zwasm.Module.Budget) [inputs.len]RunResult {
     var out: [inputs.len]RunResult = @splat(.decline);
     var eng = zwasm.Engine.init(testing.allocator, .{}) catch return out;
     defer eng.deinit();
     var mod = eng.compile(bytes) catch return out;
     defer mod.deinit();
-    var inst = mod.instantiate(.{ .engine = if (use_jit) .jit else .interp }) catch return out;
+    var inst = mod.instantiate(.{ .engine = if (use_jit) .jit else .interp, .fuel = fuel }) catch return out;
     defer inst.deinit();
+    // No fuel ends a loop that never exits: a timer interrupts it instead, so
+    // such a loop is a mismatch (`Interrupted`) and not a hang.
+    var timer: ?std.Io.Future(void) = null;
+    defer if (timer) |*f| f.cancel(testing.io);
+    if (fuel == .unmetered) timer = testing.io.concurrent(interruptAfter, .{ testing.io, &inst }) catch return out;
     for (inputs, &out) |in, *r| {
         var args = [_]zwasm.Value{ .{ .i32 = in[0] }, .{ .i32 = in[1] } };
         var res = [_]zwasm.Value{.{ .i32 = 0 }};
@@ -839,6 +876,15 @@ fn runAll(bytes: []const u8, use_jit: bool) [inputs.len]RunResult {
     return out;
 }
 
+/// Interrupts `inst` once `unmetered_limit_ms` have passed, unless canceled.
+fn interruptAfter(io: std.Io, inst: *zwasm.Instance) void {
+    io.sleep(.{ .nanoseconds = @as(i96, unmetered_limit_ms) * std.time.ns_per_ms }, .awake) catch return;
+    inst.interrupt();
+}
+
+/// Far past what the four inputs of one shape take (well under a millisecond).
+const unmetered_limit_ms = 20_000;
+
 const Tally = struct {
     cur: Shape = undefined,
     shapes: u32 = 0, // shapes the generator emitted bytes for
@@ -846,6 +892,7 @@ const Tally = struct {
     value_agree: u32 = 0, // both ran, same value
     trap_agree: u32 = 0, // both trapped the same way
     computed_agree: u32 = 0, // a loop with params: the JIT gave `loopValue`
+    unmetered_agree: u32 = 0, // a loop: the JIT without fuel metering gave what it gives with it
     // Park steps the JIT's merge moves took (a cycle among them), by where
     // the moves went: a loop's params, or a block's or an `if`'s merge.
     parks_loop: u64 = 0,
@@ -872,7 +919,7 @@ const Tally = struct {
 };
 
 fn compareShape(t: *Tally, bytes: []const u8) void {
-    const iv = runAll(bytes, false);
+    const iv = runAll(bytes, false, metered);
     if (iv[0] == .decline) {
         // The interpreter declines no valid module, so this is one the
         // generator emitted wrongly — the comparison never happened. Counted
@@ -881,7 +928,7 @@ fn compareShape(t: *Tally, bytes: []const u8) void {
         return;
     }
     const parks_before = parallel_move.parks.load(.monotonic);
-    const jv = runAll(bytes, true);
+    const jv = runAll(bytes, true, metered);
     const parks = parallel_move.parks.load(.monotonic) - parks_before;
     if (t.cur.kind == .loop) t.parks_loop += parks else t.parks_forward += parks;
     if (castLoop(t.cur.body)) t.parks_cast += parks;
@@ -890,7 +937,7 @@ fn compareShape(t: *Tally, bytes: []const u8) void {
         t.declined += 1;
         return;
     }
-    if (t.cur.kind == .loop and t.cur.params > 0) {
+    if (t.cur.kind == .loop and (t.cur.params > 0 or refTail(t.cur.body))) {
         for (jv, inputs) |j, in| {
             const want = loopValue(t.cur, in);
             if (j == .value and j.value == want) {
@@ -898,12 +945,10 @@ fn compareShape(t: *Tally, bytes: []const u8) void {
                 t.credit();
             } else {
                 t.mismatch += 1;
-                printMismatch(t, in, .{ .value = want }, j);
+                printMismatch(t, in, "computed", .{ .value = want }, "jit", j);
             }
         }
-        return;
-    }
-    for (iv, jv, inputs) |i, j, in| {
+    } else for (iv, jv, inputs) |i, j, in| {
         const agree = switch (i) {
             .value => |x| j == .value and j.value == x,
             .trap => |x| j == .trap and j.trap == x,
@@ -914,20 +959,32 @@ fn compareShape(t: *Tally, bytes: []const u8) void {
             t.credit();
         } else {
             t.mismatch += 1;
-            printMismatch(t, in, i, j);
+            printMismatch(t, in, "interp", i, "jit", j);
+        }
+    }
+    if (t.cur.kind == .loop) {
+        // A back edge polls the fuel: without metering the JIT gives the same.
+        const ju = runAll(bytes, true, .unmetered);
+        for (jv, ju, inputs) |j, u, in| {
+            if (std.meta.eql(j, u)) {
+                t.unmetered_agree += 1;
+            } else {
+                t.mismatch += 1;
+                printMismatch(t, in, "jit", j, "jit-unmetered", u);
+            }
         }
     }
 }
 
-fn printMismatch(t: *Tally, in: [2]i32, i: RunResult, j: RunResult) void {
+fn printMismatch(t: *Tally, in: [2]i32, want_from: []const u8, want: RunResult, got_from: []const u8, got: RunResult) void {
     if (t.mismatch > 30) return;
     const sh = t.cur;
-    std.debug.print("  MISMATCH kind={s} ty={s} pty={s} P={d} R={d} E={d} body={s} else={s} skip={} in=({d},{d}) interp={f} jit={f}\n", .{
+    std.debug.print("  MISMATCH kind={s} ty={s} pty={s} P={d} R={d} E={d} body={s} else={s} skip={} in=({d},{d}) {s}={f} {s}={f}\n", .{
         @tagName(sh.kind), @tagName(sh.ty),                           @tagName(sh.pty),
         sh.params,         sh.results,                                sh.enclosing,
         @tagName(sh.body), if (sh.else_) |e| @tagName(e) else "none", sh.outer_skip,
-        in[0],             in[1],                                     Fmt{ .r = i },
-        Fmt{ .r = j },
+        in[0],             in[1],                                     want_from,
+        Fmt{ .r = want },  got_from,                                  Fmt{ .r = got },
     });
 }
 
@@ -989,14 +1046,14 @@ test "jit vs interp: control-frame shapes around an arm that ends early agree (#
     var report = Tally{};
     try sweep(&report);
     std.debug.print(
-        "if-merge-enum: {d} shapes, {d} invalid, {d} value-agree, {d} trap-agree, {d} computed-agree, {d} jit-declined, {d} mismatch\n" ++
+        "if-merge-enum: {d} shapes, {d} invalid, {d} value-agree, {d} trap-agree, {d} computed-agree, {d} unmetered-agree, {d} jit-declined, {d} mismatch\n" ++
             "  parks: {d} into a loop's params ({d} on br_on_cast edges, {d} on br_on_null edges), {d} into a block's or an if's merge\n" ++
             "  by kind {any}; by type {any}; by body end {any}; by else end {any}\n",
         .{
-            report.shapes,         report.invalid,    report.value_agree,   report.trap_agree,
-            report.computed_agree, report.declined,   report.mismatch,      report.parks_loop,
-            report.parks_cast,     report.parks_null, report.parks_forward, report.by_kind,
-            report.by_ty,          report.by_body,    report.by_else,
+            report.shapes,         report.invalid,         report.value_agree, report.trap_agree,
+            report.computed_agree, report.unmetered_agree, report.declined,    report.mismatch,
+            report.parks_loop,     report.parks_cast,      report.parks_null,  report.parks_forward,
+            report.by_kind,        report.by_ty,           report.by_body,     report.by_else,
         },
     );
     try testing.expectEqual(@as(u32, 0), report.mismatch);
@@ -1004,17 +1061,22 @@ test "jit vs interp: control-frame shapes around an arm that ends early agree (#
     // a nonzero count means a module the comparison silently skipped.
     try testing.expectEqual(@as(u32, 0), report.invalid);
     // The JIT declines these and no others; one that moves from agreeing to
-    // declining changes the count. x86_64 declines a `br_table` case whose
-    // moves, poll and jump are longer than the rel8 jump that skips them:
-    // here a loop with three f64 params in spill slots whose back edge is
-    // a `br_table` (`loop_brt_shift`, `loop_brt_rot`), 17 shapes. It also
-    // declines `br_on_null` to a loop: the 66 `loop_null_rot` shapes.
-    const declines: u32 = if (builtin.cpu.arch == .x86_64) 17 + 66 else 0;
+    // declining changes the count.
+    // - `br_on_non_null` takes only a block as its target, on both arches:
+    //   the 72 `loop_non_null_rot` shapes.
+    // - x86_64 takes only a block for `br_on_null` too: the 66
+    //   `loop_null_rot` and the 18 `loop_null` shapes.
+    // - x86_64 declines a `br_table` case whose moves, poll and jump are
+    //   longer than the rel8 jump that skips them: here a loop with three f64
+    //   params in spill slots whose back edge is a `br_table`
+    //   (`loop_brt_shift`, `loop_brt_rot`), 17 shapes.
+    const declines: u32 = if (builtin.cpu.arch == .x86_64) 72 + 66 + 18 + 17 else 72;
     try testing.expectEqual(declines, report.declined);
     try testing.expect(report.shapes > 1000);
     try testing.expect(report.value_agree > 1000);
     try testing.expect(report.trap_agree > 0);
     try testing.expect(report.computed_agree > 0);
+    try testing.expect(report.unmetered_agree > 0);
     // A loop's params are dead between its header and a back edge, so the
     // values an edge carries can sit in them, in any order: the rotating
     // arms make cycles, and the moves park. A block's or an `if`'s merge
@@ -1032,8 +1094,10 @@ test "jit vs interp: control-frame shapes around an arm that ends early agree (#
     for (report.by_kind) |n| try testing.expect(n > 0);
     for (report.by_ty) |n| try testing.expect(n > 0);
     for (report.by_body, all_ends) |n, e| {
-        // x86_64 declines every `br_on_null` to a loop (counted above).
-        try testing.expect(n > 0 or (e == .loop_null_rot and builtin.cpu.arch == .x86_64));
+        // The arms every shape of which is declined (counted above).
+        const declined = e == .loop_non_null_rot or
+            ((e == .loop_null_rot or e == .loop_null) and builtin.cpu.arch == .x86_64);
+        try testing.expect(n > 0 or declined);
     }
     for (report.by_else, all_ends) |n, e| {
         try testing.expect(n > 0 or loopOnly(e)); // a loop has no else arm

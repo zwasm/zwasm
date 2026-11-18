@@ -1135,7 +1135,7 @@ pub fn compile(
                         if (end_loop) |lp| {
                             // Wasm 3.0 §3.3.10.6 (try_table) — a catch to a loop is a
                             // branch to it: the back-edge poll, then the header, as `br`.
-                            try op_control.emitBackEdgeInterruptPoll(allocator, &buf, &back_edge_interrupt_fixups, &back_edge_fuel_fixups);
+                            try op_control.emitBackEdgeInterruptPoll(allocator, &buf, &back_edge_interrupt_fixups, &back_edge_fuel_fixups, null);
                             const at: u32 = @intCast(buf.items.len);
                             const disp: i32 = @as(i32, @intCast(lp.target_byte_offset)) - @as(i32, @intCast(at)) - 5;
                             try buf.appendSlice(allocator, inst.encJmpRel32(disp).slice());

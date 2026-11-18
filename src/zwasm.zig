@@ -338,6 +338,7 @@ test {
     _ = @import("engine/codegen/arm64/emit.zig");
     _ = @import("engine/codegen/arm64/emit_test.zig");
     _ = @import("engine/codegen/arm64/op_control_merge_mov.zig");
+    _ = @import("engine/codegen/arm64/op_control.zig");
     _ = @import("engine/codegen/x86_64/reg_class.zig");
     _ = @import("engine/codegen/x86_64/inst.zig");
     _ = @import("engine/codegen/x86_64/inst_sse.zig");

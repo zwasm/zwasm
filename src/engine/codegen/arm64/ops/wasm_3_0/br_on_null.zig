@@ -35,8 +35,9 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
 
     // Null-flag in a RESERVED scratch (W16/IP0 — NOT an allocatable vreg
     // home, so it does not clobber the ref; branchOnReg reads it before it
-    // emits a merge move, which may park in X16): CMP Xn,#0 (X-form —
-    // funcref is u64) ; CSET W16, EQ → 1 iff null. CMP only READS Xn, so when `src` is register-resident the ref
+    // emits anything that writes X16: a merge move, which may park there,
+    // or a loop's back-edge poll): CMP Xn,#0 (X-form — funcref is u64) ;
+    // CSET W16, EQ → 1 iff null. CMP only READS Xn, so when `src` is register-resident the ref
     // value stays live in Xn for the non-null fall-through push below
     // (CSET-into-Xn would have destroyed it — the block-path regression).
     // `branchOnReg` branches when the reg != 0 (= null).
