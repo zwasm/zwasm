@@ -64,8 +64,7 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     if (rd != 0) try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrReg(rd, 31, 0));
 
     // .done — patch the CBZ forward displacement (in words).
-    const done_at: usize = ctx.buf.items.len;
-    const disp_words: i32 = @intCast((done_at - cbz_at) / 4);
+    const disp_words = try gpr.rel(i19, cbz_at, ctx.buf.items.len);
     std.mem.writeInt(u32, ctx.buf.items[cbz_at..][0..4], inst.encCbz(xsrc, disp_words), .little);
 
     try gpr.gprStoreSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, args.result, 0);

@@ -73,7 +73,7 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // Patch B.EQ skip disp to current buf end (skip target = where
     // null-path execution lands).
     const skip_byte: u32 = @intCast(ctx.buf.items.len);
-    const beq_disp_words: i19 = @intCast(@divExact(@as(i32, @intCast(skip_byte)) - @as(i32, @intCast(beq_at)), 4));
+    const beq_disp_words = try gpr.rel(i19, beq_at, skip_byte);
     std.mem.writeInt(u32, ctx.buf.items[beq_at..][0..4], inst.encBCond(.eq, beq_disp_words), .little);
 
     // Fall-through (null) state: ref is consumed. Pop the peeked

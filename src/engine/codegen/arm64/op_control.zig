@@ -318,9 +318,7 @@ pub fn emitBr(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
         try emitBackEdgeInterruptPoll(ctx, null);
         const fixup_at: u32 = @intCast(ctx.buf.items.len);
         const tgt_byte = ctx.labels.items[tgt_idx].target_byte_offset;
-        const disp_words: i32 = @as(i32, @intCast(tgt_byte)) -
-            @as(i32, @intCast(fixup_at));
-        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(@divExact(disp_words, 4)));
+        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(try gpr.rel(i26, fixup_at, tgt_byte)));
         return;
     }
     // Forward branch (block / if_then with br inside / else_open).
@@ -366,7 +364,7 @@ pub fn branchOnReg(ctx: *EmitCtx, ins: *const ZirInstr, wn: inst.Xn) Error!void 
         // Patch the CBZ to skip past the B (i.e. land at the
         // current buf end — the next instruction).
         const skip_byte: u32 = @intCast(ctx.buf.items.len);
-        const cbz_disp_words: i19 = @intCast(@divExact(@as(i32, @intCast(skip_byte)) - @as(i32, @intCast(cbz_at)), 4));
+        const cbz_disp_words = try gpr.rel(i19, cbz_at, skip_byte);
         std.mem.writeInt(u32, ctx.buf.items[cbz_at..][0..4], inst.encCbzW(wn, cbz_disp_words), .little);
         return;
     }
@@ -393,12 +391,10 @@ pub fn branchOnReg(ctx: *EmitCtx, ins: *const ZirInstr, wn: inst.Xn) Error!void 
             try emitBackEdgeInterruptPoll(ctx, null);
             const b_at: u32 = @intCast(ctx.buf.items.len);
             const tgt_byte = ctx.labels.items[tgt_idx].target_byte_offset;
-            const disp_words: i32 = @as(i32, @intCast(tgt_byte)) -
-                @as(i32, @intCast(b_at));
-            try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(@divExact(disp_words, 4)));
+            try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(try gpr.rel(i26, b_at, tgt_byte)));
             // Patch CBZ to skip past the MOVs + B.
             const skip_byte: u32 = @intCast(ctx.buf.items.len);
-            const cbz_disp_words: i19 = @intCast(@divExact(@as(i32, @intCast(skip_byte)) - @as(i32, @intCast(cbz_at)), 4));
+            const cbz_disp_words = try gpr.rel(i19, cbz_at, skip_byte);
             std.mem.writeInt(u32, ctx.buf.items[cbz_at..][0..4], inst.encCbzW(wn, cbz_disp_words), .little);
             return;
         }
@@ -407,9 +403,7 @@ pub fn branchOnReg(ctx: *EmitCtx, ins: *const ZirInstr, wn: inst.Xn) Error!void 
         try emitBackEdgeInterruptPoll(ctx, wn);
         const fixup_at: u32 = @intCast(ctx.buf.items.len);
         const tgt_byte = ctx.labels.items[tgt_idx].target_byte_offset;
-        const disp_words: i32 = @as(i32, @intCast(tgt_byte)) -
-            @as(i32, @intCast(fixup_at));
-        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbnzW(wn, @divExact(disp_words, 4)));
+        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbnzW(wn, try gpr.rel(i19, fixup_at, tgt_byte)));
         return;
     }
     // Forward branch. D-093: for a block or `if` with merge already
@@ -432,7 +426,7 @@ pub fn branchOnReg(ctx: *EmitCtx, ins: *const ZirInstr, wn: inst.Xn) Error!void 
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(0));
         try ctx.labels.items[tgt_idx].pending.append(ctx.allocator, .{ .byte_offset = b_at, .kind = .b_uncond });
         const skip_byte: u32 = @intCast(ctx.buf.items.len);
-        const cbz_disp_words: i19 = @intCast(@divExact(@as(i32, @intCast(skip_byte)) - @as(i32, @intCast(cbz_at)), 4));
+        const cbz_disp_words = try gpr.rel(i19, cbz_at, skip_byte);
         std.mem.writeInt(u32, ctx.buf.items[cbz_at..][0..4], inst.encCbzW(wn, cbz_disp_words), .little);
         return;
     }
@@ -483,9 +477,7 @@ fn emitBranchToDepth(ctx: *EmitCtx, depth: u32) Error!void {
         try emitBackEdgeInterruptPoll(ctx, null);
         const fixup_at: u32 = @intCast(ctx.buf.items.len);
         const tgt_byte = ctx.labels.items[tgt_idx].target_byte_offset;
-        const disp_words: i32 = @as(i32, @intCast(tgt_byte)) -
-            @as(i32, @intCast(fixup_at));
-        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(@divExact(disp_words, 4)));
+        try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(try gpr.rel(i26, fixup_at, tgt_byte)));
         return;
     }
     // D-093: forward branch — same block-merge mechanism
@@ -549,7 +541,7 @@ pub fn emitBrTable(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encBCond(.ne, 0));
         try emitBranchToDepth(ctx, targets[start + i]);
         const after: u32 = @intCast(ctx.buf.items.len);
-        const disp_words: i19 = @intCast(@divExact(@as(i32, @intCast(after)) - @as(i32, @intCast(bne_at)), 4));
+        const disp_words = try gpr.rel(i19, bne_at, after);
         std.mem.writeInt(u32, ctx.buf.items[bne_at..][0..4], inst.encBCond(.ne, disp_words), .little);
     }
     try emitBranchToDepth(ctx, targets[start + count]);
@@ -672,11 +664,9 @@ pub fn emitElse(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
     // that case the if itself never emitted bytes, so the
     // skip-patch step is a no-op.
     if (lbl.if_skip_byte) |skip_byte| {
-        const skip_disp: i32 = @as(i32, @intCast(else_start)) -
-            @as(i32, @intCast(skip_byte));
         const orig_cbz = std.mem.readInt(u32, ctx.buf.items[skip_byte..][0..4], .little);
         const cbz_rt: inst.Xn = @intCast(orig_cbz & 0x1F);
-        const new_cbz = inst.encCbzW(cbz_rt, @divExact(skip_disp, 4));
+        const new_cbz = inst.encCbzW(cbz_rt, try gpr.rel(i19, skip_byte, else_start));
         std.mem.writeInt(u32, ctx.buf.items[skip_byte..][0..4], new_cbz, .little);
     }
     lbl.if_skip_byte = null;
@@ -836,11 +826,9 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
     // Patch the if-then's skip-CBZ if it's still pending (no
     // `else` was encountered).
     if (lbl.if_skip_byte) |skip_byte| {
-        const disp: i32 = @as(i32, @intCast(target_byte)) -
-            @as(i32, @intCast(skip_byte));
         const orig = std.mem.readInt(u32, ctx.buf.items[skip_byte..][0..4], .little);
         const rt: inst.Xn = @intCast(orig & 0x1F);
-        const new_cbz = inst.encCbzW(rt, @divExact(disp, 4));
+        const new_cbz = inst.encCbzW(rt, try gpr.rel(i19, skip_byte, target_byte));
         std.mem.writeInt(u32, ctx.buf.items[skip_byte..][0..4], new_cbz, .little);
     }
     // Patch all forward br fixups that targeted this label
@@ -848,14 +836,12 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
     // else-end B). Loop labels have no pending fixups.
     if (lbl.kind == .block or lbl.kind == .if_then or lbl.kind == .else_open) {
         for (lbl.pending.items) |fx| {
-            const disp_words: i32 = @as(i32, @intCast(target_byte)) -
-                @as(i32, @intCast(fx.byte_offset));
             const new_word: u32 = switch (fx.kind) {
-                .b_uncond => inst.encB(@divExact(disp_words, 4)),
+                .b_uncond => inst.encB(try gpr.rel(i26, fx.byte_offset, target_byte)),
                 .cbnz_w => blk: {
                     const orig = std.mem.readInt(u32, ctx.buf.items[fx.byte_offset..][0..4], .little);
                     const rt: inst.Xn = @intCast(orig & 0x1F);
-                    break :blk inst.encCbnzW(rt, @divExact(disp_words, 4));
+                    break :blk inst.encCbnzW(rt, try gpr.rel(i19, fx.byte_offset, target_byte));
                 },
             };
             std.mem.writeInt(u32, ctx.buf.items[fx.byte_offset..][0..4], new_word, .little);

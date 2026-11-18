@@ -40,6 +40,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const jit_abi = @import("jit_abi.zig");
+const a64 = @import("../arm64/inst.zig");
 const FuncType = @import("../../../ir/zir.zig").FuncType;
 
 /// Wrapper thunk emit parameters. The caller
@@ -77,6 +78,9 @@ pub const Error = error{
     UnsupportedOp,
     /// Allocator out of memory during byte buffer growth.
     OutOfMemory,
+    /// The wrapper's call cannot reach the body: a fact about the module's
+    /// size, not the signature, so the linker declines the module.
+    DisplacementOverflow,
 };
 
 /// Emit a wrapper thunk for the given function. Per-arch
@@ -618,13 +622,10 @@ fn emitBLAarch64(
     params: EmitParams,
     pre_offset: u32,
 ) Error!void {
-    const bl_site: i64 = @as(i64, @intCast(params.thunk_offset)) +
-        @as(i64, @intCast(pre_offset));
-    const disp_bytes: i64 = @as(i64, @intCast(params.body_offset)) - bl_site;
-    if (@mod(disp_bytes, 4) != 0) return Error.UnsupportedOp;
-    const disp_words: i32 = @intCast(@divExact(disp_bytes, 4));
-    const imm26: u32 = @bitCast(disp_words);
-    try writeInsn(allocator, bytes, 0x94000000 | (imm26 & 0x03FFFFFF));
+    const bl_site: u64 = @as(u64, params.thunk_offset) + pre_offset;
+    // A module's code size sets the distance (imm26: ±128 MiB).
+    const disp_words = a64.wordDisp(i26, bl_site, params.body_offset) orelse return Error.DisplacementOverflow;
+    try writeInsn(allocator, bytes, a64.encBL(disp_words));
 }
 
 fn writeInsn(allocator: std.mem.Allocator, bytes: *std.ArrayList(u8), word: u32) Error!void {
@@ -1220,6 +1221,29 @@ test "wrapper_thunk: emit returns UnsupportedOp for 0-result sig" {
     };
     const r = emit(testing.allocator, params);
     try testing.expectError(Error.UnsupportedOp, r);
+}
+
+test "wrapper_thunk: the aarch64 BL to the body takes a distance imm26 holds and is DisplacementOverflow one past it" {
+    const top: u32 = 4 << 25; // 128 MiB
+    const sig: FuncType = .{ .params = &.{}, .results = &.{} };
+    const cases = [_]struct { thunk: u32, body: u32, word: ?u32 }{
+        .{ .thunk = 0, .body = top - 4, .word = 0x95FFFFFF },
+        .{ .thunk = 0, .body = top, .word = null },
+        .{ .thunk = top, .body = 0, .word = 0x96000000 },
+        .{ .thunk = top + 4, .body = 0, .word = null },
+    };
+    for (cases) |c| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(testing.allocator);
+        const r = emitBLAarch64(testing.allocator, &bytes, .{ .sig = sig, .body_offset = c.body, .thunk_offset = c.thunk }, 0);
+        if (c.word) |w| {
+            try r;
+            try testing.expectEqual(w, std.mem.readInt(u32, bytes.items[0..4], .little));
+        } else {
+            try testing.expectError(Error.DisplacementOverflow, r);
+            try testing.expectEqual(@as(usize, 0), bytes.items.len);
+        }
+    }
 }
 
 test "wrapper_thunk: emit aarch64 2-int register-class (i32, i64) (28 bytes)" {

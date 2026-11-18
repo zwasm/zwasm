@@ -275,6 +275,56 @@ test "compile: br_if 0 — forward CBNZ fixup" {
     try testing.expectEqual(@as(u32, inst.encCbnzW(9, 2)), cbnz);
 }
 
+/// `(block (i32.const 0) (br_if 0) <n × i64.const> end)` with four 16-bit
+/// chunks per constant, so each is MOVZ + 3 MOVK: 16 bytes of code between
+/// the `br_if` and the block's end.
+fn compileBrIfOverConsts(n: u32) Error!emit.EmitOutput {
+    const a = testing.allocator;
+    const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
+    var f = ZirFunc.init(0, sig, &.{});
+    defer f.deinit(a);
+    try f.instrs.append(a, .{ .op = .block });
+    try f.instrs.append(a, .{ .op = .@"i32.const", .payload = 0 });
+    try f.instrs.append(a, .{ .op = .br_if, .payload = 0 });
+    const ranges = try a.alloc(zir.LiveRange, n + 1);
+    defer a.free(ranges);
+    const slots = try a.alloc(u16, n + 1);
+    defer a.free(slots);
+    @memset(slots, 0);
+    ranges[0] = .{ .def_pc = 1, .last_use_pc = 2 };
+    for (ranges[1..], 3..) |*r, pc| {
+        try f.instrs.append(a, .{ .op = .@"i64.const", .payload = 0x1111_2222, .extra = 0x3333_4444 });
+        r.* = .{ .def_pc = @intCast(pc), .last_use_pc = @intCast(pc) };
+    }
+    try f.instrs.append(a, .{ .op = .end });
+    try f.instrs.append(a, .{ .op = .end });
+    f.liveness = .{ .ranges = ranges };
+    const alloc: regalloc.Allocation = .{ .slots = slots, .n_slots = 1 };
+    return compile(a, &f, alloc, &.{}, &.{}, 0, &.{}, &.{}, .i32, &.{}, false, false);
+}
+
+test "compile: a function whose branches all reach compiles; one a conditional branch cannot span is declined" {
+    const decline_note = @import("../shared/decline_note.zig");
+    decline_note.clear();
+    defer decline_note.clear();
+    const reach = inst.reachBytes(i19);
+
+    // 60000 constants: 960000 bytes, under imm19's 1 MiB.
+    const out = try compileBrIfOverConsts(60000);
+    defer deinit(testing.allocator, out);
+    try testing.expect(out.bytes.len < reach);
+    const body0 = prologue.body_start_offset(false);
+    const cbnz = std.mem.readInt(u32, out.bytes[body0 + 4 ..][0..4], .little);
+    try testing.expectEqual(inst.encCbnzW(9, 1 + 60000 * 4), cbnz);
+
+    // 70000 constants: 1120000 bytes, past it.
+    try testing.expectError(Error.UnsupportedOp, compileBrIfOverConsts(70000));
+    const note = decline_note.take().?;
+    try testing.expectEqualStrings("imm19", note.op);
+    try testing.expect(note.reason.out_of_reach.distance > reach);
+    try testing.expectEqual(reach, note.reason.out_of_reach.reach);
+}
+
 test "compile: try_table emit populates EmitOutput.exception_handlers" {
     // EH integration — compile() of a function with
     // a populated try_table block produces an
