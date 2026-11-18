@@ -427,6 +427,7 @@ test {
     _ = @import("test_support/skip.zig");
     _ = @import("interp/mvp_tests.zig");
     _ = @import("interp/frame_depth_tests.zig");
+    _ = @import("engine/if_merge_enumeration_test.zig");
     _ = @import("wasi/preview1.zig");
     _ = @import("wasi/host.zig");
     _ = @import("wasi/proc.zig");

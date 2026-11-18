@@ -1051,9 +1051,9 @@ pub fn compile(
                     // results the end left on top.
                     const label_vregs: []const u32 = if (end_loop) |*lp| lp.param_top_vregs[0..lp.param_arity] else pushed_vregs.items;
                     // Decline rather than index past what exists: params `loop` did not capture,
-                    // or a vreg past `alloc.slots`. A param from a block that ends in `unreachable`
-                    // can still be the placeholder vreg 0; the pad then writes that vreg's slot,
-                    // on a path that never runs.
+                    // or a vreg past `alloc.slots`. A result a block minted for a body that ends
+                    // in `unreachable` (#399) is a real vreg this path never computes; declining
+                    // when it is past `alloc.slots` stays correct.
                     if (end_loop) |lp| {
                         if (lp.entry_stack_depth < lp.param_arity) return Error.AllocationMissing;
                         for (label_vregs) |v| if (v >= alloc.slots.len) return Error.AllocationMissing;

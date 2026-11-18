@@ -365,8 +365,19 @@ pub const BlockKind = enum(u8) {
     try_table,
 };
 
+/// Wasm spec §5.4.1 (blocktype) — a block's type as the lowerer decoded it.
+/// Liveness reads the results to class the vregs it mints for a frame that
+/// closes short of them (#399); a `typeidx` resolves through the module's
+/// types.
+pub const BlockType = union(enum) {
+    empty,
+    single: ValType,
+    typeidx: u32,
+};
+
 pub const BlockInfo = struct {
     kind: BlockKind,
+    block_type: BlockType = .empty,
     start_inst: u32,
     end_inst: u32,
     /// Position of the matching `else` opcode for `if` frames that
