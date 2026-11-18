@@ -5,7 +5,9 @@
 ;; `ref_result`'s `if` yields a function reference over an i32, and
 ;; `call_ref` calls it. `param_else`'s `if` takes one param and returns two
 ;; results, with values below it; `param_else_only` is the same `if` with
-;; only its param below it.
+;; only its param below it. `param_brif`'s then arm keeps the param, so a
+;; `br_if 0` carries it as the result, and the fall-through moves its own
+;; value into the param.
 ;; Built with `wasm-tools parse`; the committed .wasm is this text.
 (module
   (type $t (func (result i32)))
@@ -65,5 +67,16 @@
       drop
       i32.const 7
       i32.const 8
+    end
+    i32.add)
+  (func (export "param_brif") (param i32 i32) (result i32)
+    i32.const 300
+    i32.const 40
+    local.get 0
+    if (param i32) (result i32)
+      local.get 1
+      br_if 0
+      i32.const 1
+      i32.add
     end
     i32.add))

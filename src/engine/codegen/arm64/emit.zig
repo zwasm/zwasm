@@ -881,7 +881,7 @@ pub fn compile(
     for (func.instrs.items, 0..) |ins, pc| {
         // D-596 — mirror of the x86_64 call; see `shared/liveness_parity.zig`.
         if (parity_on) {
-            liveness_parity.check(func, pc, ins.op, pushed_vregs.items, labels.items);
+            liveness_parity.check(func, pc, ins.op, pushed_vregs.items);
         }
         // Diagnostic surface: on any error return
         // from the per-op switch below, surface the failing op
@@ -898,6 +898,7 @@ pub fn compile(
         // label stack / emit function epilogue; `else` to switch
         // to the else-arm of an if. Both are needed for emit's
         // own bookkeeping to stay aligned with the block nesting.
+        ctx.arm_dead = zir.armDeadAt(func, pc);
         if (ins.op == .end or ins.op == .@"else") {
             dead_code = false;
         }
@@ -1741,9 +1742,9 @@ pub fn compile(
                             // the results the end left on top.
                             const label_vregs: []const u32 = if (end_loop) |*lp| lp.param_top_vregs[0..lp.param_arity] else pushed_vregs.items;
                             // Decline rather than index past what exists: params `loop` did not capture,
-                            // or a vreg past `alloc.slots`. A result a block minted for a body that ends
-                            // in `unreachable` (#399) is a real vreg this path never computes; declining
-                            // when it is past `alloc.slots` stays correct.
+                            // or a vreg past `alloc.slots`. A result a frame minted for a body that ends
+                            // in a terminator (#399) is a real vreg, and this path writes the payload into
+                            // it; declining when it is past `alloc.slots` stays correct.
                             if (end_loop) |lp| {
                                 if (lp.entry_stack_depth < lp.param_arity) return Error.AllocationMissing;
                                 for (label_vregs) |v| if (v >= alloc.slots.len) return Error.AllocationMissing;

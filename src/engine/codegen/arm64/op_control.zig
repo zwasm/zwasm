@@ -390,13 +390,15 @@ pub fn branchOnReg(ctx: *EmitCtx, ins: *const ZirInstr, wn: inst.Xn) Error!void 
         try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbnzW(wn, @divExact(disp_words, 4)));
         return;
     }
-    // Forward branch. D-093: for `.block` with merge already
+    // Forward branch. D-093: for a block or `if` with merge already
     // captured, MOVs must run only when cond ≠ 0. Wrap the MOVs +
     // B inside a CBZ-skip sequence so the fall-through path
-    // (cond == 0) bypasses both. First br_if to a block (capture
-    // path, no MOV) still uses the canonical CBNZ-forward shape.
+    // (cond == 0) bypasses both — it may still read the merge vreg's
+    // value. First br_if to the frame (capture path, no MOV) still
+    // uses the canonical CBNZ-forward shape.
+    const tgt_kind = ctx.labels.items[tgt_idx].kind;
     const tgt_is_block_with_capture =
-        ctx.labels.items[tgt_idx].kind == .block and
+        (tgt_kind == .block or tgt_kind == .if_then or tgt_kind == .else_open) and
         ctx.labels.items[tgt_idx].result_arity > 0 and
         ctx.labels.items[tgt_idx].merge_captured;
     if (tgt_is_block_with_capture) {
@@ -411,9 +413,8 @@ pub fn branchOnReg(ctx: *EmitCtx, ins: *const ZirInstr, wn: inst.Xn) Error!void 
         std.mem.writeInt(u32, ctx.buf.items[cbz_at..][0..4], inst.encCbzW(wn, cbz_disp_words), .little);
         return;
     }
-    // First br_if to a .block: capture merge target (no MOV).
-    // Other forward kinds (if_then with br inside, else_open):
-    // unchanged — no merge mechanism applies.
+    // First br_if to a block or `if` with results: capture the merge
+    // target (no MOV). A frame with no results captures nothing.
     _ = try merge_mov.captureOrEmitBlockMergeMov(ctx, tgt_idx);
     const fixup_at: u32 = @intCast(ctx.buf.items.len);
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbnzW(wn, 0));
@@ -600,44 +601,50 @@ pub fn emitElse(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
     }
     const lbl_idx = ctx.labels.items.len - 1;
     const arity: u32 = ctx.labels.items[lbl_idx].result_arity;
-    // Counted from the if's own base (#739): a then-arm that ended in a
-    // terminator short of its results is dead, and what lies below the base
-    // belongs to the enclosing frame. Liveness's `.else` counts the same way.
     const frame_base: usize = @as(usize, ctx.labels.items[lbl_idx].entry_stack_depth) -| @as(usize, ctx.labels.items[lbl_idx].param_arity);
-    const then_short = ctx.pushed_vregs.items.len < frame_base + arity;
-    if (arity > 0 and !then_short) {
+    // The then arm's results reach the `end` only if the arm does. A dead
+    // then arm (`ctx.arm_dead`: it ended in a terminator) left values of any
+    // type and count, none of them its results, so it names no merge (#739).
+    // A live one left exactly its results on top: the first edge into the
+    // `end` names the merge vregs, so they are captured here unless a `br` to
+    // this `if` already did, and then the results move into those. Mirror of
+    // x86_64 and of liveness's `.else`.
+    if (arity > 0 and !ctx.arm_dead) {
+        if (ctx.pushed_vregs.items.len < frame_base + arity) return Error.UnsupportedOp;
         const base = ctx.pushed_vregs.items.len - arity;
-        var i: u32 = 0;
-        while (i < arity) : (i += 1) {
-            ctx.labels.items[lbl_idx].merge_top_vregs[i] = ctx.pushed_vregs.items[base + i];
+        if (!ctx.labels.items[lbl_idx].merge_captured) {
+            var i: u32 = 0;
+            while (i < arity) : (i += 1) {
+                ctx.labels.items[lbl_idx].merge_top_vregs[i] = ctx.pushed_vregs.items[base + i];
+            }
+            ctx.labels.items[lbl_idx].merge_captured = true;
+        } else {
+            var i: u32 = 0;
+            while (i < arity) : (i += 1) {
+                const src_vreg = ctx.pushed_vregs.items[base + i];
+                const merge_vreg = ctx.labels.items[lbl_idx].merge_top_vregs[i];
+                if (src_vreg != merge_vreg) try merge_mov.emitMergeMov(ctx, src_vreg, merge_vreg, 1, 0);
+            }
         }
-        ctx.labels.items[lbl_idx].merge_captured = true;
     }
     const b_byte: u32 = @intCast(ctx.buf.items.len);
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(0));
     const else_start: u32 = @intCast(ctx.buf.items.len);
     const lbl = &ctx.labels.items[lbl_idx];
-    // D-093 — restore else-arm operand-stack shape. Wasm
-    // spec §3.4.4: the else-arm starts with the if-frame's param
-    // types pushed back onto the stack (same view the then-arm
-    // had at entry). Truncate to `entry_stack_depth - param_arity`
-    // (= state BEFORE params were placed), then push the captured
-    // `param_top_vregs` back. A dead then-arm's leftovers above the base
-    // go too, as liveness's `.else` drops them for every `if`: kept, the
-    // else arm's `.end` would mint fewer vregs than liveness does (#399).
-    if (lbl.param_arity > 0 or then_short) {
-        const entry_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
-        if (ctx.pushed_vregs.items.len > entry_base) {
-            ctx.pushed_vregs.shrinkRetainingCapacity(entry_base);
-        }
-        while (lbl.param_arity > 0 and ctx.pushed_vregs.items.len < entry_base) {
-            // Defensive — should not fire (validator guarantees
-            // the operand-stack depth at .else matches the
-            // entry-base + result_arity shape); padding here
-            // preserves the entry-base invariant if a future
-            // validator change drifts.
-            try ctx.pushed_vregs.append(ctx.allocator, lbl.param_top_vregs[0]);
-        }
+    // D-093 — Wasm spec §3.4.4: the else arm starts from the frame's base
+    // with the params pushed back (the same view the then arm had at entry);
+    // the then arm's values are not on its stack (the merge vregs live in
+    // `merge_top_vregs`). Mirror of liveness's `.else`.
+    if (ctx.pushed_vregs.items.len > frame_base) {
+        ctx.pushed_vregs.shrinkRetainingCapacity(frame_base);
+    }
+    while (lbl.param_arity > 0 and ctx.pushed_vregs.items.len < frame_base) {
+        // Defensive — should not fire (validator guarantees the
+        // operand-stack depth at .else); padding preserves the
+        // base invariant if a future validator change drifts.
+        try ctx.pushed_vregs.append(ctx.allocator, lbl.param_top_vregs[0]);
+    }
+    {
         var i: u32 = 0;
         while (i < lbl.param_arity) : (i += 1) {
             try ctx.pushed_vregs.append(ctx.allocator, lbl.param_top_vregs[i]);
@@ -670,6 +677,13 @@ pub fn emitElse(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
 pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
     var lbl = ctx.labels.pop().?;
     defer lbl.pending.deinit(ctx.allocator);
+    // `ctx.arm_dead`: the arm this `end` closes ended in a terminator
+    // (`zir.armDeadAt`), so whatever it left is not the frame's results.
+    // `resolved`: an arm below placed the results itself (merge vregs or an
+    // `if`'s params); otherwise a dead arm's leftovers are dropped and the
+    // results minted at the bottom. Mirror of x86_64 and of liveness's `.end`.
+    const arm_dead = ctx.arm_dead;
+    var resolved = false;
 
     // D-027 fix extended to Wasm 2.0 multi-value
     // (D-035): when an else_open frame carries a
@@ -691,6 +705,7 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
     // consumers read from a stable vreg regardless of which path
     // ran at runtime.
     if (lbl.kind == .block and lbl.merge_captured and lbl.result_arity > 0) {
+        resolved = true;
         const arity: u32 = lbl.result_arity;
         // D-093: block-with-params consumed `param_arity`
         // entry-time values; canonical post-block stack base
@@ -718,7 +733,12 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
         //       if-then inside loop inside block; loop's truncate
         //       emptied the stack at loop-end, leaving block-end
         //       with 0 entries but arity=1).
-        if (ctx.pushed_vregs.items.len < entry + arity) {
+        // A dead body reaches the `end` only through the `br`s, which left
+        // the value in the merge vregs.
+        if (arm_dead) {
+            if (ctx.pushed_vregs.items.len > entry) ctx.pushed_vregs.shrinkRetainingCapacity(entry);
+            try ctx.pushed_vregs.appendSlice(ctx.allocator, lbl.merge_top_vregs[0..arity]);
+        } else if (ctx.pushed_vregs.items.len < entry + arity) {
             if (ctx.pushed_vregs.items.len > entry) {
                 ctx.pushed_vregs.shrinkRetainingCapacity(entry);
             }
@@ -760,135 +780,60 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
         }
     }
 
+    // Wasm spec §3.4.4 (end) — an `if` with an else whose merge a live then
+    // arm or a `br` named. emitElse started the else arm at the frame's base,
+    // so a live else arm's results are the top `arity` values: move them into
+    // the merge vregs. A dead one (`arm_dead`) left no results; every edge
+    // that reaches the `end` already put the value in the merge vregs. Either
+    // way the merge vregs are the result. Without a merge (a dead then arm
+    // and no `br`), a live else arm's results stand as they are. Mirror of
+    // x86_64 and of liveness's if-merge `.end` arm.
     if (lbl.kind == .else_open and lbl.merge_captured) {
-        const arity: u32 = lbl.result_arity;
-        const dead_else = blk: {
-            if (ctx.pushed_vregs.items.len < arity) break :blk false;
-            const base = ctx.pushed_vregs.items.len - arity;
-            var i: u32 = 0;
-            while (i < arity) : (i += 1) {
-                if (ctx.pushed_vregs.items[base + i] != lbl.merge_top_vregs[i]) {
-                    break :blk false;
-                }
-            }
-            break :blk true;
-        };
-        const else_frame_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
-        const else_short = ctx.pushed_vregs.items.len < else_frame_base + arity;
-        if (dead_else) {
-            // Merge targets already on top of stack from the
-            // then arm. Skip MOVs; B fixups patched below.
-        } else if (else_short) {
-            // The else arm ended in a terminator short of its results (#739):
-            // it produced no live result to move, so the then-arm's captured
-            // merge vregs are the `if`'s result. Restore them above the frame
-            // base, as the then-short path does. Without this the branch below
-            // pops the params / enclosing values as if they were else results.
-            if (ctx.pushed_vregs.items.len > else_frame_base) {
-                ctx.pushed_vregs.shrinkRetainingCapacity(else_frame_base);
-            }
-            var j: u32 = 0;
-            while (j < arity) : (j += 1) {
-                try ctx.pushed_vregs.append(ctx.allocator, lbl.merge_top_vregs[j]);
-            }
-        } else if (lbl.param_arity > 0) {
-            // D-093 — `if (param T1..TK)` case: emitElse
-            // truncated the phantom V_then_result below the
-            // re-pushed params, so at .end the stack is just
-            // [..., V_else_result_0 .. V_else_result_{N-1}].
-            // MOV else-results into the captured merge slots
-            // (= V_then_result vregs); the truncate at line 730+
-            // collapses pushed_vregs to `entry_base + arity` and
-            // back-fills the canonical merge_top_vregs into the
-            // top slots. Mirrors the param=0 path's MOV+swap
-            // shape, just without the "verify merge_base" check
-            // (no phantom layer to verify against).
-            if (ctx.pushed_vregs.items.len < arity) {
-                dbg.print("codegen", "arm64/op_control: emitEndIntra (param else_open) needs >={d} pushed_vregs, got {d} (func_idx={d})\n", .{ arity, ctx.pushed_vregs.items.len, ctx.func.func_idx });
-                return Error.UnsupportedOp;
-            }
-            var i: u32 = arity;
-            while (i > 0) {
-                i -= 1;
-                const else_result = ctx.pushed_vregs.pop().?;
-                const merge_vreg = lbl.merge_top_vregs[i];
-                try merge_mov.emitMergeMov(ctx, else_result, merge_vreg, 1, 0);
-            }
-            // Push back canonical merge_top_vregs so the post-block
-            // consumer reads the merged result.
-            var j: u32 = 0;
-            while (j < arity) : (j += 1) {
-                try ctx.pushed_vregs.append(ctx.allocator, lbl.merge_top_vregs[j]);
-            }
-        } else if (ctx.pushed_vregs.items.len < 2 * arity) {
-            dbg.print("codegen", "arm64/op_control: emitEndIntra (else_open merge) needs >={d} pushed_vregs, got {d} (func_idx={d})\n", .{ 2 * arity, ctx.pushed_vregs.items.len, ctx.func.func_idx });
-            return Error.UnsupportedOp;
-        } else {
-            // Verify the slot below the else-results is the
-            // captured merge buffer. Mismatch surfaces as
-            // UnsupportedOp (matches single-result behaviour).
-            const merge_base = ctx.pushed_vregs.items.len - 2 * arity;
-            var v: u32 = 0;
-            while (v < arity) : (v += 1) {
-                if (ctx.pushed_vregs.items[merge_base + v] != lbl.merge_top_vregs[v]) {
-                    dbg.print("codegen", "arm64/op_control: emitEndIntra merge mismatch at slot {d} — top vreg={d}, merge={d} (func_idx={d})\n", .{ v, ctx.pushed_vregs.items[merge_base + v], lbl.merge_top_vregs[v], ctx.func.func_idx });
-                    return Error.UnsupportedOp;
-                }
-            }
-            // D-038 discharge: spill-aware merge MOV. Convention:
-            //   stage 0 = merge dest (def-then-store)
-            //   stage 1 = else-arm operand load
-            // For the unspilled common case both calls return home
-            // regs and the store helper is a no-op. Pop in reverse
-            // (top = else_{N-1}); MOVs are independent so order
-            // doesn't matter for correctness, but reverse-pop
-            // matches the natural top-of-stack consumption.
-            //
-            // Per-slot type dispatch — when the
-            // merge target is v128 (per `alloc.shapeTag`), use the
-            // q* helpers + `encMovV16B` so the full 128 bits move.
-            // Earlier behaviour was 32-bit ORR W which silently
-            // truncated v128 merges; surfaced via simd_const.386's
-            // `as-block-retval` / `as-if-then-retval` exports.
-            var i: u32 = arity;
-            while (i > 0) {
-                i -= 1;
-                const else_result = ctx.pushed_vregs.pop().?;
-                const merge_vreg = lbl.merge_top_vregs[i];
-                try merge_mov.emitMergeMov(ctx, else_result, merge_vreg, 1, 0);
-            }
-        }
-    }
-    // D-093 — implicit-else marshal. `(if (param T1..TK)
-    // (result T1..TK)) (then ...)` without an `.else` validates
-    // per Wasm spec §3.4.4 (params == results required). The
-    // cond=0 path takes an implicit identity else; the
-    // post-frame result is the original param. To honour this
-    // at runtime: MOV the then-body's top `result_arity` vregs
-    // into the captured `param_top_vregs` slots BEFORE the
-    // target_byte. cond=1 path falls through the MOVs (writing
-    // V_param.slot with the new value); cond=0 path's CBZ
-    // jumps to `target_byte` AFTER the MOVs (V_param.slot still
-    // has its def value).
-    if (lbl.kind == .if_then and lbl.param_arity > 0 and !lbl.merge_captured) {
-        if (lbl.param_arity != lbl.result_arity) return Error.UnsupportedOp;
+        resolved = true;
         const arity: u32 = lbl.result_arity;
         const frame_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
+        if (!arm_dead) {
+            if (ctx.pushed_vregs.items.len < frame_base + arity) return Error.UnsupportedOp;
+            // Pop in reverse (top = else_{N-1}); emitMergeMov dispatches on
+            // the merge vreg's shape, so a v128 result takes the vector path.
+            var i: u32 = arity;
+            while (i > 0) {
+                i -= 1;
+                const else_result = ctx.pushed_vregs.pop().?;
+                const merge_vreg = lbl.merge_top_vregs[i];
+                if (else_result != merge_vreg) try merge_mov.emitMergeMov(ctx, else_result, merge_vreg, 1, 0);
+            }
+        }
+        if (ctx.pushed_vregs.items.len > frame_base) ctx.pushed_vregs.shrinkRetainingCapacity(frame_base);
+        try ctx.pushed_vregs.appendSlice(ctx.allocator, lbl.merge_top_vregs[0..arity]);
+    }
+    // D-093 — implicit else. `(if (param T1..TK) (result T1..TK))` without
+    // an `.else` validates per Wasm spec §3.4.4 (params == results): the
+    // cond=0 path skips to `target_byte` with the params as the result, so
+    // the params' vregs are the merge. A live then arm moves its results into
+    // them before `target_byte` (cond=0's CBZ jumps past the MOVs); a dead one
+    // (`arm_dead`) reaches the `end` only through a `br`, if at all (#739). A
+    // `br` that carried the params themselves named the same merge; one that
+    // carried other vregs would need the params moved on the skip path,
+    // which is not emitted, so that shape declines.
+    if (lbl.kind == .if_then and lbl.param_arity > 0) {
+        resolved = true;
+        if (lbl.param_arity != lbl.result_arity) return Error.UnsupportedOp;
+        const arity: u32 = lbl.result_arity;
+        if (lbl.merge_captured and !std.mem.eql(u32, lbl.merge_top_vregs[0..arity], lbl.param_top_vregs[0..arity])) return Error.UnsupportedOp;
+        const frame_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
         if (ctx.pushed_vregs.items.len < frame_base) return Error.UnsupportedOp;
-        if (ctx.pushed_vregs.items.len < frame_base + arity) {
-            // The then-arm ended in a terminator short of its results, so
-            // only the implicit else reaches here: the params are the
-            // result as they stand, with no MOV (#739). Liveness's
-            // implicit-else arm does the same.
+        if (arm_dead) {
             ctx.pushed_vregs.shrinkRetainingCapacity(frame_base);
             try ctx.pushed_vregs.appendSlice(ctx.allocator, lbl.param_top_vregs[0..arity]);
         } else {
+            if (ctx.pushed_vregs.items.len < frame_base + arity) return Error.UnsupportedOp;
             const top_base = ctx.pushed_vregs.items.len - arity;
             var i: u32 = 0;
             while (i < arity) : (i += 1) {
                 const src_vreg = ctx.pushed_vregs.items[top_base + i];
                 const dst_vreg = lbl.param_top_vregs[i];
-                try merge_mov.emitMergeMov(ctx, src_vreg, dst_vreg, 1, 0);
+                if (src_vreg != dst_vreg) try merge_mov.emitMergeMov(ctx, src_vreg, dst_vreg, 1, 0);
             }
             // Replace top arity vregs with param_top_vregs so post-if
             // consumers read the canonical merged slot.
@@ -897,6 +842,11 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
                 ctx.pushed_vregs.items[top_base + j] = lbl.param_top_vregs[j];
             }
         }
+    } else if (lbl.kind == .if_then and lbl.merge_captured) {
+        // An `if` without params or an else returns nothing, so no `br`
+        // carries it a value; a captured merge here is not a shape this
+        // knows how to place.
+        return Error.UnsupportedOp;
     }
     const target_byte: u32 = @intCast(ctx.buf.items.len);
     // Patch the if-then's skip-CBZ if it's still pending (no
@@ -951,6 +901,13 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
     // when the block had params (block:param tests).
     const entry_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
     const new_len: usize = entry_base + @as(usize, lbl.result_arity);
+    // A dead arm no merge or param resolved: what it left before its
+    // terminator is not the frame's results (Wasm spec §3.3.8: the terminator
+    // returns the stack to the frame's height), and need not have their types.
+    // Drop it; the mint below fills every result.
+    if (arm_dead and !resolved and ctx.pushed_vregs.items.len > entry_base) {
+        ctx.pushed_vregs.shrinkRetainingCapacity(entry_base);
+    }
     if (ctx.pushed_vregs.items.len > new_len and lbl.result_arity > 0) {
         const top_start = ctx.pushed_vregs.items.len - lbl.result_arity;
         var i: usize = 0;
@@ -961,13 +918,12 @@ pub fn emitEndIntra(ctx: *EmitCtx, _: *const ZirInstr) Error!void {
     if (ctx.pushed_vregs.items.len > new_len) {
         ctx.pushed_vregs.shrinkRetainingCapacity(new_len);
     }
-    // D-093 / D-130: a body that ended in a terminator short of its results
-    // (`unreachable`, a dead `br_table`, ... in any block kind; e.g.
-    // `unreached-valid.wast` `meet-bottom`) leaves the frame short. Mint a
-    // fresh vreg for each missing result, below the survivors: the values a
-    // body left before its terminator are the top results (the validator's
-    // order). No code computes them, since that `.end` is unreachable.
-    // Liveness mints the same ids at this pc (#399).
+    // D-093 / D-130: a frame whose last arm is dead and that nothing else
+    // resolved closes with no results (any block kind; e.g.
+    // `unreached-valid.wast` `meet-bottom`). Mint a fresh vreg for each, of
+    // its result type. A fall-through never reaches this `.end`; a catch
+    // clause that targets an `if` can, and its landing pad writes the payload
+    // into these vregs. Liveness mints the same ids at this pc (#399).
     if (ctx.pushed_vregs.items.len < new_len) {
         if (ctx.pushed_vregs.items.len < entry_base) return Error.UnsupportedOp;
         const k = ctx.pushed_vregs.items.len - entry_base;

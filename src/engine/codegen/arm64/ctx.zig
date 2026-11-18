@@ -97,6 +97,11 @@ pub const EmitCtx = struct {
     next_vreg: *u32,
     /// Control-stack frames (block / loop / if / else).
     labels: *std.ArrayList(Label),
+    /// At an `else` / `end`: whether the arm it closes is dead
+    /// (`zir.armDeadAt`), which liveness reads the same way. The emit loop
+    /// sets it before each instruction; its `dead_code` local cannot serve,
+    /// since the loop clears it before `else` / `end` run.
+    arm_dead: bool = false,
     /// Memory-bounds-trap fixups awaiting trap-stub emission at
     /// function-final `end`.
     bounds_fixups: *std.ArrayList(u32),

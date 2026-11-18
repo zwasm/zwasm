@@ -286,6 +286,11 @@ pub const EmitCtx = struct {
     /// Set true by `unreachable` (and select arm) to skip
     /// emitting until the next control-flow boundary resets it.
     dead_code: *bool,
+    /// At an `else` / `end`: whether the arm it closes is dead
+    /// (`zir.armDeadAt`), which liveness reads the same way. The loop sets
+    /// it before each instruction; `dead_code` cannot serve, since the loop
+    /// clears it before `else` / `end` run and not every terminator sets it.
+    arm_dead: bool = false,
     /// Per-function frame size in bytes (set once
     /// at function entry; consumed by return + br family for
     /// `ADD RSP, frame_bytes` in the epilogue).
