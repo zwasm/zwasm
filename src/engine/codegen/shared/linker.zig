@@ -334,19 +334,15 @@ pub fn link(allocator: Allocator, func_bodies: []const FuncBody, num_imports: u3
             const target_abs: i64 = offsets[fx.target_func_idx];
             switch (builtin_arch.target.cpu.arch) {
                 .aarch64 => {
-                    const disp_bytes = target_abs - fixup_abs;
-                    if (@rem(disp_bytes, 4) != 0) return Error.DisplacementOverflow;
-                    const disp_words = @divExact(disp_bytes, 4);
-                    // imm26 signed range: ±2^25 words = ±128 MiB.
-                    if (disp_words < -(1 << 25) or disp_words >= (1 << 25)) {
+                    // imm26: ±128 MiB.
+                    const disp_words = inst.wordDisp(i26, @intCast(fixup_abs), @intCast(target_abs)) orelse
                         return Error.DisplacementOverflow;
-                    }
                     // ADR-0112 D4: `is_tail = true` → B (0x14...);
                     // otherwise BL (0x94...). Same imm26 layout.
                     const new_word = if (fx.is_tail)
-                        inst.encB(@intCast(disp_words))
+                        inst.encB(disp_words)
                     else
-                        inst.encBL(@intCast(disp_words));
+                        inst.encBL(disp_words);
                     std.mem.writeInt(u32, block.bytes[@intCast(fixup_abs)..][0..4], new_word, .little);
                 },
                 .x86_64 => {
@@ -546,6 +542,7 @@ pub fn linkWithThunks(
             .thunk_offset = @intCast(thunk_offset_usize),
         }) catch |err| switch (err) {
             error.UnsupportedOp => continue,
+            error.DisplacementOverflow => return Error.DisplacementOverflow,
             error.OutOfMemory => return error.OutOfMemory,
         };
         try wrapper_bytes_list.append(allocator, wrapper_out.bytes);
@@ -740,7 +737,7 @@ test "link: is_tail=true fixup -> tail transfer (arm64 B / x86_64 JMP)" {
             defer module.deinit(testing.allocator);
             const fn0_off = module.func_offsets[0];
             const fn1_off = module.func_offsets[1];
-            const disp_words: i32 = @intCast(@divExact(@as(i64, fn1_off) - @as(i64, fn0_off), 4));
+            const disp_words = a64.wordDisp(i26, fn0_off, fn1_off).?;
             const patched = std.mem.readInt(u32, module.block.bytes[fn0_off..][0..4], .little);
             try testing.expectEqual(a64.encB(disp_words), patched);
             // B prefix (0x14...), not BL (0x94...).

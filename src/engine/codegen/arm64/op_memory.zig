@@ -611,8 +611,8 @@ pub fn emitMemoryFill(ctx: *EmitCtx) Error!void {
     // operands; capture X-form and use the no-overflow bounds scheme
     // (W-form capture truncated addresses ≥ 2^32 to their low bits).
     const is64 = bulkIs64(ctx);
-    const cbz: *const fn (inst.Xn, i32) u32 = if (is64) inst.encCbz else inst.encCbzW;
-    const cbnz: *const fn (inst.Xn, i32) u32 = if (is64) inst.encCbnz else inst.encCbnzW;
+    const cbz: *const fn (inst.Xn, i19) u32 = if (is64) inst.encCbz else inst.encCbzW;
+    const cbnz: *const fn (inst.Xn, i19) u32 = if (is64) inst.encCbnz else inst.encCbnzW;
 
     // Step A: Load each operand into a stable private holder.
     //
@@ -661,18 +661,12 @@ pub fn emitMemoryFill(ctx: *EmitCtx) Error!void {
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrbImm(16, 17, 0));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(17, 17, 1));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(14, 14, 1));
-    const back_disp_words: i32 = @divExact(
-        @as(i32, @intCast(loop_start)) - @as(i32, @intCast(ctx.buf.items.len)),
-        4,
-    );
+    const back_disp_words = try gpr.rel(i19, ctx.buf.items.len, loop_start);
     try gpr.writeU32(ctx.allocator, ctx.buf, cbnz(14, back_disp_words));
 
     // Step F: Patch the CBZ skip target to land here (post-loop).
     const end_byte: u32 = @intCast(ctx.buf.items.len);
-    const skip_disp_words: i19 = @intCast(@divExact(
-        @as(i32, @intCast(end_byte)) - @as(i32, @intCast(skip_at)),
-        4,
-    ));
+    const skip_disp_words = try gpr.rel(i19, skip_at, end_byte);
     std.mem.writeInt(u32, ctx.buf.items[skip_at..][0..4], cbz(14, skip_disp_words), .little);
 }
 
@@ -748,8 +742,8 @@ pub fn emitMemoryCopy(ctx: *EmitCtx) Error!void {
     // D-324 — memory64: dst / src / n are full u64 (JIT compiles only
     // memidx 0, so the memories are uniform and it_min = i64 too).
     const is64 = bulkIs64(ctx);
-    const cbz: *const fn (inst.Xn, i32) u32 = if (is64) inst.encCbz else inst.encCbzW;
-    const cbnz: *const fn (inst.Xn, i32) u32 = if (is64) inst.encCbnz else inst.encCbnzW;
+    const cbz: *const fn (inst.Xn, i19) u32 = if (is64) inst.encCbz else inst.encCbzW;
+    const cbnz: *const fn (inst.Xn, i19) u32 = if (is64) inst.encCbnz else inst.encCbnzW;
     const cmp_imm: *const fn (inst.Xn, u12) u32 = if (is64) inst.encCmpImmX else inst.encCmpImmW;
     const capture: *const fn (inst.Xn, inst.Xn, inst.Xn) u32 = if (is64) inst.encOrrReg else inst.encOrrRegW;
 
@@ -799,16 +793,10 @@ pub fn emitMemoryCopy(ctx: *EmitCtx) Error!void {
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(15, 16, 0));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrImm(15, 17, 0));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(14, 14, 8));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(@divExact(
-        @as(i32, @intCast(bwd_word_top)) - @as(i32, @intCast(ctx.buf.items.len)),
-        4,
-    )));
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(try gpr.rel(i26, ctx.buf.items.len, bwd_word_top)));
     // .bwd_tail: patch the B.lo to here; copy ≤7 remaining bytes high→low.
     const bwd_tail_top: u32 = @intCast(ctx.buf.items.len);
-    std.mem.writeInt(u32, ctx.buf.items[bwd_word_exit_at..][0..4], inst.encBCond(.lo, @divExact(
-        @as(i32, @intCast(bwd_tail_top)) - @as(i32, @intCast(bwd_word_exit_at)),
-        4,
-    )), .little);
+    std.mem.writeInt(u32, ctx.buf.items[bwd_word_exit_at..][0..4], inst.encBCond(.lo, try gpr.rel(i19, bwd_word_exit_at, bwd_tail_top)), .little);
     const bwd_tail_skip_at: u32 = @intCast(ctx.buf.items.len);
     try gpr.writeU32(ctx.allocator, ctx.buf, cbz(14, 0)); // CBZ W14, .bwd_done (fixup)
     const bwd_tail_loop: u32 = @intCast(ctx.buf.items.len);
@@ -817,25 +805,16 @@ pub fn emitMemoryCopy(ctx: *EmitCtx) Error!void {
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrbImm(15, 16, 0));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encStrbImm(15, 17, 0));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(14, 14, 1));
-    try gpr.writeU32(ctx.allocator, ctx.buf, cbnz(14, @divExact(
-        @as(i32, @intCast(bwd_tail_loop)) - @as(i32, @intCast(ctx.buf.items.len)),
-        4,
-    )));
+    try gpr.writeU32(ctx.allocator, ctx.buf, cbnz(14, try gpr.rel(i19, ctx.buf.items.len, bwd_tail_loop)));
     // .bwd_done: unconditional branch to .end (patched after fwd path).
     const bwd_end_jmp_at: u32 = @intCast(ctx.buf.items.len);
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(0));
     // Patch the no-tail CBZ to skip straight to .bwd_done (the B→.end).
-    std.mem.writeInt(u32, ctx.buf.items[bwd_tail_skip_at..][0..4], cbz(14, @divExact(
-        @as(i32, @intCast(bwd_end_jmp_at)) - @as(i32, @intCast(bwd_tail_skip_at)),
-        4,
-    )), .little);
+    std.mem.writeInt(u32, ctx.buf.items[bwd_tail_skip_at..][0..4], cbz(14, try gpr.rel(i19, bwd_tail_skip_at, bwd_end_jmp_at)), .little);
 
     // ---- Forward path (dst <= src; safe forward copy). Patch the B.LS. ----
     const fwd_byte: u32 = @intCast(ctx.buf.items.len);
-    std.mem.writeInt(u32, ctx.buf.items[fwd_at..][0..4], inst.encBCond(.ls, @divExact(
-        @as(i32, @intCast(fwd_byte)) - @as(i32, @intCast(fwd_at)),
-        4,
-    )), .little);
+    std.mem.writeInt(u32, ctx.buf.items[fwd_at..][0..4], inst.encBCond(.ls, try gpr.rel(i19, fwd_at, fwd_byte)), .little);
     // .fwd_word: while (n >= 8) { *dst = *src; dst+=8; src+=8; n-=8; }
     const fwd_word_top: u32 = @intCast(ctx.buf.items.len);
     try gpr.writeU32(ctx.allocator, ctx.buf, cmp_imm(14, 8));
@@ -846,16 +825,10 @@ pub fn emitMemoryCopy(ctx: *EmitCtx) Error!void {
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(17, 17, 8));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(16, 16, 8));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(14, 14, 8));
-    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(@divExact(
-        @as(i32, @intCast(fwd_word_top)) - @as(i32, @intCast(ctx.buf.items.len)),
-        4,
-    )));
+    try gpr.writeU32(ctx.allocator, ctx.buf, inst.encB(try gpr.rel(i26, ctx.buf.items.len, fwd_word_top)));
     // .fwd_tail: patch B.lo to here; copy ≤7 remaining bytes low→high.
     const fwd_tail_top: u32 = @intCast(ctx.buf.items.len);
-    std.mem.writeInt(u32, ctx.buf.items[fwd_word_exit_at..][0..4], inst.encBCond(.lo, @divExact(
-        @as(i32, @intCast(fwd_tail_top)) - @as(i32, @intCast(fwd_word_exit_at)),
-        4,
-    )), .little);
+    std.mem.writeInt(u32, ctx.buf.items[fwd_word_exit_at..][0..4], inst.encBCond(.lo, try gpr.rel(i19, fwd_word_exit_at, fwd_tail_top)), .little);
     const fwd_tail_skip_at: u32 = @intCast(ctx.buf.items.len);
     try gpr.writeU32(ctx.allocator, ctx.buf, cbz(14, 0)); // CBZ W14, .end (fixup)
     const fwd_tail_loop: u32 = @intCast(ctx.buf.items.len);
@@ -864,25 +837,13 @@ pub fn emitMemoryCopy(ctx: *EmitCtx) Error!void {
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(17, 17, 1));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(16, 16, 1));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(14, 14, 1));
-    try gpr.writeU32(ctx.allocator, ctx.buf, cbnz(14, @divExact(
-        @as(i32, @intCast(fwd_tail_loop)) - @as(i32, @intCast(ctx.buf.items.len)),
-        4,
-    )));
+    try gpr.writeU32(ctx.allocator, ctx.buf, cbnz(14, try gpr.rel(i19, ctx.buf.items.len, fwd_tail_loop)));
 
     // .end: patch the n==0 skip, the bwd path's exit jump, and the fwd no-tail skip.
     const end_byte: u32 = @intCast(ctx.buf.items.len);
-    std.mem.writeInt(u32, ctx.buf.items[skip_zero_at..][0..4], cbz(14, @divExact(
-        @as(i32, @intCast(end_byte)) - @as(i32, @intCast(skip_zero_at)),
-        4,
-    )), .little);
-    std.mem.writeInt(u32, ctx.buf.items[bwd_end_jmp_at..][0..4], inst.encB(@divExact(
-        @as(i32, @intCast(end_byte)) - @as(i32, @intCast(bwd_end_jmp_at)),
-        4,
-    )), .little);
-    std.mem.writeInt(u32, ctx.buf.items[fwd_tail_skip_at..][0..4], cbz(14, @divExact(
-        @as(i32, @intCast(end_byte)) - @as(i32, @intCast(fwd_tail_skip_at)),
-        4,
-    )), .little);
+    std.mem.writeInt(u32, ctx.buf.items[skip_zero_at..][0..4], cbz(14, try gpr.rel(i19, skip_zero_at, end_byte)), .little);
+    std.mem.writeInt(u32, ctx.buf.items[bwd_end_jmp_at..][0..4], inst.encB(try gpr.rel(i26, bwd_end_jmp_at, end_byte)), .little);
+    std.mem.writeInt(u32, ctx.buf.items[fwd_tail_skip_at..][0..4], cbz(14, try gpr.rel(i19, fwd_tail_skip_at, end_byte)), .little);
 }
 
 /// Wasm spec §4.5.3.10 (memory.init dataidx) — copy `n` bytes from
@@ -987,19 +948,13 @@ pub fn emitMemoryInit(ctx: *EmitCtx, ins: *const ZirInstr) Error!void {
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(16, 16, 1));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encAddImm12(17, 17, 1));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encSubImm12(14, 14, 1));
-    const back_disp_words: i32 = @divExact(
-        @as(i32, @intCast(loop_start)) - @as(i32, @intCast(ctx.buf.items.len)),
-        4,
-    );
+    const back_disp_words = try gpr.rel(i19, ctx.buf.items.len, loop_start);
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encCbnzW(14, back_disp_words));
 
     // .end: patch the n==0 skip.
     const end_byte: u32 = @intCast(ctx.buf.items.len);
     {
-        const disp_words: i19 = @intCast(@divExact(
-            @as(i32, @intCast(end_byte)) - @as(i32, @intCast(skip_zero_at)),
-            4,
-        ));
+        const disp_words = try gpr.rel(i19, skip_zero_at, end_byte);
         std.mem.writeInt(u32, ctx.buf.items[skip_zero_at..][0..4], inst.encCbzW(14, disp_words), .little);
     }
 }

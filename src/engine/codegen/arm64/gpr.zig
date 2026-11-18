@@ -29,6 +29,7 @@ const inst_neon = @import("inst_neon.zig");
 const abi = @import("abi.zig");
 const regalloc = @import("../shared/regalloc.zig");
 const ctx_mod = @import("ctx.zig");
+const decline_note = @import("../shared/decline_note.zig");
 
 const Allocator = std.mem.Allocator;
 const Error = ctx_mod.Error;
@@ -38,6 +39,23 @@ pub fn writeU32(allocator: Allocator, buf: *std.ArrayList(u8), word: u32) !void 
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &bytes, word, .little);
     try buf.appendSlice(allocator, &bytes);
+}
+
+/// The word displacement from byte offset `from` to `to` for a field of type
+/// `T`, declining the function when the field cannot hold it. A guest sizes
+/// the code between the two, so the emit pass takes every displacement it
+/// computes from here.
+pub fn rel(comptime T: type, from: usize, to: usize) Error!T {
+    return inst.wordDisp(T, from, to) orelse {
+        decline_note.set(std.fmt.comptimePrint("imm{d}", .{@bitSizeOf(T)}), .{
+            .out_of_reach = .{
+                .distance = @max(from, to) - @min(from, to),
+                // The field reaches one word farther backward.
+                .reach = inst.reachBytes(T) + @as(u64, if (to < from) 4 else 0),
+            },
+        });
+        return Error.UnsupportedOp;
+    };
 }
 
 /// Largest frame byte-offset the imm12 LDR/STR forms encode (8-byte X scale ×
@@ -494,6 +512,30 @@ pub fn qStoreSpilled(
 // ============================================================
 
 const testing = std.testing;
+
+test "rel: a distance its field holds is returned, one past it declines with the field, distance and reach" {
+    decline_note.clear();
+    defer decline_note.clear();
+    const reach = inst.reachBytes(i19);
+
+    try testing.expectEqual(@as(i19, std.math.maxInt(i19)), try rel(i19, 8, 8 + reach));
+    try testing.expectEqual(@as(?decline_note.Note, null), decline_note.take());
+
+    try testing.expectError(Error.UnsupportedOp, rel(i19, 8, 8 + reach + 4));
+    const fwd = decline_note.take().?;
+    try testing.expectEqualStrings("imm19", fwd.op);
+    try testing.expectEqual(reach + 4, fwd.reason.out_of_reach.distance);
+    try testing.expectEqual(reach, fwd.reason.out_of_reach.reach);
+
+    // Backward, on the unconditional branch's field.
+    const reach26 = inst.reachBytes(i26);
+    try testing.expectEqual(@as(i26, std.math.minInt(i26)), try rel(i26, reach26 + 4, 0));
+    try testing.expectError(Error.UnsupportedOp, rel(i26, reach26 + 8, 0));
+    const back = decline_note.take().?;
+    try testing.expectEqualStrings("imm26", back.op);
+    try testing.expectEqual(reach26 + 8, back.reason.out_of_reach.distance);
+    try testing.expectEqual(reach26 + 4, back.reason.out_of_reach.reach);
+}
 
 test "fpLoadSpilled: vreg in V-reg returns it directly without emitting bytes" {
     const slots = [_]u16{0};

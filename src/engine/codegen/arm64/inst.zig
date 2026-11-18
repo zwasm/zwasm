@@ -614,20 +614,38 @@ pub fn encNop() u32 {
     return 0xD503201F;
 }
 
-/// `B disp` — unconditional 26-bit-signed-offset branch (PC-relative,
-/// in instruction units = 4 bytes). Range ±128 MiB.
+/// The displacement from byte offset `from` to `to` of one code buffer, in
+/// instruction words, or null when the field type `T` cannot hold it.
+///
+/// A PC-relative encoder takes its field's own type (`i19`, `i26`): a wider
+/// value does not coerce to it, and a literal that does not fit fails to
+/// compile. A guest sizes a computed distance (a function's length, a
+/// module's), so its caller declines on null (`gpr.rel`). `@intCast` at a
+/// call site would compile and assert instead; no site uses it for a
+/// distance a module sizes.
+pub fn wordDisp(comptime T: type, from: u64, to: u64) ?T {
+    const bytes: i65 = @as(i65, to) - @as(i65, from);
+    if (@rem(bytes, 4) != 0) return null;
+    return std.math.cast(T, @divExact(bytes, 4));
+}
+
+/// The farthest byte distance forward a word-displacement field of type `T`
+/// reaches; backward it reaches one word more.
+pub fn reachBytes(comptime T: type) u64 {
+    return @as(u64, std.math.maxInt(T)) * 4;
+}
+
+/// `B disp` — unconditional branch, imm26 in instruction words (±128 MiB).
 /// Encoding: `0 00101 [imm26:26]` = `0x14000000`.
-pub fn encB(disp_words: i32) u32 {
-    const masked: u32 = @as(u32, @bitCast(disp_words)) & 0x03FFFFFF;
-    return 0x14000000 | masked;
+pub fn encB(disp_words: i26) u32 {
+    return 0x14000000 | @as(u32, @as(u26, @bitCast(disp_words)));
 }
 
 /// `BL disp` — branch-with-link (call). Same imm26 form as B
 /// but with bit 31 set. Sets X30 (LR) to PC+4 then branches.
 /// Encoding: `1 00101 [imm26:26]` = `0x94000000`.
-pub fn encBL(disp_words: i32) u32 {
-    const masked: u32 = @as(u32, @bitCast(disp_words)) & 0x03FFFFFF;
-    return 0x94000000 | masked;
+pub fn encBL(disp_words: i26) u32 {
+    return 0x94000000 | @as(u32, @as(u26, @bitCast(disp_words)));
 }
 
 /// `ADR Xd, label` — PC-relative address. Forms `Xd = PC + imm21`
@@ -645,40 +663,39 @@ pub fn encAdr(rd: Xn, byte_offset: i21) u32 {
     return 0x10000000 | (immlo << 29) | (immhi << 5) | @as(u32, rd);
 }
 
-/// `CBZ Wn, disp` — branch when Wn == 0; 19-bit signed
-/// instruction-unit offset (range ±1 MiB).
+/// `CBZ Wn, disp` — branch when Wn == 0; imm19 in instruction words
+/// (±1 MiB).
 /// Encoding: `0 011010 0 [imm19:19] [Rt:5]` = `0x34000000`.
-pub fn encCbzW(rt: Xn, disp_words: i32) u32 {
-    const masked: u32 = @as(u32, @bitCast(disp_words)) & 0x0007FFFF;
-    return 0x34000000 | (masked << 5) | @as(u32, rt);
+pub fn encCbzW(rt: Xn, disp_words: i19) u32 {
+    return 0x34000000 | (imm19(disp_words) << 5) | @as(u32, rt);
 }
 
-/// `CBNZ Wn, disp` — branch when Wn != 0; 19-bit signed offset.
+/// `CBNZ Wn, disp` — branch when Wn != 0; imm19.
 /// Encoding: `0 011010 1 [imm19:19] [Rt:5]` = `0x35000000`.
-pub fn encCbnzW(rt: Xn, disp_words: i32) u32 {
-    const masked: u32 = @as(u32, @bitCast(disp_words)) & 0x0007FFFF;
-    return 0x35000000 | (masked << 5) | @as(u32, rt);
+pub fn encCbnzW(rt: Xn, disp_words: i19) u32 {
+    return 0x35000000 | (imm19(disp_words) << 5) | @as(u32, rt);
 }
 
 /// `CBZ Xn, disp` — 64-bit form, branch when Xn == 0.
 /// Encoding: `1 011010 0 [imm19:19] [Rt:5]` = `0xB4000000`.
-pub fn encCbz(rt: Xn, disp_words: i32) u32 {
-    const masked: u32 = @as(u32, @bitCast(disp_words)) & 0x0007FFFF;
-    return 0xB4000000 | (masked << 5) | @as(u32, rt);
+pub fn encCbz(rt: Xn, disp_words: i19) u32 {
+    return 0xB4000000 | (imm19(disp_words) << 5) | @as(u32, rt);
 }
 
 /// `CBNZ Xn, disp` — 64-bit form, branch when Xn != 0.
 /// Encoding: `1 011010 1 [imm19:19] [Rt:5]` = `0xB5000000`.
-pub fn encCbnz(rt: Xn, disp_words: i32) u32 {
-    const masked: u32 = @as(u32, @bitCast(disp_words)) & 0x0007FFFF;
-    return 0xB5000000 | (masked << 5) | @as(u32, rt);
+pub fn encCbnz(rt: Xn, disp_words: i19) u32 {
+    return 0xB5000000 | (imm19(disp_words) << 5) | @as(u32, rt);
 }
 
-/// `B.cond disp` — conditional branch; 19-bit signed offset.
+/// `B.cond disp` — conditional branch; imm19.
 /// Encoding: `01010100 [imm19:19] 0 [cond:4]` = `0x54000000`.
-pub fn encBCond(cond: Cond, disp_words: i32) u32 {
-    const masked: u32 = @as(u32, @bitCast(disp_words)) & 0x0007FFFF;
-    return 0x54000000 | (masked << 5) | @as(u32, @backingInt(cond));
+pub fn encBCond(cond: Cond, disp_words: i19) u32 {
+    return 0x54000000 | (imm19(disp_words) << 5) | @as(u32, @backingInt(cond));
+}
+
+fn imm19(disp_words: i19) u32 {
+    return @as(u19, @bitCast(disp_words));
 }
 
 /// `MUL Xd, Xn, Xm` — alias for `MADD Xd, Xn, Xm, XZR`.
@@ -1250,7 +1267,6 @@ test "encB +1 — `b 1f / nop / 1:` → 0x14000001" {
 }
 
 test "encB -1 — backward branch by 1 word → 0x17FFFFFF" {
-    // imm26 sign-extended = -1; bit26 wraps. Mask to 26 bits = 0x3FFFFFF.
     try testing.expectEqual(@as(u32, 0x17FFFFFF), encB(-1));
 }
 
@@ -1285,6 +1301,62 @@ test "encCbzW w0, +1 — `cbz w0, 1f` → 0x34000020" {
 
 test "encBCond .eq, +1 — `b.eq 1f` → 0x54000020" {
     try testing.expectEqual(@as(u32, 0x54000020), encBCond(.eq, 1));
+}
+
+test "wordDisp: an imm19 field holds ±2^18 words and nothing past them" {
+    const top: u64 = 4 << 18; // 1 MiB
+    // Forward: the last distance that fits, then the first that does not.
+    try testing.expectEqual(@as(?i19, std.math.maxInt(i19)), wordDisp(i19, 0, top - 4));
+    try testing.expectEqual(@as(?i19, null), wordDisp(i19, 0, top));
+    // Backward: the field is asymmetric, one word longer.
+    try testing.expectEqual(@as(?i19, std.math.minInt(i19)), wordDisp(i19, top, 0));
+    try testing.expectEqual(@as(?i19, null), wordDisp(i19, top + 4, 0));
+    try testing.expectEqual(@as(u64, top - 4), reachBytes(i19));
+}
+
+test "wordDisp: an imm26 field holds ±2^25 words and nothing past them" {
+    const top: u64 = 4 << 25; // 128 MiB
+    try testing.expectEqual(@as(?i26, std.math.maxInt(i26)), wordDisp(i26, 0, top - 4));
+    try testing.expectEqual(@as(?i26, null), wordDisp(i26, 0, top));
+    try testing.expectEqual(@as(?i26, std.math.minInt(i26)), wordDisp(i26, top, 0));
+    try testing.expectEqual(@as(?i26, null), wordDisp(i26, top + 4, 0));
+    try testing.expectEqual(@as(u64, top - 4), reachBytes(i26));
+}
+
+test "wordDisp: offsets are not narrowed before the subtraction, and a target off the word grid has no displacement" {
+    const far: u64 = 1 << 40;
+    try testing.expectEqual(@as(?i19, 3), wordDisp(i19, far, far + 12));
+    try testing.expectEqual(@as(?i26, -3), wordDisp(i26, far + 12, far));
+    try testing.expectEqual(@as(?i26, null), wordDisp(i26, 0, far));
+    try testing.expectEqual(@as(?i19, null), wordDisp(i19, 0, 6));
+}
+
+test "imm19 encoders place the field's two extremes in bits 23..5" {
+    const max: u32 = 0x3FFFF << 5;
+    const min: u32 = 0x40000 << 5;
+    try testing.expectEqual(0x54000000 | max, encBCond(.eq, std.math.maxInt(i19)));
+    try testing.expectEqual(0x54000000 | min, encBCond(.eq, std.math.minInt(i19)));
+    try testing.expectEqual(0x34000000 | max, encCbzW(0, std.math.maxInt(i19)));
+    try testing.expectEqual(0x34000000 | min, encCbzW(0, std.math.minInt(i19)));
+    try testing.expectEqual(0x35000000 | max, encCbnzW(0, std.math.maxInt(i19)));
+    try testing.expectEqual(0x35000000 | min, encCbnzW(0, std.math.minInt(i19)));
+    try testing.expectEqual(0xB4000000 | max, encCbz(0, std.math.maxInt(i19)));
+    try testing.expectEqual(0xB4000000 | min, encCbz(0, std.math.minInt(i19)));
+    try testing.expectEqual(0xB5000000 | max, encCbnz(0, std.math.maxInt(i19)));
+    try testing.expectEqual(0xB5000000 | min, encCbnz(0, std.math.minInt(i19)));
+}
+
+test "imm26 encoders place the field's two extremes in bits 25..0" {
+    try testing.expectEqual(@as(u32, 0x15FFFFFF), encB(std.math.maxInt(i26)));
+    try testing.expectEqual(@as(u32, 0x16000000), encB(std.math.minInt(i26)));
+    try testing.expectEqual(@as(u32, 0x95FFFFFF), encBL(std.math.maxInt(i26)));
+    try testing.expectEqual(@as(u32, 0x96000000), encBL(std.math.minInt(i26)));
+}
+
+test "encAdr places imm21's two extremes across immlo and immhi" {
+    // +2^20-1: immlo = 0b11, immhi = 0x3FFFF. -2^20: immlo = 0, immhi = 0x40000.
+    try testing.expectEqual(@as(u32, 0x10000000 | (3 << 29) | (0x3FFFF << 5)), encAdr(0, std.math.maxInt(i21)));
+    try testing.expectEqual(@as(u32, 0x10000000 | (0x40000 << 5)), encAdr(0, std.math.minInt(i21)));
 }
 
 test "encMulReg x0, x1, x2 — `mul x0, x1, x2` → 0x9B027C20" {

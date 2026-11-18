@@ -29,10 +29,14 @@ pub const Reason = union(enum) {
     simd_args: u32,
     /// The callee's result count, above the 2 that return in registers.
     memory_class_results: u32,
+    /// A PC-relative instruction whose target is farther than its field
+    /// reaches, both in bytes. `Note.op` names the field, not a wasm op.
+    out_of_reach: struct { distance: u64, reach: u64 },
 };
 
 pub const Note = struct {
-    /// The declining op's wasm name — a static string.
+    /// The declining op's wasm name, or for `out_of_reach` the instruction
+    /// field — a static string.
     op: []const u8,
     reason: Reason,
 };

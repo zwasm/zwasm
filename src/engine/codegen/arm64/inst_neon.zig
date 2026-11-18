@@ -282,18 +282,16 @@ pub fn encMvn16B(rd: Vn, rn: Vn) u32 {
 /// `LDR Q<rt>, <label>` — PC-relative literal load of 128-bit value.
 /// `imm19` is the signed offset in 4-byte words from LDR to label.
 /// Use `0` as a placeholder; fixup pass patches with the real offset.
-pub fn encLdrLiteralQ(rt: Vn, imm19: i20) u32 {
-    const u_imm19: u32 = @as(u32, @bitCast(@as(i32, imm19))) & 0x7FFFF;
-    return 0x9C000000 | (u_imm19 << 5) | @as(u32, rt);
+pub fn encLdrLiteralQ(rt: Vn, imm19: i19) u32 {
+    return 0x9C000000 | (@as(u32, @as(u19, @bitCast(imm19))) << 5) | @as(u32, rt);
 }
 
 /// Patch the imm19 field of a previously-emitted LDR-literal-Q
 /// placeholder. Used by the fixup pass after the const-pool has
 /// been appended to the JIT block.
-pub fn patchLdrLiteralQImm19(word: u32, imm19: i20) u32 {
-    const u_imm19: u32 = @as(u32, @bitCast(@as(i32, imm19))) & 0x7FFFF;
+pub fn patchLdrLiteralQImm19(word: u32, imm19: i19) u32 {
     // Clear bits 23:5 (imm19) then OR new value.
-    return (word & ~@as(u32, 0x00FFFFE0)) | (u_imm19 << 5);
+    return (word & ~@as(u32, 0x00FFFFE0)) | (@as(u32, @as(u19, @bitCast(imm19))) << 5);
 }
 
 /// `BSL V<d>.16B, V<n>.16B, V<m>.16B` — bitwise select using V<d>
@@ -482,6 +480,13 @@ test "encLdrLiteralQ: imm19=-1 (back 4 bytes; sign-extended)" {
     // imm19 = -1 = 0x7FFFF (19-bit sign-extended).
     // 0x9C000000 | (0x7FFFF << 5) | 0 = 0x9CFFFFE0
     try testing.expectEqual(@as(u32, 0x9CFFFFE0), encLdrLiteralQ(0, -1));
+}
+
+test "LDR (literal) places imm19's two extremes in bits 23..5" {
+    try testing.expectEqual(@as(u32, 0x9C000000 | (0x3FFFF << 5)), encLdrLiteralQ(0, std.math.maxInt(i19)));
+    try testing.expectEqual(@as(u32, 0x9C000000 | (0x40000 << 5)), encLdrLiteralQ(0, std.math.minInt(i19)));
+    try testing.expectEqual(@as(u32, 0x9C000000 | (0x3FFFF << 5) | 7), patchLdrLiteralQImm19(encLdrLiteralQ(7, 0), std.math.maxInt(i19)));
+    try testing.expectEqual(@as(u32, 0x9C000000 | (0x40000 << 5) | 7), patchLdrLiteralQImm19(encLdrLiteralQ(7, 0), std.math.minInt(i19)));
 }
 
 test "patchLdrLiteralQImm19: replaces imm19 field" {
