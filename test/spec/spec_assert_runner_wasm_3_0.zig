@@ -553,8 +553,8 @@ const lv_known_x86_64_sysv: []const LvKnown = &.{};
 /// table made, to the same counts.
 ///
 /// Emptied 2026-11-15 with #399 fixed, as the SysV table was re-taken: both
-/// rows were the liveness side's, which this leg shares. This PR's run of
-/// the leg is the measurement.
+/// rows were the liveness side's, which this leg shares. #751's run of the
+/// leg is the measurement.
 const lv_known_x86_64_windows: []const LvKnown = &.{};
 
 /// aarch64 (the macOS leg) — seeded 2026-09-05 by the same first CI run
@@ -569,7 +569,7 @@ const lv_known_x86_64_windows: []const LvKnown = &.{};
 ///
 /// Emptied 2026-11-15 with #399 fixed, as the SysV table was re-taken: both
 /// rows were the liveness side's, and the arm64 emit mints the same vregs as
-/// the x86_64 one. This PR's run of the leg is the measurement.
+/// the x86_64 one. #751's run of the leg is the measurement.
 const lv_known_aarch64: []const LvKnown = &.{};
 
 comptime {

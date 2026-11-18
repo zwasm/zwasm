@@ -115,9 +115,8 @@ const Frame = struct {
     merge_captured: bool,
     // An `if` frame passed its `.else`. The emit tells the implicit else
     // apart by its label kind (`.if_then` against `.else_open`); this is
-    // the same fact for the `.end` arms below. A then-arm short of its
-    // results captures nothing at `.else` (#739), so `merge_captured`
-    // alone does not say it.
+    // the same fact for the `.end` arms below. A dead then-arm captures
+    // nothing at `.else` (#739), so `merge_captured` alone does not say it.
     saw_else: bool = false,
     param_vregs: [8]u32,
     // D-093 (d-11) — if/block result-merge survival. emit's per-arch
@@ -130,6 +129,23 @@ const Frame = struct {
     merge_vregs: [8]u32,
 };
 
+/// Push `vregs` (a frame's merge vregs or an `if`'s params, now its
+/// results) onto the simulated stack and keep each live to this `.end`.
+fn pushMerge(
+    ranges: []LiveRange,
+    sim_stack: *[max_simulated_stack]u32,
+    sim_len: *usize,
+    vregs: []const u32,
+    pc: u32,
+) Error!void {
+    for (vregs) |v| {
+        if (sim_len.* == max_simulated_stack) return Error.OperandStackUnderflow;
+        ranges[v].last_use_pc = pc;
+        sim_stack[sim_len.*] = v;
+        sim_len.* += 1;
+    }
+}
+
 /// D-330 — on the FIRST forward `br`/`br_if`/`br_table` to a
 /// `block(result_arity>0)`, capture the targeted block's result
 /// operands as its canonical merge vregs (mirrors the emit's
@@ -138,6 +154,10 @@ const Frame = struct {
 /// consumer, so the regalloc keeps them live across any
 /// intervening call instead of parking the result in a
 /// callee-saved register a call would clobber.
+///
+/// An `if` frame captures the same way: the emit's helper takes the
+/// first edge into an `if`'s `end` too (D-096), whether it is a `br` from
+/// an arm or the then arm's fall-through at `.else`.
 ///
 /// No-op for: `loop` targets (backward branch — no forward
 /// merge), function-level escapes (depth ≥ stack), zero-result
@@ -152,7 +172,7 @@ fn captureBlockMergeVregs(
 ) void {
     if (depth >= block_stack_len) return;
     const fr = &block_stack.*[block_stack_len - 1 - @as(usize, depth)];
-    if (fr.is_if or fr.is_loop or fr.merge_captured or fr.result_arity == 0) return;
+    if (fr.is_loop or fr.merge_captured or fr.result_arity == 0) return;
     const arity: usize = fr.result_arity;
     if (sim.len < arity) return;
     const base = sim.len - arity;
@@ -161,6 +181,15 @@ fn captureBlockMergeVregs(
         fr.merge_vregs[i] = sim[base + i];
     }
     fr.merge_captured = true;
+}
+
+/// Wasm spec §3.3.8 (block, loop, if) — the operand-stack height below the
+/// innermost open frame's params: everything above it belongs to that
+/// frame. 0 at function scope.
+fn innermostFrameBase(open: []const Frame) usize {
+    if (open.len == 0) return 0;
+    const fr = open[open.len - 1];
+    return @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
 }
 
 /// The signature a call-shaped op pops its arguments against: `call` /
@@ -196,7 +225,8 @@ fn tagSig(tag_idx: u32, tag_typeidxs: []const u32, module_types: []const zir.Fun
 
 /// Wasm spec §5.4.1 (blocktype) — the result types of block `block_idx`,
 /// a typeidx resolved through `module_types`. Liveness reads them only to
-/// class the vregs it mints for a frame that closes short (#399).
+/// class the vregs it mints for a frame whose body ended in a terminator
+/// (#399).
 fn blockResults(func: *const ZirFunc, module_types: []const zir.FuncType, block_idx: u64) Error![]const zir.ValType {
     if (block_idx >= func.blocks.items.len) return Error.UnsupportedOp;
     const info = &func.blocks.items[@intCast(block_idx)];
@@ -352,119 +382,39 @@ pub fn compute(
                 // post-if consumer would then read whichever
                 // later vreg got V_then_i's slot.
                 const fr = block_stack[block_stack_len - 1];
-                if (fr.is_if and fr.merge_captured and fr.result_arity > 0) {
-                    // Indexed from the if-frame's own operand base, not from
-                    // an absolute depth: when the else-arm's only exit is a
-                    // `br`, the branch handler has drained `sim_len` back to
-                    // `entry_depth`, and `sim_len - result_arity` would then
-                    // address the ENCLOSING frame's vreg. Same case split as
-                    // the block branch below and as `emitEndIntra`.
-                    const arity: usize = fr.result_arity;
-                    const entry: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
-                    if (sim_len < entry + arity) {
-                        // No else-arm result reached the `.end` — V_then (the
-                        // vregs captured at `.else`) IS the if's result. Emit
-                        // never dropped them from `pushed_vregs`; restore them
-                        // here so the post-if consumer pops the canonical vreg.
-                        // A terminator drains only to the innermost open
-                        // frame's entry depth (the `return` / `br` arms
-                        // below), so nothing lowers `sim_len` past this
-                        // frame's base. The pad that once filled that gap
-                        // wrote a vreg it could not reconstruct over an
-                        // enclosing frame's record; the invariant is
-                        // asserted instead
-                        // (`.claude/rules/comment_as_invariant.md`).
-                        std.debug.assert(sim_len >= entry);
-                        if (sim_len > entry) sim_len = entry;
-                        var i: usize = 0;
-                        while (i < arity) : (i += 1) {
-                            if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
-                            ranges.items[fr.merge_vregs[i]].last_use_pc = pc;
-                            sim_stack[sim_len] = fr.merge_vregs[i];
-                            sim_len += 1;
-                        }
-                    } else {
-                        const base = sim_len - arity;
-                        var i: usize = 0;
-                        while (i < arity) : (i += 1) {
-                            ranges.items[sim_stack[base + i]].last_use_pc = pc;
-                            sim_stack[base + i] = fr.merge_vregs[i];
-                        }
-                    }
-                } else if (fr.is_if and !fr.saw_else and !fr.merge_captured and fr.param_arity > 0 and fr.result_arity > 0) {
-                    // D-093 (d-13) — implicit-else (no `.else`).
-                    // Canonical post-if vreg is `param_vregs[i]`
-                    // (Wasm spec §3.4.4 requires param == result
-                    // for valid implicit-else). Bump then-body
-                    // result vregs' last_use_pc and replace
-                    // sim_stack with param_vregs so the post-if
-                    // consumer pops the canonical vreg, extending
-                    // its liveness.
-                    // Same base-relative indexing as the branch above.
-                    const arity: usize = fr.result_arity;
-                    const entry: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
-                    if (sim_len < entry + arity) {
-                        // Same invariant as the if-merge arm above.
-                        std.debug.assert(sim_len >= entry);
-                        if (sim_len > entry) sim_len = entry;
-                        var i: usize = 0;
-                        while (i < arity) : (i += 1) {
-                            if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
-                            ranges.items[fr.param_vregs[i]].last_use_pc = pc;
-                            sim_stack[sim_len] = fr.param_vregs[i];
-                            sim_len += 1;
-                        }
-                    } else {
-                        const base = sim_len - arity;
-                        var i: usize = 0;
-                        while (i < arity) : (i += 1) {
-                            ranges.items[sim_stack[base + i]].last_use_pc = pc;
-                            sim_stack[base + i] = fr.param_vregs[i];
-                        }
-                    }
-                } else if (!fr.is_if and fr.merge_captured and fr.result_arity > 0) {
+                // Mirror of `emitEndIntra`, arm for arm. `arm_dead`: the arm
+                // this `end` closes ended in a terminator, so what it left is
+                // not the frame's results. `resolved`: an arm below placed the
+                // results itself (merge vregs or an `if`'s params); otherwise
+                // a dead arm's leftovers are dropped and the results minted.
+                const arm_dead = zir.armDeadAt(func, idx);
+                const entry: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
+                const arity: usize = fr.result_arity;
+                var resolved = false;
+                if (!fr.is_if and !fr.is_loop and fr.merge_captured and arity > 0) {
                     // D-330 — block-result merge survival. The emit's
-                    // `captureOrEmitBlockMergeMov` captured these vregs
-                    // (the result operands of the FIRST br/br_if to this
-                    // block) as the canonical merge target; `.end` homes
-                    // the fall-through result into them. Bump their
-                    // last_use_pc to this `.end` and swap them onto the
-                    // operand stack so the post-block consumer pops the
-                    // canonical vreg. Without this the merge vreg dies at
-                    // the branch (range `[def,def]`), so the regalloc may
-                    // park it in a callee-saved reg (X20-X22 / RBX-R14)
-                    // that an intervening call clobbers — the taken edge
-                    // jumps over `.end`'s home MOV, leaving it stale
-                    // (c_sha256 dropped the final `\n`). Mirrors the
-                    // if/else handling above.
+                    // `captureOrEmitBlockMergeMov` captured these vregs (the
+                    // result operands of the FIRST br/br_if to this block) as
+                    // the canonical merge target; `.end` homes a live
+                    // fall-through result into them. Bump their last_use_pc
+                    // to this `.end` and swap them onto the operand stack so
+                    // the post-block consumer pops the canonical vreg. Without
+                    // this the merge vreg dies at the branch (range
+                    // `[def,def]`), so the regalloc may park it in a
+                    // callee-saved reg (X20-X22 / RBX-R14) that an intervening
+                    // call clobbers — the taken edge jumps over `.end`'s home
+                    // MOV, leaving it stale (c_sha256 dropped the final `\n`).
                     //
-                    // The case split mirrors `emitEndIntra`. `entry` is the
-                    // block's own operand-stack base (entry depth minus the
-                    // params it consumed), so the merge vregs are homed at
-                    // `entry .. entry + result_arity`.
-                    const arity: usize = fr.result_arity;
-                    const entry: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
-                    if (sim_len < entry + arity) {
-                        // The block's only exit is a `br`: its handler drained
-                        // the body back to the innermost entry depth, so no
-                        // fall-through operand is left to home. The merge
-                        // vregs ARE the block's result — emit's `pushed_vregs`
-                        // still carries them, so put them back and keep them
-                        // live to this `.end`. Without this they die at the
-                        // branch and regalloc hands their register to the next
-                        // push, which then aliases the block's result
-                        // (AssemblyScript `~lib/rt/tlsf.ts` insertBlock's
-                        // `slMap[fl] |= 1 << sl` read 1 instead of 0).
-                        // Same invariant as the if-merge arm above.
+                    // A dead body (or one whose only exit is a `br`, which
+                    // drained it back to the innermost entry depth) has no
+                    // fall-through operand: the merge vregs ARE the result
+                    // (AssemblyScript `~lib/rt/tlsf.ts` insertBlock's
+                    // `slMap[fl] |= 1 << sl` read 1 instead of 0 without them).
+                    resolved = true;
+                    if (arm_dead or sim_len < entry + arity) {
                         std.debug.assert(sim_len >= entry);
-                        if (sim_len > entry) sim_len = entry;
-                        var i: usize = 0;
-                        while (i < arity) : (i += 1) {
-                            if (sim_len == max_simulated_stack) return Error.OperandStackUnderflow;
-                            ranges.items[fr.merge_vregs[i]].last_use_pc = pc;
-                            sim_stack[sim_len] = fr.merge_vregs[i];
-                            sim_len += 1;
-                        }
+                        sim_len = entry;
+                        try pushMerge(ranges.items, &sim_stack, &sim_len, fr.merge_vregs[0..arity], pc);
                     } else {
                         const base = sim_len - arity;
                         var i: usize = 0;
@@ -474,6 +424,41 @@ pub fn compute(
                             sim_stack[base + i] = fr.merge_vregs[i];
                         }
                     }
+                } else if (fr.is_if and fr.saw_else and fr.merge_captured and arity > 0) {
+                    // D-093 (d-12) — an `if` with an else whose merge a live
+                    // then arm or a `br` named. A live else arm's results sit
+                    // on top of the base (`.else` truncated there): the emit
+                    // reads them at the merge MOV, so this `.end` is their last
+                    // use. A dead one left none. Either way the merge vregs are
+                    // the result, and post-if consumers' pops extend them.
+                    resolved = true;
+                    if (!arm_dead) {
+                        if (sim_len < entry + arity) return Error.UnsupportedOp;
+                        var i: usize = sim_len - arity;
+                        while (i < sim_len) : (i += 1) ranges.items[sim_stack[i]].last_use_pc = pc;
+                    }
+                    if (sim_len > entry) sim_len = entry;
+                    try pushMerge(ranges.items, &sim_stack, &sim_len, fr.merge_vregs[0..arity], pc);
+                } else if (fr.is_if and !fr.saw_else and fr.param_arity > 0) {
+                    // D-093 (d-13) — implicit else (no `.else`). Wasm spec
+                    // §3.4.4 requires param == result, and the params' vregs
+                    // are the merge: a live then arm's results are moved into
+                    // them, so this `.end` is their last read; a dead one left
+                    // nothing that reaches here (#739). A `br` that carried
+                    // other vregs than the params is a shape the emit declines.
+                    resolved = true;
+                    if (fr.param_arity != fr.result_arity) return Error.UnsupportedOp;
+                    if (fr.merge_captured and !std.mem.eql(u32, fr.merge_vregs[0..arity], fr.param_vregs[0..arity])) return Error.UnsupportedOp;
+                    if (sim_len < entry) return Error.UnsupportedOp;
+                    if (!arm_dead) {
+                        if (sim_len < entry + arity) return Error.UnsupportedOp;
+                        var i: usize = sim_len - arity;
+                        while (i < sim_len) : (i += 1) ranges.items[sim_stack[i]].last_use_pc = pc;
+                    }
+                    sim_len = entry;
+                    try pushMerge(ranges.items, &sim_stack, &sim_len, fr.param_vregs[0..arity], pc);
+                } else if (fr.is_if and !fr.saw_else and fr.merge_captured) {
+                    return Error.UnsupportedOp; // the emit declines it too
                 }
                 // Mirror of `emitEndIntra`'s closing step. Whatever the
                 // arms above left, the frame closes to `[..base) ++
@@ -481,16 +466,16 @@ pub fn compute(
                 // frame: the top `result_arity` entries move down to
                 // `base`, anything between is dropped. The snapshot is
                 // one side of a comparison (`liveness_parity`), so it
-                // computes that shape rather than assume it. A body that
-                // ended in a terminator short of its results leaves the
-                // frame short; the emit mints a fresh vreg for each
-                // missing result, below the ones that survived (the
-                // validator's order: the values left before the
-                // terminator are the top results), and this side mints the
-                // same ids at the same pc in the same order (#399). No code
-                // computes them: the `.end` is unreachable, since an `if`
-                // whose then-arm closed short at `.else` captured nothing
-                // (#739).
+                // computes that shape rather than assume it. A dead arm
+                // that nothing resolved left values that are not results
+                // (Wasm spec §3.3.8: its terminator returned the stack to
+                // the frame's height) and need not have their types: they
+                // are dropped, and the emit mints a fresh vreg for each
+                // result. This side mints the same ids at the same pc in
+                // the same order (#399). A fall-through never reaches that
+                // `.end`; a catch clause that targets an `if` can, and its
+                // landing pad writes these vregs.
+                if (arm_dead and !resolved and sim_len > entry) sim_len = entry;
                 const frame_base: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
                 const closed_len: usize = frame_base + @as(usize, fr.result_arity);
                 if (sim_len > closed_len) {
@@ -601,23 +586,22 @@ pub fn compute(
                 const fr = &block_stack[block_stack_len - 1];
                 if (fr.is_if) {
                     fr.saw_else = true;
-                    // D-093 (d-12) — capture top `result_arity`
-                    // vregs as the merge target (mirrors emit's
-                    // `.else` `merge_top_vregs` capture). At .end
-                    // these become the canonical post-if vregs.
-                    // Counted from the if's own base, as the emit does
-                    // (#739): a then-arm short of its results is dead
-                    // and captures nothing.
+                    // Mirror of `emitElse`. A dead then arm (it ended in a
+                    // terminator, `zir.armDeadAt`) left values of any type and
+                    // count, none of them its results, so it names no merge
+                    // (#739). A live one left exactly its results on top: they
+                    // become the merge vregs, unless a `br` to this `if`
+                    // already named them, and then they are moved into those
+                    // here, so this `.else` is their last read.
                     const frame_base: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
-                    if (fr.result_arity > 0 and sim_len >= frame_base + @as(usize, fr.result_arity)) {
-                        const base = sim_len - @as(usize, fr.result_arity);
-                        var i: u32 = 0;
-                        while (i < fr.result_arity) : (i += 1) {
-                            // Bump V_then_i's last_use_pc to the
-                            // else-PC (emit captures + later writes
-                            // through this slot at the merge MOV).
+                    const arity: usize = fr.result_arity;
+                    if (arity > 0 and !zir.armDeadAt(func, idx)) {
+                        if (sim_len < frame_base + arity) return Error.UnsupportedOp;
+                        const base = sim_len - arity;
+                        var i: usize = 0;
+                        while (i < arity) : (i += 1) {
                             ranges.items[sim_stack[base + i]].last_use_pc = pc;
-                            fr.merge_vregs[i] = sim_stack[base + i];
+                            if (!fr.merge_captured) fr.merge_vregs[i] = sim_stack[base + i];
                         }
                         fr.merge_captured = true;
                     }
@@ -735,10 +719,10 @@ pub fn compute(
             // callee's arguments — after the table index (`return_call_
             // indirect`) or funcref (`return_call_ref`) on top; `return`
             // and `unreachable` read in place and pop nothing. Mirror the
-            // pops, close every range above the innermost open frame's
-            // entry depth (control never falls through, so this is their
-            // last read), and leave the rest of the stack for that frame's
-            // `.end` to close, exactly as the emit's frozen stack reaches
+            // pops, close every range from the innermost open frame's base
+            // up, params included (control never falls through, so this is
+            // their last read), and leave the stack for that frame's `.end`,
+            // which drops them, exactly as the emit's frozen stack reaches
             // its `emitEndIntra`. Pops are tolerant like the `call` arm's.
             var n_pop: usize = 0;
             if (instr.op == .throw) {
@@ -757,12 +741,9 @@ pub fn compute(
                 sim_len -= 1;
                 ranges.items[sim_stack[sim_len]].last_use_pc = pc;
             }
-            const innermost_entry_term: u32 = if (block_stack_len == 0)
-                0
-            else
-                block_stack[block_stack_len - 1].entry_depth;
+            const innermost_base: usize = innermostFrameBase(block_stack[0..block_stack_len]);
             var k: usize = sim_len;
-            while (k > @as(usize, innermost_entry_term)) {
+            while (k > innermost_base) {
                 k -= 1;
                 ranges.items[sim_stack[k]].last_use_pc = pc;
             }
@@ -812,12 +793,11 @@ pub fn compute(
             // the vregs where they are — the innermost frame's `.end` keeps
             // the top `result_arity` of them as that frame's result, as the
             // emit does, and the snapshot has to agree with it there.
-            const innermost_entry: u32 = if (block_stack_len == 0)
-                0
-            else
-                block_stack[block_stack_len - 1].entry_depth;
+            // The frame's params count: the branch may carry them, and the
+            // dead arm's `.end` drops them with the rest.
+            const innermost_base: usize = innermostFrameBase(block_stack[0..block_stack_len]);
             var k: usize = sim_len;
-            while (k > @as(usize, innermost_entry)) {
+            while (k > innermost_base) {
                 k -= 1;
                 ranges.items[sim_stack[k]].last_use_pc = pc;
             }
@@ -866,6 +846,16 @@ pub fn compute(
                     while (t <= count) : (t += 1) {
                         captureBlockMergeVregs(&block_stack, block_stack_len, targets[start + t], sim_stack[0..sim_len]);
                     }
+                }
+                // A terminator like `br`: every target reads its values at
+                // this pc (a MOV into a captured merge, or the function
+                // return's marshal), and the arm's `.end` drops them. So
+                // their ranges close here, as `br`'s do.
+                const innermost_base: usize = innermostFrameBase(block_stack[0..block_stack_len]);
+                var k: usize = sim_len;
+                while (k > innermost_base) {
+                    k -= 1;
+                    ranges.items[sim_stack[k]].last_use_pc = pc;
                 }
             }
             continue;
@@ -1387,10 +1377,9 @@ test "compute: install onto ZirFunc.liveness slot round-trips" {
 
 test "compute: a frame whose body ended in a terminator closes to its result shape" {
     // loop (result i32) ; local.get 0 ; return ; end ; i32.const 1 ; i32.add ; end
-    // `return` reads vreg 0 in place and the emit freezes its stack, so
-    // the loop's `.end` hands vreg 0 on as the loop's result and the
-    // `i32.add` pops it. Its range must reach the add (pre-fix the
-    // terminator drained it and the range stopped at the `return`).
+    // `return` reads vreg 0 in place. The loop's body ends in a terminator,
+    // so its `.end` drops what the body left and mints vreg 1 as the
+    // result; the `i32.add` pops vreg 1, not vreg 0.
     var f = try buildFuncWithParams(testing.allocator, &.{ .i32, .i32 }, &.{
         .{ .op = .loop, .extra = 1 },
         .{ .op = .@"local.get", .payload = 0 },
@@ -1401,40 +1390,45 @@ test "compute: a frame whose body ended in a terminator closes to its result sha
         .{ .op = .end },
     });
     defer f.deinit(testing.allocator);
+    try f.blocks.append(testing.allocator, .{ .kind = .loop, .block_type = .{ .single = .i32 }, .start_inst = 0, .end_inst = 3 });
 
     const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
-    try testing.expectEqual(@as(usize, 3), live.ranges.len);
-    try testing.expectEqual(@as(u32, 5), live.ranges[0].last_use_pc);
+    try testing.expectEqual(@as(usize, 4), live.ranges.len);
+    try testing.expectEqual(@as(u32, 2), live.ranges[0].last_use_pc);
+    try testing.expectEqual(@as(u32, 5), live.ranges[1].last_use_pc);
 }
 
 test "compute: the snapshot carries a frame's results past a br-only body" {
     // `(block (result i32) (loop (result i32) i32.const 5 br 1))` lowers,
     // with the constant hoisted into a local, to
     //   block ; i32.const ; local.set 0 ; loop ; local.get 0 ; br 1 ; end ; end ; end
-    // Entering the block's `.end` (pc 7) the emit's stack is `{ 1 }`: the
-    // loop closed to its one result. The snapshot must read the same.
+    // Entering the block's `.end` (pc 7) the emit's stack is `{ 2 }`: the
+    // loop's body ended in `br`, so the loop closed to a minted result. The
+    // block's merge is the `br 1` operand, vreg 1, so pc 8 reads `{ 1 }`.
     dbg.initFromEnv("liveverify");
     defer dbg.resetForTest();
     var f = try buildFuncWithParams(testing.allocator, &.{ .i32, .i32 }, &.{
         .{ .op = .block, .extra = 1 },
         .{ .op = .@"i32.const", .payload = 5 },
         .{ .op = .@"local.set", .payload = 0 },
-        .{ .op = .loop, .extra = 1 },
+        .{ .op = .loop, .payload = 1, .extra = 1 },
         .{ .op = .@"local.get", .payload = 0 },
         .{ .op = .br, .payload = 1 },
-        .{ .op = .end },
-        .{ .op = .end },
+        .{ .op = .end, .payload = 1 },
+        .{ .op = .end, .payload = 0 },
         .{ .op = .end },
     });
     defer f.deinit(testing.allocator);
+    try f.blocks.append(testing.allocator, .{ .kind = .block, .block_type = .{ .single = .i32 }, .start_inst = 0, .end_inst = 7 });
+    try f.blocks.append(testing.allocator, .{ .kind = .loop, .block_type = .{ .single = .i32 }, .start_inst = 3, .end_inst = 6 });
 
     const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(u32, 1), live.stack_depth[7]);
-    try testing.expectEqual(snapshotDigest(&.{1}), live.stack_digest[7]);
+    try testing.expectEqual(snapshotDigest(&.{2}), live.stack_digest[7]);
     try testing.expectEqual(@as(u32, 1), live.stack_depth[8]);
     try testing.expectEqual(snapshotDigest(&.{1}), live.stack_digest[8]);
 }
@@ -1547,16 +1541,17 @@ test "compute: a block closing short before call_ref mints a gpr result (#399, #
     try testing.expectEqual(@as(usize, 2), live.ranges.len);
 }
 
-test "compute: a frame closing short mints below the results its body left (#399)" {
+test "compute: a frame whose body ended in a terminator mints every result (#399)" {
     // block (result f64 i32) ; i32.const 1 ; unreachable ; end — the i32 the
-    // body left is the top result, so the minted f64 goes below it: `{ 1, 0 }`.
+    // body left is not a result: the `.end` drops it and mints both, each
+    // in its result's class: `{ 1, 2 }`.
     dbg.initFromEnv("liveverify");
     defer dbg.resetForTest();
     var f = try buildFunc(testing.allocator, &.{
         .{ .op = .block, .extra = 2 }, // 0
         .{ .op = .@"i32.const", .payload = 1 }, // 1: v0
         .{ .op = .@"unreachable" }, // 2
-        .{ .op = .end }, // 3: mints v1
+        .{ .op = .end }, // 3: mints v1, v2
         .{ .op = .drop }, // 4
         .{ .op = .drop }, // 5
         .{ .op = .end },
@@ -1568,14 +1563,15 @@ test "compute: a frame closing short mints below the results its body left (#399
     const live = try compute(testing.allocator, &f, &.{}, &types, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
-    try testing.expectEqual(snapshotDigest(&.{ 1, 0 }), live.stack_digest[4]);
+    try testing.expectEqual(snapshotDigest(&.{ 1, 2 }), live.stack_digest[4]);
     try testing.expectEqual(RegClass.fpr, live.classes[1]);
-    try testing.expectEqual(RegClass.gpr, live.classes[0]);
+    try testing.expectEqual(RegClass.gpr, live.classes[2]);
 }
 
 test "compute: a throw pops its tag's payload before the stack freezes" {
     // Same shape with `throw 0` and a one-i32 tag: the emit pops the
-    // payload only, so the first constant survives as the block's result.
+    // payload only, so the first constant is still there entering the
+    // `.end` (pc 4). The `.end` then drops it and mints the result.
     dbg.initFromEnv("liveverify");
     defer dbg.resetForTest();
     var f = try buildFunc(testing.allocator, &.{
@@ -1588,14 +1584,15 @@ test "compute: a throw pops its tag's payload before the stack freezes" {
         .{ .op = .end },
     });
     defer f.deinit(testing.allocator);
+    try f.blocks.append(testing.allocator, .{ .kind = .block, .block_type = .{ .single = .i32 }, .start_inst = 0, .end_inst = 4 });
 
     const tag_type: zir.FuncType = .{ .params = &.{.i32}, .results = &.{} };
     const live = try compute(testing.allocator, &f, &.{}, &.{tag_type}, &.{0}, &.{});
     defer deinit(testing.allocator, live);
 
     try testing.expectEqual(@as(u32, 3), live.ranges[1].last_use_pc);
-    try testing.expectEqual(@as(u32, 1), live.stack_depth[5]);
-    try testing.expectEqual(snapshotDigest(&.{0}), live.stack_digest[5]);
+    try testing.expectEqual(snapshotDigest(&.{0}), live.stack_digest[4]);
+    try testing.expectEqual(snapshotDigest(&.{2}), live.stack_digest[5]);
 }
 
 test "compute: a catch to a loop carries the loop's params, one to a block fresh results (#369)" {

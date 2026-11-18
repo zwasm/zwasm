@@ -366,9 +366,9 @@ pub const BlockKind = enum(u8) {
 };
 
 /// Wasm spec §5.4.1 (blocktype) — a block's type as the lowerer decoded it.
-/// Liveness reads the results to class the vregs it mints for a frame that
-/// closes short of them (#399); a `typeidx` resolves through the module's
-/// types.
+/// Liveness reads the results to class the vregs it mints for a frame whose
+/// body ended in a terminator (#399); a `typeidx` resolves through the
+/// module's types.
 pub const BlockType = union(enum) {
     empty,
     single: ValType,
@@ -393,6 +393,25 @@ pub const BlockInfo = struct {
 // unchanged.
 const zir_ops = @import("zir_ops.zig");
 pub const ZirOp = zir_ops.ZirOp;
+
+/// Wasm spec §3.3.8 — an instruction after which the operand stack is
+/// polymorphic. The lowerer marks the rest of its frame dead at each of these
+/// (`markUnreachable`) and emits nothing until that frame's `else` or `end`,
+/// so the ZIR instruction just before an `else` / `end` is one of these
+/// exactly when the arm it closes is dead. The emit and liveness both read
+/// it, so they agree on which arms are dead whatever values a dead arm left.
+pub fn isTerminator(op: ZirOp) bool {
+    return switch (op) {
+        .@"unreachable", .@"return", .br, .br_table, .throw, .throw_ref, .return_call, .return_call_indirect, .return_call_ref => true,
+        else => false,
+    };
+}
+
+/// Whether the arm that the `else` / `end` at `pc` closes is dead: the
+/// instruction before it is a terminator (see `isTerminator`).
+pub fn armDeadAt(func: *const ZirFunc, pc: usize) bool {
+    return pc > 0 and isTerminator(func.instrs.items[pc - 1].op);
+}
 
 pub const ZirInstr = struct {
     op: ZirOp,

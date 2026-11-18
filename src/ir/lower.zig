@@ -1084,12 +1084,23 @@ pub const Lowerer = struct {
         self.markUnreachable();
     }
 
+    /// The other direction of `markUnreachable`'s assert: an arm whose last
+    /// op is one `zir.isTerminator` names was marked dead, so the lowerer and
+    /// `zir.armDeadAt` agree on which arms are dead.
+    fn assertTerminatorMarked(self: *const Lowerer) void {
+        const n = self.out.instrs.items.len;
+        if (n > 0 and zir.isTerminator(self.out.instrs.items[n - 1].op)) std.debug.assert(self.unreachable_at_depth != null);
+    }
+
     /// D-093 (d-1) helper: enter the dead-code region. Records
     /// `block_stack_len` at the terminator's site so the matching
     /// `end` / `else` knows when to clear. Idempotent — repeated
     /// terminators in dead code don't update the depth.
     fn markUnreachable(self: *Lowerer) void {
         if (self.unreachable_at_depth == null) {
+            // The op just emitted is what `zir.armDeadAt` reads to find a
+            // dead arm, so it must be one `zir.isTerminator` names.
+            std.debug.assert(zir.isTerminator(self.out.instrs.items[self.out.instrs.items.len - 1].op));
             self.unreachable_at_depth = @intCast(self.block_stack_len);
         }
     }
@@ -1280,6 +1291,7 @@ pub const Lowerer = struct {
         // out.blocks update. The unreachable flag itself stays
         // set (we're still inside the outer dead region).
         if (block_idx == unreachable_block_sentinel) return;
+        self.assertTerminatorMarked();
 
         // If popping this (live) block crosses the depth where
         // the unreachable region started, clear the flag NOW so
@@ -1304,6 +1316,7 @@ pub const Lowerer = struct {
 
         // D-093 (d-1): else of a dead-code if — stays dead.
         if (block_idx == unreachable_block_sentinel) return;
+        self.assertTerminatorMarked();
 
         // If the then-arm's br/return/unreachable made us
         // unreachable AT THIS if-block's depth, the else-arm is

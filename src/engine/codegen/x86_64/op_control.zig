@@ -1017,14 +1017,16 @@ pub fn branchOnReg(
         try buf.appendSlice(allocator, inst.encJccRel32(.ne, disp).slice());
         return;
     }
-    // Forward branch. D-093 (d-2): for .block with a captured
-    // merge target, the MOVs+JMP must run only when cond ≠ 0.
-    // Wrap them inside a JE-skip sequence so the fall-through
-    // path (cond == 0) bypasses both. First br_if to a block
+    // Forward branch. D-093 (d-2): for a block or `if` with a
+    // captured merge target, the MOVs+JMP must run only when
+    // cond ≠ 0. Wrap them inside a JE-skip sequence so the
+    // fall-through path (cond == 0) bypasses both — it may still
+    // read the merge vreg's value. First br_if to the frame
     // (capture path, no MOV) uses the canonical JNE-forward
     // shape with the merge captured pre-emit.
+    const tgt_kind = labels.items[tgt_idx].kind;
     const tgt_is_block_with_capture =
-        labels.items[tgt_idx].kind == .block and
+        (tgt_kind == .block or tgt_kind == .if_then or tgt_kind == .else_open) and
         labels.items[tgt_idx].result_arity > 0 and
         labels.items[tgt_idx].merge_captured;
     if (tgt_is_block_with_capture) {
@@ -1111,8 +1113,12 @@ pub fn emitIf(
 pub fn emitElse(
     allocator: Allocator,
     buf: *std.ArrayList(u8),
+    alloc: regalloc.Allocation,
     pushed_vregs: *std.ArrayList(u32),
     labels: *std.ArrayList(Label),
+    spill_base_off: u32,
+    func: *const ZirFunc,
+    then_dead: bool,
 ) Error!void {
     if (labels.items.len == 0 or
         labels.items[labels.items.len - 1].kind != .if_then)
@@ -1121,36 +1127,49 @@ pub fn emitElse(
     }
     const lbl_idx = labels.items.len - 1;
     const arity: u32 = labels.items[lbl_idx].result_arity;
-    // Counted from the if's own base (#739): a then-arm that ended in a
-    // terminator short of its results is dead, and what lies below the base
-    // belongs to the enclosing frame. Liveness's `.else` counts the same way.
     const frame_base: usize = @as(usize, labels.items[lbl_idx].entry_stack_depth) -| @as(usize, labels.items[lbl_idx].param_arity);
-    const then_short = pushed_vregs.items.len < frame_base + arity;
-    if (arity > 0 and !then_short) {
-        const base = pushed_vregs.items.len - arity;
-        var i: u32 = 0;
-        while (i < arity) : (i += 1) {
-            labels.items[lbl_idx].merge_top_vregs[i] = pushed_vregs.items[base + i];
+    // The then arm's results reach the `end` only if the arm does. A dead
+    // then arm (`then_dead`: it ended in a terminator) left values of any
+    // type and count, none of them its results, so it names no merge (#739).
+    // A live one left exactly its results on top: the first edge into the
+    // `end` names the merge vregs, so they are captured here unless a `br` to
+    // this `if` already did, and then the results move into those. Liveness's
+    // `.else` makes the same choice.
+    if (arity > 0 and !then_dead) {
+        if (pushed_vregs.items.len < frame_base + arity) {
+            return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:else-then-short", 0);
         }
-        labels.items[lbl_idx].merge_captured = true;
+        const base = pushed_vregs.items.len - arity;
+        if (!labels.items[lbl_idx].merge_captured) {
+            var i: u32 = 0;
+            while (i < arity) : (i += 1) {
+                labels.items[lbl_idx].merge_top_vregs[i] = pushed_vregs.items[base + i];
+            }
+            labels.items[lbl_idx].merge_captured = true;
+        } else {
+            var i: u32 = 0;
+            while (i < arity) : (i += 1) {
+                const src_vreg = pushed_vregs.items[base + i];
+                const merge_vreg = labels.items[lbl_idx].merge_top_vregs[i];
+                if (src_vreg != merge_vreg) try emitMergeMov(allocator, buf, alloc, spill_base_off, func, src_vreg, merge_vreg);
+            }
+        }
     }
     const jmp_at: u32 = @intCast(buf.items.len);
     try buf.appendSlice(allocator, inst.encJmpRel32(0).slice());
     const else_start: u32 = @intCast(buf.items.len);
     const lbl = &labels.items[lbl_idx];
-    // D-093 (d-10) — restore else-arm operand-stack shape per
-    // Wasm spec §3.4.4 (mirror of arm64/op_control.zig:emitElse). A dead
-    // then-arm's leftovers above the base go too, as liveness's `.else`
-    // drops them for every `if`: kept, the else arm's `.end` would mint
-    // fewer vregs than liveness does (#399).
-    if (lbl.param_arity > 0 or then_short) {
-        const entry_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
-        if (pushed_vregs.items.len > entry_base) {
-            pushed_vregs.shrinkRetainingCapacity(entry_base);
-        }
-        while (lbl.param_arity > 0 and pushed_vregs.items.len < entry_base) {
-            try pushed_vregs.append(allocator, lbl.param_top_vregs[0]);
-        }
+    // D-093 (d-10) — Wasm spec §3.4.4: the else arm starts from the frame's
+    // base with the params pushed back; the then arm's values are not on its
+    // stack (the merge vregs live in `merge_top_vregs`). Mirror of
+    // arm64/op_control.zig:emitElse and of liveness's `.else`.
+    if (pushed_vregs.items.len > frame_base) {
+        pushed_vregs.shrinkRetainingCapacity(frame_base);
+    }
+    while (lbl.param_arity > 0 and pushed_vregs.items.len < frame_base) {
+        try pushed_vregs.append(allocator, lbl.param_top_vregs[0]);
+    }
+    {
         var i: u32 = 0;
         while (i < lbl.param_arity) : (i += 1) {
             try pushed_vregs.append(allocator, lbl.param_top_vregs[i]);
@@ -1186,9 +1205,16 @@ pub fn emitEndIntra(
     spill_base_off: u32,
     func: *const ZirFunc,
     next_vreg: *u32,
+    arm_dead: bool,
 ) Error!void {
     var lbl = labels.pop().?;
     defer lbl.pending.deinit(allocator);
+    // `arm_dead`: the arm this `end` closes ended in a terminator
+    // (`zir.armDeadAt`), so whatever it left is not the frame's results.
+    // `resolved`: an arm below placed the results itself (merge vregs or an
+    // `if`'s params); otherwise a dead arm's leftovers are dropped and the
+    // results minted at the bottom. Liveness's `.end` makes the same choices.
+    var resolved = false;
 
     // D-027 mirror extended to Wasm 2.0 multi-value (D-035
     // chunk-d035-c): when an else_open frame carries a captured
@@ -1199,6 +1225,7 @@ pub fn emitEndIntra(
     // D-093 (d-2): `.block` merge fall-through. Mirror of
     // `arm64/op_control.zig:emitEndIntra` block-merge branch.
     if (lbl.kind == .block and lbl.merge_captured and lbl.result_arity > 0) {
+        resolved = true;
         const arity: u32 = lbl.result_arity;
         // D-093 (d-6): account for Wasm 2.0 block params (mirror
         // of arm64).
@@ -1206,8 +1233,12 @@ pub fn emitEndIntra(
         // Three shapes (see `arm64/op_control.zig:emitEndIntra`
         // for the canonical comment). Case (c) — stack emptied
         // by intervening loop/if truncate — surfaced by
-        // `labels.wast:loop1`.
-        if (pushed_vregs.items.len < entry + arity) {
+        // `labels.wast:loop1`. A dead body reaches the `end` only
+        // through the `br`s, which left the value in the merge vregs.
+        if (arm_dead) {
+            if (pushed_vregs.items.len > entry) pushed_vregs.shrinkRetainingCapacity(entry);
+            try pushed_vregs.appendSlice(allocator, lbl.merge_top_vregs[0..arity]);
+        } else if (pushed_vregs.items.len < entry + arity) {
             if (pushed_vregs.items.len > entry) {
                 pushed_vregs.shrinkRetainingCapacity(entry);
             }
@@ -1242,119 +1273,77 @@ pub fn emitEndIntra(
         }
     }
 
+    // Wasm spec §3.4.4 (end) — an `if` with an else whose merge a live then
+    // arm or a `br` named. emitElse started the else arm at the frame's base,
+    // so a live else arm's results are the top `arity` values: move them into
+    // the merge vregs. A dead one (`arm_dead`) left no results; every edge
+    // that reaches the `end` already put the value in the merge vregs. Either
+    // way the merge vregs are the result. Without a merge (a dead then arm
+    // and no `br`), a live else arm's results stand as they are. Mirror of
+    // arm64 and of liveness's if-merge `.end` arm.
     if (lbl.kind == .else_open and lbl.merge_captured) {
-        const arity: u32 = lbl.result_arity;
-        const dead_else = blk: {
-            if (pushed_vregs.items.len < arity) break :blk false;
-            const base = pushed_vregs.items.len - arity;
-            var i: u32 = 0;
-            while (i < arity) : (i += 1) {
-                if (pushed_vregs.items[base + i] != lbl.merge_top_vregs[i]) break :blk false;
-            }
-            break :blk true;
-        };
-        const else_frame_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
-        const else_short = pushed_vregs.items.len < else_frame_base + arity;
-        if (dead_else) {
-            // Merge targets already on top of stack. Skip MOVs.
-        } else if (else_short) {
-            // The else arm ended in a terminator short of its results (#739):
-            // it produced no live result to move, so the then-arm's captured
-            // merge vregs are the `if`'s result. Restore them above the frame
-            // base, as the then-short path does. Without this the branch below
-            // pops the params / enclosing values as if they were else results.
-            if (pushed_vregs.items.len > else_frame_base) {
-                pushed_vregs.shrinkRetainingCapacity(else_frame_base);
-            }
-            var j: u32 = 0;
-            while (j < arity) : (j += 1) {
-                try pushed_vregs.append(allocator, lbl.merge_top_vregs[j]);
-            }
-        } else if (lbl.param_arity > 0) {
-            // D-093 (d-10) — `if (param T1..TK)` case: emitElse
-            // truncated the phantom merge layer below the
-            // re-pushed params, so the stack at .end is just
-            // [..., V_else_result_0..V_else_result_{N-1}]. MOV
-            // each into the captured merge slot, then push the
-            // canonical merge_top_vregs back so post-block
-            // consumers read the merged result. Mirrors
-            // `arm64/op_control.zig` else_open param path.
-            if (pushed_vregs.items.len < arity) {
-                return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:else-param-arity", 0);
-            }
-            var i: u32 = arity;
-            while (i > 0) {
-                i -= 1;
-                const else_result = pushed_vregs.pop().?;
-                const merge_vreg = lbl.merge_top_vregs[i];
-                try emitMergeMov(allocator, buf, alloc, spill_base_off, func, else_result, merge_vreg);
-            }
-            var j: u32 = 0;
-            while (j < arity) : (j += 1) {
-                try pushed_vregs.append(allocator, lbl.merge_top_vregs[j]);
-            }
-        } else if (pushed_vregs.items.len < 2 * arity) {
-            return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:309", 0);
-        } else {
-            const merge_base = pushed_vregs.items.len - 2 * arity;
-            var v: u32 = 0;
-            while (v < arity) : (v += 1) {
-                if (pushed_vregs.items[merge_base + v] != lbl.merge_top_vregs[v]) {
-                    return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:315", 0);
-                }
-            }
-            // Pop in reverse (top = else_{N-1}); per-slot MOV
-            // is independent because vregs are unique under
-            // fresh-vreg-per-op regalloc.
-            //
-            // (D-080 discharge): dispatch on
-            // `alloc.shapeTag(merge_vreg)` so v128 merge results
-            // take the XMM/MOVAPS path instead of the 32-bit GPR
-            // MOV that previously truncated v128 to 32 bits.
-            // Mirrors `arm64/op_control.zig` lines ~423-440. v128
-            // spilled vregs trip D-078 (c) via `resolveXmm`.
-            var i: u32 = arity;
-            while (i > 0) {
-                i -= 1;
-                const else_result = pushed_vregs.pop().?;
-                const merge_vreg = lbl.merge_top_vregs[i];
-                try emitMergeMov(allocator, buf, alloc, spill_base_off, func, else_result, merge_vreg);
-            }
-        }
-    }
-
-    // D-093 (d-13) — implicit-else marshal (mirror of arm64).
-    // `(if (param T1..TK) (result T1..TK)) (then ...)` without
-    // `.else` validates per Wasm spec §3.4.4 (param == result).
-    // cond=0 path takes the implicit identity else; post-frame
-    // result is the original param. MOV top result_arity vregs
-    // into captured param_top_vregs slots BEFORE the target so
-    // cond=1 path executes the MOVs and cond=0's Jcc skips them.
-    if (lbl.kind == .if_then and lbl.param_arity > 0 and !lbl.merge_captured) {
-        if (lbl.param_arity != lbl.result_arity) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:implicit-else-arity-mismatch", 0);
+        resolved = true;
         const arity: u32 = lbl.result_arity;
         const frame_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
+        if (!arm_dead) {
+            if (pushed_vregs.items.len < frame_base + arity) {
+                return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:else-results-short", 0);
+            }
+            // Pop in reverse (top = else_{N-1}). (D-080) emitMergeMov
+            // dispatches on the merge vreg's shape, so a v128 result takes
+            // the XMM path.
+            var i: u32 = arity;
+            while (i > 0) {
+                i -= 1;
+                const else_result = pushed_vregs.pop().?;
+                const merge_vreg = lbl.merge_top_vregs[i];
+                if (else_result != merge_vreg) try emitMergeMov(allocator, buf, alloc, spill_base_off, func, else_result, merge_vreg);
+            }
+        }
+        if (pushed_vregs.items.len > frame_base) pushed_vregs.shrinkRetainingCapacity(frame_base);
+        try pushed_vregs.appendSlice(allocator, lbl.merge_top_vregs[0..arity]);
+    }
+
+    // D-093 (d-13) — implicit else. `(if (param T1..TK) (result T1..TK))`
+    // without `.else` validates per Wasm spec §3.4.4 (param == result): the
+    // cond=0 path skips to the `end` with the params as the result, so the
+    // params' vregs are the merge. A live then arm moves its results into
+    // them before the target, which cond=0's Jcc skips; a dead one
+    // (`arm_dead`) reaches the `end` only through a `br`, if at all (#739). A
+    // `br` that carried the params themselves named the same merge; one that
+    // carried other vregs would need the params moved on the skip path, which
+    // is not emitted, so that shape declines.
+    if (lbl.kind == .if_then and lbl.param_arity > 0) {
+        resolved = true;
+        if (lbl.param_arity != lbl.result_arity) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:implicit-else-arity-mismatch", 0);
+        const arity: u32 = lbl.result_arity;
+        if (lbl.merge_captured and !std.mem.eql(u32, lbl.merge_top_vregs[0..arity], lbl.param_top_vregs[0..arity])) {
+            return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:implicit-else-br-merge", 0);
+        }
+        const frame_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
         if (pushed_vregs.items.len < frame_base) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:implicit-else-short-stack", 0);
-        if (pushed_vregs.items.len < frame_base + arity) {
-            // The then-arm ended in a terminator short of its results, so
-            // only the implicit else reaches here: the params are the
-            // result as they stand, with no MOV (#739). Liveness's
-            // implicit-else arm does the same.
+        if (arm_dead) {
             pushed_vregs.shrinkRetainingCapacity(frame_base);
             try pushed_vregs.appendSlice(allocator, lbl.param_top_vregs[0..arity]);
         } else {
+            if (pushed_vregs.items.len < frame_base + arity) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:implicit-else-then-short", 0);
             const top_base = pushed_vregs.items.len - arity;
             var i: u32 = 0;
             while (i < arity) : (i += 1) {
                 const src_vreg = pushed_vregs.items[top_base + i];
                 const dst_vreg = lbl.param_top_vregs[i];
-                try emitMergeMov(allocator, buf, alloc, spill_base_off, func, src_vreg, dst_vreg);
+                if (src_vreg != dst_vreg) try emitMergeMov(allocator, buf, alloc, spill_base_off, func, src_vreg, dst_vreg);
             }
             var j: u32 = 0;
             while (j < arity) : (j += 1) {
                 pushed_vregs.items[top_base + j] = lbl.param_top_vregs[j];
             }
         }
+    } else if (lbl.kind == .if_then and lbl.merge_captured) {
+        // An `if` without params or an else returns nothing, so no `br`
+        // carries it a value; a captured merge here is not a shape this
+        // knows how to place.
+        return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:implicit-else-no-params-merge", 0);
     }
     const target: u32 = @intCast(buf.items.len);
     // Patch the if-then's skip-Jcc if it's still pending (no
@@ -1383,6 +1372,13 @@ pub fn emitEndIntra(
     // of arm64). new_len = entry - param_arity + result_arity.
     const entry_base: usize = @as(usize, lbl.entry_stack_depth) -| @as(usize, lbl.param_arity);
     const new_len: usize = entry_base + @as(usize, lbl.result_arity);
+    // A dead arm no merge or param resolved: what it left before its
+    // terminator is not the frame's results (Wasm spec §3.3.8: the
+    // terminator returns the stack to the frame's height), and need not have
+    // their types. Drop it; the mint below fills every result.
+    if (arm_dead and !resolved and pushed_vregs.items.len > entry_base) {
+        pushed_vregs.shrinkRetainingCapacity(entry_base);
+    }
     if (pushed_vregs.items.len > new_len and lbl.result_arity > 0) {
         const top_start = pushed_vregs.items.len - lbl.result_arity;
         var i: usize = 0;
@@ -1393,12 +1389,12 @@ pub fn emitEndIntra(
     if (pushed_vregs.items.len > new_len) {
         pushed_vregs.shrinkRetainingCapacity(new_len);
     }
-    // D-093 (d-5) / D-130: a body that ended in a terminator short of its
-    // results (`unreachable`, a dead `br_table`, ... in any block kind) leaves
-    // the frame short. Mint a fresh vreg for each missing result, below the
-    // survivors: the values a body left before its terminator are the top
-    // results (the validator's order). No code computes them, since that
-    // `.end` is unreachable. Liveness mints the same ids at this pc (#399).
+    // D-093 (d-5) / D-130: a frame whose last arm is dead and that nothing
+    // else resolved closes with no results (any block kind). Mint a fresh vreg
+    // for each, of its result type. A fall-through never reaches this `.end`;
+    // a catch clause that targets an `if` can, and its landing pad writes
+    // the payload into these vregs. Liveness mints the same ids at this pc
+    // (#399).
     if (pushed_vregs.items.len < new_len) {
         if (pushed_vregs.items.len < entry_base) return types.rejectUnsupported("src/engine/codegen/x86_64/op_control.zig:short-frame-below-base", 0);
         const k = pushed_vregs.items.len - entry_base;
@@ -1458,8 +1454,12 @@ pub fn emitElseCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!void {
     return emitElse(
         ctx.allocator,
         ctx.buf,
+        ctx.alloc,
         ctx.pushed_vregs,
         ctx.labels,
+        ctx.spill_base_off,
+        ctx.func,
+        ctx.arm_dead,
     );
 }
 
@@ -1491,6 +1491,7 @@ pub fn emitEndCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Error!void {
             ctx.spill_base_off,
             ctx.func,
             ctx.next_vreg,
+            ctx.arm_dead,
         );
     }
     return emitEndInter(ctx);
