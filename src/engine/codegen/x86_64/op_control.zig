@@ -719,6 +719,22 @@ pub fn emitFunctionReturn(
     home_save_base_disp: i32,
 ) Error!void {
     try marshalReturnRegs(allocator, buf, alloc, pushed_vregs, spill_base_off, func, return_is_memory_class, indirect_result_slot_neg_off);
+    try emitEpilogue(allocator, buf, alloc, frame_bytes, uses_runtime_ptr, homing, home_save_base_disp);
+}
+
+/// The ABI epilogue after the result marshal: undo the frame `SUB RSP`,
+/// restore callee-saved homed registers (ADR-0155 stage 4), pop R15 (when
+/// `uses_runtime_ptr`) + RBP, RET. Shared by `emitFunctionReturn` and the
+/// function-label catch pad, which marshals its own return values first.
+pub fn emitEpilogue(
+    allocator: Allocator,
+    buf: *std.ArrayList(u8),
+    alloc: regalloc.Allocation,
+    frame_bytes: u32,
+    uses_runtime_ptr: bool,
+    homing: local_homing.Plan,
+    home_save_base_disp: i32,
+) Error!void {
     if (frame_bytes > 0) {
         // Inline imm8/imm32 SUB-form selection mirroring emit.zig's
         // `rspAdd` helper. Kept inline here to avoid a Zone-internal
@@ -729,8 +745,6 @@ pub fn emitFunctionReturn(
             try buf.appendSlice(allocator, inst.encAddRSpImm32(@intCast(frame_bytes)).slice());
         }
     }
-    // ADR-0155 stage 4 — restore callee-saved homed registers before the ABI
-    // epilogue (RBP-relative, so valid until POP RBP).
     try restoreCalleeSavedHomes(allocator, buf, alloc, homing, home_save_base_disp);
     if (uses_runtime_ptr) {
         try buf.appendSlice(allocator, inst.encPopR(.r15).slice());

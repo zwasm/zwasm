@@ -8,6 +8,8 @@
 //! An f32 param with three results is refused by the JIT, not misread (#618).
 //! A component reaches the host's network only with `--allow-network`.
 //! A catch clause whose label is a loop branches to the loop's header (#369).
+//! A catch clause whose label is the function's own label returns the delivered
+//! values.
 //! An `if` whose then-arm ends in `unreachable` returns the else arm's value
 //! on every engine (#739). A block that closes short of its f64 result
 //! before any vreg exists traps on every engine (#399). An `if` with no else
@@ -21,7 +23,8 @@
 //!         <wasi_p2_tcp_rust.wasm> <catch_to_loop.wasm>
 //!         <catch_to_loop_ref_result.wasm> <catch_to_loop_params.wasm>
 //!         <catch_to_loop_unset_params.wasm> <if_dead_then_arm.wasm>
-//!         <short_frame_f64.wasm> <if_branch_own_label.wasm>`
+//!         <short_frame_f64.wasm> <if_branch_own_label.wasm> <catch_to_func.wasm>
+//!         <catch_all_to_func.wasm>`
 
 const std = @import("std");
 const spawned_cli = @import("spawned_cli");
@@ -69,7 +72,9 @@ const U = "<catch_to_loop_unset_params>";
 const I = "<if_dead_then>";
 const B = "<short_frame>";
 const O = "<if_branch_own_label>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O };
+const C = "<catch_to_func>";
+const A = "<catch_all_to_func>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -149,7 +154,13 @@ const rows = [_]Row{
     onEngines(&all_engines, O, "i32_result=0", "150\n") ++
     onEngines(&all_engines, O, "i32_result=1", "107\n") ++
     onEngines(&all_engines, O, "ref_result=0", "100\n") ++
-    onEngines(&all_engines, O, "ref_result=1", "101\n") ++ [_]Row{
+    onEngines(&all_engines, O, "ref_result=1", "101\n") ++
+    // A catch clause whose label is the function's own label returns the
+    // delivered values on every engine: `catch_to_func` returns the tag's
+    // payload (77); the `catch_all` form returns with no values (exit 0, no
+    // output).
+    onEngines(&all_engines, C, "D1", "77\n") ++
+    onEngines(&all_engines, A, "D1", "") ++ [_]Row{
     // The pad's back-edge poll stops a loop re-entered only through its catch;
     // without it the run ends after 10^8 iterations and prints the count.
     .{ .args = &.{ "run", "--timeout", "500", "--engine", "jit", "--invoke", "catch_all_spin=100000000", L }, .exit = 1, .stderr = .{ .has = "interrupted" } },

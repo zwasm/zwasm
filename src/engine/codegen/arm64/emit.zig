@@ -1896,6 +1896,90 @@ pub fn compile(
                     std.mem.writeInt(u32, buf.items[fx_byte..][0..4], inst.encB(disp_words), .little);
                 }
 
+                // Wasm 3.0 §3.3.10.6 (try_table) + §4.4.8 — a catch whose label
+                // is the function's own (target_labels_depth 0) is a `br` to the
+                // function body: the function returns the delivered values. The
+                // intra path above only patches depths ≥ 1, so such a clause is
+                // still unresolved here. Append one pad per clause that marshals
+                // the payload into the AAPCS64 return registers and branches to
+                // the epilogue, as `br <func>` does. The delivered values ARE the
+                // function's results, so marshal the payload straight into the
+                // return regs rather than through the fall-through result vregs —
+                // those are dead (unallocated) when the body reaches its end only
+                // by the throw. Reg assignment mirrors `marshalFunctionReturn`:
+                // results in order, gpr X0.. / fp V0...
+                {
+                    var i: usize = 0;
+                    while (i < landing_pad_fixups.items.len) {
+                        const fx = landing_pad_fixups.items[i];
+                        if (fx.target_labels_depth != 0) {
+                            i += 1;
+                            continue;
+                        }
+                        const entry = &eh_builder.entries.items[fx.entry_idx];
+                        // This pad marshals into the register-class return ABI; a
+                        // memory-class / buffer-write return (> 2 results) wants
+                        // the indirect result buffer, so decline it to the interp.
+                        if (return_is_memory_class or buffer_write) return Error.UnsupportedOp;
+                        const clause_start: u32 = @intCast(buf.items.len);
+                        const is_ref = entry.kind == .catch_ref or entry.kind == .catch_all_ref;
+                        if (is_ref) {
+                            // Reify the exnref FIRST (the call clobbers caller-
+                            // saved), then move it from X0 to its return register
+                            // before the param loads overwrite X0.. It is the last
+                            // result, a ref, so its gpr index = the count of gpr
+                            // params.
+                            try gpr.writeU32(allocator, &buf, inst.encOrrReg(0, 31, abi.runtime_ptr_save_gpr)); // MOV X0, X19
+                            try gpr.writeU32(allocator, &buf, inst.encLdrImm(16, abi.runtime_ptr_save_gpr, @intCast(jit_abi.reify_exnref_fn_off)));
+                            try gpr.writeU32(allocator, &buf, inst.encBLR(16));
+                            var exn_gpr_idx: u8 = 0;
+                            if (entry.tag_idx) |t| for (ctx.tagParams(t)) |p| switch (p) {
+                                .i32, .i64, .ref => exn_gpr_idx += 1,
+                                else => {},
+                            };
+                            if (exn_gpr_idx != 0 and exn_gpr_idx < 8) {
+                                try gpr.writeU32(allocator, &buf, inst.encOrrReg(@intCast(exn_gpr_idx), 31, 0)); // MOV X<idx>, X0
+                            }
+                        }
+                        // No homed-local reload here (unlike the intra-block pad):
+                        // the function returns at once, so its locals are dead, and
+                        // the epilogue's callee-saved-home restore gives the caller
+                        // its registers back. The return regs are caller-saved.
+                        if (entry.kind == .catch_ or entry.kind == .catch_ref) {
+                            const tag_idx = entry.tag_idx orelse return Error.UnsupportedOp;
+                            var n_gpr: u8 = 0;
+                            var n_fp: u8 = 0;
+                            for (ctx.tagParams(tag_idx), 0..) |param, k| {
+                                const slot_off: u14 = @intCast(jit_abi.eh_payload_buf_off + k * 8);
+                                switch (param) {
+                                    .f32, .f64 => {
+                                        if (n_fp >= 8) return Error.UnsupportedOp;
+                                        const word = if (param == .f32)
+                                            inst.encLdrSImm(@intCast(n_fp), abi.runtime_ptr_save_gpr, slot_off)
+                                        else
+                                            inst.encLdrDImm(@intCast(n_fp), abi.runtime_ptr_save_gpr, slot_off);
+                                        try gpr.writeU32(allocator, &buf, word);
+                                        n_fp += 1;
+                                    },
+                                    .i32, .i64, .ref => {
+                                        if (n_gpr >= 8) return Error.UnsupportedOp;
+                                        try gpr.writeU32(allocator, &buf, inst.encLdrImm(@intCast(n_gpr), abi.runtime_ptr_save_gpr, slot_off));
+                                        n_gpr += 1;
+                                    },
+                                    // v128 in an exception payload (8-byte slot)
+                                    // cannot reach a 16-byte V return; decline.
+                                    .v128 => return Error.UnsupportedOp,
+                                }
+                            }
+                        }
+                        const at: u32 = @intCast(buf.items.len);
+                        const disp_words: i32 = @divExact(@as(i32, @intCast(epilogue_byte)) - @as(i32, @intCast(at)), 4);
+                        try gpr.writeU32(allocator, &buf, inst.encB(disp_words));
+                        entry.landing_pad_pc = clause_start;
+                        _ = landing_pad_fixups.swapRemove(i);
+                    }
+                }
+
                 // Trap stub: emitted after the regular RET when the
                 // function had any bounds-check / sig-mismatch /
                 // NaN-trap / range-trap fixups. Each fixup's B.cond

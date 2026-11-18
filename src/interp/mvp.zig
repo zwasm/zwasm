@@ -967,17 +967,29 @@ fn findAndDispatchCatch(
     return false;
 }
 
-/// Unwind to `target_depth` and push `payload` values onto the
-/// operand stack at the target label's height. Used by catch_
-/// dispatch where `payload` carries the thrown tag's params (the
-/// catch label's stack signature expects exactly these values).
+/// Unwind to `target_depth` and deliver `payload` there. At an enclosing
+/// label, push the values at that label's height and jump to it; at the
+/// function's own label (`target_depth == label_len`, §4.4.8) a `br` returns,
+/// so return from the function with the values as its results. Used by catch_
+/// dispatch where `payload` carries the thrown tag's params (plus the exnref
+/// for a `_ref` clause) — the catch label's signature expects exactly these.
 inline fn dispatchCatchWithPayload(
     rt: *Runtime,
     frame: *runtime.Frame,
     target_depth: u32,
     payload: []const Value,
 ) Trap!void {
-    if (target_depth >= frame.label_len) return Trap.Unreachable;
+    if (target_depth > frame.label_len) return Trap.Unreachable;
+    if (target_depth == frame.label_len) {
+        // The catch targets the function's implicit label (§4.4.8): a `br` to
+        // it returns, so the function returns the delivered values. `payload`
+        // is exactly the function's results (validation pins the label type).
+        // catch_all reaches the same return through `doBranch`; the payload
+        // kinds route here instead.
+        rt.operand_len = frame.operand_base;
+        for (payload) |v| try rt.pushOperand(v);
+        return returnFromFunction(rt, frame);
+    }
     const target = frame.labelAt(target_depth);
     var k: u32 = 0;
     while (k <= target_depth) : (k += 1) _ = frame.popLabel();
