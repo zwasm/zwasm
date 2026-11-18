@@ -1741,9 +1741,9 @@ pub fn compile(
                             // the results the end left on top.
                             const label_vregs: []const u32 = if (end_loop) |*lp| lp.param_top_vregs[0..lp.param_arity] else pushed_vregs.items;
                             // Decline rather than index past what exists: params `loop` did not capture,
-                            // or a vreg past `alloc.slots`. A param from a block that ends in `unreachable`
-                            // can still be the placeholder vreg 0; the pad then writes that vreg's slot,
-                            // on a path that never runs.
+                            // or a vreg past `alloc.slots`. A result a block minted for a body that ends
+                            // in `unreachable` (#399) is a real vreg this path never computes; declining
+                            // when it is past `alloc.slots` stays correct.
                             if (end_loop) |lp| {
                                 if (lp.entry_stack_depth < lp.param_arity) return Error.AllocationMissing;
                                 for (label_vregs) |v| if (v >= alloc.slots.len) return Error.AllocationMissing;
@@ -1854,14 +1854,11 @@ pub fn compile(
                     continue;
                 }
                 // Function-level end (labels stack is empty).
-                // D-093: when the function body terminates
-                // via a dead-fall-through loop (the function
-                // never returns at runtime; an infinite loop or
-                // br target above the function), pushed_vregs
-                // may carry a placeholder vreg 0 with no
-                // allocation entry. The marshal code would
-                // be unreachable at runtime regardless, so skip
-                // when top_vreg has no slot entry.
+                // D-093: `marshalFunctionReturn` skips a result
+                // vreg with no slot entry. The dead-fall-through
+                // pad that produced one (vreg 0 before any vreg
+                // was minted) mints a real vreg since #399; the
+                // guard stays.
                 // D-093: multi-result function return marshal
                 // via shared op_control helper (mirrors the per-arch
                 // X0..X7 / V0..V7 AAPCS64 ABI).

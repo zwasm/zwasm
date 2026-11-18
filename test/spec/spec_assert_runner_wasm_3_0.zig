@@ -532,16 +532,10 @@ const LvKnown = struct {
 /// Re-taken 2026-11-09 with #400's `br_on_*` capture rows fixed: 2 lines
 /// over 2 modules, both the dead-body row. The `.end` lines the 2026-09-07
 /// rises added went with the capture rows.
-const lv_known_x86_64_sysv: []const LvKnown = &.{
-    // #400's dead-body `br_table` row (func 70, the one line of the seed's
-    // 25 that #398 left): `drop` after the `.end` of a dead body
-    // (`unreachable`, `br_table`, `end`), liveness depth 0 against the
-    // emit's 1.
-    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 1 },
-    // The same row (func 6): `call_ref` after a block whose dead body
-    // (`unreachable`, `br_on_non_null`, ...) closes before any vreg exists.
-    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 1 },
-};
+///
+/// Re-taken 2026-11-15 with #399 fixed (a frame that closes short gets fresh
+/// vregs on both sides): `0 enumerated, 0 unexpected, 0 stale`.
+const lv_known_x86_64_sysv: []const LvKnown = &.{};
 
 /// x86_64-windows — seeded 2026-09-05 by this lane's own first CI run
 /// (run 33939200603, job 101233144158; ADR-0226 D2), with the table empty:
@@ -557,10 +551,11 @@ const lv_known_x86_64_sysv: []const LvKnown = &.{
 /// (run 34200535507, job 101978122541) against the seed rows:
 /// `10 enumerated, 4 unexpected, 3 stale`, the same seven moves the SysV
 /// table made, to the same counts.
-const lv_known_x86_64_windows: []const LvKnown = &.{
-    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 1 },
-    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 1 },
-};
+///
+/// Emptied 2026-11-15 with #399 fixed, as the SysV table was re-taken: both
+/// rows were the liveness side's, which this leg shares. This PR's run of
+/// the leg is the measurement.
+const lv_known_x86_64_windows: []const LvKnown = &.{};
 
 /// aarch64 (the macOS leg) — seeded 2026-09-05 by the same first CI run
 /// (job 101233144280), table empty: `0 enumerated, 10 unexpected, 0 stale`.
@@ -571,10 +566,11 @@ const lv_known_x86_64_windows: []const LvKnown = &.{
 /// Re-taken 2026-09-08 by the same run as the Win64 table (job
 /// 101978122561): `10 enumerated, 4 unexpected, 3 stale`, the same seven
 /// moves to the same counts — the third backend agreeing on #398's effect.
-const lv_known_aarch64: []const LvKnown = &.{
-    .{ .key = "memory64/br_table/br_table.0.wasm", .count = 1 },
-    .{ .key = "function-references/br_on_non_null/br_on_non_null.0.wasm", .count = 1 },
-};
+///
+/// Emptied 2026-11-15 with #399 fixed, as the SysV table was re-taken: both
+/// rows were the liveness side's, and the arm64 emit mints the same vregs as
+/// the x86_64 one. This PR's run of the leg is the measurement.
+const lv_known_aarch64: []const LvKnown = &.{};
 
 comptime {
     // A duplicated key would be counted once by `countFor` and twice in

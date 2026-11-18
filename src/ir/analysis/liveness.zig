@@ -194,6 +194,19 @@ fn tagSig(tag_idx: u32, tag_typeidxs: []const u32, module_types: []const zir.Fun
     return module_types[tag_typeidxs[tag_idx]];
 }
 
+/// Wasm spec §5.4.1 (blocktype) — the result types of block `block_idx`,
+/// a typeidx resolved through `module_types`. Liveness reads them only to
+/// class the vregs it mints for a frame that closes short (#399).
+fn blockResults(func: *const ZirFunc, module_types: []const zir.FuncType, block_idx: u64) Error![]const zir.ValType {
+    if (block_idx >= func.blocks.items.len) return Error.UnsupportedOp;
+    const info = &func.blocks.items[@intCast(block_idx)];
+    return switch (info.block_type) {
+        .empty => &.{},
+        .single => |*t| t[0..1],
+        .typeidx => |ti| if (ti < module_types.len) module_types[ti].results else Error.UnsupportedOp,
+    };
+}
+
 fn isControlFlow(op: ZirOp) bool {
     // After sub-7.5c-iv, every Wasm 1.0 control-flow op is
     // handled explicitly in `compute`. The function exists
@@ -469,19 +482,15 @@ pub fn compute(
                 // `base`, anything between is dropped. The snapshot is
                 // one side of a comparison (`liveness_parity`), so it
                 // computes that shape rather than assume it. A body that
-                // never produced its results (it ended in a terminator
-                // with nothing on the stack) leaves the frame short; the
-                // emit names each missing result vreg 0, its dead-fall-
-                // through placeholder, and the snapshot carries the same
-                // id. The range extension a later pop of it records on
-                // vreg 0 is conservative.
-                //
-                // Before the first vreg is minted that id names nothing:
-                // the emit's own read of it is out of bounds
-                // (`regalloc.slot`), and pushing it here would move that
-                // read to the next pop. The snapshot stays short there,
-                // and the parity check reports the difference, which is
-                // a true statement about the emit.
+                // ended in a terminator short of its results leaves the
+                // frame short; the emit mints a fresh vreg for each
+                // missing result, below the ones that survived (the
+                // validator's order: the values left before the
+                // terminator are the top results), and this side mints the
+                // same ids at the same pc in the same order (#399). No code
+                // computes them: the `.end` is unreachable, since an `if`
+                // whose then-arm closed short at `.else` captured nothing
+                // (#739).
                 const frame_base: usize = @as(usize, fr.entry_depth) -| @as(usize, fr.param_arity);
                 const closed_len: usize = frame_base + @as(usize, fr.result_arity);
                 if (sim_len > closed_len) {
@@ -489,7 +498,22 @@ pub fn compute(
                     std.mem.copyForwards(u32, sim_stack[frame_base..closed_len], sim_stack[sim_len - results .. sim_len]);
                     sim_len = closed_len;
                 }
-                while (sim_len < closed_len and ranges.items.len != 0) : (sim_len += 1) sim_stack[sim_len] = 0;
+                if (sim_len < closed_len) {
+                    // The emit refuses the same state (`short-frame-below-base`).
+                    if (sim_len < frame_base) return Error.UnsupportedOp;
+                    if (closed_len > max_simulated_stack) return Error.OperandStackUnderflow;
+                    const results = try blockResults(func, module_types, instr.payload);
+                    if (results.len != fr.result_arity) return Error.UnsupportedOp;
+                    const k = sim_len - frame_base;
+                    const m = closed_len - sim_len;
+                    std.mem.copyBackwards(u32, sim_stack[frame_base + m .. closed_len], sim_stack[frame_base .. frame_base + k]);
+                    for (0..m) |j| {
+                        sim_stack[frame_base + j] = @intCast(ranges.items.len);
+                        try ranges.append(allocator, .{ .def_pc = pc, .last_use_pc = pc });
+                        try classes.append(allocator, result_class.ofValType(results[j]));
+                    }
+                    sim_len = closed_len;
+                }
                 block_stack_len -= 1;
             }
             continue;
@@ -1415,11 +1439,10 @@ test "compute: the snapshot carries a frame's results past a br-only body" {
     try testing.expectEqual(snapshotDigest(&.{1}), live.stack_digest[8]);
 }
 
-test "compute: a frame closed before any vreg exists leaves the snapshot short" {
-    // block (result i32) ; unreachable ; end ; end — nothing mints a vreg,
-    // so the emit's placeholder vreg 0 names nothing. Liveness must not
-    // push it (the function-level `end` would then index an empty
-    // `ranges`); the snapshot stays one short of the emit's `{ 0 }`.
+test "compute: a frame closed before any vreg exists mints its result (#399)" {
+    // block (result i32) ; unreachable ; end ; end — nothing mints a vreg
+    // before the block closes short, so its `.end` mints v0 for the result,
+    // as the emit does.
     dbg.initFromEnv("liveverify");
     defer dbg.resetForTest();
     var f = try buildFunc(testing.allocator, &.{
@@ -1429,20 +1452,22 @@ test "compute: a frame closed before any vreg exists leaves the snapshot short" 
         .{ .op = .end },
     });
     defer f.deinit(testing.allocator);
+    try f.blocks.append(testing.allocator, .{ .kind = .block, .block_type = .{ .single = .i32 }, .start_inst = 0, .end_inst = 2 });
 
     const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
     defer deinit(testing.allocator, live);
 
-    try testing.expectEqual(@as(usize, 0), live.ranges.len);
-    try testing.expectEqual(@as(u32, 0), live.stack_depth[3]);
+    try testing.expectEqual(@as(usize, 1), live.ranges.len);
+    try testing.expectEqual(@as(u32, 2), live.ranges[0].def_pc);
+    try testing.expectEqual(@as(u32, 1), live.stack_depth[3]);
 }
 
 test "compute: a tail call pops its arguments before the stack freezes" {
     // block (result i32) ; i32.const ; i32.const ; return_call 0 ; end ; i32.eqz ; end
     // with func 0 taking two i32s. The emit's `marshalCallArgs` pops both
-    // arguments before `dead_code`, so the block closes short and takes the
-    // placeholder: entering `i32.eqz` (pc 5) the stack is `{ 0 }`, not the
-    // second constant.
+    // arguments before `dead_code`, so the block closes short and mints v2
+    // for its result: entering `i32.eqz` (pc 5) the stack is `{ 2 }`, not
+    // the second constant.
     dbg.initFromEnv("liveverify");
     defer dbg.resetForTest();
     var f = try buildFunc(testing.allocator, &.{
@@ -1455,6 +1480,7 @@ test "compute: a tail call pops its arguments before the stack freezes" {
         .{ .op = .end },
     });
     defer f.deinit(testing.allocator);
+    try f.blocks.append(testing.allocator, .{ .kind = .block, .block_type = .{ .single = .i32 }, .start_inst = 0, .end_inst = 4 });
     const sigs = [_]zir.FuncType{.{ .params = &.{ .i32, .i32 }, .results = &.{.i32} }};
 
     const live = try compute(testing.allocator, &f, &sigs, &.{}, &.{}, &.{});
@@ -1462,7 +1488,89 @@ test "compute: a tail call pops its arguments before the stack freezes" {
 
     try testing.expectEqual(@as(u32, 3), live.ranges[1].last_use_pc);
     try testing.expectEqual(@as(u32, 1), live.stack_depth[5]);
-    try testing.expectEqual(snapshotDigest(&.{0}), live.stack_digest[5]);
+    try testing.expectEqual(snapshotDigest(&.{2}), live.stack_digest[5]);
+}
+
+test "compute: a nested block closing short before any vreg mints an fpr result (#399, #400 func 70)" {
+    // block (result f64) ; block (result f32) ; unreachable ; end ; drop ;
+    // f64.const ; end ; drop — `memory64/br_table.0` func 70 as the lowerer
+    // leaves it. The inner `.end` mints v0, an f32, for the `drop`.
+    dbg.initFromEnv("liveverify");
+    defer dbg.resetForTest();
+    var f = try buildFunc(testing.allocator, &.{
+        .{ .op = .block, .payload = 0, .extra = 1 }, // 0
+        .{ .op = .block, .payload = 1, .extra = 1 }, // 1
+        .{ .op = .@"unreachable" }, // 2
+        .{ .op = .end, .payload = 1 }, // 3
+        .{ .op = .drop }, // 4
+        .{ .op = .@"f64.const" }, // 5
+        .{ .op = .end, .payload = 0 }, // 6
+        .{ .op = .drop }, // 7
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+    try f.blocks.append(testing.allocator, .{ .kind = .block, .block_type = .{ .single = .f64 }, .start_inst = 0, .end_inst = 6 });
+    try f.blocks.append(testing.allocator, .{ .kind = .block, .block_type = .{ .single = .f32 }, .start_inst = 1, .end_inst = 3 });
+
+    const live = try compute(testing.allocator, &f, &.{}, &.{}, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(u32, 1), live.stack_depth[4]);
+    try testing.expectEqual(snapshotDigest(&.{0}), live.stack_digest[4]);
+    try testing.expectEqual(RegClass.fpr, live.classes[0]);
+}
+
+test "compute: a block closing short before call_ref mints a gpr result (#399, #400 func 6)" {
+    // block (result funcref) ; unreachable ; end ; call_ref 0 ; end —
+    // `function-references/br_on_non_null.0` func 6 as the lowerer leaves
+    // it. The `.end` mints v0, a ref, as `call_ref`'s callee; the call's
+    // result is v1, not v0 again.
+    dbg.initFromEnv("liveverify");
+    defer dbg.resetForTest();
+    var f = try buildFunc(testing.allocator, &.{
+        .{ .op = .block, .extra = 1 }, // 0
+        .{ .op = .@"unreachable" }, // 1
+        .{ .op = .end }, // 2
+        .{ .op = .call_ref, .payload = 0 }, // 3
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+    try f.blocks.append(testing.allocator, .{ .kind = .block, .block_type = .{ .single = zir.ValType.funcref }, .start_inst = 0, .end_inst = 2 });
+    const types = [_]zir.FuncType{.{ .params = &.{}, .results = &.{.i32} }};
+
+    const live = try compute(testing.allocator, &f, &.{}, &types, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(@as(u32, 1), live.stack_depth[3]);
+    try testing.expectEqual(snapshotDigest(&.{0}), live.stack_digest[3]);
+    try testing.expectEqual(RegClass.gpr, live.classes[0]);
+    try testing.expectEqual(@as(usize, 2), live.ranges.len);
+}
+
+test "compute: a frame closing short mints below the results its body left (#399)" {
+    // block (result f64 i32) ; i32.const 1 ; unreachable ; end — the i32 the
+    // body left is the top result, so the minted f64 goes below it: `{ 1, 0 }`.
+    dbg.initFromEnv("liveverify");
+    defer dbg.resetForTest();
+    var f = try buildFunc(testing.allocator, &.{
+        .{ .op = .block, .extra = 2 }, // 0
+        .{ .op = .@"i32.const", .payload = 1 }, // 1: v0
+        .{ .op = .@"unreachable" }, // 2
+        .{ .op = .end }, // 3: mints v1
+        .{ .op = .drop }, // 4
+        .{ .op = .drop }, // 5
+        .{ .op = .end },
+    });
+    defer f.deinit(testing.allocator);
+    try f.blocks.append(testing.allocator, .{ .kind = .block, .block_type = .{ .typeidx = 0 }, .start_inst = 0, .end_inst = 3 });
+    const types = [_]zir.FuncType{.{ .params = &.{}, .results = &.{ .f64, .i32 } }};
+
+    const live = try compute(testing.allocator, &f, &.{}, &types, &.{}, &.{});
+    defer deinit(testing.allocator, live);
+
+    try testing.expectEqual(snapshotDigest(&.{ 1, 0 }), live.stack_digest[4]);
+    try testing.expectEqual(RegClass.fpr, live.classes[1]);
+    try testing.expectEqual(RegClass.gpr, live.classes[0]);
 }
 
 test "compute: a throw pops its tag's payload before the stack freezes" {

@@ -1096,7 +1096,7 @@ pub const Lowerer = struct {
 
     /// Wasm 3.0 EH `try_table` opener — mirrors `openBlock` but
     /// parses the catch-vec into `Lowerer.catch_entries` between
-    /// `readBlockArity` and the frame push. Each opener appends one
+    /// `readBlockType` and the frame push. Each opener appends one
     /// `LandingPad` referencing the new block plus the half-open
     /// catch-entry slice. The interp unwinder (10.E-5b) consumes
     /// `ZirFunc.eh_landing_pads` keyed by the try_table label's
@@ -1104,7 +1104,7 @@ pub const Lowerer = struct {
     ///
     /// Wasm spec 3.0 §3.3.10.6 — try_table.
     fn openTryTable(self: *Lowerer) Error!void {
-        const arity = try self.readBlockArity();
+        const bt = try self.readBlockType();
         const catches_start: u32 = @intCast(self.catch_entries.items.len);
         try self.lowerCatchVec();
         const catches_end: u32 = @intCast(self.catch_entries.items.len);
@@ -1125,6 +1125,7 @@ pub const Lowerer = struct {
         const start_inst: u32 = @intCast(self.out.instrs.items.len);
         try self.out.blocks.append(self.alloc, .{
             .kind = .try_table,
+            .block_type = bt.block_type,
             .start_inst = start_inst,
             .end_inst = 0,
         });
@@ -1133,7 +1134,7 @@ pub const Lowerer = struct {
             .catches_start = catches_start,
             .catches_end = catches_end,
         });
-        try self.emit(.try_table, block_idx, arity);
+        try self.emit(.try_table, block_idx, bt.arity);
 
         self.block_stack[self.block_stack_len] = block_idx;
         self.block_stack_len += 1;
@@ -1178,7 +1179,7 @@ pub const Lowerer = struct {
     }
 
     fn openBlock(self: *Lowerer, kind: BlockKind, op: ZirOp) Error!void {
-        const arity = try self.readBlockArity();
+        const bt = try self.readBlockType();
         if (self.block_stack_len == zir.max_control_stack) return Error.ControlStackOverflow;
 
         // D-093 (d-1): block opened inside the dead region —
@@ -1195,33 +1196,38 @@ pub const Lowerer = struct {
         const start_inst: u32 = @intCast(self.out.instrs.items.len);
         try self.out.blocks.append(self.alloc, .{
             .kind = kind,
+            .block_type = bt.block_type,
             .start_inst = start_inst,
             .end_inst = 0,
         });
-        try self.emit(op, block_idx, arity);
+        try self.emit(op, block_idx, bt.arity);
 
         self.block_stack[self.block_stack_len] = block_idx;
         self.block_stack_len += 1;
     }
 
-    /// Decode a Wasm blocktype and return its arity (count of result
-    /// types the block pushes back at end). Wasm 1.0 forms (single
-    /// byte 0x40 / 0x7F..0x7C) yield 0 or 1. Wasm 2.0 multivalue
-    /// (s33 typeidx ≥ 0) yields the typeidx'd FuncType's results
-    /// length. D-035 chunk-d035-a lifts the previous `params.len !=
-    /// 0` rejection — multi-param + multi-result blocks now flow
-    /// through. The `arity` slot still communicates only the result
-    /// count; param consumption + push-back is handled by the
-    /// validator's stack discipline (the operand stack already
-    /// carries the params at block entry — emit sees them as
-    /// existing vregs).
-    fn readBlockArity(self: *Lowerer) Error!u32 {
+    /// What `readBlockType` decodes: the arity word a block's ZIR instr
+    /// carries in `extra`, and the type its `BlockInfo` keeps (#399).
+    const DecodedBlockType = struct {
+        arity: u32,
+        block_type: zir.BlockType,
+    };
+
+    /// Wasm spec §5.4.1 (blocktype) — decode a blocktype. Wasm 1.0 forms
+    /// (single byte 0x40 / a valtype) yield arity 0 or 1. Wasm 2.0
+    /// multivalue (s33 typeidx ≥ 0) yields the typeidx'd FuncType's
+    /// results length, with its params length in the high byte (D-035
+    /// chunk-d035-a lifts the previous `params.len != 0` rejection). Param
+    /// consumption + push-back is the validator's stack discipline: the
+    /// operand stack already carries the params at block entry, and emit
+    /// sees them as existing vregs.
+    fn readBlockType(self: *Lowerer) Error!DecodedBlockType {
         if (self.pos >= self.body.len) return Error.UnexpectedEnd;
         const sleb = leb128.readSleb128(i32, self.body, &self.pos) catch
             return Error.BadBlockType;
         if (sleb < 0) {
-            return switch (sleb) {
-                -64 => @as(u32, 0), // 0x40 empty
+            switch (sleb) {
+                -64 => return .{ .arity = 0, .block_type = .empty }, // 0x40 empty
                 // §9.9 / 9.9-f-2: -5 (0x7B) = v128 single valtype
                 // (Wasm 2.0 SIMD per spec §5.3.5). §9.9 /
                 // 9.9-l-1b-d093-d45 (D-118): -16/-17 = funcref/externref
@@ -1230,19 +1236,25 @@ pub const Lowerer = struct {
                 // shorthands (0x6E..0x69 = anyref/eqref/i31ref/structref/
                 // arrayref/exnref) as blocktypes: 1 result, 0 params.
                 // Sibling of validator.readBlockType's GC arms (10.G c144).
-                -1, -2, -3, -4, -5, -16, -17, -18, -19, -20, -21, -22, -23 => @as(u32, 1), // single valtype
+                // The s33 is the valtype's own byte, so it decodes the way
+                // a value type does.
+                -1, -2, -3, -4, -5, -16, -17, -18, -19, -20, -21, -22, -23 => {
+                    const byte = [1]u8{@intCast(sleb + 0x80)};
+                    var p: usize = 0;
+                    const t = init_expr.readValType(&byte, &p) catch return Error.BadBlockType;
+                    return .{ .arity = 1, .block_type = .{ .single = t } };
+                },
                 // function-references §5.3.4: typed-ref result via
                 // `0x63 ht` / `0x64 ht`. The SLEB read consumed the
                 // prefix (0x63 → -29, 0x64 → -28); consume the heap-type
-                // and count it as a single result. Nullability is
-                // irrelevant to arity, but readTypedRef needs it.
-                -29, -28 => blk: {
-                    _ = init_expr.readTypedRef(self.body, &self.pos, sleb == -29) catch
+                // and count it as a single result.
+                -29, -28 => {
+                    const t = init_expr.readTypedRef(self.body, &self.pos, sleb == -29) catch
                         return Error.BadBlockType;
-                    break :blk @as(u32, 1);
+                    return .{ .arity = 1, .block_type = .{ .single = t } };
                 },
-                else => Error.BadBlockType,
-            };
+                else => return Error.BadBlockType,
+            }
         }
         const idx: u32 = @intCast(sleb);
         if (idx >= self.module_types.len) return Error.BadBlockType;
@@ -1256,7 +1268,7 @@ pub const Lowerer = struct {
         const params: u32 = @intCast(ft.params.len);
         const results: u32 = @intCast(ft.results.len);
         if (params > 0xFF or results > 0xFF) return Error.BadBlockType;
-        return (params << 8) | results;
+        return .{ .arity = (params << 8) | results, .block_type = .{ .typeidx = idx } };
     }
 
     fn closeBlock(self: *Lowerer) Error!void {
