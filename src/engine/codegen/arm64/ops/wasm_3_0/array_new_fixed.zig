@@ -35,6 +35,7 @@ const gpr = @import("../../gpr.zig");
 const inst = @import("../../inst.zig");
 const inst_neon = @import("../../inst_neon.zig");
 const jit_abi = @import("../../../shared/jit_abi.zig");
+const gc_alloc_trap = @import("gc_alloc_trap.zig");
 const heap_mod = @import("../../../../../feature/gc/heap.zig");
 const zir = @import("../../../../../ir/zir.zig");
 
@@ -66,6 +67,8 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // ADR-0203 D1 — helper via the rt slot ([X19+off]), not a baked imm64 (D-516 PIC).
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(fn_scratch, abi.runtime_ptr_save_gpr, jit_abi.gc_alloc_array_fn_off));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encBLR(fn_scratch));
+    // #364 — a failed alloc returns 0; trap out_of_memory before using the ref.
+    try gc_alloc_trap.emit(ctx);
 
     // W17 = zero-extended ref; element base X16 = slab + ref + 12 (slab
     // base re-loaded post-call because alloc may have realloc-moved it).

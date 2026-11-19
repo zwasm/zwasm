@@ -16,6 +16,7 @@ const runner = @import("runner.zig");
 const entry = @import("codegen/shared/entry.zig");
 const trap_surface = @import("../api/trap_surface.zig");
 const trap_registry = @import("../platform/trap_registry.zig");
+const heap_mod = @import("../feature/gc/heap.zig");
 
 // `(module (func (export "_start") unreachable))` — the JIT lowers `unreachable`
 // to an unconditional branch into a dedicated trap stub recording trap-kind 5.
@@ -138,6 +139,40 @@ test "JIT array.init_data on null array traps null_reference (GC trap-kind preci
     try testing.expectError(entry.Error.Trap, inst.invoke(testing.allocator, "test", &.{}));
     try testing.expectEqual(@as(u32, 10), inst.owned.rt.trap_kind); // null_reference
     try testing.expectEqual(trap_surface.TrapKind.null_reference, trap_surface.jitTrapCode(inst.owned.rt.trap_kind).?);
+}
+
+// #364 — a GC allocation that fails must surface out_of_memory (raw 20, jitTrapCode
+// → .out_of_memory), the same kind the interp reports (OutOfHeap). struct.new goes
+// through `jitGcAlloc` (the helper the array fixtures do NOT exercise): a fixed-size
+// struct cannot overshoot the 4 GiB cap in one allocation, and the cap has no C-API
+// knob, so the heap bump pointer is pinned just below the cap and the pressure
+// collect is disarmed (next_gc_at > cursor, so `jitGcAlloc`'s maybeCollectJit
+// early-returns), forcing the next bump to fail deterministically with no live-root
+// setup. Deleting `gc_alloc_trap.emit` from struct.new's emit makes it store the
+// field at the null-ref (0) base and crash, instead of trapping.
+// `(type $s (struct (field i32))) (func (export "test") (result i32)
+//   i32.const 7 struct.new $s drop i32.const 0)`.
+const struct_new_cap_wasm = [_]u8{
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x5f,
+    0x01, 0x7f, 0x00, 0x60, 0x00, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x01, 0x07,
+    0x08, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x00, 0x00, 0x0a, 0x0c, 0x01,
+    0x0a, 0x00, 0x41, 0x07, 0xfb, 0x00, 0x00, 0x1a, 0x41, 0x00, 0x0b, 0x00,
+    0x0b, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x04, 0x04, 0x01, 0x00, 0x01, 0x73,
+};
+
+test "JIT struct.new over the GC heap cap traps out_of_memory (#364)" {
+    if (builtin.os.tag == .windows) return skip.phaseEnd(.win64);
+    var inst = try runner.JitInstance.init(testing.allocator, &struct_new_cap_wasm);
+    defer inst.deinit(testing.allocator);
+    // Pin the bump pointer one below the cap (even → alignForward is a no-op, no
+    // u32 overflow) and arm next_gc_at above it so the pressure collect does not
+    // fire and reclaim; the next struct bump then overshoots the 4 GiB cap.
+    const heap: *heap_mod.Heap = @ptrCast(@alignCast(inst.owned.rt.gc_heap.?));
+    heap.cursor = heap_mod.Heap.max_size - 1;
+    heap.next_gc_at = heap_mod.Heap.max_size;
+    try testing.expectError(entry.Error.Trap, inst.invoke(testing.allocator, "test", &.{}));
+    try testing.expectEqual(@as(u32, 20), inst.owned.rt.trap_kind); // out_of_memory (#364)
+    try testing.expectEqual(trap_surface.TrapKind.out_of_memory, trap_surface.jitTrapCode(inst.owned.rt.trap_kind).?);
 }
 
 // `(module (func (export "_start") i32.const 1 i32.const 0 i32.div_s drop))` —

@@ -319,6 +319,7 @@ fn setDeclineDiag(note: decline_note.Note, tail: []const u8) void {
         .simd_args => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with {d} floating-point or vector arguments — more than the register bank carries{s}", .{ note.op, n, tail }),
         .memory_class_results => |n| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with a {d}-result callee{s}", .{ note.op, n, tail }),
         .out_of_reach => |r| diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile code that puts an instruction {d} bytes from its target: its {s} field reaches {d}{s}", .{ r.distance, note.op, r.reach, tail }),
+        .v128_array_element => diagnostic.setDiag(.instantiate, .binding_error, .unknown, "the JIT does not compile `{s}` with a v128 element{s}", .{ note.op, tail }),
     }
 }
 

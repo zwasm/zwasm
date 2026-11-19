@@ -1010,7 +1010,8 @@ pub fn waitIdxOf(op: zir.ZirOp) u32 {
 /// (the SAME logic the interp `struct_ops.zig` uses), and returns the
 /// `GcRef` (u32 slab offset). Returns `0` (null sentinel) on bad
 /// typeidx / unmaterialised GC substrate / OOM — the JIT caller maps
-/// `0` to a trap. C-ABI; callee-saved regs preserved by the callee.
+/// `0` to an out_of_memory trap (#364; `ops/wasm_3_0/gc_alloc_trap.zig`).
+/// C-ABI; callee-saved regs preserved by the callee.
 pub fn jitGcAlloc(rt: *JitRuntime, typeidx: u32) callconv(.c) u32 {
     if (comptime !wasm_v3_plus) @panic("jitGcAlloc in a sub-v3 build (unreachable — validator rejects GC ops)");
     const heap_opaque = rt.gc_heap orelse return 0;
@@ -1035,7 +1036,8 @@ pub fn jitGcAlloc(rt: *JitRuntime, typeidx: u32) callconv(.c) u32 {
 /// Unlike `jitGcAlloc` (struct, compile-time size), the array total size
 /// depends on the runtime `length` operand → the dedicated 3-arg
 /// trampoline. Returns `0` (null sentinel) on bad typeidx / unmaterialised
-/// GC substrate / OOM — the JIT caller maps `0` to a trap.
+/// GC substrate / OOM — the JIT caller maps `0` to an out_of_memory trap
+/// (#364; `ops/wasm_3_0/gc_alloc_trap.zig`).
 pub fn jitGcAllocArray(rt: *JitRuntime, typeidx: u32, length: u32) callconv(.c) u32 {
     if (comptime !wasm_v3_plus) @panic("jitGcAllocArray in a sub-v3 build (unreachable — validator rejects GC ops)");
     const heap_opaque = rt.gc_heap orelse return 0;
@@ -1057,7 +1059,11 @@ pub fn jitGcAllocArray(rt: *JitRuntime, typeidx: u32, length: u32) callconv(.c) 
 /// `array_ops.zig` arrayNew does. Doing the fill HERE (vs an emitted
 /// machine-code loop) keeps the per-arch emit a plain marshal+CALL, since
 /// the element count is a runtime value. Returns the `GcRef`, or `0` on
-/// bad typeidx / unmaterialised substrate / OOM. NOTE: `init` is the raw
+/// bad typeidx / unmaterialised substrate / OOM — the JIT caller maps `0`
+/// to an out_of_memory trap (#364; `ops/wasm_3_0/gc_alloc_trap.zig`). The
+/// `array.new` emit declines a v128 element (esz>8) at compile time, so the
+/// esz>8 return below is unreachable via the live path (kept as defense;
+/// D-495). NOTE: `init` is the raw
 /// 8 bytes of the value; FP element types (f32/f64) would need the emit
 /// to marshal from an FP reg — currently GPR-only (see debt; matches the
 /// struct.new field-store simplification).
@@ -1071,8 +1077,10 @@ pub fn jitGcAllocArrayFill(rt: *JitRuntime, typeidx: u32, length: u32, init: u64
     const ai = gti.array_infos[typeidx] orelse return 0;
     const esz: u32 = ai.element.size;
     // D-495: init value arrives as a u64 (8 bytes); a v128 element (esz=16) can't
-    // be reconstructed → trap cleanly (return 0) rather than panic on the OOB
-    // slice. Proper fix = pointer-marshal the 16-byte value.
+    // be reconstructed from it. The `array.new` emit declines a v128 element at
+    // compile time (#364), so this guard is unreachable via the live path — kept
+    // as defense (return 0 rather than panic on the OOB slice). Proper fix =
+    // pointer-marshal the 16-byte value.
     if (esz > 8) return 0;
     const ref = object_alloc.allocArrayObject(heap, typeidx, length, ai.element.size, false) catch return 0;
     const ahsz: u32 = @sizeOf(gc_type_info.ArrayHeader);
