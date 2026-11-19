@@ -216,9 +216,8 @@ pub fn trampolineCore(
                         // comparable identity the unwinder already matches on;
                         // when the catching module declares no tag with that
                         // identity, the exnref has no representable index here,
-                        // and the no-match sentinel `rethrowFromExnref` already
-                        // uses for a null exnref sends a `throw_ref` of it to an
-                        // uncaught dispatch rather than to the wrong handler.
+                        // and `no_local_tag_idx` has a `throw_ref` of it match on
+                        // that identity rather than on an index naming another tag.
                         // The identity travels; the index is only its name in
                         // one module, so it is translated where the catching
                         // module has one and marked absent where it does not.

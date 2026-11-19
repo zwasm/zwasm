@@ -19,6 +19,7 @@
 //! values: a block's and an `if`'s on every engine, a loop's on the JIT;
 //! the edge may be a `br_on_*`. `br_on_null` to a loop branches when its
 //! operand is null, with and without a fuel budget.
+//! `throw_ref` of a null exnref traps on every engine, caught or not (#745).
 //!
 //! Usage: `zig build test-cli-usage` /
 //!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>
@@ -30,7 +31,7 @@
 //!         <short_frame_f64.wasm> <if_branch_own_label.wasm> <catch_to_func.wasm>
 //!         <catch_all_to_func.wasm> <merge_moves.wasm> <merge_moves_v128.wasm>
 //!         <merge_moves_br_on.wasm> <merge_moves_br_on_null_loop.wasm>
-//!         <br_on_null_loop.wasm>`
+//!         <br_on_null_loop.wasm> <throw_ref_null.wasm>`
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -67,7 +68,8 @@ const Row = struct {
 /// clauses that target the function's label, and frames whose edges deliver
 /// values that sit in each other's places (the v128 loop in a module of its
 /// own, and the `br_on_*` edges in two more), and a loop with no params
-/// whose back edge is a `br_on_null`.
+/// whose back edge is a `br_on_null`, and #745's `throw_ref` of a null
+/// exnref under each kind of clause.
 const M = "<module>";
 const E = "<argv_echo>";
 const S = "<simd_op>";
@@ -90,7 +92,8 @@ const W = "<merge_moves_v128>";
 const K = "<merge_moves_br_on>";
 const N = "<merge_moves_br_on_null_loop>";
 const Y = "<br_on_null_loop>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y };
+const Z = "<throw_ref_null>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -134,6 +137,21 @@ const null_back_edge_rows = if (builtin.cpu.arch == .x86_64)
     }
 else
     eachOn(&(all_engines ++ metered_engines), Y, &null_back_edge_passes);
+
+/// Every export of `throw_ref_null.wat` on each engine setting: exit 1 with
+/// `null_reference`, and nothing printed, since no clause catches it.
+const throw_ref_rows = blk: {
+    const exports = [_][]const u8{ "plain", "catch_all", "catch_all_ref", "catch_tag_i32", "catch_tag_funcref", "catch_ref_tag_i32" };
+    var out: [all_engines.len * exports.len]Row = undefined;
+    for (all_engines, 0..) |engine, i| {
+        for (exports, 0..) |name, j| {
+            const args = [_][]const u8{"run"} ++ engine[0..engine.len].* ++ [_][]const u8{ "--invoke", name, Z };
+            out[i * exports.len + j] = .{ .args = &args, .exit = 1, .stdout = .{ .is = "" }, .stderr = .{ .has = "trap kind=null_reference" } };
+        }
+    }
+    const final = out;
+    break :blk final;
+};
 
 const rows = [_]Row{
     .{ .args = &.{ "run", "--bogus", M }, .exit = 2, .stderr = .{ .has = "unknown option '--bogus'" } },
@@ -261,7 +279,7 @@ const rows = [_]Row{
     // without it the run ends after 10^8 iterations and prints the count.
     .{ .args = &.{ "run", "--timeout", "500", "--engine", "jit", "--invoke", "catch_all_spin=100000000", L }, .exit = 1, .stderr = .{ .has = "interrupted" } },
     .{ .args = &.{ "run", "--fuel", "100000", "--engine", "jit", "--invoke", "catch_all_spin=100000000", L }, .exit = 1, .stderr = .{ .has = "all fuel consumed" } },
-};
+} ++ throw_ref_rows;
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
