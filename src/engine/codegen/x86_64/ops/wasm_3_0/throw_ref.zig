@@ -2,10 +2,11 @@
 //! + ADR-0114 D2 + ADR-0119. Mirror of arm64 sibling.
 //!
 //! Wasm spec 3.0 §3.3.10.8. Pop the exnref (a `*Exception` handle the
-//! JIT reified at a catch_ref/catch_all_ref landing pad, D-327), read its
-//! tag_idx + payload back into the JIT payload-staging buffer via the
-//! `rethrowFromExnref` helper, then re-enter the throw dispatcher exactly
-//! as a fresh `throw` of that tag (round-trip identity, ADR-0120 D6).
+//! JIT reified at a catch_ref/catch_all_ref landing pad, D-327); a null one
+//! traps `null_reference` here, before any handler is looked up. Otherwise
+//! read its tag_idx + payload back into the JIT payload-staging buffer via
+//! the `rethrowFromExnref` helper, then re-enter the throw dispatcher
+//! exactly as a fresh `throw` of that tag (round-trip identity, ADR-0120 D6).
 //!
 //! Registered in `dispatch_collector.collected_x86_64_ctx_ops`.
 //!
@@ -39,6 +40,11 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     if (ctx.pushed_vregs.items.len < 1) return ctx_mod.Error.AllocationMissing;
     const exn_vreg = ctx.pushed_vregs.pop().?;
     const exn_reg = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, exn_vreg, 0);
+    // Null exnref → TEST; JE → the null_reference stub (code 10), as the interpreter traps (#745).
+    try ctx.buf.appendSlice(ctx.allocator, inst.encTestRR(.q, exn_reg, exn_reg).slice());
+    const null_fixup: u32 = @intCast(ctx.buf.items.len);
+    try ctx.buf.appendSlice(ctx.allocator, inst.encJccRel32(.e, 0).slice());
+    try ctx.null_ref_fixups.append(ctx.allocator, null_fixup);
     const arg0 = abi.current.entry_arg0_gpr; // RDI (SysV) / RCX (Win64)
     const arg1 = abi.current.arg_gprs[1]; // RSI (SysV) / RDX (Win64)
     // arg1 = exc_ptr (set before arg0 in case exn_reg == arg0).

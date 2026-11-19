@@ -707,14 +707,13 @@ pub fn reifyExnref(rt: *JitRuntime) callconv(.c) usize {
 /// (`exc_ptr`) back into the JIT payload-staging buffer + length, and
 /// returns its `tag_idx` so the emitted `throw_ref` re-enters the throw
 /// dispatcher exactly as a fresh `throw` of the same tag+payload (the
-/// round-trip identity Wasm `throw_ref` requires). `exc_ptr == 0` is a
-/// null exnref — spec says `throw_ref` then TRAPS; route to an uncaught
-/// dispatch (len 0 + no-match sentinel) rather than deref null (the
-/// precise null-trap kind is a follow-up, untested by the wg-3.0 corpus).
+/// round-trip identity Wasm `throw_ref` requires).
 pub fn rethrowFromExnref(rt: *JitRuntime, exc_ptr: usize) callconv(.c) u32 {
+    // Both arches' `throw_ref` emit trap `null_reference` before calling here
+    // (#745), but an earlier zwasm's `.cwasm` still loads and passes a null.
     if (exc_ptr == 0) {
         rt.eh_payload_len = 0;
-        return 0xFFFF_FFFF;
+        return no_local_tag_idx;
     }
     const exc: *exception_mod.Exception = @ptrFromInt(exc_ptr);
     const n = @min(exc.payload_len, exception_mod.max_payload);
@@ -739,7 +738,7 @@ pub fn rethrowFromExnref(rt: *JitRuntime, exc_ptr: usize) callconv(.c) u32 {
 
 /// `eh_thrown_tag_idx` / a `rethrowFromExnref` result meaning "this runtime has
 /// no index for the tag; read `eh_thrown_tag_id` instead". Also what a null
-/// exnref yields, where it makes the dispatch uncaught.
+/// exnref yields, which only an earlier zwasm's code passes.
 pub const no_local_tag_idx: u32 = 0xFFFF_FFFF;
 
 /// Default `memory_grow_fn` — unconditionally refuses growth by
@@ -1834,6 +1833,13 @@ test "rethrowFromExnref: a reified exnref names its tag by identity, not by inde
         .payload = undefined,
     };
     try testing.expectEqual(@as(u32, 7), rethrowFromExnref(&rt, @intFromPtr(&legacy)));
+}
+
+test "rethrowFromExnref: a null exnref yields the no-index marker and no payload (#745)" {
+    var rt: JitRuntime = std.mem.zeroes(JitRuntime);
+    rt.eh_payload_len = 3;
+    try testing.expectEqual(no_local_tag_idx, rethrowFromExnref(&rt, 0));
+    try testing.expectEqual(@as(u32, 0), rt.eh_payload_len);
 }
 
 test "jitGcAlloc: allocates struct{i32} via the *JitRuntime bridge" {
