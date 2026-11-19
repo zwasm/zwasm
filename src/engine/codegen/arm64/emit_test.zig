@@ -22,6 +22,7 @@ comptime {
     _ = @import("emit_test_alu_float.zig");
     _ = @import("emit_test_control.zig");
     _ = @import("emit_test_call.zig");
+    _ = @import("emit_test_call_stack_args.zig");
     _ = @import("emit_test_memory.zig");
     _ = @import("emit_test_local.zig");
     _ = liveness_mod; // hook upstream module so future regalloc tests are reachable

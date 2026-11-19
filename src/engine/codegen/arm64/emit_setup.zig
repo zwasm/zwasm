@@ -15,24 +15,22 @@
 //! `src/engine/codegen/x86_64/` per ROADMAP §A3.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const zir = @import("../../../ir/zir.zig");
+const abi = @import("abi.zig");
 const ctx_mod = @import("ctx.zig");
 
 const Allocator = std.mem.Allocator;
 const ZirFunc = zir.ZirFunc;
 const Error = ctx_mod.Error;
 
-/// Pre-scan the function body for the worst-case
-/// outgoing-args region size (caller-side stack-arg lowering per
-/// AAPCS64 §6.4.2). For each `call N` / `call_indirect type_idx`
-/// instruction, count the args that overflow the X1..X7 (int) and
-/// V0..V7 (fp) register pools and sum the per-slot 8-byte
-/// allocations; track the max across all calls. This region sits
-/// at the bottom of the caller's frame (`[SP, #0]` upward), so
-/// callee can read overflows at `[X29, #16 + 8*K]`.
+/// Pre-scan the function body for the worst-case outgoing region (caller-side
+/// stack-arg lowering per AAPCS64 §6.4.2): the max over its calls of
+/// `abi.callOutgoingBytes`, which owns the per-call size. The region sits at
+/// the bottom of the caller's frame (`[SP, #0]` upward), so the callee reads
+/// its stack arguments from `[X29, #16]` upward.
 pub fn computeOutgoingMaxBytes(
+    packing: abi.StackArgPacking,
     func: *const ZirFunc,
     func_sigs: []const zir.FuncType,
     module_types: []const zir.FuncType,
@@ -56,72 +54,7 @@ pub fn computeOutgoingMaxBytes(
             else => null,
         };
         const callee_sig = sig orelse continue;
-        // X0 = `*JitRuntime` per ADR-0017, so user int args use
-        // X1..X7 (7 slots). FP args use V0..V7 (8 slots).
-        // Apple arm64 packs stack args at natural size; standard
-        // AAPCS64 uses uniform 8-byte stride. Mirror of the
-        // prologue's `apple_natural_packing` cursor.
-        const apple_natural_packing: bool = builtin.target.os.tag == .macos or
-            builtin.target.os.tag == .ios or
-            builtin.target.os.tag == .watchos or
-            builtin.target.os.tag == .tvos;
-        var int_slot: u32 = 1; // X1..X7
-        var fp_slot: u32 = 0; // V0..V7
-        var stack_byte_off: u32 = 0;
-        for (callee_sig.params) |p| {
-            switch (p) {
-                .i32 => {
-                    if (int_slot >= 8) {
-                        const sz: u32 = if (apple_natural_packing) 4 else 8;
-                        stack_byte_off = (stack_byte_off + sz - 1) & ~(sz - 1);
-                        stack_byte_off += sz;
-                    } else int_slot += 1;
-                },
-                // i31ref u32 GcRef shares the
-                // 8-byte gpr-class slot with other reftypes.
-                .i64, .ref => {
-                    if (int_slot >= 8) {
-                        stack_byte_off = (stack_byte_off + 7) & ~@as(u32, 7);
-                        stack_byte_off += 8;
-                    } else int_slot += 1;
-                },
-                .f32 => {
-                    if (fp_slot >= 8) {
-                        const sz: u32 = if (apple_natural_packing) 4 else 8;
-                        stack_byte_off = (stack_byte_off + sz - 1) & ~(sz - 1);
-                        stack_byte_off += sz;
-                    } else fp_slot += 1;
-                },
-                .f64 => {
-                    if (fp_slot >= 8) {
-                        stack_byte_off = (stack_byte_off + 7) & ~@as(u32, 7);
-                        stack_byte_off += 8;
-                    } else fp_slot += 1;
-                },
-                .v128 => {
-                    if (fp_slot >= 8) {
-                        stack_byte_off = (stack_byte_off + 15) & ~@as(u32, 15);
-                        stack_byte_off += 16;
-                    } else fp_slot += 1;
-                },
-            }
-        }
-        // Round up the outgoing-args region to 16-byte boundary to
-        // preserve SP alignment (AAPCS64 §6.2.3 / Apple ABI both
-        // require 16-byte aligned SP at BL).
-        const overflow_bytes: u32 = (stack_byte_off + 15) & ~@as(u32, 15);
-        // ADR-0069 §Phase 2: when callee returns
-        // MEMORY-class (struct > 16 B per AAPCS64 §6.8.2; v2
-        // trigger = `results.len > 2`), reserve a per-result
-        // 8-byte buffer slot at the top of THIS call's outgoing-
-        // args footprint. Buffer follows the overflow-args block:
-        // `[SP, #0..overflow_bytes-1]` overflow + `[SP, #overflow_
-        // bytes..overflow_bytes + n_results*8 - 1]` return buf.
-        const return_buf_bytes: u32 = if (callee_sig.results.len > 2)
-            @as(u32, @intCast(callee_sig.results.len)) * 8
-        else
-            0;
-        const bytes: u32 = overflow_bytes + return_buf_bytes;
+        const bytes: u32 = abi.callOutgoingBytes(packing, callee_sig);
         if (bytes > max_bytes) max_bytes = bytes;
     }
     return max_bytes;

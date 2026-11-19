@@ -95,9 +95,7 @@ const tail3_ok_wasm = [_]u8{
 };
 
 // 8 × f64 + 1 × v128 — nine FP/SIMD arguments for a bank of eight. The int
-// budget is untouched and `computeCallOverflowBytes` reports ZERO overflow,
-// because it counts f64 against the bank but excludes v128 by design, while
-// the marshaller advances one shared slot across both and puts the ninth on
+// budget is untouched; f64 and v128 draw on one bank, so the ninth goes on
 // the stack (#424 review). One live vector, so the shape does not depend on
 // register-allocator pressure the way a nine-vector one does.
 //

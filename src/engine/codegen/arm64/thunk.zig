@@ -20,7 +20,7 @@
 //! mismatch: X24 pointed at the callee's typeidx_base). The cohort is the
 //! array's, whatever it holds; the frame size follows it.
 //!
-//! Layout (`n` = overflow words per `op_call.computeCallOverflowBytes`,
+//! Layout (`n` = stack-argument words per `abi.callStackArgBytes(.aapcs64, …)`,
 //! `cb` = `n * 8` rounded up to 16; cohort `Ri` = `reserved_invariant_gprs[i]`):
 //!
 //! ```text
@@ -72,11 +72,11 @@
 //! FP/LR frame — the aarch64-macos leg caught that one). The callee's
 //! prologue (`STP X29, X30, [SP, #-16]!; MOV X29, SP`) reads word `k` at
 //! `[X29_callee, #16 + 8k]` = `[SP_at_BLR, #8k]`, so the words are copied to
-//! the bottom of this frame before the BLR. `n` counts 8-byte words per `computeCallOverflowBytes`;
-//! on Apple targets the importer packs narrower scalars naturally
-//! (`marshalCallArgs`), so `8n` is an upper bound of the region and the copy
-//! carries the packed bytes unchanged — it is a byte copy, not a re-marshal.
-//! SP stays 16-aligned because `cb` is.
+//! the bottom of this frame before the BLR. `n` is counted at the 8-byte
+//! stride whatever the target: on Apple targets the importer packs narrower
+//! scalars naturally (`abi.StackArgPacking`), so `8n` is an upper bound of the
+//! region and the copy carries the packed bytes unchanged — it is a byte copy,
+//! not a re-marshal. SP stays 16-aligned because `cb` is.
 //!
 //! MEMORY-class (#390 shape 2): AAPCS64 passes the hidden result pointer in
 //! X8, which the thunk never touches (X9..X11 and X16/X17 are its scratch),
@@ -106,7 +106,6 @@
 const std = @import("std");
 const inst = @import("inst.zig");
 const abi = @import("abi.zig");
-const op_call = @import("op_call.zig");
 const jit_abi = @import("../shared/jit_abi.zig");
 const zir = @import("../../../ir/zir.zig");
 
@@ -153,7 +152,7 @@ pub const thunk_bytes: usize = n_insns * 4 + 16;
 /// `sig`          — the CALLEE's signature (`FuncImportTarget.sig`).
 pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize, sig: zir.FuncType) void {
     std.debug.assert(buf.len == thunk_bytes);
-    const overflow_bytes: u32 = op_call.computeCallOverflowBytes(sig);
+    const overflow_bytes: u32 = abi.callStackArgBytes(.aapcs64, sig);
     const n_words: u32 = overflow_bytes / 8;
     const copy_bytes: u32 = (overflow_bytes + 15) & ~@as(u32, 15);
     // `marshalCallArgs` caps a call at 128 args, so both immediates fit
@@ -364,15 +363,15 @@ test "emitThunk: saves and restores every abi.reserved_invariant_gprs register, 
     try testing.expect(restored[abi.globals_base_save_gpr]);
 }
 
-// ADR-0228 / #390 shape 1 — the copy is sized by the call site's own rule,
+// ADR-0228 / #390 shape 1 — the copy is sized by the 8-byte-stride count,
 // SP stays 16-aligned, and the count immediate is the word count.
-test "emitThunk: the overflow copy follows computeCallOverflowBytes and keeps SP 16-aligned (#390)" {
+test "emitThunk: the overflow copy follows callStackArgBytes at the 8-byte stride and keeps SP 16-aligned (#390)" {
     var n_params: usize = 0;
     while (n_params <= 12) : (n_params += 1) {
         for ([_]zir.FuncType{ sigOf(i32s[0..n_params], &one), sigOf(i32s[0..n_params], &three) }) |sig| {
             var buf: [thunk_bytes]u8 = undefined;
             emitThunk(&buf, 0, 0, sig);
-            const overflow = op_call.computeCallOverflowBytes(sig);
+            const overflow = abi.callStackArgBytes(.aapcs64, sig);
             const cb: u12 = @intCast((overflow + 15) & ~@as(u32, 15));
             try testing.expectEqual(@as(u32, 0), cb % 16);
             // SUB SP / MOVZ sit right after the entry LDR (index 2 + cohort + 5).
