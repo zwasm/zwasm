@@ -18,6 +18,7 @@ const abi = @import("../../abi.zig");
 const gpr = @import("../../gpr.zig");
 const inst = @import("../../inst.zig");
 const jit_abi = @import("../../../shared/jit_abi.zig");
+const gc_alloc_trap = @import("gc_alloc_trap.zig");
 const zir = @import("../../../../../ir/zir.zig");
 
 pub const op_tag = meta.op_tag;
@@ -42,6 +43,8 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // ADR-0203 D1 — helper via the rt slot ([X19+off]), not a baked imm64 (D-516 PIC).
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(scratch, abi.runtime_ptr_save_gpr, jit_abi.gc_alloc_array_fn_off));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encBLR(scratch));
+    // #364 — a failed alloc returns 0; trap out_of_memory before capturing W0.
+    try gc_alloc_trap.emit(ctx);
 
     // Capture W0 (GcRef) → result vreg (mirror struct_new_default).
     const rd = try gpr.gprDefSpilled(ctx.alloc, args.result, 0);

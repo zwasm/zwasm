@@ -31,6 +31,7 @@ const abi = @import("../../abi.zig");
 const gpr = @import("../../gpr.zig");
 const inst = @import("../../inst.zig");
 const jit_abi = @import("../../../shared/jit_abi.zig");
+const gc_alloc_trap = @import("gc_alloc_trap.zig");
 const heap_mod = @import("../../../../../feature/gc/heap.zig");
 const zir = @import("../../../../../ir/zir.zig");
 
@@ -63,6 +64,8 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // ADR-0203 D1 — helper via the rt slot ([R15+off]), not a baked imm64 (D-516 PIC).
     try ctx.buf.appendSlice(ctx.allocator, inst.encMovR64FromMemDisp32(call_scratch, abi.runtime_ptr_save_gpr, jit_abi.gc_alloc_array_fn_off).slice());
     try ctx.buf.appendSlice(ctx.allocator, inst.encCallReg(call_scratch).slice());
+    // #364 — a failed alloc returns 0; trap out_of_memory before using the ref.
+    try gc_alloc_trap.emit(ctx);
 
     // Object base R11 = slab + ref (slab base re-loaded post-call). MOV
     // R10D, EAX zero-extends the u32 ref into R10 before the 64-bit ADD.

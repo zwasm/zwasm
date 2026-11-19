@@ -21,6 +21,8 @@ const abi = @import("../../abi.zig");
 const gpr = @import("../../gpr.zig");
 const inst = @import("../../inst.zig");
 const jit_abi = @import("../../../shared/jit_abi.zig");
+const gc_alloc_trap = @import("gc_alloc_trap.zig");
+const decline_note = @import("../../../shared/decline_note.zig");
 const zir = @import("../../../../../ir/zir.zig");
 
 pub const op_tag = meta.op_tag;
@@ -31,6 +33,14 @@ const scratch: inst.Xn = 16; // IP0 — &fn.
 
 pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void {
     const typeidx: u32 = @intCast(ins.payload);
+    // D-495 — the fill marshals the init through a GPR, so a v128 (16-byte)
+    // element has no path: jitGcAllocArrayFill returns 0 (esz>8) and #364's
+    // zero-check would surface it as out_of_memory, which it is not. Decline
+    // instead, so the default engine runs it on the interpreter.
+    if (ctx.func.arrayElemValType(typeidx) == 0x7B) {
+        decline_note.set("array.new", .v128_array_element);
+        return ctx_mod.Error.UnsupportedOp;
+    }
     // args.lhs = init value; args.rhs = i32 length (stack top); result = ref.
     const args = try ctx.popBinary();
     // W2 = length (rhs); X3 = init (lhs, full 8-byte value bits).
@@ -46,6 +56,8 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // ADR-0203 D1 — helper via the rt slot ([X19+off]), not a baked imm64 (D-516 PIC).
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encLdrImm(scratch, abi.runtime_ptr_save_gpr, jit_abi.gc_alloc_array_fill_fn_off));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encBLR(scratch));
+    // #364 — a failed alloc returns 0; trap out_of_memory before capturing W0.
+    try gc_alloc_trap.emit(ctx);
 
     // Capture W0 (GcRef) → result vreg.
     const rd = try gpr.gprDefSpilled(ctx.alloc, args.result, 0);

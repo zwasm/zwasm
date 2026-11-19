@@ -31,7 +31,8 @@
 //!         <short_frame_f64.wasm> <if_branch_own_label.wasm> <catch_to_func.wasm>
 //!         <catch_all_to_func.wasm> <merge_moves.wasm> <merge_moves_v128.wasm>
 //!         <merge_moves_br_on.wasm> <merge_moves_br_on_null_loop.wasm>
-//!         <br_on_null_loop.wasm> <throw_ref_null.wasm>`
+//!         <br_on_null_loop.wasm> <throw_ref_null.wasm> <gc_alloc_trap.wasm>
+//!         <gc_v128_array_new.wasm>`
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -69,7 +70,9 @@ const Row = struct {
 /// values that sit in each other's places (the v128 loop in a module of its
 /// own, and the `br_on_*` edges in two more), and a loop with no params
 /// whose back edge is a `br_on_null`, and #745's `throw_ref` of a null
-/// exnref under each kind of clause.
+/// exnref under each kind of clause, #364's two array.new* exports that ask
+/// for a ~8 GiB array, and #364/D-495's v128-element array.new the JIT
+/// declines.
 const M = "<module>";
 const E = "<argv_echo>";
 const S = "<simd_op>";
@@ -93,7 +96,9 @@ const K = "<merge_moves_br_on>";
 const N = "<merge_moves_br_on_null_loop>";
 const Y = "<br_on_null_loop>";
 const Z = "<throw_ref_null>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z };
+const H = "<gc_alloc_trap>";
+const X = "<gc_v128_array_new>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -279,6 +284,29 @@ const rows = [_]Row{
     // without it the run ends after 10^8 iterations and prints the count.
     .{ .args = &.{ "run", "--timeout", "500", "--engine", "jit", "--invoke", "catch_all_spin=100000000", L }, .exit = 1, .stderr = .{ .has = "interrupted" } },
     .{ .args = &.{ "run", "--fuel", "100000", "--engine", "jit", "--invoke", "catch_all_spin=100000000", L }, .exit = 1, .stderr = .{ .has = "all fuel consumed" } },
+    // #364 — a GC allocation past the heap's 4 GiB cap traps out_of_memory at
+    // the allocating instruction on the JIT and the default engine, as it
+    // already does on the interpreter; the trailing (i32.const 42) never runs.
+    // array.new* are the only GC allocs whose SINGLE allocation can overshoot
+    // the cap (a runtime length), so they are the cheap ones to exercise here.
+    // struct.new* / array.new_fixed share the same zero-check and it is equally
+    // load-bearing: a guest that fills the heap (retained refs) makes their
+    // next alloc fail too — that path is just not cheap to drive in a fixture.
+    .{ .args = &.{ "run", "--engine", "interp", "--invoke", "array_new_default", H }, .exit = 1, .stderr = .{ .has = "kind=out_of_memory" } },
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "array_new_default", H }, .exit = 1, .stderr = .{ .has = "kind=out_of_memory" } },
+    .{ .args = &.{ "run", "--invoke", "array_new_default", H }, .exit = 1, .stderr = .{ .has = "kind=out_of_memory" } },
+    .{ .args = &.{ "run", "--engine", "interp", "--invoke", "array_new", H }, .exit = 1, .stderr = .{ .has = "kind=out_of_memory" } },
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "array_new", H }, .exit = 1, .stderr = .{ .has = "kind=out_of_memory" } },
+    .{ .args = &.{ "run", "--invoke", "array_new", H }, .exit = 1, .stderr = .{ .has = "kind=out_of_memory" } },
+    // #364 / D-495 — array.new of a v128 element is not an allocation failure:
+    // the JIT fill cannot marshal a 16-byte init, so the JIT declines (not an
+    // out_of_memory trap) and the default engine falls back to the interpreter,
+    // which does not execute v128.const. Both engines refuse, each for its own
+    // reason. array.new_default is unaffected (not asserted here — it needs no
+    // v128.const, so it has no cli-usage shape distinct from the GC rows above).
+    .{ .args = &.{ "run", "--engine", "interp", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the interpreter does not execute `v128.const`" } },
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a v128 element" } },
+    .{ .args = &.{ "run", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a v128 element" } },
 } ++ throw_ref_rows;
 
 pub fn main(init: std.process.Init) !u8 {

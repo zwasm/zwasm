@@ -1183,25 +1183,30 @@ entries:
     layer: "code"
     status: "note"
     description: |-
-      `array.fill` / `array.new` with a v128 INIT/FILL value is unimplemented under JIT
-      (only crash-GUARDED @39bdc9c0b). The JIT fill helpers jitGcArrayFill +
-      jitGcAllocArrayFill (jit_abi.zig) receive the value as a `u64` (8 bytes); a v128
-      element (esz=16) made `value_bytes[0..esz]` panic = a GUEST-TRIGGERABLE HOST PANIC
-      (index OOB). Guarded `esz>8 → return 0` (clean oob trap instead of panic). PROPER FIX
+      `array.fill` / `array.new` with a v128 INIT/FILL value is unimplemented under JIT.
+      The JIT fill helpers jitGcArrayFill + jitGcAllocArrayFill (jit_abi.zig) receive the
+      value as a `u64` (8 bytes); for a v128 element (esz=16) `value_bytes[0..esz]` would
+      index out of bounds = a GUEST-TRIGGERABLE HOST PANIC, so both guard `esz>8 → return 0`.
+      `array.fill`: the 0 surfaces as a clean oob trap. `array.new`: the JIT emit declines a
+      v128 element at compile time (decline_note `v128_array_element`), so its guard is not
+      reached; the default engine falls back to the interpreter, which runs it unless a body
+      uses an op the interpreter does not execute (e.g. `v128.const`). PROPER FIX
       (low-pri, niche): pointer-marshal the 16-byte fill value — change the helper signature
       to take a `*const [16]u8` (or a scratch-buffer ptr in JitRuntime) + the per-arch
       array.fill/array.new emit to store the v128 value there + pass the address; then the
       helper memcpy's `esz` bytes from the pointer (works for 8 and 16). array.new_DEFAULT
       (zero-init, no value) + array.new_data (D-493) + struct.new v128-field + array.get-v128
-      (D-460) all already work; ONLY the value-fill path is u64-limited. Interp is SIMD-JIT-only
-      so it traps at v128.const before reaching these (no interp crash). Regression fixture
-      array_fill_v128_traps asserts the clean trap (flip to a value when this lands).
+      (D-460) all already work; ONLY the value-fill path is u64-limited. Regression fixtures:
+      array_fill_v128_traps asserts the clean trap, gc_v128_array_new pins the array.new
+      decline (flip both to a value when this lands).
     first_raised: "2026-06-21"
-    last_reviewed: "2026-08-24"
+    last_reviewed: "2026-11-17"
     refs: |-
-      src/engine/codegen/shared/jit_abi.zig (jitGcArrayFill ~999 + jitGcAllocArrayFill ~961; the u64 value arg)
+      src/engine/codegen/shared/jit_abi.zig (jitGcArrayFill ~1116 + jitGcAllocArrayFill ~1071; the u64 value arg)
       src/engine/codegen/{arm64,x86_64}/ops/wasm_3_0/array_fill.zig (emit: marshal v128 value via ptr)
+      src/engine/codegen/{arm64,x86_64}/ops/wasm_3_0/array_new.zig (v128 decline: arm64 ~41, x86_64 ~35)
       test/edge_cases/p17/array_fill_v128_traps (interim clean-trap fixture)
+      test/runners/fixtures/cli_usage/gc_v128_array_new.wat (array.new decline, 3 cli-usage rows)
   - id: "D-492"
     layer: "code"
     status: "note"

@@ -32,6 +32,10 @@ pub const Reason = union(enum) {
     /// A PC-relative instruction whose target is farther than its field
     /// reaches, both in bytes. `Note.op` names the field, not a wasm op.
     out_of_reach: struct { distance: u64, reach: u64 },
+    /// #364 — `array.new` with a v128 element: the fill marshals the init
+    /// through a general register, so a 16-byte element has no path (D-495).
+    /// The JIT declines rather than mis-marshalling; the interpreter runs it.
+    v128_array_element,
 };
 
 pub const Note = struct {
