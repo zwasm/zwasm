@@ -69,34 +69,27 @@ pub const tail_target_gpr: inst.Xn = 16;
 /// outgoing-args region reserved instead (`emit_setup.computeOutgoingMaxBytes`,
 /// #424).
 fn tailFrameCanCarry(callee_sig: zir.FuncType) bool {
-    return op_call.computeCallOverflowBytes(callee_sig) == 0 and
-        simdArgsFitRegisters(callee_sig) and
+    return abi.callStackArgBytes(abi.stack_arg_packing, callee_sig) == 0 and
         callee_sig.results.len <= 2;
 }
 
-/// Does every FP/SIMD argument reach the callee in a register? #424 review —
-/// `computeCallOverflowBytes` counts `f32`/`f64` against the bank but excludes
-/// `v128` by design (its overflow slot is 16 bytes, outside that helper's
-/// per-8-byte-word accounting), while `marshalCallArgs` advances ONE
-/// `fp_arg_slot` across all three. A signature past `abi.fp_arg_regs` of any
-/// mix therefore puts arguments on the stack that the helper reports as zero
-/// overflow — which for a frame-consuming tail call is the stack that is about
-/// to go. Counted here rather than folded into the helper, because that helper
-/// also sizes the outgoing region and the return-buffer offset.
+/// Does every FP/SIMD argument reach the callee in a register? Not a second
+/// gate — `abi.callStackArgBytes` already counts a ninth one of any mix — but
+/// the reason `declineTailFrame` reports when that is why the frame cannot
+/// carry the call (#424 review).
 fn simdArgsFitRegisters(callee_sig: zir.FuncType) bool {
     return simdArgCount(callee_sig) <= abi.fp_arg_regs;
 }
 
 /// Record the refused shape for the reporting layer, then decline. `op` is the
-/// wasm op name the user wrote. The conditions are tested in the order
-/// `tailFrameCanCarry` reads them, so the reason reported is the one that
-/// actually failed.
+/// wasm op name the user wrote. With the FP/SIMD bank ruled out, every stack
+/// argument is an integer one, and the 8-byte-stride count is their number on
+/// either packing.
 fn declineTailFrame(op: []const u8, callee_sig: zir.FuncType) ctx_mod.Error {
-    const overflow = op_call.computeCallOverflowBytes(callee_sig);
-    if (overflow > 0) {
-        decline_note.set(op, .{ .overflow_words = overflow / 8 });
-    } else if (!simdArgsFitRegisters(callee_sig)) {
+    if (!simdArgsFitRegisters(callee_sig)) {
         decline_note.set(op, .{ .simd_args = simdArgCount(callee_sig) });
+    } else if (abi.callStackArgBytes(.aapcs64, callee_sig) > 0) {
+        decline_note.set(op, .{ .overflow_words = abi.callStackArgBytes(.aapcs64, callee_sig) / 8 });
     } else {
         decline_note.set(op, .{ .memory_class_results = @intCast(callee_sig.results.len) });
     }

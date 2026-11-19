@@ -26,6 +26,7 @@
 //! Zone 2 (`src/jit_arm64/`).
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const inst = @import("inst.zig");
 const zir = @import("../../../ir/zir.zig");
@@ -210,6 +211,88 @@ pub fn slotToReg(slot_id: u16) ?Xn {
     return allocatable_gprs[slot_id];
 }
 
+/// AAPCS64 §6.4: V0..V7 carry the FP/SIMD arguments. ONE bank shared by
+/// `f32` / `f64` / `v128`, so the ninth of any mix overflows to the stack.
+/// Named so `ArgCursor` and the tail-call decline reason read the same number
+/// (#424 review).
+pub const fp_arg_regs: u32 = 8;
+
+/// How a call's stack arguments are laid out. AAPCS64 (Arm IHI 0055 §6.4.2
+/// stage C) gives every scalar an 8-byte slot; Apple's "Writing ARM64 Code for
+/// Apple Platforms" gives each its natural size and alignment, so two `i32`
+/// take 8 bytes, not 16. A `v128` is 16 bytes, 16-aligned, under both.
+pub const StackArgPacking = enum { aapcs64, apple };
+
+/// The build target's packing — what the marshaller, the prologue, the frame
+/// prescan and the return-buffer offset pass. The rule below takes it as a
+/// parameter so a test on any host can state either.
+pub const stack_arg_packing: StackArgPacking = switch (builtin.target.os.tag) {
+    .macos, .ios, .watchos, .tvos => .apple,
+    else => .aapcs64,
+};
+
+/// Where one argument travels: a register of its class, or `[SP, #stack]` at
+/// the call (which the callee reads at `[X29, #16 + stack]`).
+pub const ArgLoc = union(enum) { gpr: Xn, fpr: inst.Vn, stack: u32 };
+
+/// The one owner of where a call's arguments go (#425). The marshaller, the
+/// callee's prologue, the frame prescan and the return-buffer offset all walk
+/// a signature through `next`; none restates the register budget or the
+/// stack stride. X0 carries `*JitRuntime` (ADR-0017), so integers start at X1.
+pub const ArgCursor = struct {
+    packing: StackArgPacking,
+    next_gpr: Xn = 1,
+    next_fpr: inst.Vn = 0,
+    stack_bytes: u32 = 0,
+
+    pub fn next(self: *ArgCursor, ty: zir.ValType) ArgLoc {
+        switch (ty) {
+            .i32, .i64, .ref => if (self.next_gpr <= 7) {
+                defer self.next_gpr += 1;
+                return .{ .gpr = self.next_gpr };
+            },
+            .f32, .f64, .v128 => if (self.next_fpr < fp_arg_regs) {
+                defer self.next_fpr += 1;
+                return .{ .fpr = self.next_fpr };
+            },
+        }
+        const size: u32 = switch (ty) {
+            .i32, .f32 => switch (self.packing) {
+                .aapcs64 => 8,
+                .apple => 4,
+            },
+            .i64, .f64, .ref => 8,
+            .v128 => 16,
+        };
+        const off = (self.stack_bytes + size - 1) & ~(size - 1);
+        self.stack_bytes = off + size;
+        return .{ .stack = off };
+    }
+};
+
+/// Bytes of `[SP, #0..)` a call to `sig` writes its stack arguments into: the
+/// end of the last one, unrounded. Zero when every argument rides a register.
+pub fn callStackArgBytes(packing: StackArgPacking, sig: zir.FuncType) u32 {
+    var cursor: ArgCursor = .{ .packing = packing };
+    for (sig.params) |p| _ = cursor.next(p);
+    return cursor.stack_bytes;
+}
+
+/// Offset from SP of a MEMORY-class callee's return buffer (ADR-0069): the end
+/// of the stack-argument region, rounded to 16 as SP is at the BL. The frame
+/// reserves exactly up to here before the buffer (`callOutgoingBytes`).
+pub fn callReturnBufferOff(packing: StackArgPacking, sig: zir.FuncType) u32 {
+    return (callStackArgBytes(packing, sig) + 15) & ~@as(u32, 15);
+}
+
+/// Bytes of outgoing region one call to `sig` needs at the bottom of its
+/// caller's frame: the stack arguments, then one 8-byte slot per result when
+/// the callee is MEMORY-class (`results.len > 2`).
+pub fn callOutgoingBytes(packing: StackArgPacking, sig: zir.FuncType) u32 {
+    const buffer_bytes: u32 = if (sig.results.len > 2) @intCast(sig.results.len * 8) else 0;
+    return callReturnBufferOff(packing, sig) + buffer_bytes;
+}
+
 /// Float / SIMD V-register pool (caller-saved scratch range,
 /// V16..V28 → 13 slots after D-037's V29/V30 carve-out for FP
 /// spill staging). V31 is reserved for popcnt's V-register
@@ -225,13 +308,6 @@ pub fn slotToReg(slot_id: u16) ?Xn {
 /// physical registers (X9 vs V16 for slot 0). The regalloc itself
 /// stays class-blind; class-aware allocation is a follow-up
 /// (D-036 §"option (b)").
-/// AAPCS64 §6.4: V0..V7 carry the FP/SIMD arguments. ONE bank shared by
-/// `f32` / `f64` / `v128` — `marshalCallArgs` advances a single `fp_arg_slot`
-/// across all three, so the ninth of any mix overflows to the stack. Named so
-/// the marshaller and the tail-call fit predicate read the same number
-/// (#424 review).
-pub const fp_arg_regs: u32 = 8;
-
 pub const allocatable_v_regs = [_]Xn{
     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
 };
