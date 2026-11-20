@@ -10,6 +10,98 @@ SemVer compatibility guarantees start at the first stable `v2.0.0` tag.
 
 ## [Unreleased]
 
+## [2.12.1] - 2026-11-20
+
+### Added
+
+- **Each release archive carries SLSA build provenance.** `gh attestation
+  verify <archive> --repo zwasm/zwasm` confirms the archive was built by the
+  release workflow from the tagged commit; `SHA256SUMS` alone could not tell a
+  replaced archive from the original.
+
+### Fixed
+
+- **On the arm64 JIT, `br_on_null` to a loop branches exactly when its
+  operand is null.** On the back edge of a loop with no params the branch
+  was never taken without a fuel budget, and always taken with one (the call
+  then ended in `out_of_fuel`): it tested a register the back-edge poll had
+  just written. It now reads its condition first.
+
+- **On the JIT, an `if` with no else whose then arm branches to the `if`'s
+  own label gives its params when the condition is zero.** An `if` with no
+  else behaves as one whose else arm is empty, so its params are its results,
+  and a branch to its label carries the results. The JIT compiles the shape
+  to that rule and gives what the interpreter gives.
+
+### Security
+
+- **On the JIT, a GC allocation that fails now traps `out_of_memory`** (#364).
+  `array.new`, `array.new_default`, `array.new_fixed`, `struct.new` and
+  `struct.new_default` checked the result on the interpreter but not the JIT,
+  where a failed allocation (the GC heap's 4 GiB cap) returned a null reference.
+  The JIT now traps there, and declines a v128-element `array.new`.
+  [GHSA-pjxf-4q9v-jpwq](https://github.com/zwasm/zwasm/security/advisories/GHSA-pjxf-4q9v-jpwq).
+
+- **On the arm64 JIT, a call's stack arguments, the frame reserved for them and
+  the return buffer of a callee with three or more results follow one rule**
+  (#425). On Apple targets the buffer was placed by an eight-bytes-per-scalar
+  count while the frame reserved the four-byte-packed size; it now starts where
+  the reserved argument region ends, on every arm64 target.
+  [GHSA-493c-fvh2-2pv7](https://github.com/zwasm/zwasm/security/advisories/GHSA-493c-fvh2-2pv7).
+
+- **`throw_ref` of a null `exnref` traps `null_reference` on the JIT, as on the
+  interpreter** (#745). It raised an exception instead, which a `try_table`
+  clause could catch and the run went on.
+  [GHSA-wwr2-84fx-2j37](https://github.com/zwasm/zwasm/security/advisories/GHSA-wwr2-84fx-2j37).
+
+- **On arm64, the JIT declines a function when a branch or a literal load in
+  it cannot reach its target, and the interpreter runs the module.** Both
+  reach 1 MiB, so this is a function with more than about 1 MiB of machine
+  code; `--engine jit` reports the distance and the reach. A module is also
+  declined when an entry wrapper is more than a call's 128 MiB from its
+  function (`DisplacementOverflow`).
+  [GHSA-9v38-4fvh-wjp6](https://github.com/zwasm/zwasm/security/advisories/GHSA-9v38-4fvh-wjp6).
+
+- **A `try_table` catch clause whose label is the function's own label returns
+  the delivered values — the tag's payload, and the exnref for a `_ref` clause —
+  as the function's results, on the interpreter and on both JIT architectures.**
+  Earlier neither engine reached the function's return path for it.
+
+- **On the JIT, every path that reaches the end of an `if` delivers its own
+  values to it**, when an arm ends in a terminator, when a `br_if` targets the
+  `if`, and when the `if` has no else (#739). Before, a then-arm short of its
+  results took its value from below the `if`, with no trap.
+  [GHSA-grpg-98rp-93g7](https://github.com/zwasm/zwasm/security/advisories/GHSA-grpg-98rp-93g7).
+
+- **On the JIT, the values an edge delivers to a merge are moved as one
+  parallel assignment**, on x86_64 and arm64: at the end of a block or of an
+  `if` arm, and on a branch to a block, an `if` or a loop. Each edge delivers
+  its own values when they sit where another edge's values go.
+  [GHSA-4wxj-2fwr-xxwq](https://github.com/zwasm/zwasm/security/advisories/GHSA-4wxj-2fwr-xxwq).
+
+- **On the JIT, a block whose body ends in `unreachable` before producing its
+  result traps as the interpreter does** (#399). Before, in a function that
+  computed nothing else, reading that result indexed an empty table and the
+  process aborted, on `--engine jit` and on the default engine.
+  [GHSA-pxpg-mx84-x9c9](https://github.com/zwasm/zwasm/security/advisories/GHSA-pxpg-mx84-x9c9).
+
+### Documentation
+
+- **`SECURITY.md` states what a small group of maintainers can keep doing**
+  (ADR-0237). A sandbox, isolation or grant breach is released within 30 days
+  of its fix being ready (14 if it was reported from outside), at most one
+  security release every two weeks. An advisory is published for those and
+  for any report from outside; other security fixes are listed under
+  Security here.
+
+### Known limitations
+
+- **The `wasi:http` host holds every request and response body whole in host
+  memory** (#761). `--max-memory` and the memory-pages limit cap a guest's
+  linear memory, not this: a guest that makes or serves an HTTP exchange, or
+  the peer of its request, chooses the size of a host allocation. Bound the
+  process's memory from outside when such a guest is not trusted.
+
 ## [2.12.0] - 2026-11-15
 
 ### Changed
