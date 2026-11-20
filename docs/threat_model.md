@@ -170,6 +170,11 @@ breached decides how soon the fix is released
   that blocks, except a preview1 `poll_oneoff` clock wait: a preview1 `fd_read`
   of a silent stdin outlasts them. A WASI 0.2 / 0.3 clock wait and a 0.2 socket
   read outlast them too (#730).
+- **Host memory held for a guest (goal 5).** `--max-memory` and the
+  memory-pages limit cap a guest's linear memory, not what the host holds on
+  its behalf. The `wasi:http` host keeps every request and response body
+  whole, so a guest that makes or serves an HTTP exchange, or the peer of its
+  request, chooses the size of a host allocation (#761).
 
 ## Embedder responsibilities
 
@@ -179,6 +184,9 @@ breached decides how soon the fix is released
   [README](../README.md#embedding) and [the CLI reference](reference/cli.md#run).
 - **Grant the least.** Preopen only the directories the guest needs, and pass
   only the environment it needs.
+- **Bound the process's memory from outside** (a cgroup or a container limit)
+  when a guest you do not trust can use `wasi:http`: no zwasm limit covers the
+  bodies the host holds (#761).
 - **Give the runtime the stack it needs.** A thread under 1 MiB of stack can
   die before any wasm runs (#532, #534); on musl, see #533.
 - **Treat `.cwasm` files and the cache directory as executables.**
