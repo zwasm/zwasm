@@ -25,6 +25,10 @@
 #     external system-linker consumer (test_extlink.sh) + zone_check +
 #     spill_aware_check (host-independent source checks, promoted to CI
 #     2026-07-03 as real merge gates)
+#   The DCE matrix builds each combination for the host and, off x86_64, once
+#     more for x86_64-linux. A leg whose ci.yml row says `dce_native_only`
+#     (macOS), read by check_build_dce.sh as ZWASM_CI_DCE_NATIVE_ONLY, skips
+#     the second: the x86_64-linux leg of the same run builds it natively.
 #
 # Usage:
 #   bash scripts/ci_gate.sh                    # core gate on this host

@@ -95,7 +95,7 @@ text or code identifiers.
   define). The **extended** checks (lint /
   build-option DCE / ReleaseSafe JIT smoke / AOT cross-compile / `zone_check` /
   `spill_aware`) are gated on `ZWASM_CI_EXTENDED`, which `ci.yml` sets only on
-  the **push to `main`** — they are up to ~20 cold-cache ReleaseSafe builds and
+  the **push to `main`** — they are ~11 cold-cache ReleaseSafe builds per leg and
   would dominate every PR's wall-clock (rationale in `ci.yml`).
   Doc-only PRs auto-skip the heavy legs (still green via `ci-required`) — the
   PR's last push decides, and the `merge_group` run gates the merged tree

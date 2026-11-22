@@ -22,11 +22,16 @@
 #   --sample <N>      : build N random combinations (cheaper smoke)
 #   --target <combo>  : build a single combination, e.g. "v1_0:p1"
 #   --report          : exit 0; emit the matrix table
+#
+# Environment:
+#   ZWASM_CI_DCE_NATIVE_ONLY=1 : skip the x86_64-linux cross builds (D-231
+#                                below). For a CI leg that runs beside an
+#                                x86_64-linux leg; see ci.yml `dce_native_only`.
 
 set -uo pipefail
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-  sed -n '2,24p' "$0"
+  sed -n '2,29p' "$0"
   exit 0
 fi
 
@@ -75,11 +80,19 @@ build_one() {
 # x86 codegen is compiled + its dead symbols are observable to nm. nix `nm`
 # (llvm-nm via the clang wrapper) reads cross ELF fine.
 #
-# On an x86_64 host the native build already compiles the x86_64 codegen, so
-# the same-triple cross build adds zero coverage — skip it (halves the matrix
-# wall-clock on the x86_64-linux CI leg; each ReleaseSafe build is minutes).
+# Skipped where it adds no coverage: on an x86_64 host the native build
+# already compiles the x86_64 codegen, and a CI leg that sets
+# ZWASM_CI_DCE_NATIVE_ONLY leaves these builds to the x86_64-linux leg of the
+# same run, which makes the same nine natively. Each ReleaseSafe build is
+# minutes, so either halves the matrix wall-clock.
 XBUILD_TARGET="x86_64-linux-gnu"
 HOST_ARCH="$(uname -m)"
+CROSS_X86="on"
+if [ "$HOST_ARCH" = "x86_64" ]; then
+  CROSS_X86="off (x86_64 host: the native build is the x86_64 build)"
+elif [ "${ZWASM_CI_DCE_NATIVE_ONLY:-0}" = "1" ]; then
+  CROSS_X86="off (ZWASM_CI_DCE_NATIVE_ONLY=1)"
+fi
 build_one_x86() {
   local wasm="$1" wasi="$2"
   local prefix="$OUT_BASE/x86_${wasm}_${wasi}"
@@ -169,6 +182,7 @@ esac
 fail=0
 echo "=== build-option DCE check (per ADR-0073) ==="
 echo "matrix size: ${#MATRIX[@]}"
+echo "x86_64-linux cross builds: $CROSS_X86"
 echo ""
 printf '%-6s %-4s %-10s %-12s %-12s\n' wasm wasi build text_bytes forbidden
 echo "----------------------------------------------------"
@@ -200,9 +214,8 @@ for entry in "${MATRIX[@]}"; do
   fi
 
   # D-231: cross-x86 DCE check (forbidden-symbol nm-grep only; no size —
-  # host `size` may not read cross ELF, but nm does). Skipped on x86_64 hosts
-  # where it would duplicate the native build above.
-  if [ "$HOST_ARCH" = "x86_64" ]; then
+  # host `size` may not read cross ELF, but nm does).
+  if [ "$CROSS_X86" != "on" ]; then
     continue
   fi
   if ! build_one_x86 "$wasm" "$wasi"; then
