@@ -106,9 +106,10 @@ in) — plus
 `test-wasi-p1-official`, which blocks from a step of its own rather than from
 inside the script (ADR-0225). The extended
 static/build checks (lint, the build-option DCE matrix, AOT cross-compile,
-`zone_check`) run on the merge to `main`, not per PR — they are up to ~20
-cold-cache builds and would dominate every PR's wall-clock. That run skips the
-core gate when the queue run passed the same commit (#691). A failure of that
+`zone_check`) run on the merge to `main`, not per PR — they are ~11
+cold-cache ReleaseSafe builds per leg and would dominate every PR's
+wall-clock. That run skips the core gate when the queue run passed the same
+commit (#691). A failure of that
 `main` run is reported as a comment on the open `ci:main-failure` issue, since
 the run's actor is the merge queue's bot and GitHub notifies nobody (#312).
 All four legs are blocking (ADR-0211 D3, #545). There is no additional hidden gate
@@ -137,6 +138,10 @@ ZWASM_CI_EXTENDED=1 bash scripts/ci_gate.sh  # + lint/DCE/AOT/zone checks (Unix)
 ZWASM_CI_CORE=0 ZWASM_CI_EXTENDED=1 bash scripts/ci_gate.sh  # extended alone (the push to main)
 zig build test-wasi-p1-official            # the blocking step outside the script
 ```
+
+On Apple Silicon the extended lines build the DCE matrix for x86_64-linux as
+well as natively. CI's macOS leg leaves those nine builds to its x86_64-linux
+leg; add `ZWASM_CI_DCE_NATIVE_ONLY=1` to run what that leg runs.
 
 ## Cutting a release
 

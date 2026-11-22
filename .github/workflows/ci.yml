@@ -302,8 +302,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runs-on }}
-    # 120: the extended (main-push) gate runs the full DCE matrix (~50-70min
-    # alone); a cold zig cache pushed the total past the previous 75min cap.
+    # 120: sized when the macOS push leg's DCE matrix was 18 builds (~50-70min
+    # alone, past the previous 75min cap). That leg builds 9 now
+    # (`dce_native_only`); the cap has not been re-sized.
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -313,9 +314,17 @@ jobs:
             runs-on: macos-15
             zig-dir: zig-aarch64-macos-0.17.1
             extended: true
+            # The DCE matrix here builds each combination for arm64 only. Its
+            # x86_64-linux cross builds (D-231) are left to the x86_64-linux
+            # row, which builds the same nine natively. Holds while that row
+            # is `extended`: the two then run in the same push run.
+            dce_native_only: true
           - name: x86_64-linux
             runs-on: ubuntu-22.04
             zig-dir: zig-x86_64-linux-0.17.1
+            # `extended` here is also what the aarch64-macos row's
+            # `dce_native_only` rests on: this is then the one leg that builds
+            # the DCE matrix for x86_64-linux (D-231).
             extended: true
             # #347 — the unit tests built ReleaseSafe, on every PR. A row gets
             # this when its leg finishes far enough ahead of aarch64-macos
@@ -327,14 +336,14 @@ jobs:
             zig-dir: zig-aarch64-linux-0.17.1
             # #545 — both ReleaseSafe lanes, measured on run 39030377235: the
             # unit lane adds 6.6 min to an 11-17 min leg (macOS: 22-31), and
-            # the JIT smoke 4.5 min to the push run, where macOS takes ~90.
+            # the JIT smoke 4.5 min to the push run, where macOS took ~90.
             # Not `extended`: those checks are host-independent.
             jit_releasesafe: true
             releasesafe_unit: true
           - name: x86_64-windows
             runs-on: windows-2022
             zig-dir: zig-x86_64-windows-0.17.1
-            # #303 — not `extended` (~20 cold ReleaseSafe builds), but the one
+            # #303 — not `extended` (~11 cold ReleaseSafe builds), but the one
             # check in that set whose value is host-specific: nothing else runs
             # the Win64 entry thunks optimised, and Windows is where the JIT is
             # the default engine.
@@ -472,8 +481,8 @@ jobs:
           wasm-tools --version
           wasmtime --version
 
-      # Extended checks (lint + 9-combo × 2-arch build-DCE matrix + ReleaseSafe
-      # JIT smoke + AOT cross-compile) are up to ~20 cold-cache ReleaseSafe builds
+      # Extended checks (lint + 9-combo build-DCE matrix + ReleaseSafe JIT smoke
+      # + AOT cross-compile) are ~11 cold-cache ReleaseSafe builds per leg
       # and dominate wall-clock (~2.5-4.5 min/build on hosted runners), so they
       # run ONLY on the merge to `main` (push) — not on every PR / dispatch, which
       # get the core gate (fmt + test-all + the Linux-only rust-host + the
@@ -488,6 +497,7 @@ jobs:
           ZWASM_CI_EXTENDED: ${{ (github.event_name == 'push' && matrix.extended) && '1' || '0' }}
           ZWASM_CI_JIT_RELEASESAFE: ${{ (github.event_name == 'push' && matrix.jit_releasesafe) && '1' || '0' }}
           ZWASM_CI_RELEASESAFE_UNIT: ${{ matrix.releasesafe_unit && '1' || '0' }}
+          ZWASM_CI_DCE_NATIVE_ONLY: ${{ matrix.dce_native_only && '1' || '0' }}
         run: bash scripts/ci_gate.sh
 
       # Official wasi-testsuite wasm32-wasip1 corpus (D-582). BLOCKING, with
