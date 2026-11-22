@@ -71,6 +71,7 @@
 //!   diff_runner_exe <corpus-dir> [--jit|--aot|--wasmer|--interp|--interp-all]
 //!                                [--versions-lock <path>]
 
+const builtin = @import("builtin");
 const std = @import("std");
 
 const zwasm = @import("zwasm");
@@ -149,7 +150,14 @@ const interp_all_deadline_ms: u64 = 480_000;
 pub fn main(init: std.process.Init) !void {
     zwasm.support.dbg.initFromEnv(init.environ_map.get("ZWASM_DEBUG"));
     const io = init.io;
-    const gpa = init.gpa;
+    // In a Debug build `init.gpa` records a stack trace on every alloc and
+    // free, and on macOS the unwind is not cached, so the engines under test
+    // spend most of their time there. A Debug build takes this allocator
+    // instead: it keeps the leak, double-free and write-after-free checks,
+    // and its reports name no allocation site.
+    var debug_gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .stack_trace_frames = 0 });
+    defer _ = debug_gpa.deinit();
+    const gpa = if (builtin.mode == .debug) debug_gpa.allocator() else init.gpa;
 
     var stdout_buf: [1024]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buf);
