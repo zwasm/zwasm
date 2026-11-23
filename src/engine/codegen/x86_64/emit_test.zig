@@ -9,4 +9,5 @@
 comptime {
     _ = @import("emit_test_int.zig");
     _ = @import("emit_test_float.zig");
+    _ = @import("emit_test_call_stack_args.zig");
 }

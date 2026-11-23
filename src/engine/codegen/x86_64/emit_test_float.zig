@@ -1339,15 +1339,11 @@ test "compile: unreachable emits JMP rel32 + trap stub patches disp to trap_byte
 }
 
 test "compile: SysV callee with 6 i32 params — 6th param read from caller stack [RBP+16+8*0]" {
-    // Mirror of 7.10-f: caller writes overflow args at
-    // `[RSP + 8 * nsaa_idx]` from its stack pointer; callee reads
-    // them at `[RBP + 16 + r15_save_off + 8 * nsaa_idx]` (= caller's
-    // bottom-of-frame after RET addr push + saved RBP + saved R15).
-    //
-    // Pre-7.10-j the SysV side surfaced UnsupportedOp[
-    // i32-param-arg-overflow] at emit.zig:382 since arg_gprs.len = 6
-    // and int_arg_idx starts at 1 (slot 0 = runtime ptr); 6 user
-    // i32 args overflow at the 6th.
+    // Mirror of 7.10-f: the caller writes an overflow arg at
+    // `[RSP + off]` (`abi.ArgCursor`); the callee reads it at
+    // `[RBP + 16 + r15_save_off + off]` (= caller's bottom-of-frame
+    // after RET addr push + saved RBP + saved R15). Slot 0 carries the
+    // runtime ptr, so 5 user i32 args fit RSI..R9 and the 6th overflows.
     // SIBLING-AT: src/engine/codegen/arm64/emit_test_alu_float.zig (AAPCS64 path)
     if (comptime abi.current_cc != .sysv) return;
     const sig: zir.FuncType = .{ .params = &[_]zir.ValType{ .i32, .i32, .i32, .i32, .i32, .i32 }, .results = &.{} };

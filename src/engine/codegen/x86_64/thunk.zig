@@ -74,9 +74,9 @@
 //! on a 16-byte boundary for every `n`. For `n = 0` this is the pre-ADR-0228
 //! frame (`SUB RSP, sh + 8`), now in two instructions.
 //!
-//! A SysV v128 overflow argument is not counted by
-//! `computeCallOverflowBytesCc` (two 16-aligned eightbytes; excluded on the
-//! call site too), so the facade still declines any v128 parameter
+//! A SysV v128 overflow argument (two 16-aligned eightbytes, which the call
+//! site places through `abi.ArgCursor`) is not counted by
+//! `computeCallOverflowBytesCc`, so the facade still declines any v128 parameter
 //! (`api/instance.zig`). Win64 passes v128 as a hidden pointer, which is a
 //! word like any other, but the decline is uniform.
 //!

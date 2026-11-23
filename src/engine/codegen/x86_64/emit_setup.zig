@@ -30,21 +30,13 @@ const Error = types.Error;
 /// Mirror of `arm64/emit.zig:computeOutgoingMaxBytes`.
 /// Pre-scan the function body for the worst-case outgoing-args
 /// region size at the bottom of the caller's frame (`[RSP, #0]`
-/// upward). For each `call N` / `call_indirect type_idx`, count
-/// the args that overflow the per-Cc register pools and sum the
-/// per-slot 8-byte allocations; track the max across all calls.
-///
-/// **SysV** (System V x86_64 §3.2.3): int args use arg_gprs[1..6]
-/// (5 user slots; arg_gprs[0] = RDI = runtime_ptr per ADR-0026).
-/// FP args use arg_xmms[0..7] (8 user slots, independent counter).
-/// Per-call overflow = `(max(0, n_int - 5) + max(0, n_fp - 8)) * 8`.
-///
-/// **Win64** (Microsoft x64): int and FP share slots arg_gprs[1..3]
-/// (3 user slots; arg_gprs[0] = RCX = runtime_ptr). Total user
-/// args > 3 ⇒ overflow. The shared shadow-space-prefixed region
-/// places overflow at `[RSP + 32 + 8*K]`, so the outgoing region
-/// must include the 32-byte shadow when any call exists. Per-call
-/// outgoing = `32 + max(0, n_int + n_fp - 3) * 8`.
+/// upward). For each `call N` / `call_indirect type_idx` /
+/// `call_ref` / cross-module `return_call`, take the max over its
+/// calls of where the stack arguments end plus the MEMORY-class
+/// return buffer. `abi.callStackLayout` owns the per-Cc layout, so
+/// this reserves exactly what `op_call.marshalCallArgs` writes —
+/// including a `v128` stack argument, which earlier counts left
+/// past the region.
 pub fn computeOutgoingMaxBytes(
     func: *const ZirFunc,
     func_sigs: []const zir.FuncType,
@@ -111,76 +103,15 @@ pub fn computeOutgoingMaxBytes(
             else => null,
         };
         const callee_sig = sig orelse continue;
-        var n_int: u32 = 0;
-        var n_fp: u32 = 0;
-        var n_v128: u32 = 0;
-        for (callee_sig.params) |p| {
-            switch (p) {
-                .i32, .i64, .ref => n_int += 1,
-                .f32, .f64 => n_fp += 1,
-                // Win64 v128 is a hidden-pointer
-                // arg — consumes one int-arg-reg slot for the
-                // pointer; on SysV it's an XMM-reg / stack-eightbyte
-                // arg (already excluded from n_int / n_fp here).
-                .v128 => n_v128 += 1,
-            }
-        }
-        // SysV: v128 fp-class consumes 2 eightbytes
-        // on stack per overflowed arg (SSE class).
-        // Win64: v128 = hidden ptr in int-arg slot + 16-byte scratch
-        // in caller's outgoing region (Microsoft x64 §Param passing).
-        const bytes: u32 = switch (abi.current_cc) {
-            .sysv => blk: {
-                // ADR-0026 2026-05-18 Convention Swap: MEMORY-class
-                // callee receives &buffer in RDI (slot 0) + rt in
-                // RSI (slot 1), shrinking the user int-reg pool to
-                // 4 slots (RDX/RCX/R8/R9). Non-MEMORY callee
-                // retains 5 user int regs (RSI..R9).
-                const callee_is_memory_class = callee_sig.results.len > 2;
-                const n_user_int_regs: u32 = if (callee_is_memory_class) 4 else 5;
-                const n_int_overflow: u32 = if (n_int > n_user_int_regs) n_int - n_user_int_regs else 0;
-                const n_fp_total = n_fp + 2 * n_v128;
-                const n_fp_overflow: u32 = if (n_fp_total > 8) n_fp_total - 8 else 0;
-                const overflow_bytes: u32 = (n_int_overflow + n_fp_overflow) * 8;
-                // MEMORY-class return reserves an N×8 B buffer slot
-                // at the top of THIS call's outgoing-args footprint.
-                // The caller LEAs RDI = &buffer immediately before
-                // CALL (Convention Swap above); the callee captures
-                // RDI into its own frame slot. Mirrors arm64's
-                // `indirect_result_slot_bytes` accounting. Win64
-                // MEMORY-class deferred.
-                const return_buf_bytes: u32 = if (callee_is_memory_class)
-                    @as(u32, @intCast(callee_sig.results.len)) * 8
-                else
-                    0;
-                break :blk overflow_bytes + return_buf_bytes;
-            },
-            .win64 => blk: {
-                // D-165 close (2026-05-23): Win64 internal JIT-to-JIT
-                // MEMORY-class return ABI mirrors SysV §3.2.3 with
-                // RCX-as-hidden-ptr / RDX-as-rt. Callee with > 2
-                // results consumes 2 int-arg slots (RCX=&buffer,
-                // RDX=rt) before user ints → 2 user int regs
-                // (R8/R9). Non-MEMORY callees keep slot 0=RCX=rt
-                // and have 3 user int regs (RDX/R8/R9).
-                const callee_is_memory_class = callee_sig.results.len > 2;
-                const n_int_w = n_int + n_v128;
-                const n_total = n_int_w + n_fp;
-                const n_user_int_regs: u32 = if (callee_is_memory_class) 2 else 3;
-                const n_overflow: u32 = if (n_total > n_user_int_regs) n_total - n_user_int_regs else 0;
-                const shadow_and_overflow = abi.current.shadow_space_bytes + n_overflow * 8;
-                const scratch_base = (shadow_and_overflow + 15) & ~@as(u32, 15);
-                // Return buffer for MEMORY-class lives at the TOP
-                // of THIS call's outgoing-args footprint (= above
-                // v128 scratch); caller LEA RCX=&buffer per
-                // emitCall's Win64 hidden-ptr setup.
-                const return_buf_bytes: u32 = if (callee_is_memory_class)
-                    @as(u32, @intCast(callee_sig.results.len)) * 8
-                else
-                    0;
-                break :blk scratch_base + n_v128 * 16 + return_buf_bytes;
-            },
-        };
+        // ADR-0069 §Phase 2: a MEMORY-class callee (`results.len > 2`) reserves
+        // an N×8 B return buffer above its stack arguments; the caller LEAs the
+        // hidden pointer there before CALL (ADR-0026 Convention Swap).
+        const args_end = abi.callStackLayout(abi.current_cc, callee_sig).return_buffer_off;
+        const return_buf_bytes: u32 = if (callee_sig.results.len > 2)
+            @as(u32, @intCast(callee_sig.results.len)) * 8
+        else
+            0;
+        const bytes: u32 = args_end + return_buf_bytes;
         if (bytes > max_bytes) max_bytes = bytes;
     }
     return max_bytes;

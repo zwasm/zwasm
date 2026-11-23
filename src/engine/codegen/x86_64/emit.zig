@@ -121,9 +121,6 @@ const stack_limit = @import("../../../platform/stack_limit.zig");
 const computeOutgoingMaxBytes = setup.computeOutgoingMaxBytes;
 const computeLocalLayout = setup.computeLocalLayout;
 
-// `win64V128ScratchBase` helper lives in `op_call.zig` (used by
-// the caller-side marshal).
-
 /// Emit x86_64 machine code for `func`. Requires `alloc.slots`
 /// to be populated (call `regalloc.compute` first; pass the
 /// `Allocation` here). `func_sigs` and `module_types` are
@@ -441,32 +438,9 @@ pub fn compile(
         try buf.appendSlice(allocator, inst.encStoreR64MemRBPDisp32(disp, hidden_ptr_gpr).slice());
     }
 
-    // Marshal i32 params from arg regs to
-    // local slots. Per ADR-0026 Cc-pivot:
-    //   SysV: arg_gprs = {RDI, RSI, RDX, RCX, R8, R9}; RDI = runtime
-    //         ptr, user int args from RSI (max 5)
-    //   Win64: arg_gprs = {RCX, RDX, R8, R9}; RCX = runtime ptr,
-    //         user int args from RDX (max 3)
-    // The base index into arg_gprs is set so index 0 of the user
-    // params lands on the first non-runtime-ptr arg reg.
+    // Copy params from where the caller passed them into local slots.
     param_marshal: {
         var p_idx: u32 = 0;
-        // Cc-aware arg-reg index counters. SysV (§3.2.3) tracks
-        // int and FP args independently — `int_arg_idx` starts
-        // at 1 (skip runtime_ptr in RDI = arg_gprs[0]); FP args
-        // use a separate `fp_arg_idx` from XMM0. Win64 (Microsoft
-        // ABI) shares slot positions: arg N occupies either
-        // arg_gprs[N] OR arg_xmms[N], so `fp_arg_idx` mirrors
-        // the int-side slot counter and both advance per arg.
-        // Win64 args at slot >= 4 land on the stack at
-        // [RBP + 16 + 8*slot] (Microsoft x64 ABI §"Argument
-        // Passing"); the prologue copies them via RAX scratch
-        // into the local frame slot.
-        // ADR-0026 2026-05-18 Convention Swap: when SELF returns
-        // MEMORY-class, SysV §3.2.3 places &buffer in RDI (slot 0)
-        // and shifts rt to RSI (slot 1); user int args begin at
-        // RDX (slot 2). For non-MEMORY-class, slot 0 = RDI = rt;
-        // user int args begin at RSI (slot 1).
         // ADR-0106 path (a) — buffer_write ABI: args
         // come from `[args_ptr + i*8]` (args_ptr in RDX on SysV
         // / R8 on Win64; the 3rd `callconv(.c)` arg after rt
@@ -493,149 +467,69 @@ pub fn compile(
             // Skip the legacy per-class loop entirely.
             break :param_marshal;
         }
-        var int_arg_idx: usize = if (return_is_memory_class) 2 else 1;
-        var fp_arg_idx: usize = if (abi.current_cc == .win64) int_arg_idx else 0;
-        // Per-overflow NSAA index for SysV. Mirror of
-        // the caller-side counter in op_call.marshalCallArgs.
-        // Both classes share the NSAA stream in declaration
-        // order — increment per overflowed arg regardless of class.
-        var nsaa_idx: u32 = 0;
+        // `abi.ArgCursor` finds each parameter where the caller's
+        // `op_call.marshalCallArgs` put it: a register of its class, or
+        // `[RSP + off]` at the call, which is `[RBP + 16 + r15_save_off + off]`
+        // here (+16 = saved RBP + return address; +r15_save_off covers this
+        // prologue's PUSH R15 shifting RBP one cell deeper than the standard
+        // ABI shape). RAX / XMM0 are scratch until the body starts.
+        const r15_save_off: i32 = if (uses_runtime_ptr) 8 else 0;
+        var cursor = abi.ArgCursor.init(abi.current_cc, func.sig);
         while (p_idx < num_params) : (p_idx += 1) {
             // Per-local disp from layout.
             // Auto-helpers pick disp8 / disp32 form per offset range.
             const off: i32 = layout.disps[p_idx];
             const ptype = func.sig.params[p_idx];
-            switch (ptype) {
-                .i32, .i64, .f32, .f64, .v128, .ref => {},
-            }
-            // Win64 stack-arg fallback for slot >= 4. The shared
-            // slot is `int_arg_idx` (== `fp_arg_idx` under Win64).
-            // Read from the shadow-space-relative location and
-            // write to local slot.
-            //   [RBP + 16 + r15_save_off + 8*slot]
-            // where +16 = saved RBP (8) + return addr (8); the
-            // +r15_save_off (8 bytes) covers our PUSH R15 prologue
-            // shifting RBP one cell deeper than the std ABI shape.
-            // Without it, [RBP + 48] (the standard "first overflow
-            // at slot 4") reads the saved-RBP slot instead of
-            // caller-written arg bytes when uses_runtime_ptr fires.
-            if (abi.current_cc == .win64 and int_arg_idx >= abi.current.arg_gprs.len) {
-                const r15_save_off: i32 = if (uses_runtime_ptr) 8 else 0;
-                const stack_disp: i32 = 16 + r15_save_off + @as(i32, @intCast(int_arg_idx * 8));
-                switch (ptype) {
-                    .i32 => {
-                        try buf.appendSlice(allocator, inst.encMovR32FromMemDisp32(.rax, .rbp, stack_disp).slice());
-                        try buf.appendSlice(allocator, rbpStoreR32(off, .rax).slice());
-                    },
-                    // D-093 (d-33): reftype shares i64 8-byte gpr slot.
-                    .i64, .f32, .f64, .ref => {
-                        try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.rax, .rbp, stack_disp).slice());
-                        try buf.appendSlice(allocator, rbpStoreR64(off, .rax).slice());
-                    },
-                    .v128 => {
-                        // Win64 v128 hidden-pointer
-                        // marshal — stack-overflow slot. Per Microsoft
-                        // x64 ABI §"Parameter passing" the caller wrote
-                        // an 8-byte pointer at the int-arg stack slot;
-                        // the pointed-to memory holds the 16-byte v128
-                        // value (16-byte aligned per ABI). Load pointer
-                        // → RAX, then MOVUPS xmm_tmp ← [RAX] and store
-                        // to local slot.
-                        try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.rax, .rbp, stack_disp).slice());
-                        try buf.appendSlice(allocator, inst.encMovupsXmmMemBaseDisp32(false, .xmm0, .rax, 0).slice());
-                        try buf.appendSlice(allocator, rbpStoreXmmV128(off, .xmm0).slice());
-                    },
-                }
-                int_arg_idx += 1;
-                fp_arg_idx += 1;
-                continue;
-            }
-            // SysV per-overflow stack-arg read (mirror of
-            // op_call.marshalCallArgs's NSAA write path).
-            // `[RBP + 16 + r15_save_off + 8 * nsaa_idx]` matches the
-            // caller's `[RSP + 8 * nsaa_idx]` write after RET addr +
-            // saved RBP (+ saved R15) push. Win64 already handled
-            // above; this branch is structurally SysV-only.
-            const sysv_int_overflow = (ptype == .i32 or ptype == .i64 or ptype == .ref) and int_arg_idx >= abi.current.arg_gprs.len;
-            const sysv_fp_overflow = (ptype == .f32 or ptype == .f64) and fp_arg_idx >= abi.current.arg_xmms.len;
-            if (sysv_int_overflow or sysv_fp_overflow) {
-                const r15_save_off: i32 = if (uses_runtime_ptr) 8 else 0;
-                const stack_disp: i32 = 16 + r15_save_off + @as(i32, @intCast(nsaa_idx * 8));
-                switch (ptype) {
-                    .i32 => {
-                        try buf.appendSlice(allocator, inst.encMovR32FromMemDisp32(.rax, .rbp, stack_disp).slice());
-                        try buf.appendSlice(allocator, rbpStoreR32(off, .rax).slice());
-                    },
-                    // D-093 (d-33): reftype shares i64 8-byte gpr slot.
-                    .i64, .f32, .f64, .ref => {
-                        try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.rax, .rbp, stack_disp).slice());
-                        try buf.appendSlice(allocator, rbpStoreR64(off, .rax).slice());
-                    },
-                    .v128 => unreachable, // Win64 v128 hidden-ptr handled above
-                }
-                nsaa_idx += 1;
-                if (sysv_int_overflow) int_arg_idx += 1 else fp_arg_idx += 1;
-                continue;
-            }
-            switch (ptype) {
-                .i32 => {
-                    try buf.appendSlice(allocator, rbpStoreR32(off, abi.current.arg_gprs[int_arg_idx]).slice());
-                    int_arg_idx += 1;
-                    if (abi.current_cc == .win64) fp_arg_idx += 1;
+            switch (cursor.next(ptype)) {
+                .gpr => |slot| {
+                    const src = abi.current.arg_gprs[slot];
+                    switch (ptype) {
+                        .i32 => try buf.appendSlice(allocator, rbpStoreR32(off, src).slice()),
+                        // D-093 (d-33): reftype shares i64 8-byte gpr slot.
+                        .i64, .ref => try buf.appendSlice(allocator, rbpStoreR64(off, src).slice()),
+                        .f32, .f64, .v128 => unreachable,
+                    }
                 },
-                // D-093 (d-33): reftype shares i64 8-byte gpr slot.
-                .i64, .ref => {
-                    try buf.appendSlice(allocator, rbpStoreR64(off, abi.current.arg_gprs[int_arg_idx]).slice());
-                    int_arg_idx += 1;
-                    if (abi.current_cc == .win64) fp_arg_idx += 1;
+                .xmm => |slot| {
+                    const src = abi.current.arg_xmms[slot];
+                    switch (ptype) {
+                        .f32 => try buf.appendSlice(allocator, rbpStoreXmmF32(off, src).slice()),
+                        .f64 => try buf.appendSlice(allocator, rbpStoreXmmF64(off, src).slice()),
+                        .v128 => try buf.appendSlice(allocator, rbpStoreXmmV128(off, src).slice()),
+                        .i32, .i64, .ref => unreachable,
+                    }
                 },
-                .f32 => {
-                    try buf.appendSlice(allocator, rbpStoreXmmF32(off, abi.current.arg_xmms[fp_arg_idx]).slice());
-                    fp_arg_idx += 1;
-                    if (abi.current_cc == .win64) int_arg_idx += 1;
-                },
-                .f64 => {
-                    try buf.appendSlice(allocator, rbpStoreXmmF64(off, abi.current.arg_xmms[fp_arg_idx]).slice());
-                    fp_arg_idx += 1;
-                    if (abi.current_cc == .win64) int_arg_idx += 1;
-                },
-                .v128 => {
-                    if (abi.current_cc == .win64) {
-                        // Win64 v128 hidden-pointer
-                        // marshal — register slot. Per Microsoft x64
-                        // ABI §"Parameter passing" the caller wrote
-                        // the v128 into a 16-byte aligned scratch buf
-                        // in its outgoing-args region and passed the
-                        // address in the int-arg-reg slot (RDX/R8/R9).
-                        // Load via MOVUPS xmm_tmp ← [ptr_reg] and
-                        // store to local slot.
-                        const ptr_reg = abi.current.arg_gprs[int_arg_idx];
-                        try buf.appendSlice(allocator, inst.encMovupsXmmMemBaseDisp32(false, .xmm0, ptr_reg, 0).slice());
-                        try buf.appendSlice(allocator, rbpStoreXmmV128(off, .xmm0).slice());
-                        int_arg_idx += 1;
-                        fp_arg_idx += 1;
-                    } else {
-                        // SysV co-discharge:
-                        // SysV v128 in XMM0..XMM7 direct (AMD64 ABI §3.2.3
-                        // SSE class); stack-overflow at `fp_arg_idx >= 8`
-                        // reads 16 consecutive aligned bytes from the
-                        // NSAA stream (SSE class → 2 eightbytes on stack).
-                        if (fp_arg_idx >= abi.current.arg_xmms.len) {
-                            // SysV NSAA v128 alignment: each v128 takes
-                            // 2 eightbyte slots, 16-byte aligned. Round
-                            // nsaa_idx up to even before consuming.
-                            if ((nsaa_idx & 1) != 0) nsaa_idx += 1;
-                            const r15_save_off: i32 = if (uses_runtime_ptr) 8 else 0;
-                            const stack_disp: i32 = 16 + r15_save_off + @as(i32, @intCast(nsaa_idx * 8));
+                .stack => |s| {
+                    const stack_disp: i32 = 16 + r15_save_off + @as(i32, @intCast(s));
+                    switch (ptype) {
+                        .i32 => {
+                            try buf.appendSlice(allocator, inst.encMovR32FromMemDisp32(.rax, .rbp, stack_disp).slice());
+                            try buf.appendSlice(allocator, rbpStoreR32(off, .rax).slice());
+                        },
+                        .i64, .f32, .f64, .ref => {
+                            try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.rax, .rbp, stack_disp).slice());
+                            try buf.appendSlice(allocator, rbpStoreR64(off, .rax).slice());
+                        },
+                        // SysV SSE class: 16 aligned bytes of the NSAA stream.
+                        .v128 => {
                             try buf.appendSlice(allocator, inst.encMovupsXmmMemBaseDisp32(false, .xmm0, .rbp, stack_disp).slice());
                             try buf.appendSlice(allocator, rbpStoreXmmV128(off, .xmm0).slice());
-                            nsaa_idx += 2;
-                            fp_arg_idx += 1;
-                        } else {
-                            try buf.appendSlice(allocator, rbpStoreXmmV128(off, abi.current.arg_xmms[fp_arg_idx]).slice());
-                            fp_arg_idx += 1;
-                        }
+                        },
                     }
+                },
+                // Microsoft x64 §"Parameter passing": the caller wrote the
+                // v128 to a 16-byte scratch slot and passed its address.
+                .win64_v128 => |w| {
+                    const ptr_reg: abi.Gpr = switch (w.ptr) {
+                        .gpr => |slot| abi.current.arg_gprs[slot],
+                        .stack => |s| blk: {
+                            const stack_disp: i32 = 16 + r15_save_off + @as(i32, @intCast(s));
+                            try buf.appendSlice(allocator, inst.encMovR64FromMemDisp32(.rax, .rbp, stack_disp).slice());
+                            break :blk .rax;
+                        },
+                    };
+                    try buf.appendSlice(allocator, inst.encMovupsXmmMemBaseDisp32(false, .xmm0, ptr_reg, 0).slice());
+                    try buf.appendSlice(allocator, rbpStoreXmmV128(off, .xmm0).slice());
                 },
             }
         }

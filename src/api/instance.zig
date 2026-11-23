@@ -1177,9 +1177,10 @@ fn crossModuleJitTarget(
     if (hasNonFuncConcreteHeapType(want_sig, importer_types) or hasNonFuncConcreteHeapType(src_sig, if (source_inst.export_src_types) |*t| t else null)) return error.Unsupported;
     // #390 / ADR-0228 — the bridge thunk is laid out for the callee's
     // signature, so overflow arguments and MEMORY-class results cross it. What
-    // it still does not carry is a v128 parameter: the SysV call site's own
-    // overflow rule (`computeCallOverflowBytesCc`) excludes v128, so the thunk
-    // cannot size a copy for it. Decline the shape — NULL, as `v2.6.0`
+    // it still does not carry is a v128 parameter: the thunk copies by the
+    // per-class overflow count (`computeCallOverflowBytesCc`), which leaves a
+    // SysV v128 out, while the call site places one through `abi.ArgCursor`,
+    // so the thunk cannot size a copy for it. Decline the shape — NULL, as `v2.6.0`
     // returned for every cross-module import — rather than carry it wrongly.
     // Mirrors the host-func sibling above, whose `dispatchPtrFor` declines the
     // signatures ITS bridge does not cover.
