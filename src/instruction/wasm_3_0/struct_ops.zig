@@ -220,7 +220,7 @@ fn buildInstanceForTypes(arena: *std.heap.ArenaAllocator, body: []const u8) !str
     const rt = try a.create(Runtime);
     rt.* = Runtime.init(a);
     const heap = try a.create(@import("../../feature/gc/heap.zig").Heap);
-    heap.* = @import("../../feature/gc/heap.zig").Heap.init(a);
+    heap.* = @import("../../feature/gc/heap.zig").Heap.init(a, testing.allocator);
     rt.gc_heap = heap;
 
     const inst = try a.create(Instance);

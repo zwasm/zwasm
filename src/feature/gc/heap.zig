@@ -86,6 +86,12 @@ pub const Heap = struct {
     /// append OOM'd mid-sweep (ADR-0147). Best-effort reclaim: those
     /// slots just aren't reused this cycle — never a freed live object.
     reclaim_oom_count: u32 = 0,
+    /// Allocator for a collection's transient buffers (the object-start
+    /// set, the mark work list). Every buffer allocated from it is freed
+    /// before that collection returns, so it must reclaim individual frees
+    /// — never the `parent` arena, which would keep each one. The offset of
+    /// `bytes`, which compiled code reads, is pinned by a test below.
+    scratch: Allocator,
 
     /// 4 KB grow granularity per ADR-0115 §5. Page is the slab
     /// grow unit, NOT the OS page (the slab is a sub-region of
@@ -110,8 +116,8 @@ pub const Heap = struct {
         OutOfHeap,
     };
 
-    pub fn init(parent: Allocator) Heap {
-        return .{ .parent = parent };
+    pub fn init(parent: Allocator, scratch: Allocator) Heap {
+        return .{ .parent = parent, .scratch = scratch };
     }
 
     /// Returns memory to the parent allocator. Per ADR-0014
@@ -212,15 +218,22 @@ pub const Heap = struct {
 
 const testing = std.testing;
 
+test "Heap.bytes stays at the offset JIT code reads the slab from" {
+    // The JIT emits `@offsetOf(Heap, "bytes")` into GC loads and stores, and a
+    // `.cwasm` keeps that code (#665): moving the field breaks an artifact
+    // another build produced. 16 = after `parent`, as in v2.12.1.
+    try testing.expectEqual(@as(usize, 16), @offsetOf(Heap, "bytes"));
+}
+
 test "Heap.init: empty slab, cursor at 2 (offset 0+1 reserved)" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     try testing.expectEqual(@as(usize, 0), h.bytes.len);
     try testing.expectEqual(@as(u32, 2), h.cursor);
 }
 
 test "Heap.allocate: first allocation lands at offset 2 (post-sentinel)" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     const ref = try h.allocate(16);
     try testing.expectEqual(@as(GcRef, 2), ref);
@@ -228,7 +241,7 @@ test "Heap.allocate: first allocation lands at offset 2 (post-sentinel)" {
 }
 
 test "Heap.allocate: cursor advances; never returns null_ref" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     const r0 = try h.allocate(8);
     const r1 = try h.allocate(8);
@@ -238,7 +251,7 @@ test "Heap.allocate: cursor advances; never returns null_ref" {
 }
 
 test "Heap.allocate: 2-byte alignment preserves i31 low bit (ADR-0116)" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     // Allocate an odd-size object — next ref must be even-aligned.
     _ = try h.allocate(1);
@@ -247,7 +260,7 @@ test "Heap.allocate: 2-byte alignment preserves i31 low bit (ADR-0116)" {
 }
 
 test "Heap pressure: shouldCollect arms at next_gc_at; noteCollected re-arms + counts (§15.1 chunk 1c)" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     h.pressure_bytes = 64; // shrink so a few small allocs cross it
     h.next_gc_at = 64;
@@ -271,7 +284,7 @@ test "Heap pressure: shouldCollect arms at next_gc_at; noteCollected re-arms + c
 }
 
 test "Heap free-list: exact-size reuse only; mismatched size bumps (§15.1 chunk 2)" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     const off = try h.allocate(16); // bump
     const cursor1 = h.cursor;
@@ -291,7 +304,7 @@ test "Heap free-list: exact-size reuse only; mismatched size bumps (§15.1 chunk
 }
 
 test "Heap.allocate: grow in 4 KB pages" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     _ = try h.allocate(1);
     // First grow rounds up to one page (4096 B).
@@ -302,14 +315,14 @@ test "Heap.allocate: grow in 4 KB pages" {
 }
 
 test "Heap.allocate: returns OutOfHeap when size > 4 GiB cap" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     // Past the 4 GiB cap.
     try testing.expectError(Heap.Error.OutOfHeap, h.allocate(Heap.max_size));
 }
 
 test "Heap.deinit: explicit free returns bytes to parent" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     _ = try h.allocate(8);
     try testing.expect(h.bytes.len > 0);
     h.deinit();

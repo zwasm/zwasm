@@ -1860,7 +1860,7 @@ test "jitGcAlloc: allocates struct{i32} via the *JitRuntime bridge" {
     var types = try sections.decodeTypes(testing.allocator, &body);
     defer types.deinit();
     var gti = try gc_type_info.materialiseGcTypes(a, types);
-    var heap = heap_mod.Heap.init(a);
+    var heap = heap_mod.Heap.init(a, testing.allocator);
 
     var rt: JitRuntime = std.mem.zeroes(JitRuntime);
     rt.gc_heap = &heap;
@@ -1896,7 +1896,7 @@ test "jitGcAllocArray: allocates array(mut i32) length 3 via the *JitRuntime bri
     var types = try sections.decodeTypes(testing.allocator, &body);
     defer types.deinit();
     var gti = try gc_type_info.materialiseGcTypes(a, types);
-    var heap = heap_mod.Heap.init(a);
+    var heap = heap_mod.Heap.init(a, testing.allocator);
 
     var rt: JitRuntime = std.mem.zeroes(JitRuntime);
     rt.gc_heap = &heap;
@@ -1936,7 +1936,7 @@ test "jitGcAllocArrayFill: allocates array(mut i32) len 2 filled with init" {
     var types = try sections.decodeTypes(testing.allocator, &body);
     defer types.deinit();
     var gti = try gc_type_info.materialiseGcTypes(a, types);
-    var heap = heap_mod.Heap.init(a);
+    var heap = heap_mod.Heap.init(a, testing.allocator);
 
     var rt: JitRuntime = std.mem.zeroes(JitRuntime);
     rt.gc_heap = &heap;

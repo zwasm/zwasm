@@ -692,7 +692,7 @@ pub fn setupRuntimeLinked(
                     error.UnsupportedFieldSize => return error.UnsupportedEntrySignature,
                 };
                 const heap = try gaa.create(heap_mod.Heap);
-                heap.* = heap_mod.Heap.init(gaa);
+                heap.* = heap_mod.Heap.init(gaa, ga.child_allocator);
                 gc_heap_typed = heap;
                 gc_type_infos_typed = gti;
             } else {

@@ -770,7 +770,7 @@ test "Runtime.deinit: releases gc_heap when set (10.G-foundation cycle 5)" {
     var r = Runtime.init(testing.allocator);
     // Simulate the instantiate-side gate: create + assign a heap.
     const h = try testing.allocator.create(heap_mod.Heap);
-    h.* = heap_mod.Heap.init(testing.allocator);
+    h.* = heap_mod.Heap.init(testing.allocator, testing.allocator);
     _ = try h.allocate(16); // bump cursor; ensure bytes allocated
     r.gc_heap = h;
     // Round-trip: deinit should free the slab bytes (heap.deinit)

@@ -70,7 +70,7 @@ const std = @import("std");
 const testing = std.testing;
 
 test "NullCollector.allocObject: delegates to Heap.allocate (10.G-foundation cycle 4)" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     var nc = NullCollector.init(&h);
     const c = nc.collector();
@@ -80,7 +80,7 @@ test "NullCollector.allocObject: delegates to Heap.allocate (10.G-foundation cyc
 }
 
 test "NullCollector.allocObject: cursor advances across calls" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     var nc = NullCollector.init(&h);
     const c = nc.collector();
@@ -90,7 +90,7 @@ test "NullCollector.allocObject: cursor advances across calls" {
 }
 
 test "NullCollector.allocObject: returns null on OutOfHeap (4 GiB cap)" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     var nc = NullCollector.init(&h);
     const c = nc.collector();
@@ -99,7 +99,7 @@ test "NullCollector.allocObject: returns null on OutOfHeap (4 GiB cap)" {
 }
 
 test "NullCollector.collect: no-op (safe to call against fresh heap)" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     var nc = NullCollector.init(&h);
     const c = nc.collector();
@@ -111,7 +111,7 @@ test "NullCollector.collect: no-op (safe to call against fresh heap)" {
 }
 
 test "NullCollector.walkRoots: no-op (callback never invoked)" {
-    var h = Heap.init(testing.allocator);
+    var h = Heap.init(testing.allocator, testing.allocator);
     defer h.deinit();
     var nc = NullCollector.init(&h);
     const c = nc.collector();
@@ -130,9 +130,9 @@ test "NullCollector.walkRoots: no-op (callback never invoked)" {
 test "NullCollector: vtable shape carries ctx back to impl" {
     // Round-trip check: two collectors backed by different heaps
     // produce different alloc offsets in their own backing.
-    var h1 = Heap.init(testing.allocator);
+    var h1 = Heap.init(testing.allocator, testing.allocator);
     defer h1.deinit();
-    var h2 = Heap.init(testing.allocator);
+    var h2 = Heap.init(testing.allocator, testing.allocator);
     defer h2.deinit();
 
     var nc1 = NullCollector.init(&h1);

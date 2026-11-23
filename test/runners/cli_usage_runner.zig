@@ -20,6 +20,8 @@
 //! the edge may be a `br_on_*`. `br_on_null` to a loop branches when its
 //! operand is null, with and without a fuel budget.
 //! `throw_ref` of a null exnref traps on every engine, caught or not (#745).
+//! A garbage collection marks a long chain of GC objects without recursing on
+//! the native stack, on every engine.
 //!
 //! Usage: `zig build test-cli-usage` /
 //!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>
@@ -32,7 +34,7 @@
 //!         <catch_all_to_func.wasm> <merge_moves.wasm> <merge_moves_v128.wasm>
 //!         <merge_moves_br_on.wasm> <merge_moves_br_on_null_loop.wasm>
 //!         <br_on_null_loop.wasm> <throw_ref_null.wasm> <gc_alloc_trap.wasm>
-//!         <gc_v128_array_new.wasm>`
+//!         <gc_v128_array_new.wasm> <gc_mark_deep.wasm>`
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -98,7 +100,8 @@ const Y = "<br_on_null_loop>";
 const Z = "<throw_ref_null>";
 const H = "<gc_alloc_trap>";
 const X = "<gc_v128_array_new>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X };
+const GD = "<gc_mark_deep>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X, GD };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -307,7 +310,19 @@ const rows = [_]Row{
     .{ .args = &.{ "run", "--engine", "interp", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the interpreter does not execute `v128.const`" } },
     .{ .args = &.{ "run", "--engine", "jit", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a v128 element" } },
     .{ .args = &.{ "run", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a v128 element" } },
-} ++ throw_ref_rows;
+} ++ throw_ref_rows ++ gc_mark_deep_rows;
+
+/// A long GC chain, marked end to end. Building it past the 1 MiB watermark
+/// fires a collection while the whole list is live; the mark once recursed one
+/// native frame per node, so a long enough chain overflowed the native stack and
+/// the process died on a fatal signal. Post-fix the mark uses an explicit work
+/// list, so a chain of any length marks in a bounded native depth and `run`
+/// returns its argument unchanged on every engine. (The ambient `ulimit -s`
+/// decides how long a chain the OLD mark survived, so this end-to-end row is a
+/// completion check; the stack-independent regression is the unit test in
+/// `src/feature/gc/collector_mark_sweep.zig`.)
+const gc_mark_deep_rows =
+    onEngines(&all_engines, GD, "run=100001", "100001\n");
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;

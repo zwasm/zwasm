@@ -99,9 +99,35 @@ pub const MarkSweepCollector = struct {
     /// VALIDATED object starts (see `scanNativeStackRoots`), so an
     /// interior / garbage stack word can never corrupt payload bytes.
     scan_native_stack: bool = false,
+    /// Set true when a collection cannot mark every reachable object — an
+    /// allocation failure growing `mark_work`. Reclamation is live
+    /// (ADR-0147), so an incomplete mark MUST NOT sweep: `runCollection`
+    /// frees nothing and clears the mark bits the partial mark set, the heap
+    /// grows one cycle, and the next collection retries. `runCollection`
+    /// resets it, so a collector reused for the next collection starts
+    /// complete.
+    mark_incomplete: bool = false,
+    /// Explicit mark work list — objects whose mark bit is set but whose
+    /// payload reftype slots have not been traced yet (see `markFromRoot`).
+    /// A field, not a local, so one buffer is reused across the many
+    /// per-root callbacks of a single collection; allocated from
+    /// `heap.scratch` and freed when the collection ends (`runCollection`).
+    /// Each object is pushed at most once (the mark bit guards the push),
+    /// so the length is bounded by the live object count — at most
+    /// `heap.cursor` / the minimum object size (a 0-payload struct,
+    /// `header_size` bytes), and `heap.cursor` is in turn bounded by the
+    /// 4 GiB GcRef span (`Heap.max_size`). Each entry is one 4-byte GcRef.
+    mark_work: std.ArrayList(GcRef) = .empty,
 
     pub fn init(heap: *Heap, gti: *const GcTypeInfos) MarkSweepCollector {
         return .{ .heap = heap, .gc_type_infos = gti };
+    }
+
+    /// Free the mark work list's backing buffer, for a mark that ran
+    /// without a following `collect`. Each collection driver in
+    /// `root_scope.zig` calls this when the collection returns.
+    pub fn deinit(self: *MarkSweepCollector) void {
+        self.mark_work.deinit(self.heap.scratch);
     }
 
     /// Bind a Runtime back-pointer for root enumeration. Caller
@@ -126,21 +152,54 @@ pub const MarkSweepCollector = struct {
         return self.heap.allocate(size) catch null;
     }
 
-    /// Mark single root + transitively trace payload reftype
-    /// slots (cycle 28). Idempotent: checks mark bit before
-    /// recursing so cycles terminate. Conservative scan within
-    /// each marked object — any payload slot whose declared
-    /// valtype is a heap reftype (per `isHeapReftype`) is probed
-    /// via the same filters as `tryReportRef` and recursively
-    /// marked.
+    /// Mark `ref` and every GC object transitively reachable from it,
+    /// setting each object's mark bit (cycle 28). Iterative: reachable
+    /// references are pushed onto the explicit `mark_work` list and marked
+    /// AT PUSH TIME, then traced in a loop, so the native-stack depth is
+    /// bounded regardless of the object graph's depth — a long chain of
+    /// references no longer recurses one native frame per object.
+    ///
+    /// Each object enters the work list at most once: the mark bit is set
+    /// before the push and re-checked for every candidate, so a reference
+    /// that is already marked (including a back-edge of a cycle) is never
+    /// pushed again, which is what terminates cycles. Conservative scan
+    /// within each marked object — any payload slot whose declared valtype
+    /// is a heap reftype (per `isHeapReftype`) is probed via `followSlot`'s
+    /// cheap filters and pushed. If the work list cannot grow,
+    /// `mark_incomplete` is set and the sweep is skipped (see `markAndPush`).
     pub fn markFromRoot(self: *MarkSweepCollector, ref: GcRef) void {
+        if (self.mark_incomplete) return; // an earlier walk already gave up
+        self.markAndPush(ref);
+        while (self.mark_work.pop()) |obj| self.traceObject(obj);
+    }
+
+    /// Set `ref`'s mark bit and push it onto the work list, unless it is
+    /// null, out of range, or already marked (so each object is pushed at
+    /// most once). On an allocation failure growing the list, set
+    /// `mark_incomplete` — the mark bit is already set, so the object is
+    /// retained; the collection then skips the sweep (`runCollection`),
+    /// since with live reclamation (ADR-0147) an incomplete mark must not
+    /// free a live object. Over-retains, never frees a live object.
+    fn markAndPush(self: *MarkSweepCollector, ref: GcRef) void {
         if (ref == heap_mod.null_ref) return;
         if (ref + header_size > self.heap.bytes.len) return; // defensive
         var hdr: ObjectHeader = undefined;
         @memcpy(std.mem.asBytes(&hdr)[0..header_size], self.heap.bytes[ref .. ref + header_size]);
-        if ((hdr.info & mark_bit_mask) != 0) return; // already marked → cycle break
+        if ((hdr.info & mark_bit_mask) != 0) return; // already marked → don't re-push
         hdr.info |= mark_bit_mask;
         @memcpy(self.heap.bytes[ref .. ref + header_size], std.mem.asBytes(&hdr)[0..header_size]);
+        self.mark_work.append(self.heap.scratch, ref) catch {
+            self.mark_incomplete = true; // OOM growing the work list → don't sweep
+        };
+    }
+
+    /// Trace the payload reftype slots of the already-marked object at
+    /// `ref`, pushing each referenced object onto the work list. Called
+    /// only from `markFromRoot`'s drain loop, so it never recurses.
+    fn traceObject(self: *MarkSweepCollector, ref: GcRef) void {
+        if (ref + header_size > self.heap.bytes.len) return; // defensive
+        var hdr: ObjectHeader = undefined;
+        @memcpy(std.mem.asBytes(&hdr)[0..header_size], self.heap.bytes[ref .. ref + header_size]);
         const typeidx = hdr.info & ~mark_bit_mask;
         switch (hdr.kind) {
             .struct_ => self.traceStructPayload(ref, typeidx),
@@ -173,7 +232,8 @@ pub const MarkSweepCollector = struct {
     }
 
     /// Read 8-byte payload slot, probe as GcRef per the same
-    /// filters as `tryReportRef`, recursively markFromRoot.
+    /// filters as `tryReportRef`, then mark-and-push via `markAndPush`
+    /// (no recursion — the drain loop in `markFromRoot` traces it later).
     fn followSlot(self: *MarkSweepCollector, slot_off: u32) void {
         if (slot_off + 8 > self.heap.bytes.len) return;
         var slot_bytes: [8]u8 = undefined;
@@ -183,7 +243,7 @@ pub const MarkSweepCollector = struct {
         if ((slot & 1) != 0) return;
         if (slot < heap_mod.Heap.min_align or slot >= self.heap.cursor) return;
         if ((slot % heap_mod.Heap.min_align) != 0) return;
-        self.markFromRoot(@intCast(slot));
+        self.markAndPush(@intCast(slot));
     }
 
     fn collectImpl(ctx: *anyopaque) void {
@@ -199,11 +259,17 @@ pub const MarkSweepCollector = struct {
         // Mark phase is driven externally — caller invokes
         // `walkRoots(markFromRoot, ...)` BEFORE collect().
         // collect() runs the sweep phase only.
+        //
+        // After an incomplete mark (`mark_incomplete`) the walk frees nothing
+        // and only clears the mark bits it finds. The clearing is required: a
+        // bit left set reads as "already traced" to the next collection's
+        // `markAndPush`, which would not trace what that object references.
+        const sweep = !self.mark_incomplete;
         var stats: SweepStats = .{};
         // Rebuild the reclamation free-list from scratch each sweep
         // (ADR-0147): "dead" is recomputed every cycle, so a slot the
         // mark phase conservatively retained is simply not re-added.
-        self.heap.free_list.clearRetainingCapacity();
+        if (sweep) self.heap.free_list.clearRetainingCapacity();
         var cursor: u32 = heap_mod.null_ref + heap_mod.Heap.min_align;
         // The Heap's bump cursor records the high-water mark; objects
         // exist in [min_align, heap.cursor).
@@ -222,7 +288,7 @@ pub const MarkSweepCollector = struct {
                 // Clear mark bit for next cycle.
                 hdr.info &= ~mark_bit_mask;
                 @memcpy(self.heap.bytes[cursor .. cursor + header_size], std.mem.asBytes(&hdr)[0..header_size]);
-            } else {
+            } else if (sweep) {
                 stats.dead_bytes += obj_size;
                 // Reclaim: record the dead slot for exact-size reuse
                 // (ADR-0147). External list → the slot keeps its header,
@@ -236,7 +302,9 @@ pub const MarkSweepCollector = struct {
             }
             cursor = std.mem.alignForward(u32, cursor + obj_size, heap_mod.Heap.min_align);
         }
-        self.last_stats = stats;
+        self.last_stats = if (sweep) stats else .{};
+        self.mark_incomplete = false;
+        self.mark_work.clearAndFree(self.heap.scratch);
     }
 
     /// Decode the byte size of the object at `off` whose header
@@ -426,7 +494,7 @@ fn buildArenaedHeap(arena: *std.heap.ArenaAllocator, body: []const u8) !struct {
     defer types.deinit();
     const gti = try type_info_mod.materialiseGcTypes(a, types);
     const heap = try a.create(Heap);
-    heap.* = Heap.init(a);
+    heap.* = Heap.init(a, testing.allocator);
     return .{ .heap = heap, .gti = gti };
 }
 
@@ -488,6 +556,7 @@ test "MarkSweepCollector: native-stack scan marks a stack-held GcRef only when e
     const env = try buildArenaedHeap(&arena, &body);
 
     var c = MarkSweepCollector.init(env.heap, &env.gti);
+    defer c.deinit();
     const sz: u32 = header_size + 8;
     // Padding objects push the target's offset higher (less likely to
     // collide with an unrelated stack word) and exercise the heap walk
@@ -852,7 +921,7 @@ test "MarkSweepCollector: cycle in struct refs terminates (10.G op_gc cycle 28)"
     @memcpy(env.heap.bytes[b_ref + header_size .. b_ref + header_size + 8], &slot_b);
 
     var c = MarkSweepCollector.init(env.heap, &env.gti);
-    c.markFromRoot(a_ref); // would recurse forever without cycle break
+    c.markFromRoot(a_ref); // would loop forever without the mark-bit push guard
     c.collector().collect();
 
     try testing.expectEqual(@as(u32, 2), c.last_stats.objects_seen);
@@ -891,4 +960,87 @@ test "MarkSweepCollector: i32 field NOT traced as reftype (10.G op_gc cycle 28)"
     try testing.expectEqual(@as(u32, 2), c.last_stats.objects_seen);
     try testing.expectEqual(@as(u32, 1), c.last_stats.survivors);
     try testing.expectEqual(sz, c.last_stats.dead_bytes);
+}
+
+test "MarkSweepCollector: a mark the work list cannot finish frees nothing and leaves no mark bit set" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // struct { anyref } — refs[2] holds refs[1], which holds refs[0].
+    const body = [_]u8{ 0x01, 0x5F, 0x01, 0x6E, 0x01 };
+    const env = try buildArenaedHeap(&arena, &body);
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    env.heap.scratch = failing.allocator();
+
+    const sz: u32 = header_size + 8;
+    var refs: [3]GcRef = undefined;
+    var prev: GcRef = heap_mod.null_ref;
+    for (&refs) |*r| {
+        r.* = try env.heap.allocate(sz);
+        const hdr: ObjectHeader = .{ .kind = .struct_, .info = 0 };
+        @memcpy(env.heap.bytes[r.* .. r.* + header_size], std.mem.asBytes(&hdr)[0..header_size]);
+        var slot: [8]u8 = undefined;
+        std.mem.writeInt(u64, &slot, @as(u64, prev), .little);
+        @memcpy(env.heap.bytes[r.* + header_size .. r.* + header_size + 8], &slot);
+        prev = r.*;
+    }
+
+    // The work list's first allocation fails: the head is marked, nothing traced.
+    failing.fail_index = failing.alloc_index;
+    var c = MarkSweepCollector.init(env.heap, &env.gti);
+    c.markFromRoot(refs[2]);
+    try testing.expect(c.mark_incomplete);
+    c.collector().collect();
+    // refs[0] and refs[1] are unmarked but live: no slot may be reused.
+    try testing.expectEqual(@as(usize, 0), env.heap.free_list.items.len);
+    for (refs) |r| try testing.expect(!headerIsMarked(env.heap, r));
+
+    // So the next collection, on the same collector, traces the whole chain,
+    // not stopping at a header still marked from the incomplete one.
+    failing.fail_index = std.math.maxInt(usize);
+    c.markFromRoot(refs[2]);
+    c.collector().collect();
+    try testing.expectEqual(@as(u32, 3), c.last_stats.survivors);
+}
+
+test "MarkSweepCollector: marking a long chain does not recurse on the native stack" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // struct { anyref } — one reftype field, so a node links to the next.
+    const body = [_]u8{ 0x01, 0x5F, 0x01, 0x6E, 0x01 };
+    const env = try buildArenaedHeap(&arena, &body);
+
+    const n: u32 = 50000;
+    const sz: u32 = header_size + 8;
+    var prev: u32 = heap_mod.null_ref; // first node's field 0 is null
+    var head: u32 = heap_mod.null_ref;
+    var k: u32 = 0;
+    while (k < n) : (k += 1) {
+        const ref = try env.heap.allocate(sz);
+        const hdr: ObjectHeader = .{ .kind = .struct_, .info = 0 };
+        @memcpy(env.heap.bytes[ref .. ref + header_size], std.mem.asBytes(&hdr)[0..header_size]);
+        var slot: [8]u8 = undefined;
+        std.mem.writeInt(u64, &slot, @as(u64, prev), .little);
+        @memcpy(env.heap.bytes[ref + header_size .. ref + header_size + 8], &slot);
+        prev = ref;
+        head = ref;
+    }
+
+    var c = MarkSweepCollector.init(env.heap, &env.gti);
+    const Ctx = struct { c: *MarkSweepCollector, head: GcRef };
+    var ctx = Ctx{ .c = &c, .head = head };
+    const Run = struct {
+        fn go(x: *Ctx) void {
+            x.c.markFromRoot(x.head);
+        }
+    };
+    // A pinned 1 MiB stack: a recursive mark (≥3 native frames per node, so
+    // ≥3 MiB for n here) overflows it regardless of the process's `ulimit -s`;
+    // the iterative mark marks all n nodes in O(1) native frames. 1 MiB clears
+    // the test binary's static-TLS floor on every supported host.
+    const t = try std.Thread.spawn(.{ .stack_size = 1024 * 1024 }, Run.go, .{&ctx});
+    t.join();
+
+    c.collector().collect();
+    try testing.expectEqual(n, c.last_stats.objects_seen);
+    try testing.expectEqual(n, c.last_stats.survivors);
 }

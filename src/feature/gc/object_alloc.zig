@@ -74,7 +74,7 @@ const testing = std.testing;
 test "allocStructObject: stamps struct_ header + zero-inits payload over poison" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var heap = Heap.init(arena.allocator());
+    var heap = Heap.init(arena.allocator(), testing.allocator);
     // Grow the slab, then poison the whole buffer so the zero-init
     // has something non-zero to overwrite (newly-grown pages are
     // already zero, which would not exercise the @memset).
@@ -97,7 +97,7 @@ test "allocStructObject: stamps struct_ header + zero-inits payload over poison"
 test "allocArrayObject: stamps array header (kind+typeidx+length) + zero-inits payload over poison" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var heap = Heap.init(arena.allocator());
+    var heap = Heap.init(arena.allocator(), testing.allocator);
     _ = try heap.allocate(128);
     @memset(heap.bytes, 0xAA);
 
@@ -125,7 +125,7 @@ test "allocArrayObject: stamps array header (kind+typeidx+length) + zero-inits p
 test "allocStructObject: zero_init=false leaves payload untouched" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var heap = Heap.init(arena.allocator());
+    var heap = Heap.init(arena.allocator(), testing.allocator);
     _ = try heap.allocate(64);
     @memset(heap.bytes, 0xAA);
 

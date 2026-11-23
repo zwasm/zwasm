@@ -81,10 +81,11 @@ pub const RootScope = struct {
 };
 
 /// Drive a GC collection iff the heap has crossed its pressure
-/// watermark (§15.1 chunk 1c / ADR-0146). `MarkSweepCollector` is
-/// stateless (heap + gti + output stats), so it is built transiently
-/// here rather than stored on the Runtime — no persistent collector
-/// field, no import cycle. The conservative native-stack scan is
+/// watermark (§15.1 chunk 1c / ADR-0146). `MarkSweepCollector` keeps
+/// no state across collections, so it is built here for one collection
+/// and `deinit`ed after it rather than stored on the Runtime — no
+/// persistent collector field, no import cycle. The conservative
+/// native-stack scan is
 /// ENABLED (`scan_native_stack`): a JIT frame may hold the only
 /// reference to an object the interp is mid-constructing, invisible
 /// to the operand-stack walk. No reclamation yet (ADR-0135 interim),
@@ -100,6 +101,7 @@ pub fn maybeCollect(
 ) void {
     if (!heap.shouldCollect()) return;
     var coll = ms_mod.MarkSweepCollector.init(heap, gti);
+    defer coll.deinit();
     coll.bindRuntime(rt);
     coll.scan_native_stack = true;
     var empty_buf: [0]u8 = undefined;
@@ -125,6 +127,7 @@ pub fn maybeCollectJit(
 ) void {
     if (!heap.shouldCollect()) return;
     var coll = ms_mod.MarkSweepCollector.init(heap, gti);
+    defer coll.deinit();
     coll.scan_native_stack = true; // conservative-only; no bindRuntime (ADR-0160)
     const c = coll.collector();
     c.walkRoots(markCallbackJit, @ptrCast(&coll));
@@ -172,7 +175,7 @@ fn buildEnv(arena: *std.heap.ArenaAllocator, body: []const u8) !struct {
     defer types.deinit();
     const gti = try type_info_mod.materialiseGcTypes(a, types);
     const heap = try a.create(heap_mod.Heap);
-    heap.* = heap_mod.Heap.init(a);
+    heap.* = heap_mod.Heap.init(a, testing.allocator);
     const rt = try a.create(runtime_mod.Runtime);
     rt.* = runtime_mod.Runtime.init(a);
     return .{ .rt = rt, .heap = heap, .gti = gti };
