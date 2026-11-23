@@ -84,13 +84,14 @@ pub const RootScope = struct {
 /// watermark (§15.1 chunk 1c / ADR-0146). `MarkSweepCollector` keeps
 /// no state across collections, so it is built here for one collection
 /// and `deinit`ed after it rather than stored on the Runtime — no
-/// persistent collector field, no import cycle. The conservative
-/// native-stack scan is
-/// ENABLED (`scan_native_stack`): a JIT frame may hold the only
-/// reference to an object the interp is mid-constructing, invisible
-/// to the operand-stack walk. No reclamation yet (ADR-0135 interim),
-/// so a mis-fire here cannot UAF — the only effect is `gc_cycles` +
-/// sweep stats advancing. The transient scope's extra-roots list
+/// persistent collector field, no import cycle. Reclamation is live
+/// (ADR-0147), so the roots reported here must be complete: an object
+/// the walk misses is freed. The conservative native-stack scan is enabled
+/// (`scan_native_stack`) because a JIT frame may hold the only
+/// reference to an object the interpreter is constructing. The walk
+/// reports only real object starts (see `walkRootsImpl` /
+/// `scanNativeStackRoots`), so a false root over-retains and never
+/// writes into an object. The transient scope's extra-roots list
 /// stays empty on this path (interp roots only), so a zero-size
 /// `FixedBufferAllocator` backs it — it is never actually allocated
 /// from, which keeps the alloc handlers from needing an allocator.
@@ -277,4 +278,38 @@ test "maybeCollect: fires a collection only under heap pressure; counts the cycl
     maybeCollect(env.heap, &env.gti, env.rt);
     try testing.expectEqual(@as(u32, 1), env.heap.gc_cycles);
     try testing.expect(!env.heap.shouldCollect());
+}
+
+test "maybeCollect: a collection of a live heap allocates nothing from the heap's parent" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // struct { anyref } — each node links to the previous one.
+    const body = [_]u8{ 0x01, 0x5F, 0x01, 0x6E, 0x01 };
+    const env = try buildEnv(&arena, &body);
+
+    const header_size: u32 = @sizeOf(type_info_mod.ObjectHeader);
+    var prev: GcRef = heap_mod.null_ref;
+    var k: u32 = 0;
+    while (k < 64) : (k += 1) {
+        const ref = try env.heap.allocate(header_size + 8);
+        const hdr: type_info_mod.ObjectHeader = .{ .kind = .struct_, .info = 0 };
+        @memcpy(env.heap.bytes[ref .. ref + header_size], std.mem.asBytes(&hdr)[0..header_size]);
+        var slot: [8]u8 = undefined;
+        std.mem.writeInt(u64, &slot, @as(u64, prev), .little);
+        @memcpy(env.heap.bytes[ref + header_size .. ref + header_size + 8], &slot);
+        prev = ref;
+    }
+    try env.rt.pushOperand(.{ .ref = @as(u64, prev) });
+
+    // The parent is the long-lived arena: a buffer a collection allocates
+    // there is never reclaimed. No object is dead, so the sweep adds no slot.
+    var counting = std.testing.FailingAllocator.init(arena.allocator(), .{});
+    env.heap.parent = counting.allocator();
+    var cycle: u32 = 0;
+    while (cycle < 4) : (cycle += 1) {
+        env.heap.next_gc_at = 0;
+        maybeCollect(env.heap, &env.gti, env.rt);
+        try testing.expectEqual(cycle + 1, env.heap.gc_cycles);
+        try testing.expectEqual(@as(usize, 0), counting.allocations);
+    }
 }

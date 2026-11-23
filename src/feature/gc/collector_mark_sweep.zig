@@ -100,12 +100,12 @@ pub const MarkSweepCollector = struct {
     /// interior / garbage stack word can never corrupt payload bytes.
     scan_native_stack: bool = false,
     /// Set true when a collection cannot mark every reachable object — an
-    /// allocation failure growing `mark_work`. Reclamation is live
-    /// (ADR-0147), so an incomplete mark MUST NOT sweep: `runCollection`
-    /// frees nothing and clears the mark bits the partial mark set, the heap
-    /// grows one cycle, and the next collection retries. `runCollection`
-    /// resets it, so a collector reused for the next collection starts
-    /// complete.
+    /// allocation failure building the start set or growing `mark_work`, or
+    /// an undecodable header. Reclamation is live (ADR-0147), so an incomplete
+    /// mark MUST NOT sweep: `runCollection` frees nothing and clears the mark
+    /// bits the partial mark set, the heap grows one cycle, and the next
+    /// collection retries. `runCollection` resets it, so a collector reused
+    /// for the next collection starts complete.
     mark_incomplete: bool = false,
     /// Explicit mark work list — objects whose mark bit is set but whose
     /// payload reftype slots have not been traced yet (see `markFromRoot`).
@@ -231,9 +231,12 @@ pub const MarkSweepCollector = struct {
         }
     }
 
-    /// Read 8-byte payload slot, probe as GcRef per the same
-    /// filters as `tryReportRef`, then mark-and-push via `markAndPush`
-    /// (no recursion — the drain loop in `markFromRoot` traces it later).
+    /// Read 8-byte payload slot, probe as GcRef per cheap filters
+    /// (non-null, low-bit-0, in [min_align, cursor), aligned), then
+    /// mark-and-push via `markAndPush` (no recursion — the drain loop
+    /// in `markFromRoot` traces it later). This path follows a DECLARED
+    /// reftype slot, whose value is a real GcRef or null, so it is
+    /// not start-checked like the conservative root walk.
     fn followSlot(self: *MarkSweepCollector, slot_off: u32) void {
         if (slot_off + 8 > self.heap.bytes.len) return;
         var slot_bytes: [8]u8 = undefined;
@@ -249,6 +252,36 @@ pub const MarkSweepCollector = struct {
     fn collectImpl(ctx: *anyopaque) void {
         const self: *MarkSweepCollector = @ptrCast(@alignCast(ctx));
         self.runCollection();
+    }
+
+    /// Enumerate the real object starts in ascending offset order — one
+    /// bump-heap walk (the heap emits objects sorted, so the result is sorted
+    /// for `markIfObjectStart`'s binary search). This is the conservative root
+    /// set BOTH the native-stack scan and the operand/locals/globals walk
+    /// validate against: a value reported as a root must equal one of these,
+    /// never an object interior. On an undecodable header or an allocation
+    /// failure the walk stops and sets `mark_incomplete`, so `runCollection`
+    /// skips the sweep rather than free on an incomplete mark (ADR-0147).
+    fn collectObjectStarts(self: *MarkSweepCollector, out: *std.ArrayList(GcRef)) void {
+        const cursor = self.heap.cursor;
+        if (cursor <= heap_mod.Heap.min_align) return; // empty heap
+        var off: u32 = heap_mod.null_ref + heap_mod.Heap.min_align;
+        while (off < cursor) {
+            if (off + header_size > self.heap.bytes.len) break;
+            var hdr: ObjectHeader = undefined;
+            @memcpy(std.mem.asBytes(&hdr)[0..header_size], self.heap.bytes[off .. off + header_size]);
+            const typeidx = hdr.info & ~mark_bit_mask;
+            const obj_size = self.objectSizeAt(off, hdr, typeidx);
+            if (obj_size == 0) {
+                self.mark_incomplete = true; // undecodable header → don't sweep
+                return;
+            }
+            out.append(self.heap.scratch, off) catch {
+                self.mark_incomplete = true; // OOM building the start set → don't sweep
+                return;
+            };
+            off = std.mem.alignForward(u32, off + obj_size, heap_mod.Heap.min_align);
+        }
     }
 
     /// Walks the heap from `null_ref + 2` (the lowest possible
@@ -327,51 +360,60 @@ pub const MarkSweepCollector = struct {
         };
     }
 
-    /// Conservative root walker (cycle 27). Enumerates Runtime's
-    /// operand stack + per-frame locals + globals; for each
-    /// Value slot tests whether `v.ref` looks like a valid GcRef
-    /// (within heap range, 2-byte aligned, non-null, low-bit-0
-    /// meaning not i31-tagged per ADR-0116 §6). Calls the user
-    /// callback per probable GcRef.
+    /// Conservative root walker (cycle 27). Builds the live object-start
+    /// set once, then enumerates Runtime's operand stack + per-frame locals
+    /// + globals; a `Value` slot is reported as a root only when `v.ref`
+    /// EQUALS a real object start (via `markIfObjectStart`), the same check
+    /// the native-stack scan applies. A non-start in-range value — an i32 /
+    /// i64 a guest placed in a slot — is not reported, so `markFromRoot`
+    /// never sets a mark bit inside an object or traces its bytes as a header.
     ///
-    /// **Conservative**: an i32 / f32 / i64 value that happens
-    /// to fall in the heap-offset range with the right alignment
-    /// will be conservatively treated as a root, keeping the
-    /// referenced object alive. False-positive marks are
-    /// acceptable per ADR-0116 §1 (precise tracing requires per-
-    /// slot type tracking which the validator drops at runtime).
+    /// **Conservative**: a non-pointer integer that happens to equal a live
+    /// object's start is still treated as a root, keeping that object alive.
+    /// Such a false positive over-retains but never corrupts, acceptable per
+    /// ADR-0116 §1 (precise tracing needs per-slot type tracking the
+    /// validator drops at runtime).
     ///
-    /// Returns silently if `bindRuntime` wasn't called (cycle-26
-    /// β tests exercise sweep-without-roots; preserve that path).
+    /// Returns silently if neither `scan_native_stack` nor a bound Runtime
+    /// gives it roots (cycle-26 β tests exercise sweep-without-roots).
     fn walkRootsImpl(ctx: *anyopaque, root_callback: RootCallback, root_ctx: *anyopaque) void {
         const self: *MarkSweepCollector = @ptrCast(@alignCast(ctx));
+        if (!self.scan_native_stack and self.runtime == null) return;
 
-        // Conservative native-stack scan FIRST — runtime-independent so
-        // it covers JIT frames (which hold GcRefs the interp walk below
-        // cannot see) and runs even when no Runtime is bound.
-        if (self.scan_native_stack) self.scanNativeStackRoots(root_callback, root_ctx);
+        // The conservative root set BOTH walks validate against: the real
+        // object starts, ascending. A value reported as a root but not equal to
+        // a start would, through `markFromRoot`, set a mark bit inside an object
+        // and trace its raw bytes as a header. The native-stack scan has always
+        // rejected non-starts (`markIfObjectStart`); the operand/locals/globals
+        // walk below now does the same against the same set, built once here.
+        var starts = std.ArrayList(GcRef).empty;
+        defer starts.deinit(self.heap.scratch);
+        self.collectObjectStarts(&starts);
+
+        // Conservative native-stack scan FIRST — runtime-independent so it
+        // covers JIT frames (which hold GcRefs the interp walk cannot see) and
+        // runs even when no Runtime is bound.
+        if (self.scan_native_stack) scanNativeStackRoots(starts.items, root_callback, root_ctx);
 
         const rt_opaque = self.runtime orelse return;
         const rt = @as(*runtime_mod.Runtime, @ptrCast(@alignCast(rt_opaque)));
-        const heap_lo: u64 = heap_mod.Heap.min_align;
-        const heap_hi: u64 = self.heap.cursor;
 
         // Operand stack.
         var i: u32 = 0;
         while (i < rt.operand_len) : (i += 1) {
-            tryReportRef(rt.operand_buf[i], heap_lo, heap_hi, root_callback, root_ctx);
+            markIfObjectStart(rt.operand_buf[i].ref, starts.items, root_callback, root_ctx);
         }
         // Per-frame locals.
         var f: u32 = 0;
         while (f < rt.frame_len) : (f += 1) {
             for (rt.frameAt(f).locals) |v| {
-                tryReportRef(v, heap_lo, heap_hi, root_callback, root_ctx);
+                markIfObjectStart(v.ref, starts.items, root_callback, root_ctx);
             }
         }
         // Globals (pointers to slots in globals_storage OR
         // imported globals).
         for (rt.globals) |gptr| {
-            tryReportRef(gptr.*, heap_lo, heap_hi, root_callback, root_ctx);
+            markIfObjectStart(gptr.*.ref, starts.items, root_callback, root_ctx);
         }
     }
 
@@ -379,40 +421,20 @@ pub const MarkSweepCollector = struct {
     /// non-moving collector that may run while a JIT frame is live must
     /// treat the native call stack as a root set: a GcRef can sit only
     /// in a callee-saved register spilled to the stack, invisible to the
-    /// interp walk above. JSC-Riptide-style conservative scan — NOT
-    /// precise stack maps (ADR-0128 §2: non-moving needs only this).
+    /// interp walk. JSC-Riptide-style conservative scan — NOT precise
+    /// stack maps (ADR-0128 §2: non-moving needs only this).
     ///
     /// Correctness: `markFromRoot` sets the mark bit + traces payload
     /// UNCONDITIONALLY, so marking an interior pointer or a garbage
     /// look-alike would corrupt payload bytes / panic on a bogus
-    /// ObjectKind. So we first enumerate the REAL object starts (one
-    /// ascending heap walk), then mark only stack words that exactly
-    /// equal a real start. False positives (a non-pointer integer equal
-    /// to a live object's offset) over-retain but never corrupt, per
-    /// ADR-0116 §1.
-    fn scanNativeStackRoots(self: *MarkSweepCollector, cb: RootCallback, cb_ctx: *anyopaque) void {
+    /// ObjectKind. So it marks only stack words that exactly equal a real
+    /// object start in `starts` (enumerated once by the caller). False
+    /// positives (a non-pointer integer equal to a live object's offset)
+    /// over-retain but never corrupt, per ADR-0116 §1.
+    fn scanNativeStackRoots(starts: []const GcRef, cb: RootCallback, cb_ctx: *anyopaque) void {
+        if (starts.len == 0) return;
         const high = stack_limit.nativeStackHigh();
         if (high == 0) return; // platform probe disabled/failed → skip (interp roots still ran)
-        const cursor = self.heap.cursor;
-        if (cursor <= heap_mod.Heap.min_align) return; // empty heap
-
-        // Real object starts in ascending offset order (the bump heap
-        // emits them sorted → no explicit sort before the binary search
-        // below). Bounded by object count, not stack depth.
-        var starts = std.ArrayList(GcRef).empty;
-        defer starts.deinit(self.heap.parent);
-        var off: u32 = heap_mod.null_ref + heap_mod.Heap.min_align;
-        while (off < cursor) {
-            if (off + header_size > self.heap.bytes.len) break;
-            var hdr: ObjectHeader = undefined;
-            @memcpy(std.mem.asBytes(&hdr)[0..header_size], self.heap.bytes[off .. off + header_size]);
-            const typeidx = hdr.info & ~mark_bit_mask;
-            const obj_size = self.objectSizeAt(off, hdr, typeidx);
-            if (obj_size == 0) return; // undecodable header → abort scan (no partial marking)
-            starts.append(self.heap.parent, off) catch return; // OOM mid-GC → skip (interp roots ran)
-            off = std.mem.alignForward(u32, off + obj_size, heap_mod.Heap.min_align);
-        }
-        if (starts.items.len == 0) return;
 
         // Walk the native stack word-aligned from this frame up to the
         // thread's stack base; mark any word naming a real object start.
@@ -422,8 +444,8 @@ pub const MarkSweepCollector = struct {
         var addr: usize = std.mem.alignForward(usize, @frameAddress(), @alignOf(usize));
         while (addr + word_size <= high) : (addr += word_size) {
             const word = @as(*const usize, @ptrFromInt(addr)).*;
-            markIfObjectStart(@as(u64, word), starts.items, cb, cb_ctx);
-            if (word_size > 4) markIfObjectStart(@as(u64, word & 0xFFFF_FFFF), starts.items, cb, cb_ctx);
+            markIfObjectStart(@as(u64, word), starts, cb, cb_ctx);
+            if (word_size > 4) markIfObjectStart(@as(u64, word & 0xFFFF_FFFF), starts, cb, cb_ctx);
         }
     }
 
@@ -464,18 +486,6 @@ fn isHeapReftype(valtype_byte: u8) bool {
         0x6A => true, // arrayref
         else => false, // numeric / v128 / externref / i31ref / typed refs
     };
-}
-
-fn tryReportRef(v: runtime_mod.Value, heap_lo: u64, heap_hi: u64, cb: RootCallback, cb_ctx: *anyopaque) void {
-    const r = v.ref;
-    // Quick rejects: null, i31-tagged (low bit 1), out of range,
-    // unaligned. Each preserves the §6 invariant: heap pointers
-    // have low bit 0 and live in [min_align, cursor).
-    if (r == 0) return;
-    if ((r & 1) != 0) return; // i31-tagged
-    if (r < heap_lo or r >= heap_hi) return;
-    if ((r % heap_mod.Heap.min_align) != 0) return;
-    cb(cb_ctx, @intCast(r));
 }
 
 // ============================================================
@@ -769,6 +779,52 @@ test "MarkSweepCollector.walkRoots: filters i31-tagged + null + out-of-range (10
     try rt.pushOperand(.{ .ref = 0 }); // null
     try rt.pushOperand(.{ .ref = 0x4242_4243 }); // odd → i31-tagged
     try rt.pushOperand(.{ .ref = 0xDEAD_BEEF_DEAD_BEEF }); // way out of range
+
+    var c = MarkSweepCollector.init(env.heap, &env.gti);
+    c.bindRuntime(@ptrCast(rt));
+
+    const Collected = struct {
+        var seen: [16]GcRef = undefined;
+        var seen_len: usize = 0;
+        fn cb(_: *anyopaque, ref: GcRef) void {
+            if (seen_len < seen.len) {
+                seen[seen_len] = ref;
+                seen_len += 1;
+            }
+        }
+    };
+    Collected.seen_len = 0;
+    c.collector().walkRoots(Collected.cb, @ptrCast(rt));
+    try testing.expectEqual(@as(usize, 1), Collected.seen_len);
+    try testing.expectEqual(ref1, Collected.seen[0]);
+}
+
+test "MarkSweepCollector.walkRoots: an even in-range value that is not an object start is not reported" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const body = [_]u8{ 0x01, 0x5F, 0x01, 0x7F, 0x01 };
+    const env = try buildArenaedHeap(&arena, &body);
+    const a = arena.allocator();
+    const rt = try a.create(runtime_mod.Runtime);
+    rt.* = runtime_mod.Runtime.init(a);
+
+    // Two live objects so an interior offset is in range and 2-aligned.
+    const sz: u32 = header_size + 8;
+    const ref1 = try env.heap.allocate(sz);
+    const hdr1: ObjectHeader = .{ .kind = .struct_, .info = 0 };
+    @memcpy(env.heap.bytes[ref1 .. ref1 + header_size], std.mem.asBytes(&hdr1)[0..header_size]);
+    const ref2 = try env.heap.allocate(sz);
+    const hdr2: ObjectHeader = .{ .kind = .struct_, .info = 0 };
+    @memcpy(env.heap.bytes[ref2 .. ref2 + header_size], std.mem.asBytes(&hdr2)[0..header_size]);
+
+    // A real root plus two offsets that pass the cheap filters
+    // (even, in [min_align, cursor), 2-aligned) but are NOT object starts: the
+    // middle of ref1's header and ref1's payload start. The operand walk must
+    // filter them exactly as the native-stack scan does (markIfObjectStart),
+    // so marking never writes into an object interior.
+    try rt.pushOperand(.{ .ref = @as(u64, ref1) });
+    try rt.pushOperand(.{ .ref = @as(u64, ref1) + 2 });
+    try rt.pushOperand(.{ .ref = @as(u64, ref1) + header_size });
 
     var c = MarkSweepCollector.init(env.heap, &env.gti);
     c.bindRuntime(@ptrCast(rt));
