@@ -20,6 +20,11 @@
 //! the edge may be a `br_on_*`. `br_on_null` to a loop branches when its
 //! operand is null, with and without a fuel budget.
 //! `throw_ref` of a null exnref traps on every engine, caught or not (#745).
+//! A garbage collection marks a value only when it is a real object start, so an
+//! even in-range integer a guest holds no longer corrupts an object; the default
+//! engine falls back to the interpreter for a module the JIT declines.
+//! A garbage collection marks a long chain of GC objects without recursing on
+//! the native stack, on every engine.
 //!
 //! Usage: `zig build test-cli-usage` /
 //!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>
@@ -32,7 +37,8 @@
 //!         <catch_all_to_func.wasm> <merge_moves.wasm> <merge_moves_v128.wasm>
 //!         <merge_moves_br_on.wasm> <merge_moves_br_on_null_loop.wasm>
 //!         <br_on_null_loop.wasm> <throw_ref_null.wasm> <gc_alloc_trap.wasm>
-//!         <gc_v128_array_new.wasm>`
+//!         <gc_v128_array_new.wasm> <gc_root_struct.wasm> <gc_root_array.wasm>
+//!         <gc_root_ordinary.wasm> <gc_root_auto.wasm> <gc_mark_deep.wasm>`
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -98,7 +104,12 @@ const Y = "<br_on_null_loop>";
 const Z = "<throw_ref_null>";
 const H = "<gc_alloc_trap>";
 const X = "<gc_v128_array_new>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X };
+const GS = "<gc_root_struct>";
+const GA = "<gc_root_array>";
+const GO = "<gc_root_ordinary>";
+const GU = "<gc_root_auto>";
+const GD = "<gc_mark_deep>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X, GS, GA, GO, GU, GD };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -307,7 +318,42 @@ const rows = [_]Row{
     .{ .args = &.{ "run", "--engine", "interp", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the interpreter does not execute `v128.const`" } },
     .{ .args = &.{ "run", "--engine", "jit", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a v128 element" } },
     .{ .args = &.{ "run", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a v128 element" } },
-} ++ throw_ref_rows;
+} ++ throw_ref_rows ++ gc_root_rows ++ gc_mark_deep_rows;
+
+/// The GC conservative-root defect, reproduced end to end. The interpreter once
+/// marked an even in-range integer that was not an object start, flipping a
+/// field, corrupting an array length, or aborting on a bogus kind byte, and a
+/// plain GC program could sum wrong once its heap passed 1 MiB. The JIT already
+/// checked object starts, so its rows were always green; the default `auto`
+/// engine reaches the defect only for `gc_root_auto`, whose >256 MiB memory the
+/// JIT declines, so it runs the interpreter. Post-fix only a real object start
+/// is marked, so each run returns the uncorrupted value on every engine.
+const gc_root_rows =
+    onEngines(&all_engines, GS, "run=9,0", "0\n") ++ // control: an odd plant is never a root
+    onEngines(&all_engines, GS, "run=10,0", "0\n") ++ // an even interior offset no longer flips field 0
+    onEngines(&all_engines, GS, "run=10,5", "5\n") ++ // ... and no longer aborts on a bogus kind byte
+    onEngines(&all_engines, GA, "len=6", "1\n") ++ // ... and no longer corrupts an array length
+    onEngines(&all_engines, GO, "run=44000,1", "967978000\n") ++ // an ordinary GC program sums exactly
+    [_]Row{
+        // A module reaches the defect with its own bytes alone: no flag, no
+        // argument. The default engine runs the interpreter here because the
+        // JIT declines the >256 MiB memory (#489); `--engine jit` is refused.
+        .{ .args = &.{ "run", GU }, .exit = 0, .stdout = .{ .is = "" } },
+        .{ .args = &.{ "run", "--engine", "interp", GU }, .exit = 0, .stdout = .{ .is = "" } },
+        .{ .args = &.{ "run", "--engine", "jit", GU }, .exit = 1, .stderr = .{ .has = "UnsupportedEntrySignature" } },
+    };
+
+/// A long GC chain, marked end to end. Building it past the 1 MiB watermark
+/// fires a collection while the whole list is live; the mark once recursed one
+/// native frame per node, so a long enough chain overflowed the native stack and
+/// the process died on a fatal signal. Post-fix the mark uses an explicit work
+/// list, so a chain of any length marks in a bounded native depth and `run`
+/// returns its argument unchanged on every engine. (The ambient `ulimit -s`
+/// decides how long a chain the OLD mark survived, so this end-to-end row is a
+/// completion check; the stack-independent regression is the unit test in
+/// `src/feature/gc/collector_mark_sweep.zig`.)
+const gc_mark_deep_rows =
+    onEngines(&all_engines, GD, "run=100001", "100001\n");
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;

@@ -1047,7 +1047,7 @@ pub fn instantiateRuntime(
     // ADR-0115 §1: zero overhead when false.
     if (module.needs_gc_heap) {
         const h = try a.create(heap_mod.Heap);
-        h.* = heap_mod.Heap.init(a);
+        h.* = heap_mod.Heap.init(a, inst.arena.?.child_allocator);
         rt.gc_heap = h;
     }
 
