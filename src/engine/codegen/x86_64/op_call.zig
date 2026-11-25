@@ -41,29 +41,6 @@ const op_control = @import("op_control.zig");
 const canonical_type = @import("../shared/canonical_type.zig");
 const func_mod = @import("../../../runtime/instance/func.zig");
 
-/// Helper: per-call v128-scratch base for Win64.
-/// Returns the [RSP + N] offset where the first 16-byte v128
-/// scratch slot lives in the caller's outgoing-args region.
-/// Must agree with `emit.zig:computeOutgoingMaxBytes` Win64
-/// branch. Mirror of cranelift's prologue-time
-/// `ABIArg::ImplicitPtrArg` offset finalisation
-/// (cranelift `cranelift/codegen/src/isa/x64/abi.rs:383-395`).
-fn win64V128ScratchBase(callee_sig: zir.FuncType) u32 {
-    var n_int: u32 = 0;
-    var n_fp: u32 = 0;
-    var n_v128: u32 = 0;
-    for (callee_sig.params) |p| switch (p) {
-        .i32, .i64 => n_int += 1,
-        .f32, .f64 => n_fp += 1,
-        .v128 => n_v128 += 1,
-        .ref => {},
-    };
-    const n_total = n_int + n_v128 + n_fp;
-    const n_overflow: u32 = if (n_total > 3) n_total - 3 else 0;
-    const shadow_and_overflow = abi.current.shadow_space_bytes + n_overflow * 8;
-    return (shadow_and_overflow + 15) & ~@as(u32, 15);
-}
-
 const Allocator = std.mem.Allocator;
 const Error = types.Error;
 const CallFixup = types.CallFixup;
@@ -192,18 +169,18 @@ pub fn emitCallIndirectCtx(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) Erro
 /// **Scope**: i32 args + i32 / void return only. f32/f64/i64
 /// args + return surface as UnsupportedOp (lifted alongside
 /// 7.7-fp / globals i64 chunks).
-/// ADR-0228 — bytes of overflow (stack) arguments this call writes under
-/// `cc`, i.e. the region `marshalCallArgs` fills at `[RSP + shadow ..]` and the
-/// callee reads back at `[RBP + 16 + r15_save + shadow ..]` (`emit.zig`). One
-/// 8-byte word per overflowed scalar. The convention is a parameter so the
-/// bridge thunk can be checked for Win64 from a SysV host (`thunk.zig`);
-/// production callers go through `computeCallOverflowBytes`.
+/// ADR-0228 — the per-class overflow count under `cc`: one 8-byte word per
+/// overflowed scalar, which the bridge thunk copies by (`thunk.zig`) and the
+/// frame-consuming tail-call gate reads (`op_tail_call.zig`). It matches the
+/// overflow words `marshalCallArgs` writes (`abi.ArgCursor`) except a SysV
+/// v128, which takes two 16-aligned eightbytes and is not counted here; the
+/// facade therefore declines a v128 import (`api/instance.zig`). The
+/// convention is a parameter so the thunk can be checked for Win64 from a SysV
+/// host; production callers go through `computeCallOverflowBytes`.
 ///
 /// SysV: MEMORY-class callees (results.len > 2) consume 2 slots (RDI=buffer,
 /// RSI=rt) → 4 user int regs (RDX/CX/R8/R9); non-MEMORY 5 (RSI..R9); 8 XMM,
-/// counted separately. v128 is NOT counted on SysV (its overflow takes two
-/// 16-aligned eightbytes and is excluded from this path — see
-/// `marshalCallArgs`). Win64: int, fp and v128 (a hidden pointer) share ONE
+/// counted separately. Win64: int, fp and v128 (a hidden pointer) share ONE
 /// position sequence; 3 user positions, 2 when MEMORY-class (D-165).
 pub fn computeCallOverflowBytesCc(comptime cc: abi.Cc, callee_sig: zir.FuncType) u32 {
     var n_int: u32 = 0;
@@ -240,26 +217,15 @@ pub fn computeCallOverflowBytes(callee_sig: zir.FuncType) u32 {
 
 /// ADR-0069 §Phase 2 chunk (b)-e-3 / D-165 close 2026-05-23 —
 /// returns the byte offset within THIS call's outgoing-args
-/// footprint where the MEMORY-class return buffer is placed.
-/// SysV §3.2.3: buffer immediately above the overflow-args region
-/// at the bottom of outgoing-args. Win64 (D-165): buffer at top
-/// of outgoing-args, above shadow(32) + overflow + v128 scratch.
-/// The overflow size itself is `computeCallOverflowBytes`'s. For
-/// non-MEMORY callees, return value is unused.
+/// footprint where the MEMORY-class return buffer is placed:
+/// immediately above where the call's stack arguments end, which
+/// `abi.callStackLayout` owns (SysV §3.2.3 buffer above the
+/// overflow-args region; Win64 above shadow + overflow + v128
+/// scratch). A `v128` stack argument is part of that end, so the
+/// buffer never overlaps one. For non-MEMORY callees the value is
+/// unused.
 pub fn computeCallReturnBufferOff(callee_sig: zir.FuncType) u32 {
-    const overflow = computeCallOverflowBytes(callee_sig);
-    return switch (abi.current_cc) {
-        .sysv => overflow,
-        .win64 => blk: {
-            var n_v128: u32 = 0;
-            for (callee_sig.params) |p| {
-                if (p == .v128) n_v128 += 1;
-            }
-            const shadow_and_overflow = abi.current.shadow_space_bytes + overflow;
-            const scratch_base = (shadow_and_overflow + 15) & ~@as(u32, 15);
-            break :blk scratch_base + n_v128 * 16;
-        },
-    };
+    return abi.callStackLayout(abi.current_cc, callee_sig).return_buffer_off;
 }
 
 pub fn emitCall(
@@ -850,20 +816,11 @@ const carry_gpr: abi.Gpr = abi.spill_stage_gprs[1];
 
 /// Marshal call arguments per SysV x86_64 §3.2.3 / Microsoft x64
 /// §"Argument Passing": pop N arg vregs in REVERSE (top-of-stack =
-/// rightmost arg), then emit MOV from each arg's home register
-/// into the per-Cc arg slot. Args overflowing the register pool
-/// land at `[RSP + outgoing_offset + 8 * K]` in the caller's
-/// pre-allocated outgoing-args region (mirror of
-/// arm64). The callee's prologue reads them at `[RBP + 16
-/// + r15_save_off + 8 * K]`.
-///
-/// **Per-Cc overflow position**:
-///   - SysV: outgoing_offset = 0; per-overflow slot K = NSAA index
-///     (incremented per overflowed arg of EITHER class — both
-///     classes share the NSAA stream in declaration order).
-///   - Win64: outgoing_offset = 32 (shadow space); per-overflow
-///     slot K = `shared_slot - 4` where shared_slot tracks the
-///     int/fp shared counter and 4 is the per-Cc reg pool size.
+/// rightmost arg), then move each from its home to where
+/// `abi.ArgCursor` places it: an argument register of its class, or
+/// the caller's pre-allocated outgoing-args region at `[RSP + off]`,
+/// which the callee's prologue reads at `[RBP + 16 + r15_save_off +
+/// off]` through the same cursor.
 ///
 /// An argument may sit in another argument's register, so the
 /// register-bound GPR arguments go out as one `gpr.ParallelMove`
@@ -895,184 +852,75 @@ pub fn marshalCallArgs(
         arg_vregs[i] = pushed_vregs.pop().?;
     }
 
-    // arg_gprs slot 0 carries `*const JitRuntime` (RDI on SysV,
-    // RCX on Win64) — skip; user int args start at slot 1.
-    // ADR-0026 2026-05-18 Convention Swap: when the SysV callee
-    // returns MEMORY-class (results.len > 2), SysV §3.2.3 places
-    // &result_buffer in RDI (slot 0) and shifts rt to RSI (slot 1);
-    // user int args then start at RDX = slot 2.
-    // FP args use a separate slot counter on SysV (§3.2.3 — int and
-    // FP register pools are independent), but a SHARED counter on
-    // Win64 (Microsoft x64 §"Argument Passing" — arg N occupies
-    // either arg_gprs[N] or arg_xmms[N], advancing both indices).
-    //   SysV non-MEMORY: arg_gprs[1..6] = RSI, RDX, RCX, R8, R9
-    //                    (5 user GPRs)
-    //   SysV MEMORY    : arg_gprs[2..6] = RDX, RCX, R8, R9
-    //                    (4 user GPRs)
-    //   SysV (both)    : arg_xmms[0..7] = XMM0..XMM7 (8 user FP)
-    //   Win64          : arg_gprs[1..4] = RDX, R8, R9 (3 user GPRs);
-    //                    arg_xmms[1..4] = XMM1..XMM3 (shared count).
-    // D-165 close 2026-05-23: Win64 MEMORY-class also shifts user
-    // args by 1 slot (RCX=&buffer, RDX=rt → user starts at R8 =
-    // slot 2). Mirror of SysV.
-    const callee_is_memory_class: bool = callee_sig.results.len > 2;
-    var gpr_arg_slot: usize = if (callee_is_memory_class) 2 else 1;
-    // SysV: FP slots independent of GPR. Win64: shared counter
-    // tracks combined int+fp slot, so init mirrors gpr_arg_slot
-    // (= 2 for MEMORY else 1).
-    var fp_arg_slot: usize = if (abi.current_cc == .win64)
-        (if (callee_is_memory_class) 2 else 1)
-    else
-        0;
-    // SysV NSAA index (per-overflow counter; increments only on
-    // overflow). Win64 reuses gpr_arg_slot/fp_arg_slot's shared
-    // value to derive its overflow slot.
-    var nsaa_idx: u32 = 0;
-    // Win64 v128 hidden-pointer scratch index.
-    // Counts v128 args processed so far; the per-arg scratch
-    // lives at `[RSP + win64V128ScratchBase(sig) + v128_idx*16]`.
-    var v128_idx: u32 = 0;
-    const win64_v128_scratch_base: u32 = if (abi.current_cc == .win64)
-        win64V128ScratchBase(callee_sig)
-    else
-        0;
     // Register-bound GPR arguments wait until every source has been read:
     // memory and XMM destinations go out in order, these as one parallel move.
+    var cursor = abi.ArgCursor.init(abi.current_cc, callee_sig);
     var moves: gpr.ParallelMove = .{};
     var k: u32 = 0;
     while (k < n_args) : (k += 1) {
         const src_vreg = arg_vregs[k];
-        switch (callee_sig.params[k]) {
-            .i32 => {
-                if (gpr_arg_slot >= abi.current.arg_gprs.len) {
-                    // Overflow: stage src into R10 (or R11 if R10
-                    // already holds a prior overflowed arg in
-                    // flight — but the marshal sequence emits each
-                    // store before staging the next, so stage 0 is
-                    // safe here). Then STR W to outgoing region.
-                    const src = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
-                    const disp = computeOverflowDisp(nsaa_idx, gpr_arg_slot);
-                    try buf.appendSlice(allocator, inst.encStoreR32MemRSPDisp32(src, disp).slice());
-                    nsaa_idx += 1;
-                } else {
-                    try moves.addVreg(alloc, abi.current.arg_gprs[gpr_arg_slot], src_vreg, .d);
-                }
-                gpr_arg_slot += 1;
-                if (abi.current_cc == .win64) fp_arg_slot += 1;
+        const ty = callee_sig.params[k];
+        switch (cursor.next(ty)) {
+            // D-093 (d-33): reftype shares the i64 8-byte gpr slot.
+            .gpr => |slot| try moves.addVreg(alloc, abi.current.arg_gprs[slot], src_vreg, switch (ty) {
+                .i32 => .d,
+                .i64, .ref => .q,
+                .f32, .f64, .v128 => unreachable,
+            }),
+            .xmm => |slot| {
+                const dst = abi.current.arg_xmms[slot];
+                const src = switch (ty) {
+                    .f32, .f64 => try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0),
+                    // Spilled v128 vregs trip D-078 (c) via `resolveXmm`'s UnsupportedOp.
+                    .v128 => try gpr.resolveXmm(alloc, src_vreg),
+                    .i32, .i64, .ref => unreachable,
+                };
+                if (src != dst) try buf.appendSlice(allocator, inst.encMovapsXmmXmm(dst, src).slice());
             },
-            // D-093 (d-33): reftype shares i64 8-byte gpr slot.
-            .i64, .ref => {
-                if (gpr_arg_slot >= abi.current.arg_gprs.len) {
-                    const src = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
-                    const disp = computeOverflowDisp(nsaa_idx, gpr_arg_slot);
-                    try buf.appendSlice(allocator, inst.encStoreR64MemRSPDisp32(src, disp).slice());
-                    nsaa_idx += 1;
-                } else {
-                    try moves.addVreg(alloc, abi.current.arg_gprs[gpr_arg_slot], src_vreg, .q);
-                }
-                gpr_arg_slot += 1;
-                if (abi.current_cc == .win64) fp_arg_slot += 1;
-            },
-            .f32 => {
-                if (fp_arg_slot >= abi.current.arg_xmms.len) {
-                    const src = try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
-                    const disp = computeOverflowDisp(nsaa_idx, fp_arg_slot);
-                    try buf.appendSlice(allocator, inst.encStoreXmmF32MemRSPDisp32(src, disp).slice());
-                    nsaa_idx += 1;
-                } else {
-                    const dst = abi.current.arg_xmms[fp_arg_slot];
-                    const src = try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
-                    if (src != dst) {
-                        try buf.appendSlice(allocator, inst.encMovapsXmmXmm(dst, src).slice());
-                    }
-                }
-                fp_arg_slot += 1;
-                if (abi.current_cc == .win64) gpr_arg_slot += 1;
-            },
-            .f64 => {
-                if (fp_arg_slot >= abi.current.arg_xmms.len) {
-                    const src = try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
-                    const disp = computeOverflowDisp(nsaa_idx, fp_arg_slot);
-                    try buf.appendSlice(allocator, inst.encStoreXmmF64MemRSPDisp32(src, disp).slice());
-                    nsaa_idx += 1;
-                } else {
-                    const dst = abi.current.arg_xmms[fp_arg_slot];
-                    const src = try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
-                    if (src != dst) {
-                        try buf.appendSlice(allocator, inst.encMovapsXmmXmm(dst, src).slice());
-                    }
-                }
-                fp_arg_slot += 1;
-                if (abi.current_cc == .win64) gpr_arg_slot += 1;
-            },
-            // SysV + Win64 caller-side
-            // v128 marshal. SysV (§3.2.3 SIMD): XMM0..XMM7 direct,
-            // overflow on stack as 2-eightbyte SSE class (16-byte
-            // aligned). Win64 (Microsoft x64 §"Param passing"):
-            // hidden-pointer — write v128 to 16-byte aligned scratch
-            // in caller's outgoing-args region, pass scratch address
-            // in the next int-arg-reg slot (RDX/R8/R9) or overflow
-            // 8-byte stack slot. Spilled v128 vregs trip D-078 (c)
-            // via `resolveXmm`'s explicit UnsupportedOp.
-            .v128 => {
-                if (abi.current_cc == .win64) {
-                    // Write v128 source into the per-call scratch
-                    // slot at `[RSP + scratch_base + v128_idx*16]`.
-                    const src = try gpr.resolveXmm(alloc, src_vreg);
-                    const scratch_disp: i32 = @intCast(win64_v128_scratch_base + v128_idx * 16);
-                    try buf.appendSlice(allocator, inst.encStoreXmmV128MemRSPDisp32(src, scratch_disp).slice());
-                    // Pass the scratch address in the int-arg-reg slot,
-                    // or store the pointer onto the stack overflow.
-                    if (gpr_arg_slot < abi.current.arg_gprs.len) {
-                        moves.add(abi.current.arg_gprs[gpr_arg_slot], .{ .lea_rsp = scratch_disp }, .q);
-                    } else {
-                        // Stack overflow: caller writes the 8-byte
-                        // pointer into the int-arg shared slot.
-                        try buf.appendSlice(allocator, inst.encLeaR64BaseRspDisp32(.rax, scratch_disp).slice());
-                        const disp = computeOverflowDisp(nsaa_idx, gpr_arg_slot);
-                        try buf.appendSlice(allocator, inst.encStoreR64MemRSPDisp32(.rax, disp).slice());
-                        nsaa_idx += 1;
-                    }
-                    gpr_arg_slot += 1;
-                    fp_arg_slot += 1;
-                    v128_idx += 1;
-                } else {
-                    // SysV path.
-                    if (fp_arg_slot >= abi.current.arg_xmms.len) {
-                        // SysV v128 stack-overflow co-discharge:
-                        // write the 16-byte v128 to `[RSP + nsaa_disp]`,
-                        // 16-byte aligned (NSAA SSE class takes 2 eightbytes).
-                        if ((nsaa_idx & 1) != 0) nsaa_idx += 1;
+            // A spilled source stages through stage 0 (R10 / XMM14); each store
+            // goes out before the next source is staged.
+            .stack => |off| {
+                const disp: i32 = @intCast(off);
+                switch (ty) {
+                    .i32 => {
+                        const src = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
+                        try buf.appendSlice(allocator, inst.encStoreR32MemRSPDisp32(src, disp).slice());
+                    },
+                    .i64, .ref => {
+                        const src = try gpr.gprLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
+                        try buf.appendSlice(allocator, inst.encStoreR64MemRSPDisp32(src, disp).slice());
+                    },
+                    .f32 => {
+                        const src = try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
+                        try buf.appendSlice(allocator, inst.encStoreXmmF32MemRSPDisp32(src, disp).slice());
+                    },
+                    .f64 => {
+                        const src = try gpr.xmmLoadSpilled(allocator, buf, alloc, spill_base_off, src_vreg, 0);
+                        try buf.appendSlice(allocator, inst.encStoreXmmF64MemRSPDisp32(src, disp).slice());
+                    },
+                    .v128 => {
                         const src = try gpr.resolveXmm(alloc, src_vreg);
-                        const disp: i32 = @intCast(nsaa_idx * 8);
                         try buf.appendSlice(allocator, inst.encStoreXmmV128MemRSPDisp32(src, disp).slice());
-                        nsaa_idx += 2;
-                        fp_arg_slot += 1;
-                    } else {
-                        const dst = abi.current.arg_xmms[fp_arg_slot];
-                        const src = try gpr.resolveXmm(alloc, src_vreg);
-                        if (src != dst) {
-                            try buf.appendSlice(allocator, inst.encMovapsXmmXmm(dst, src).slice());
-                        }
-                        fp_arg_slot += 1;
-                    }
+                    },
+                }
+            },
+            // Microsoft x64: the v128 goes to its scratch slot and its address
+            // to the argument position (a register, or the stack through RAX).
+            .win64_v128 => |w| {
+                const scratch: i32 = @intCast(w.scratch);
+                const src = try gpr.resolveXmm(alloc, src_vreg);
+                try buf.appendSlice(allocator, inst.encStoreXmmV128MemRSPDisp32(src, scratch).slice());
+                switch (w.ptr) {
+                    .gpr => |slot| moves.add(abi.current.arg_gprs[slot], .{ .lea_rsp = scratch }, .q),
+                    .stack => |off| {
+                        try buf.appendSlice(allocator, inst.encLeaR64BaseRspDisp32(.rax, scratch).slice());
+                        try buf.appendSlice(allocator, inst.encStoreR64MemRSPDisp32(.rax, @intCast(off)).slice());
+                    },
                 }
             },
         }
     }
     try moves.emit(allocator, buf, alloc, spill_base_off);
-}
-
-/// Compute the [RSP + disp] offset for an overflowed arg per
-/// the active Cc. SysV uses the NSAA counter; Win64 uses the
-/// shared int/fp slot index post-shadow-space (slot 4 = first
-/// overflow at [RSP + 32]). See rationale on
-/// `marshalCallArgs`.
-fn computeOverflowDisp(nsaa_idx: u32, shared_slot: usize) i32 {
-    return switch (abi.current_cc) {
-        .sysv => @intCast(nsaa_idx * 8),
-        .win64 => @intCast(shared_slot * 8),
-    };
 }
 
 /// Capture a call's return value into the next vreg per SysV

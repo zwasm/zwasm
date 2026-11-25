@@ -62,8 +62,8 @@ pub const tail_target_gpr: inst.Gpr = .r11;
 /// fix this decline stands in for is forwarding the words into the
 /// grand-caller's incoming-args area instead.
 ///
-/// The threshold is NOT restated here: `computeCallOverflowBytes` is the rule
-/// the call sites marshal by, so a change there moves this predicate with it.
+/// The threshold is NOT restated here: `computeCallOverflowBytes` owns the
+/// per-class overflow count, so a change there moves this predicate with it.
 ///
 /// Cross-module `return_call $import` is NOT gated by this — it keeps its frame
 /// through the thunk's call-and-return, so its overflow words are reserved
@@ -78,15 +78,14 @@ fn tailFrameCanCarry(callee_sig: zir.FuncType) bool {
 /// Does every FP/SIMD argument reach the callee in a register? #424 review —
 /// on SysV `computeCallOverflowBytes` counts `f32`/`f64` against the XMM bank
 /// but excludes `v128` by design (its overflow takes two 16-aligned
-/// eightbytes, outside that helper's accounting), while `marshalCallArgs`
-/// advances ONE `fp_arg_slot` across all three. A signature past
+/// eightbytes, outside that helper's accounting), while `abi.ArgCursor`, which
+/// `marshalCallArgs` walks, advances ONE XMM slot across all three. A signature past
 /// `arg_xmms.len` of any mix puts arguments on the stack that the helper
 /// reports as zero overflow — for a frame-consuming tail call, the stack that
 /// is about to go. Win64 needs no help here: it counts v128 in its shared
 /// `n_total`, so the helper already sees the overflow.
 ///
-/// Not folded into the helper itself, which also sizes the outgoing region and
-/// the MEMORY-class return-buffer offset.
+/// Not folded into the helper itself, which the bridge thunk also copies by.
 fn simdArgsFitRegisters(callee_sig: zir.FuncType) bool {
     if (abi.current_cc == .win64) return true;
     return simdArgCount(callee_sig) <= abi.current.arg_xmms.len;

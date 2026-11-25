@@ -324,13 +324,152 @@ pub const current = switch (current_cc) {
     .win64 => win64,
 };
 
-// ============================================================
-// ADR-0077 op-internal register reservations
-// ============================================================
-
 const zir = @import("../../../ir/zir.zig");
 const regalloc = @import("../shared/regalloc.zig");
 const jit_abi = @import("../shared/jit_abi.zig");
+
+// ============================================================
+// One rule: where a call's arguments go
+// ============================================================
+
+/// Where one argument travels: an argument register of its class (an index
+/// into the convention's `arg_gprs` / `arg_xmms`), or `[RSP + off]` at the
+/// call, which the callee reads at `[RBP + 16 + r15_save + off]`. A Win64
+/// `v128` is passed by hidden pointer: its bytes go to `[RSP + scratch]` and
+/// the pointer rides `ptr`.
+pub const ArgLoc = union(enum) {
+    gpr: u8,
+    xmm: u8,
+    stack: u32,
+    win64_v128: struct { scratch: u32, ptr: ArgPtr },
+};
+
+pub const ArgPtr = union(enum) { gpr: u8, stack: u32 };
+
+/// The one owner of where a call's arguments go — mirror of arm64's
+/// `ArgCursor` (#425). The caller's marshaller (`op_call.marshalCallArgs`),
+/// the callee's prologue (`emit.zig`), the frame prescan
+/// (`emit_setup.computeOutgoingMaxBytes`) and the MEMORY-class return-buffer
+/// offset (`op_call.computeCallReturnBufferOff`) walk a signature through
+/// `next`; none restates the register budget or the stack layout. The bridge
+/// thunk and the frame-consuming tail-call gate still read the per-class
+/// overflow count (`op_call.computeCallOverflowBytesCc`), as arm64's thunk
+/// keeps its own.
+///
+/// SysV §3.2.3: integer and FP/SIMD registers are separate pools, and both
+/// classes overflow into one NSAA stream of eightbytes in declaration order; a
+/// `v128` there takes two 16-aligned eightbytes, so the padding depends on the
+/// order. Win64 §"Parameter passing": every argument takes the next position
+/// of one shared sequence, and a `v128` is a pointer to a 16-byte scratch slot
+/// above shadow + overflow. ADR-0026 Convention Swap: the first argument slot
+/// carries `*JitRuntime`; a MEMORY-class callee (`results.len > 2`) takes
+/// &buffer there and rt in the second, so user arguments start one slot later.
+pub const ArgCursor = struct {
+    cc: Cc,
+    /// Next integer slot (SysV) / next shared position (Win64).
+    int_slot: u32,
+    /// Next XMM slot (SysV only).
+    fp_slot: u32 = 0,
+    /// SysV: eightbytes of stack arguments placed so far.
+    nsaa: u32 = 0,
+    /// Win64: `v128` arguments placed so far, and where their scratch starts.
+    v128_count: u32 = 0,
+    scratch_base: u32 = 0,
+
+    pub fn init(cc: Cc, sig: zir.FuncType) ArgCursor {
+        const first: u32 = if (sig.results.len > 2) 2 else 1;
+        var c: ArgCursor = .{ .cc = cc, .int_slot = first };
+        if (cc == .win64) {
+            // The scratch sits above every overflow position, so it needs the
+            // whole signature's count before the first argument is placed.
+            const in_regs: u32 = @as(u32, win64.arg_gprs.len) - first;
+            const n: u32 = @intCast(sig.params.len);
+            c.scratch_base = align16(win64.shadow_space_bytes + (n -| in_regs) * 8);
+        }
+        return c;
+    }
+
+    pub fn next(self: *ArgCursor, ty: zir.ValType) ArgLoc {
+        return switch (self.cc) {
+            .sysv => self.nextSysv(ty),
+            .win64 => self.nextWin64(ty),
+        };
+    }
+
+    fn nextSysv(self: *ArgCursor, ty: zir.ValType) ArgLoc {
+        switch (ty) {
+            .i32, .i64, .ref => {
+                defer self.int_slot += 1;
+                if (self.int_slot < sysv.arg_gprs.len) return .{ .gpr = @intCast(self.int_slot) };
+                defer self.nsaa += 1;
+                return .{ .stack = self.nsaa * 8 };
+            },
+            .f32, .f64 => {
+                defer self.fp_slot += 1;
+                if (self.fp_slot < sysv.arg_xmms.len) return .{ .xmm = @intCast(self.fp_slot) };
+                defer self.nsaa += 1;
+                return .{ .stack = self.nsaa * 8 };
+            },
+            .v128 => {
+                defer self.fp_slot += 1;
+                if (self.fp_slot < sysv.arg_xmms.len) return .{ .xmm = @intCast(self.fp_slot) };
+                self.nsaa += self.nsaa & 1; // 16-align the SSE pair
+                defer self.nsaa += 2;
+                return .{ .stack = self.nsaa * 8 };
+            },
+        }
+    }
+
+    fn nextWin64(self: *ArgCursor, ty: zir.ValType) ArgLoc {
+        const pos = self.int_slot;
+        self.int_slot += 1;
+        const in_reg = pos < win64.arg_gprs.len;
+        const stack_off = pos * 8; // position 4 is [RSP + 32], just above the shadow
+        switch (ty) {
+            .i32, .i64, .ref => return if (in_reg) .{ .gpr = @intCast(pos) } else .{ .stack = stack_off },
+            .f32, .f64 => return if (in_reg) .{ .xmm = @intCast(pos) } else .{ .stack = stack_off },
+            .v128 => {
+                const scratch = self.scratch_base + self.v128_count * 16;
+                self.v128_count += 1;
+                const ptr: ArgPtr = if (in_reg) .{ .gpr = @intCast(pos) } else .{ .stack = stack_off };
+                return .{ .win64_v128 = .{ .scratch = scratch, .ptr = ptr } };
+            },
+        }
+    }
+
+    /// Where the stack-argument region ends once every argument is placed.
+    pub fn end(self: ArgCursor) u32 {
+        return switch (self.cc) {
+            .sysv => self.nsaa * 8,
+            .win64 => self.scratch_base + self.v128_count * 16,
+        };
+    }
+};
+
+fn align16(n: u32) u32 {
+    return (n + 15) & ~@as(u32, 15);
+}
+
+/// The byte offsets a call's stack-argument region defines.
+pub const CallStackLayout = struct {
+    /// Byte offset from RSP where a MEMORY-class callee's return buffer begins
+    /// (ADR-0069): the end of every stack write the marshaller makes. For a
+    /// non-MEMORY callee it is still the end of the region the frame reserves.
+    return_buffer_off: u32,
+    /// Win64: byte offset from RSP of the first `v128` scratch slot. SysV: 0.
+    v128_scratch_base: u32,
+};
+
+/// `ArgCursor` walked over every parameter of `sig` under `cc`.
+pub fn callStackLayout(cc: Cc, sig: zir.FuncType) CallStackLayout {
+    var c = ArgCursor.init(cc, sig);
+    for (sig.params) |p| _ = c.next(p);
+    return .{ .return_buffer_off = c.end(), .v128_scratch_base = c.scratch_base };
+}
+
+// ============================================================
+// ADR-0077 op-internal register reservations
+// ============================================================
 
 const zir_op_count = @typeInfo(zir.ZirOp).@"enum".field_names.len;
 
