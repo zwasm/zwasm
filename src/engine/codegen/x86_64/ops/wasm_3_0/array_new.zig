@@ -6,7 +6,8 @@
 //! regs BEFORE the CALL (length → EDX, init → RCX) → strict `is_call`.
 //!
 //! NOTE: init marshaled from a GPR (`MOV RCX, Rinit`) — GPR element types
-//! only (f32/f64 deferred; see debt). SysV args RDI/ESI/EDX/RCX; ret EAX.
+//! only; f32/f64 and v128 elements decline to the interpreter (see emit).
+//! SysV args RDI/ESI/EDX/RCX; ret EAX.
 //! Intel SDM Vol.2 (MOV 0x89, MOVABS 0xB8, CALL 0xFF /2).
 
 const meta = @import("../../../../../instruction/wasm_3_0/array_new.zig");
@@ -31,8 +32,16 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // element has no path: jitGcAllocArrayFill returns 0 (esz>8) and #364's
     // zero-check would surface it as out_of_memory, which it is not. Decline
     // instead, so the default engine runs it on the interpreter.
-    if (ctx.func.arrayElemValType(typeidx) == 0x7B) {
+    const elem_vt = ctx.func.arrayElemValType(typeidx);
+    if (elem_vt == 0x7B) {
         decline_note.set("array.new", .v128_array_element);
+        return ctx_mod.Error.UnsupportedOp;
+    }
+    // f32 (0x7D) / f64 (0x7C): the init below is marshaled through a GPR, but an
+    // f32/f64 init sits in an FP register, so the GPR load is of the wrong bits.
+    // Decline (the interpreter fills it), as for a v128 element above.
+    if (elem_vt == 0x7D or elem_vt == 0x7C) {
+        decline_note.set("array.new", .fp_array_element);
         return ctx_mod.Error.UnsupportedOp;
     }
     const args = try ctx.popBinary(); // lhs=init, rhs=length (top), result=ref

@@ -24,6 +24,7 @@ const abi = @import("../../abi.zig");
 const gpr = @import("../../gpr.zig");
 const inst = @import("../../inst.zig");
 const jit_abi = @import("../../../shared/jit_abi.zig");
+const decline_note = @import("../../../shared/decline_note.zig");
 const zir = @import("../../../../../ir/zir.zig");
 
 pub const op_tag = meta.op_tag;
@@ -34,6 +35,15 @@ const scratch: inst.Xn = 16; // IP0 — &jitGcArrayFill.
 
 pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void {
     const typeidx: u32 = @intCast(ins.payload);
+    // f32 (0x7D) / f64 (0x7C): the value below is marshaled through a GPR, but
+    // an f32/f64 value sits in an FP register, so the GPR load is of the wrong
+    // bits. Decline (the interpreter fills it), as array.new does for the same
+    // element types.
+    const elem_vt = ctx.func.arrayElemValType(typeidx);
+    if (elem_vt == 0x7D or elem_vt == 0x7C) {
+        decline_note.set("array.fill", .fp_array_element);
+        return ctx_mod.Error.UnsupportedOp;
+    }
     // Operand stack: [.., ref, idx, value, count] (count on top). Pop reverse.
     if (ctx.pushed_vregs.items.len < 4) return ctx_mod.Error.AllocationMissing;
     const count_vreg = ctx.pushed_vregs.pop().?;

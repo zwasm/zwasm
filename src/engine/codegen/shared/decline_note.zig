@@ -36,6 +36,11 @@ pub const Reason = union(enum) {
     /// through a general register, so a 16-byte element has no path (D-495).
     /// The JIT declines rather than mis-marshalling; the interpreter runs it.
     v128_array_element,
+    /// `array.new` / `array.fill` with an f32 or f64 element: the fill marshals
+    /// the value through a general register, where an f32/f64 value — held in a
+    /// floating-point register — is not. The JIT declines rather than filling
+    /// from the wrong register; the interpreter runs it.
+    fp_array_element,
 };
 
 pub const Note = struct {

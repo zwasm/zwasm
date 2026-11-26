@@ -9,8 +9,8 @@
 //! (strict `is_call`; only vregs SPANNING it do).
 //!
 //! NOTE: the init is marshaled from a GPR (`MOV X3, Xinit`) — correct for
-//! i32/i64/ref element arrays; f32/f64 element arrays would need an FP
-//! marshal (FMOV) — deferred (see debt; struct.new has the same gap).
+//! i32/i64/ref element arrays; f32/f64 and v128 element arrays decline to the
+//! interpreter (see emit; an FP marshal via FMOV is the post-release option).
 //!
 //! Lowering: MOV W2 = length; MOV X3 = init; MOV X0, X19 (rt); MOVZ/MOVK
 //! W1 = typeidx; MOVZ/MOVK X16 = &jitGcAllocArrayFill; BLR X16; W0 → ref.
@@ -37,8 +37,16 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // element has no path: jitGcAllocArrayFill returns 0 (esz>8) and #364's
     // zero-check would surface it as out_of_memory, which it is not. Decline
     // instead, so the default engine runs it on the interpreter.
-    if (ctx.func.arrayElemValType(typeidx) == 0x7B) {
+    const elem_vt = ctx.func.arrayElemValType(typeidx);
+    if (elem_vt == 0x7B) {
         decline_note.set("array.new", .v128_array_element);
+        return ctx_mod.Error.UnsupportedOp;
+    }
+    // f32 (0x7D) / f64 (0x7C): the init below is marshaled through a GPR, but an
+    // f32/f64 init sits in an FP register, so the GPR load is of the wrong bits.
+    // Decline (the interpreter fills it), as for a v128 element above.
+    if (elem_vt == 0x7D or elem_vt == 0x7C) {
+        decline_note.set("array.new", .fp_array_element);
         return ctx_mod.Error.UnsupportedOp;
     }
     // args.lhs = init value; args.rhs = i32 length (stack top); result = ref.
