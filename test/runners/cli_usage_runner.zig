@@ -33,7 +33,8 @@
 //!         <merge_moves_br_on.wasm> <merge_moves_br_on_null_loop.wasm>
 //!         <br_on_null_loop.wasm> <throw_ref_null.wasm> <gc_alloc_trap.wasm>
 //!         <gc_v128_array_new.wasm> <gc_array_new_fp.wasm>
-//!         <gc_array_fill_fp.wasm> <gc_struct_array_fixed_fp.wasm>`
+//!         <gc_array_fill_fp.wasm> <gc_struct_array_fixed_fp.wasm>
+//!         <gc_new_f64.wasm> <gc_fill_f64.wasm>`
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -104,7 +105,9 @@ const X = "<gc_v128_array_new>";
 const AN = "<gc_array_new_fp>";
 const AF = "<gc_array_fill_fp>";
 const SA = "<gc_struct_array_fixed_fp>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X, AN, AF, SA };
+const NF = "<gc_new_f64>";
+const FF = "<gc_fill_f64>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X, AN, AF, SA, NF, FF };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -342,6 +345,13 @@ const rows = [_]Row{
     .{ .args = &.{ "run", "--engine", "jit", "--invoke", "fill_f32_r", AF }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.fill` with a floating-point element" } },
     .{ .args = &.{ "run", "--engine", "interp", "--invoke", "new_f64", AN }, .exit = 0, .stdout = .{ .is = "4611686018427387904\n" } },
     .{ .args = &.{ "run", "--engine", "interp", "--invoke", "fill_f32_c", AF }, .exit = 0, .stdout = .{ .is = "1075838976\n" } },
+    // f64 alone: in AN / AF the f32 function declines first and masks the f64
+    // branch, so these modules hold only an f64 op — the f64 decline is the
+    // first and only one.
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "nf64", NF }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a floating-point element" } },
+    .{ .args = &.{ "run", "--invoke", "nf64", NF }, .exit = 0, .stdout = .{ .is = "4611686018427387904\n" } },
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "ff64", FF }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.fill` with a floating-point element" } },
+    .{ .args = &.{ "run", "--invoke", "ff64", FF }, .exit = 0, .stdout = .{ .is = "4611686018427387904\n" } },
 } ++ eachOn(&sa_engines, SA, &sa_list) ++ throw_ref_rows;
 
 pub fn main(init: std.process.Init) !u8 {
