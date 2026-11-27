@@ -483,7 +483,10 @@ pub fn compile(
             .stack => |off| 16 + off,
             .gpr, .fpr => 0,
         };
-        if (stack_off_u > (if (param_ty == .v128) @as(u32, 65520) else 32760)) return Error.UnsupportedOp;
+        // The caller-stack LOAD uses the same per-type encoding as the slot
+        // STORE (LDR W/S imm12*4 = 16380 for i32/f32), so `cap` bounds it too;
+        // a wider offset would overflow the u14 `@intCast` below.
+        if (stack_off_u > cap) return Error.UnsupportedOp;
         switch (param_ty) {
             .i32 => switch (loc) {
                 .stack => {

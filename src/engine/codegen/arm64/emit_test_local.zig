@@ -168,6 +168,28 @@ test "compile: unsupported op surfaces UnsupportedOp" {
     try testing.expectError(Error.UnsupportedOp, compile(testing.allocator, &f, empty, &.{}, &.{}, 0, &.{}, &.{}, .i32, &.{}, false, false));
 }
 
+test "compile: an i32 param whose caller-stack offset passes 16 KiB declines, not aborts" {
+    // AAPCS64: the 7 i32 params fill X1..X7, 8 of the v128 fill V0..V7, and
+    // the remaining 1023 v128 land on the caller stack (16368 B). The last
+    // i32 then arrives at caller-stack offset 16 + 16368 = 16384, past the
+    // LDR W / LDR S imm12*4 range (max 16380). The load offset is `@intCast`
+    // to a u14, so 16384 overflowed it (a process abort in a safety build);
+    // the type cap at the slot-store check above governs the load too, so a
+    // param past it declines (UnsupportedOp → the interpreter runs it). Same
+    // for an f32 last (LDR S, same 16380 cap). x86_64 reads with a disp32 and
+    // is unaffected.
+    var params: [1039]zir.ValType = undefined;
+    for (params[0..7]) |*p| p.* = .i32;
+    for (params[7..1038]) |*p| p.* = .v128;
+    params[1038] = .i32;
+    const sig: zir.FuncType = .{ .params = &params, .results = &.{} };
+    var f = ZirFunc.init(0, sig, &.{});
+    defer f.deinit(testing.allocator);
+    f.liveness = .{ .ranges = &.{} };
+    const empty: regalloc.Allocation = .{ .slots = &.{}, .n_slots = 0 };
+    try testing.expectError(Error.UnsupportedOp, compile(testing.allocator, &f, empty, &.{}, &.{}, 0, &.{}, &.{}, .i32, &.{}, false, false));
+}
+
 test "compile: 1 local — prologue includes SUB SP,SP,#16; epilogue ADD SP,SP,#16" {
     // ADR-0155 stage-1 register-homing gates on the HOST arch (local_homing.plan
     // checks builtin.target.cpu.arch); this test asserts the HOMED layout, which
