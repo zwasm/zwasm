@@ -1288,6 +1288,112 @@ test "JitInstance.initLinked: call_indirect and call_ref through an imported tab
     try testing.expectEqual(@as(?u64, 77), try i.invoke(gpa, "test_ref", &.{}));
 }
 
+// A resolved cross-module import whose signature the arm64 bridge thunk cannot
+// address is refused at instantiation (the `setup.zig` guard, before
+// `emitThunk`). The signature carries 518 i32 params — 511 on the stack = 4088
+// bytes, 4096 rounded, one slot past the thunk's `SUB SP` imm12 — so the two
+// modules are built at runtime. x86_64 copies the overflow with a disp32 and
+// links; only arm64 refuses.
+fn ulebInto(a: Allocator, buf: *std.ArrayList(u8), v: u32) !void {
+    var x = v;
+    while (true) {
+        const byte: u8 = @intCast(x & 0x7f);
+        x >>= 7;
+        try buf.append(a, if (x != 0) byte | 0x80 else byte);
+        if (x == 0) break;
+    }
+}
+
+fn sectionInto(a: Allocator, buf: *std.ArrayList(u8), id: u8, body: []const u8) !void {
+    try buf.append(a, id);
+    try ulebInto(a, buf, @intCast(body.len));
+    try buf.appendSlice(a, body);
+}
+
+const wide_param_count: u32 = 518;
+
+fn wideFuncType(a: Allocator, buf: *std.ArrayList(u8)) !void {
+    try buf.append(a, 0x60); // func
+    try ulebInto(a, buf, wide_param_count);
+    var k: u32 = 0;
+    while (k < wide_param_count) : (k += 1) try buf.append(a, 0x7f); // i32
+    try ulebInto(a, buf, 1);
+    try buf.append(a, 0x7f); // result i32
+}
+
+fn buildWideExporter(a: Allocator) ![]u8 {
+    var ty: std.ArrayList(u8) = .empty;
+    defer ty.deinit(a);
+    try ulebInto(a, &ty, 1);
+    try wideFuncType(a, &ty);
+    var ex: std.ArrayList(u8) = .empty;
+    defer ex.deinit(a);
+    try ulebInto(a, &ex, 1);
+    try ulebInto(a, &ex, 3);
+    try ex.appendSlice(a, "big");
+    try ex.append(a, 0x00); // func export
+    try ulebInto(a, &ex, 0); // of func 0
+    var m: std.ArrayList(u8) = .empty;
+    errdefer m.deinit(a);
+    try m.appendSlice(a, &[_]u8{ 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00 });
+    try sectionInto(a, &m, 1, ty.items);
+    try sectionInto(a, &m, 3, &[_]u8{ 0x01, 0x00 }); // 1 func, type 0
+    try sectionInto(a, &m, 7, ex.items);
+    try sectionInto(a, &m, 10, &[_]u8{ 0x01, 0x04, 0x00, 0x20, 0x00, 0x0b }); // local.get 0; end
+    return m.toOwnedSlice(a);
+}
+
+fn buildWideImporter(a: Allocator) ![]u8 {
+    var ty: std.ArrayList(u8) = .empty;
+    defer ty.deinit(a);
+    try ulebInto(a, &ty, 2);
+    try wideFuncType(a, &ty); // type 0 = the imported func
+    try ty.appendSlice(a, &[_]u8{ 0x60, 0x00, 0x01, 0x7f }); // type 1 = () -> i32
+    var im: std.ArrayList(u8) = .empty;
+    defer im.deinit(a);
+    try ulebInto(a, &im, 1);
+    try ulebInto(a, &im, 1);
+    try im.appendSlice(a, "A");
+    try ulebInto(a, &im, 3);
+    try im.appendSlice(a, "big");
+    try im.appendSlice(a, &[_]u8{ 0x00, 0x00 }); // func import, type 0
+    var ex: std.ArrayList(u8) = .empty;
+    defer ex.deinit(a);
+    try ulebInto(a, &ex, 1);
+    try ulebInto(a, &ex, 2);
+    try ex.appendSlice(a, "go");
+    try ex.append(a, 0x00);
+    try ulebInto(a, &ex, 1); // of func 1 (import is func 0)
+    var m: std.ArrayList(u8) = .empty;
+    errdefer m.deinit(a);
+    try m.appendSlice(a, &[_]u8{ 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00 });
+    try sectionInto(a, &m, 1, ty.items);
+    try sectionInto(a, &m, 2, im.items);
+    try sectionInto(a, &m, 3, &[_]u8{ 0x01, 0x01 }); // 1 func, type 1
+    try sectionInto(a, &m, 7, ex.items);
+    try sectionInto(a, &m, 10, &[_]u8{ 0x01, 0x04, 0x00, 0x41, 0x07, 0x0b }); // i32.const 7; end
+    return m.toOwnedSlice(a);
+}
+
+test "JitInstance.initLinked: an imported function too wide for the arm64 bridge is refused" {
+    const gpa = testing.allocator;
+    const exp_bytes = try buildWideExporter(gpa);
+    defer gpa.free(exp_bytes);
+    const imp_bytes = try buildWideImporter(gpa);
+    defer gpa.free(imp_bytes);
+    var e = try JitInstance.init(gpa, exp_bytes);
+    defer e.deinit(gpa);
+    const target = e.exportedFuncTarget(gpa, "big") orelse return error.TestUnexpectedResult;
+    const targets = [_]runner.FuncImportTarget{target};
+    const r = JitInstance.initLinked(gpa, imp_bytes, &.{}, &targets, &.{}, &.{});
+    if (builtin.target.cpu.arch == .aarch64) {
+        try testing.expectError(error.UnsupportedEntrySignature, r);
+    } else {
+        var i = try r; // x86_64 copies the overflow with a disp32; it links.
+        i.deinit(gpa);
+    }
+}
+
 // #413 — the importer uses a global, calls a cross-module callee that uses
 // ITS global, then reads its own. On arm64 the globals base lives in X23,
 // which the callee's prologue overwrites and the thunk must restore; a thunk

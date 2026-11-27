@@ -2026,6 +2026,27 @@ test "compile: throw emits JMP rel32 placeholder + appends unreach_fixup (trap-p
     try testing.expectEqual(@as(usize, 0), out.exception_handlers.len);
 }
 
+test "compile: throw of a tag with more than 16 payload values declines, not aborts" {
+    // Mirror of the arm64 sibling. The payload buffer holds 16 values
+    // (ADR-0114 D1) and nothing validates the tag's arity, so a 17-parameter
+    // tag reaches here; marshalling it used to assert n_payload <= 16 (a
+    // process abort in a safety build). Decline so the interpreter runs it.
+    const seventeen: [17]zir.ValType = @splat(.i32);
+    const tag_sig: zir.FuncType = .{ .params = &seventeen, .results = &.{} };
+    const module_types = [_]zir.FuncType{tag_sig};
+    const sig: zir.FuncType = .{ .params = &.{}, .results = &.{} };
+    var f = ZirFunc.init(0, sig, &.{});
+    defer f.deinit(testing.allocator);
+    try f.instrs.append(testing.allocator, .{ .op = .throw, .payload = 0 });
+    try f.instrs.append(testing.allocator, .{ .op = .end });
+    f.liveness = .{ .ranges = &[_]zir.LiveRange{} };
+    const alloc: regalloc.Allocation = .{ .slots = &[_]u16{}, .n_slots = 0 };
+    try testing.expectError(
+        Error.UnsupportedOp,
+        compile(testing.allocator, &f, alloc, &.{}, &module_types, 0, &.{}, &.{}, .i32, &[_]u32{0}, false, false),
+    );
+}
+
 test "compile: try_table reaches per-op emit with ExceptionTable.Builder wired" {
     // EH integration — compile() detects `.try_table`
     // ops in func.instrs and allocates a per-function

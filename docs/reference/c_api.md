@@ -147,7 +147,8 @@ instance: the JIT where it takes the module, the interpreter where the JIT
 function imported from another instance this Store backs with the JIT binds on
 the JIT, and the interpreter cannot bind it at all, so a decline there has no
 fallback: a signature with a `v128` parameter or a struct or array reference
-type returns `NULL` with no trap. A module the JIT judges
+type — or, on arm64, one that passes more arguments on the stack than the JIT's
+cross-instance call can address — returns `NULL` with no trap. A module the JIT judges
 *invalid* is not retried on the interpreter: `NULL`, with a
 `ZWASM_TRAP_INVALID_MODULE` trap whose message names the verdict (#233). The
 fallback is at instantiation only — a decline reached at call time, where the

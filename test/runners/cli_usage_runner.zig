@@ -20,6 +20,8 @@
 //! the edge may be a `br_on_*`. `br_on_null` to a loop branches when its
 //! operand is null, with and without a fuel budget.
 //! `throw_ref` of a null exnref traps on every engine, caught or not (#745).
+//! A `throw` of a tag with more than 16 payload values is declined by the JIT
+//! (`UnsupportedOp`, exit 1); the 16-value form is caught and returns 42.
 //!
 //! Usage: `zig build test-cli-usage` /
 //!        `zwasm-cli-usage <zwasm-cli> <module.wasm> <argv_echo.wasm>
@@ -32,7 +34,7 @@
 //!         <catch_all_to_func.wasm> <merge_moves.wasm> <merge_moves_v128.wasm>
 //!         <merge_moves_br_on.wasm> <merge_moves_br_on_null_loop.wasm>
 //!         <br_on_null_loop.wasm> <throw_ref_null.wasm> <gc_alloc_trap.wasm>
-//!         <gc_v128_array_new.wasm>`
+//!         <gc_v128_array_new.wasm> <throw16.wasm> <throw17.wasm>`
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -98,7 +100,9 @@ const Y = "<br_on_null_loop>";
 const Z = "<throw_ref_null>";
 const H = "<gc_alloc_trap>";
 const X = "<gc_v128_array_new>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X };
+const T6 = "<throw16>";
+const T7 = "<throw17>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X, T6, T7 };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -307,6 +311,14 @@ const rows = [_]Row{
     .{ .args = &.{ "run", "--engine", "interp", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the interpreter does not execute `v128.const`" } },
     .{ .args = &.{ "run", "--engine", "jit", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a v128 element" } },
     .{ .args = &.{ "run", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a v128 element" } },
+    // A `throw` of a tag with more than 16 payload values is one past the JIT's
+    // `Exception.payload[16]`. On `--engine jit` the 16-value form compiles and
+    // runs (the throw is caught, `go` returns 42); the 17-value form declines
+    // (`UnsupportedOp`, exit 1). The `auto` / `interp` outcome of the 17-value
+    // form is #781's wrong trap and is left unpinned — it would have to flip
+    // when #781 is fixed.
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "go", T6 }, .exit = 0, .stdout = .{ .is = "42\n" } },
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "go", T7 }, .exit = 1, .stderr = .{ .has = "UnsupportedOp" } },
 } ++ throw_ref_rows;
 
 pub fn main(init: std.process.Init) !u8 {

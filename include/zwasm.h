@@ -261,10 +261,11 @@ WASM_API_EXTERN wasm_func_t* zwasm_instance_get_func(wasm_instance_t*, uint32_t 
  * satisfy, or a body it cannot compile). A function imported from another
  * instance THIS Store backs with the JIT binds on the JIT, and the interpreter
  * cannot bind it at all, so a decline there has no fallback: a signature with
- * a v128 parameter or a struct or array reference type. AUTO
- * returns NULL with no trap for these, as JIT does. A module the JIT judges
- * INVALID is not retried: NULL, with a ZWASM_TRAP_INVALID_MODULE trap through
- * trap_out.
+ * a v128 parameter or a struct or array reference type, or, on arm64, one that
+ * passes more arguments on the stack than the JIT's cross-instance call can
+ * address. AUTO returns NULL with no trap for these, as JIT does. A module the
+ * JIT judges INVALID is not retried: NULL, with a ZWASM_TRAP_INVALID_MODULE
+ * trap through trap_out.
  * JIT forces the native JIT: a declined module fails instantiation, returning
  * NULL with no trap — no silent downgrade; an invalid one returns NULL with
  * the same trap AUTO gives. INTERP forces the interpreter.
