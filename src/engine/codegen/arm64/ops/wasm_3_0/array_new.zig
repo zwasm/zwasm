@@ -8,11 +8,11 @@
 //! BEFORE the BLR (length → W2, init → X3), so neither force-spills
 //! (strict `is_call`; only vregs SPANNING it do).
 //!
-//! NOTE: the init is marshaled from a GPR (`MOV X3, Xinit`) — correct for
-//! i32/i64/ref element arrays; f32/f64 element arrays would need an FP
-//! marshal (FMOV) — deferred (see debt; struct.new has the same gap).
+//! NOTE: the init is marshaled into X3 — from a GPR for i32/i64/ref, and by
+//! FMOV from an FP register for an f32/f64 element (D-212, as array.set reads
+//! it). The helper writes the low `esz` bytes, so W3 (f32) / X3 (f64) suffice.
 //!
-//! Lowering: MOV W2 = length; MOV X3 = init; MOV X0, X19 (rt); MOVZ/MOVK
+//! Lowering: MOV W2 = length; set X3 = init; MOV X0, X19 (rt); MOVZ/MOVK
 //! W1 = typeidx; MOVZ/MOVK X16 = &jitGcAllocArrayFill; BLR X16; W0 → ref.
 
 const meta = @import("../../../../../instruction/wasm_3_0/array_new.zig");
@@ -20,6 +20,7 @@ const ctx_mod = @import("../../ctx.zig");
 const abi = @import("../../abi.zig");
 const gpr = @import("../../gpr.zig");
 const inst = @import("../../inst.zig");
+const inst_fp = @import("../../inst_fp.zig");
 const jit_abi = @import("../../../shared/jit_abi.zig");
 const gc_alloc_trap = @import("gc_alloc_trap.zig");
 const decline_note = @import("../../../shared/decline_note.zig");
@@ -33,21 +34,35 @@ const scratch: inst.Xn = 16; // IP0 — &fn.
 
 pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void {
     const typeidx: u32 = @intCast(ins.payload);
-    // D-495 — the fill marshals the init through a GPR, so a v128 (16-byte)
+    const elem_vt = ctx.func.arrayElemValType(typeidx); // D-212
+    // D-495 — the fill marshals the init through a u64, so a v128 (16-byte)
     // element has no path: jitGcAllocArrayFill returns 0 (esz>8) and #364's
     // zero-check would surface it as out_of_memory, which it is not. Decline
     // instead, so the default engine runs it on the interpreter.
-    if (ctx.func.arrayElemValType(typeidx) == 0x7B) {
+    if (elem_vt == 0x7B) {
         decline_note.set("array.new", .v128_array_element);
         return ctx_mod.Error.UnsupportedOp;
     }
     // args.lhs = init value; args.rhs = i32 length (stack top); result = ref.
     const args = try ctx.popBinary();
-    // W2 = length (rhs); X3 = init (lhs, full 8-byte value bits).
+    // W2 = length (rhs).
     const xsize = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, args.rhs, 0);
     if (xsize != 2) try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrRegW(2, 31, xsize));
-    const xinit = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, args.lhs, 1);
-    if (xinit != 3) try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrReg(3, 31, xinit));
+    // X3 = init. An f32/f64 init lives in an FP register (D-212); FMOV its bits
+    // into W3 (f32, zero-extends) / X3 (f64). i32/i64/ref come from a GPR.
+    switch (elem_vt) {
+        0x7D, 0x7C => {
+            const vs = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, args.lhs, 0);
+            if (elem_vt == 0x7D)
+                try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovWFromS(3, vs))
+            else
+                try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovXFromD(3, vs));
+        },
+        else => {
+            const xinit = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, args.lhs, 1);
+            if (xinit != 3) try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrReg(3, 31, xinit));
+        },
+    }
     // X0 = rt; W1 = typeidx.
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrReg(0, 31, abi.runtime_ptr_save_gpr));
     try gpr.writeU32(ctx.allocator, ctx.buf, inst.encMovzImm16(1, @intCast(typeidx & 0xFFFF)));

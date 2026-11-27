@@ -33,6 +33,7 @@ const call_scratch: abi.Gpr = .r10; // emit scratch — &fn, then CALL target.
 
 pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void {
     const typeidx: u32 = @intCast(ins.payload);
+    const elem_vt = ctx.func.arrayElemValType(typeidx); // D-212
     // Operand stack: [.., ref, idx, value, count] (count on top). Pop reverse.
     if (ctx.pushed_vregs.items.len < 4) return ctx_mod.Error.AllocationMissing;
     const count_vreg = ctx.pushed_vregs.pop().?;
@@ -50,8 +51,24 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     try gc_marshal.routeArg(ctx, 2, xref, .d);
     const xidx = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, idx_vreg, 0);
     try gc_marshal.routeArg(ctx, 3, xidx, .d);
-    const xval = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, value_vreg, 0);
-    try gc_marshal.routeArg(ctx, 4, xval, .q);
+    // value (arg 4, .q). An f32/f64 value lives in the XMM file (D-212), so
+    // MOVD/MOVQ its bits into the FP-marshal scratch GPR (R10, free here) and
+    // route that; i32/i64/ref come from a GPR. The helper writes the low `esz`
+    // bytes, so the low 32 (f32) / 64 (f64) suffice.
+    switch (elem_vt) {
+        0x7D, 0x7C => {
+            const xv = try gpr.xmmLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, value_vreg, 0);
+            if (elem_vt == 0x7D)
+                try ctx.buf.appendSlice(ctx.allocator, inst.encMovdR32FromXmm(abi.spill_stage_gprs[0], xv).slice())
+            else
+                try ctx.buf.appendSlice(ctx.allocator, inst.encMovqR64FromXmm(abi.spill_stage_gprs[0], xv).slice());
+            try gc_marshal.routeArg(ctx, 4, abi.spill_stage_gprs[0], .q);
+        },
+        else => {
+            const xval = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, value_vreg, 0);
+            try gc_marshal.routeArg(ctx, 4, xval, .q);
+        },
+    }
     const xcount = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, count_vreg, 0);
     try gc_marshal.routeArg(ctx, 5, xcount, .d);
 
