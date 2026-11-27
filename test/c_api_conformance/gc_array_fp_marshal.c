@@ -6,7 +6,8 @@
  * argument, so it fills every element with the value. Under AUTO — what stock
  * wasm_instance_new passes — the module compiles wholly on the JIT. This checks
  * the C-API host sees the value, not the bits of some register the value was
- * never in.
+ * never in, and asserts the instance resolved to the JIT (zwasm_instance_engine,
+ * ADR-0200 D3) so a future JIT decline could not pass the test on the interp.
  *
  *   array.new  of (array (mut f32)) with 2.0 -> i32.reinterpret = 1073741824
  *   array.new  of (array (mut f64)) with 2.0 -> i64.reinterpret = 4611686018427387904
@@ -61,8 +62,9 @@ static const uint8_t kArrayFill[] = {
       0x61
 };
 
-/* Instantiate `bytes` under AUTO, call `export_idx`, and require the result to
- * equal `want` (i32 when `is64` is 0, else i64). 0 = ok, 1 = mismatch. */
+/* Instantiate `bytes` under AUTO, require it resolved to the JIT, call
+ * `export_idx`, and require the result to equal `want` (i32 when `is64` is 0,
+ * else i64). 0 = ok, 1 = mismatch / wrong engine. */
 static int check(wasm_store_t* store, const uint8_t* bytes, size_t len, size_t export_idx, int is64, int64_t want, const char* label) {
     wasm_byte_vec_t binary = { len, (wasm_byte_t*) bytes };
     wasm_module_t* module = wasm_module_new(store, &binary);
@@ -72,6 +74,15 @@ static int check(wasm_store_t* store, const uint8_t* bytes, size_t len, size_t e
     wasm_instance_t* instance = wasm_instance_new(store, module, &imports, NULL);
     int rc = 1;
     if (!instance) { fprintf(stderr, "%s: instantiate failed\n", label); goto drop_module; }
+
+    /* The marshal under test is the JIT's. AUTO resolves to the JIT for these
+     * modules; pin that, so a future decline that handed them to the interpreter
+     * (interp-correct, JIT untested) fails the test instead of passing silently. */
+    int32_t resolved = ZWASM_ENGINE_AUTO;
+    if (!zwasm_instance_engine(instance, &resolved) || resolved != ZWASM_ENGINE_JIT) {
+        fprintf(stderr, "%s: ran on engine %d, want JIT (%d)\n", label, resolved, ZWASM_ENGINE_JIT);
+        goto drop_instance;
+    }
 
     wasm_extern_vec_t exports = { 0, NULL };
     wasm_instance_exports(instance, &exports);
