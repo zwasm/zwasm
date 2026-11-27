@@ -32,7 +32,9 @@
 //!         <catch_all_to_func.wasm> <merge_moves.wasm> <merge_moves_v128.wasm>
 //!         <merge_moves_br_on.wasm> <merge_moves_br_on_null_loop.wasm>
 //!         <br_on_null_loop.wasm> <throw_ref_null.wasm> <gc_alloc_trap.wasm>
-//!         <gc_v128_array_new.wasm>`
+//!         <gc_v128_array_new.wasm> <gc_array_new_fp.wasm>
+//!         <gc_array_fill_fp.wasm> <gc_struct_array_fixed_fp.wasm>
+//!         <gc_new_f64.wasm> <gc_fill_f64.wasm>`
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -72,7 +74,9 @@ const Row = struct {
 /// whose back edge is a `br_on_null`, and #745's `throw_ref` of a null
 /// exnref under each kind of clause, #364's two array.new* exports that ask
 /// for a ~8 GiB array, and #364/D-495's v128-element array.new the JIT
-/// declines.
+/// declines, and array.new / array.fill of an f32 / f64 element, which the JIT
+/// declines so the interpreter fills them, and struct.new / array.new_fixed of
+/// an f32 / f64 field / element, which both engines read correctly.
 const M = "<module>";
 const E = "<argv_echo>";
 const S = "<simd_op>";
@@ -98,7 +102,12 @@ const Y = "<br_on_null_loop>";
 const Z = "<throw_ref_null>";
 const H = "<gc_alloc_trap>";
 const X = "<gc_v128_array_new>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X };
+const AN = "<gc_array_new_fp>";
+const AF = "<gc_array_fill_fp>";
+const SA = "<gc_struct_array_fixed_fp>";
+const NF = "<gc_new_f64>";
+const FF = "<gc_fill_f64>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X, AN, AF, SA, NF, FF };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -156,6 +165,17 @@ const throw_ref_rows = blk: {
     }
     const final = out;
     break :blk final;
+};
+
+/// struct.new / array.new_fixed of an f32 / f64 field / element read the value
+/// correctly on both engines — a const value and a computed (stack-resident)
+/// one — unlike array.new / array.fill, whose operand is register-resident.
+const sa_engines = [_][]const []const u8{ all_engines[0], all_engines[1] }; // interp, jit
+const sa_list = [_][2][]const u8{
+    .{ "sn32_const", "1073741824\n" },           .{ "sn32_stack", "1073741824\n" },
+    .{ "sn64_const", "4611686018427387904\n" },  .{ "sn64_stack", "4611686018427387904\n" },
+    .{ "anf32_const", "1073741824\n" },          .{ "anf32_stack", "1073741824\n" },
+    .{ "anf64_const", "4611686018427387904\n" }, .{ "anf64_stack", "4611686018427387904\n" },
 };
 
 const rows = [_]Row{
@@ -307,7 +327,32 @@ const rows = [_]Row{
     .{ .args = &.{ "run", "--engine", "interp", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the interpreter does not execute `v128.const`" } },
     .{ .args = &.{ "run", "--engine", "jit", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a v128 element" } },
     .{ .args = &.{ "run", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a v128 element" } },
-} ++ throw_ref_rows;
+    // array.new / array.fill of an f32 / f64 element: the JIT marshals the
+    // init / fill value through a general register, which an FP-register value
+    // never reaches, so the JIT declines (like a v128 element) and the default
+    // engine fills it on the interpreter. 2.0 is f32 1073741824 / f64
+    // 4611686018427387904, 2.5 is f32 1075838976. Each op is its own module so
+    // the explicit-JIT decline names that op (the compile stops at the first
+    // declining function).
+    .{ .args = &.{ "run", "--invoke", "new_f32", AN }, .exit = 0, .stdout = .{ .is = "1073741824\n" } },
+    .{ .args = &.{ "run", "--invoke", "new_f64", AN }, .exit = 0, .stdout = .{ .is = "4611686018427387904\n" } },
+    .{ .args = &.{ "run", "--invoke", "fill_f32_c", AF }, .exit = 0, .stdout = .{ .is = "1075838976\n" } },
+    .{ .args = &.{ "run", "--invoke", "fill_f32_r", AF }, .exit = 0, .stdout = .{ .is = "1073741824\n" } },
+    .{ .args = &.{ "run", "--invoke", "fill_f64_r", AF }, .exit = 0, .stdout = .{ .is = "4611686018427387904\n" } },
+    // Explicit JIT surfaces the decline for each instruction; the interpreter
+    // fills the same elements correctly on its own.
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "new_f32", AN }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a floating-point element" } },
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "fill_f32_r", AF }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.fill` with a floating-point element" } },
+    .{ .args = &.{ "run", "--engine", "interp", "--invoke", "new_f64", AN }, .exit = 0, .stdout = .{ .is = "4611686018427387904\n" } },
+    .{ .args = &.{ "run", "--engine", "interp", "--invoke", "fill_f32_c", AF }, .exit = 0, .stdout = .{ .is = "1075838976\n" } },
+    // f64 alone: in AN / AF the f32 function declines first and masks the f64
+    // branch, so these modules hold only an f64 op — the f64 decline is the
+    // first and only one.
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "nf64", NF }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a floating-point element" } },
+    .{ .args = &.{ "run", "--invoke", "nf64", NF }, .exit = 0, .stdout = .{ .is = "4611686018427387904\n" } },
+    .{ .args = &.{ "run", "--engine", "jit", "--invoke", "ff64", FF }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.fill` with a floating-point element" } },
+    .{ .args = &.{ "run", "--invoke", "ff64", FF }, .exit = 0, .stdout = .{ .is = "4611686018427387904\n" } },
+} ++ eachOn(&sa_engines, SA, &sa_list) ++ throw_ref_rows;
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
