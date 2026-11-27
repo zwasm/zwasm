@@ -36,8 +36,6 @@
 //!
 //! Zone 2 (`src/engine/codegen/arm64/ops/`).
 
-const std = @import("std");
-
 const meta = @import("../../../../../instruction/wasm_3_0/throw.zig");
 const ctx_mod = @import("../../ctx.zig");
 const abi = @import("../../abi.zig");
@@ -86,7 +84,10 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // shape; no pops, just a `STR Wzr` for the length.
     const params = ctx.tagParams(tag_idx);
     const n_payload: u32 = @intCast(params.len);
-    std.debug.assert(n_payload <= 16);
+    // The payload buffer is `Exception.payload[16]` (ADR-0114 D1) and nothing
+    // validates the tag's arity, so a guest can reach here with more than 16
+    // values; decline rather than overrun the buffer.
+    if (n_payload > 16) return ctx_mod.Error.UnsupportedOp;
 
     if (n_payload > 0) {
         if (ctx.pushed_vregs.items.len < n_payload) return ctx_mod.Error.AllocationMissing;
