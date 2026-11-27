@@ -95,6 +95,18 @@ pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize, sig: zir.Func
     arch_thunk.emitThunk(buf, callee_rt, callee_entry, sig);
 }
 
+/// Whether `emitThunk` can encode a bridge for a callee of signature `sig` on
+/// the current target. arm64 caps the overflow-copy immediates (see
+/// `arm64/thunk.zig`); x86_64 copies the overflow area with a disp32 and has no
+/// such cap, so every signature fits. A caller that gets `false` must decline
+/// the instantiation rather than call `emitThunk`.
+pub fn sigFitsThunk(sig: zir.FuncType) bool {
+    return switch (builtin.target.cpu.arch) {
+        .aarch64 => arch_thunk.sigFitsThunk(sig),
+        else => true,
+    };
+}
+
 // ============================================================
 // Per-instance thunk arena lifecycle (ADR-0066 (c)-2.2)
 // ============================================================

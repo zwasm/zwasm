@@ -142,6 +142,32 @@ const n_insns: usize = 2 + cohort.len + 6 + 2 + 2 + 4 + 2 + cohort.len + 4 + 2;
 /// Total thunk size in bytes: the instructions + two quad literals.
 pub const thunk_bytes: usize = n_insns * 4 + 16;
 
+/// Overflow-copy sizing for a callee of signature `sig`: the stack-argument
+/// word count and its 16-aligned byte size. The copy loop materialises
+/// `n_words` with `MOVZ #imm16` and sizes the outgoing area with
+/// `SUB`/`ADD SP, #copy_bytes` (`imm12`).
+const OverflowCopy = struct { n_words: u32, copy_bytes: u32 };
+fn overflowCopy(sig: zir.FuncType) OverflowCopy {
+    const overflow_bytes: u32 = abi.callStackArgBytes(.aapcs64, sig);
+    return .{ .n_words = overflow_bytes / 8, .copy_bytes = (overflow_bytes + 15) & ~@as(u32, 15) };
+}
+
+/// Whether `emitThunk` can encode a bridge for a callee of signature `sig`.
+/// False when the overflow-argument area overflows the `MOVZ` imm16 word count
+/// or the `SUB`/`ADD SP` imm12 byte size the copy loop uses. `marshalCallArgs`
+/// caps a *call* at 128 args, but a resolved import's thunk is emitted whether
+/// or not the import is ever called, so the signature is the only gate — the
+/// caller MUST check this and decline the instantiation before `emitThunk`.
+pub fn sigFitsThunk(sig: zir.FuncType) bool {
+    const oc = overflowCopy(sig);
+    // The imm12 (`copy_bytes <= 4095`) binds first: `copy_bytes >=
+    // overflow_bytes` and `n_words = overflow_bytes / 8`, so a `copy_bytes` in
+    // range implies `n_words <= 511`. The imm16 term is the MOVZ limit
+    // emitThunk also relies on, kept against a future layout that decouples the
+    // two immediates.
+    return oc.n_words <= 0xFFFF and oc.copy_bytes <= 4095;
+}
+
 /// Emit one bridge thunk into `buf[0..thunk_bytes]` for a callee of
 /// signature `sig`. `buf` MUST be exactly `thunk_bytes` long; the caller is
 /// responsible for allocating it inside an RX-mappable arena.
@@ -152,12 +178,12 @@ pub const thunk_bytes: usize = n_insns * 4 + 16;
 /// `sig`          — the CALLEE's signature (`FuncImportTarget.sig`).
 pub fn emitThunk(buf: []u8, callee_rt: usize, callee_entry: usize, sig: zir.FuncType) void {
     std.debug.assert(buf.len == thunk_bytes);
-    const overflow_bytes: u32 = abi.callStackArgBytes(.aapcs64, sig);
-    const n_words: u32 = overflow_bytes / 8;
-    const copy_bytes: u32 = (overflow_bytes + 15) & ~@as(u32, 15);
-    // `marshalCallArgs` caps a call at 128 args, so both immediates fit
-    // (MOVZ imm16, ADD/SUB imm12).
-    std.debug.assert(n_words <= 0xFFFF and copy_bytes <= 4095);
+    const oc = overflowCopy(sig);
+    const n_words: u32 = oc.n_words;
+    const copy_bytes: u32 = oc.copy_bytes;
+    // Precondition: the caller declined any signature `sigFitsThunk` rejects
+    // (setup.zig refuses the instantiation), so both immediates fit here.
+    std.debug.assert(sigFitsThunk(sig));
     const flag_off: u15 = jit_abi.trap_flag_off;
 
     var off: usize = 0;
@@ -395,4 +421,16 @@ test "emitThunk: distinct callee pairs differ only in the literal pool" {
     emitThunk(&b, 0xAAAA_BBBB_CCCC_DDDD, 0xEEEE_FFFF_0000_1111, sigOf(&.{}, &one));
     try testing.expectEqualSlices(u8, a[0 .. n_insns * 4], b[0 .. n_insns * 4]);
     try testing.expect(!std.mem.eql(u8, a[n_insns * 4 ..], b[n_insns * 4 ..]));
+}
+
+// A callee whose overflow-argument area needs a `SUB SP, #copy_bytes` past the
+// imm12 range (4095) cannot be bridged: 7 i32 fill X1..X7, so 518 i32 leave 511
+// on the stack = 4088 B → 4096 rounded, one slot over; 517 leave 4080 B, which
+// fits. setup.zig refuses the instantiation for the former rather than letting
+// emitThunk abort. Reached from the importing module's bytes + the embedder's
+// link, whether or not the import is ever called.
+test "sigFitsThunk: 517 i32 params fit the overflow copy, 518 do not" {
+    const many: [518]zir.ValType = @splat(.i32);
+    try testing.expect(sigFitsThunk(sigOf(many[0..517], &one)));
+    try testing.expect(!sigFitsThunk(sigOf(many[0..518], &one)));
 }

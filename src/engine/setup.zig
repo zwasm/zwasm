@@ -494,6 +494,14 @@ pub fn setupRuntimeLinked(
             if (t.callee_entry != 0) any_resolved = true;
         }
         if (any_resolved) {
+            // A resolved cross-module import whose signature the bridge thunk
+            // cannot encode (its overflow-argument area exceeds the arm64 copy
+            // immediates, `shared_thunk.sigFitsThunk`) is refused here, before
+            // any arena is allocated, rather than aborting inside emitThunk.
+            for (func_import_targets, 0..) |t, j| {
+                if (j >= num_func_imports or t.callee_entry == 0) continue;
+                if (!shared_thunk.sigFitsThunk(t.sig)) return Error.UnsupportedEntrySignature;
+            }
             const arena = try shared_thunk.allocArena(num_func_imports);
             thunk_arena = arena;
             for (func_import_targets, 0..) |t, j| {
