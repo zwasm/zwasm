@@ -50,15 +50,24 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     if (xref != 2) try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrRegW(2, 31, xref));
     const xidx = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, idx_vreg, 0);
     if (xidx != 3) try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrRegW(3, 31, xidx));
-    // X4 = value. An f32/f64 value lives in an FP register (D-212); FMOV its
-    // bits into W4 (f32, zero-extends) / X4 (f64). i32/i64/ref come from a GPR.
+    // X4 = value. An f32/f64 value lives in the FP class (D-212). In an FP
+    // register: FMOV its bits into W4 (f32, zero-extends) / X4 (f64). Spilled:
+    // load the bits straight from the slot into W4/X4 with the large-offset-safe
+    // GPR frame load — the GPR loader, not fpLoadSpilled, so this path carries no
+    // 32,760-byte frame bound. i32/i64/ref come from a GPR.
     switch (elem_vt) {
         0x7D, 0x7C => {
-            const vs = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, value_vreg, 0);
-            if (elem_vt == 0x7D)
-                try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovWFromS(4, vs))
-            else
-                try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovXFromD(4, vs));
+            const is_w = elem_vt == 0x7D;
+            switch (ctx.alloc.slot(value_vreg, .fpr)) {
+                .reg => |id| {
+                    const vs = abi.fpSlotToReg(id) orelse return ctx_mod.Error.SlotOverflow;
+                    if (is_w)
+                        try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovWFromS(4, vs))
+                    else
+                        try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovXFromD(4, vs));
+                },
+                .spill => |off| try gpr.frameLdrGpr(ctx.allocator, ctx.buf, 4, ctx.spill_base_off + off, is_w),
+            }
         },
         else => {
             const xval = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, value_vreg, 0);

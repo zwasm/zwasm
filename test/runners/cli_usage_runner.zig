@@ -35,7 +35,7 @@
 //!         <gc_v128_array_new.wasm> <gc_array_new_f32.wasm>
 //!         <gc_array_new_f64.wasm> <gc_array_fill_f32.wasm>
 //!         <gc_array_fill_f64.wasm> <gc_fp_array_with_simd.wasm>
-//!         <gc_struct_array_fixed_fp.wasm>`
+//!         <gc_struct_array_fixed_fp.wasm> <gc_fp_largeframe.wasm>`
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -110,7 +110,8 @@ const AF32 = "<gc_array_fill_f32>";
 const AF64 = "<gc_array_fill_f64>";
 const SI = "<gc_fp_array_with_simd>";
 const SA = "<gc_struct_array_fixed_fp>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X, AN32, AN64, AF32, AF64, SI, SA };
+const LF = "<gc_fp_largeframe>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X, AN32, AN64, AF32, AF64, SI, SA, LF };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -347,6 +348,14 @@ const rows = [_]Row{
     // default engine does not fall to the interpreter — which cannot run this
     // module at all (`v128.const`), so only the JIT and default engines apply.
     eachOn(jit_engines, SI, &.{ .{ "simd", "7\n" }, .{ "mk", "1073741824\n" } }) ++
+    // A spilled f32/f64 array.new / array.fill element, in a frame large enough
+    // (4200 i64 locals → spill base > 32,760 B) that the spill slot is past the
+    // FP load's imm bound. The arm64 emit loads the operand's bits straight from
+    // the slot into the GPR with the large-offset-safe GPR frame load, so the
+    // element holds the right value on the JIT instead of declining. The value is
+    // a call result (homed large-offset-safe), read back in a small-frame helper
+    // so no later FP op forces its own spill. jit + default engine.
+    eachOn(jit_engines, LF, &.{ .{ "new_f32", "1073741824\n" }, .{ "new_f64", "4611686018427387904\n" }, .{ "fill_f32", "1073741824\n" }, .{ "fill_f64", "4611686018427387904\n" } }) ++
     eachOn(&sa_engines, SA, &sa_list) ++ throw_ref_rows;
 
 pub fn main(init: std.process.Init) !u8 {

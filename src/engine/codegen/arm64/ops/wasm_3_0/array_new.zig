@@ -8,9 +8,10 @@
 //! BEFORE the BLR (length → W2, init → X3), so neither force-spills
 //! (strict `is_call`; only vregs SPANNING it do).
 //!
-//! NOTE: the init is marshaled into X3 — from a GPR for i32/i64/ref, and by
-//! FMOV from an FP register for an f32/f64 element (D-212, as array.set reads
-//! it). The helper writes the low `esz` bytes, so W3 (f32) / X3 (f64) suffice.
+//! NOTE: the init is marshaled into X3 — from a GPR for i32/i64/ref; for an
+//! f32/f64 element (D-212), by FMOV from an FP register or a GPR load from the
+//! spill slot (see the switch below). The helper writes the low `esz` bytes, so
+//! W3 (f32) / X3 (f64) suffice.
 //!
 //! Lowering: MOV W2 = length; set X3 = init; MOV X0, X19 (rt); MOVZ/MOVK
 //! W1 = typeidx; MOVZ/MOVK X16 = &jitGcAllocArrayFill; BLR X16; W0 → ref.
@@ -48,15 +49,24 @@ pub fn emit(ctx: *ctx_mod.EmitCtx, ins: *const zir.ZirInstr) ctx_mod.Error!void 
     // W2 = length (rhs).
     const xsize = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, args.rhs, 0);
     if (xsize != 2) try gpr.writeU32(ctx.allocator, ctx.buf, inst.encOrrRegW(2, 31, xsize));
-    // X3 = init. An f32/f64 init lives in an FP register (D-212); FMOV its bits
-    // into W3 (f32, zero-extends) / X3 (f64). i32/i64/ref come from a GPR.
+    // X3 = init. An f32/f64 init lives in the FP class (D-212). In an FP
+    // register: FMOV its bits into W3 (f32, zero-extends) / X3 (f64). Spilled:
+    // load the bits straight from the slot into W3/X3 with the large-offset-safe
+    // GPR frame load — the GPR loader, not fpLoadSpilled, so this path carries no
+    // 32,760-byte frame bound. i32/i64/ref come from a GPR.
     switch (elem_vt) {
         0x7D, 0x7C => {
-            const vs = try gpr.fpLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, args.lhs, 0);
-            if (elem_vt == 0x7D)
-                try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovWFromS(3, vs))
-            else
-                try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovXFromD(3, vs));
+            const is_w = elem_vt == 0x7D;
+            switch (ctx.alloc.slot(args.lhs, .fpr)) {
+                .reg => |id| {
+                    const vs = abi.fpSlotToReg(id) orelse return ctx_mod.Error.SlotOverflow;
+                    if (is_w)
+                        try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovWFromS(3, vs))
+                    else
+                        try gpr.writeU32(ctx.allocator, ctx.buf, inst_fp.encFmovXFromD(3, vs));
+                },
+                .spill => |off| try gpr.frameLdrGpr(ctx.allocator, ctx.buf, 3, ctx.spill_base_off + off, is_w),
+            }
         },
         else => {
             const xinit = try gpr.gprLoadSpilled(ctx.allocator, ctx.buf, ctx.alloc, ctx.spill_base_off, args.lhs, 1);
