@@ -32,7 +32,10 @@
 //!         <catch_all_to_func.wasm> <merge_moves.wasm> <merge_moves_v128.wasm>
 //!         <merge_moves_br_on.wasm> <merge_moves_br_on_null_loop.wasm>
 //!         <br_on_null_loop.wasm> <throw_ref_null.wasm> <gc_alloc_trap.wasm>
-//!         <gc_v128_array_new.wasm>`
+//!         <gc_v128_array_new.wasm> <gc_array_new_f32.wasm>
+//!         <gc_array_new_f64.wasm> <gc_array_fill_f32.wasm>
+//!         <gc_array_fill_f64.wasm> <gc_fp_array_with_simd.wasm>
+//!         <gc_struct_array_fixed_fp.wasm> <gc_fp_largeframe.wasm>`
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -72,7 +75,10 @@ const Row = struct {
 /// whose back edge is a `br_on_null`, and #745's `throw_ref` of a null
 /// exnref under each kind of clause, #364's two array.new* exports that ask
 /// for a ~8 GiB array, and #364/D-495's v128-element array.new the JIT
-/// declines.
+/// declines, array.new / array.fill of an f32 / f64 element the JIT now fills
+/// from the floating-point register, an f32 array.new in a module with a SIMD
+/// export (which runs on the JIT, no module-wide decline), and struct.new /
+/// array.new_fixed of an f32 / f64 field / element both engines already read.
 const M = "<module>";
 const E = "<argv_echo>";
 const S = "<simd_op>";
@@ -98,7 +104,14 @@ const Y = "<br_on_null_loop>";
 const Z = "<throw_ref_null>";
 const H = "<gc_alloc_trap>";
 const X = "<gc_v128_array_new>";
-const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X };
+const AN32 = "<gc_array_new_f32>";
+const AN64 = "<gc_array_new_f64>";
+const AF32 = "<gc_array_fill_f32>";
+const AF64 = "<gc_array_fill_f64>";
+const SI = "<gc_fp_array_with_simd>";
+const SA = "<gc_struct_array_fixed_fp>";
+const LF = "<gc_fp_largeframe>";
+const placeholders = [_][]const u8{ M, E, S, D, V, P, F, T, L, R, Q, U, I, B, O, C, A, G, W, K, N, Y, Z, H, X, AN32, AN64, AF32, AF64, SI, SA, LF };
 
 const all_engines = [_][]const []const u8{ &.{ "--engine", "interp" }, &.{ "--engine", "jit" }, &.{} };
 /// The interpreter traps on some loops with params (#244).
@@ -156,6 +169,19 @@ const throw_ref_rows = blk: {
     }
     const final = out;
     break :blk final;
+};
+
+/// struct.new / array.new_fixed of an f32 / f64 field / element read the value
+/// correctly on both engines — a const value and a computed (stack-resident)
+/// one. They pop a pre-homed value, so the GPR loader already read the real
+/// bytes; array.new / array.fill now read the register-resident operand from
+/// the floating-point register too.
+const sa_engines = [_][]const []const u8{ all_engines[0], all_engines[1] }; // interp, jit
+const sa_list = [_][2][]const u8{
+    .{ "sn32_const", "1073741824\n" },           .{ "sn32_stack", "1073741824\n" },
+    .{ "sn64_const", "4611686018427387904\n" },  .{ "sn64_stack", "4611686018427387904\n" },
+    .{ "anf32_const", "1073741824\n" },          .{ "anf32_stack", "1073741824\n" },
+    .{ "anf64_const", "4611686018427387904\n" }, .{ "anf64_stack", "4611686018427387904\n" },
 };
 
 const rows = [_]Row{
@@ -307,7 +333,30 @@ const rows = [_]Row{
     .{ .args = &.{ "run", "--engine", "interp", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the interpreter does not execute `v128.const`" } },
     .{ .args = &.{ "run", "--engine", "jit", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a v128 element" } },
     .{ .args = &.{ "run", "--invoke", "new", X }, .exit = 1, .stderr = .{ .has = "the JIT does not compile `array.new` with a v128 element" } },
-} ++ throw_ref_rows;
+    // array.new / array.fill of an f32 / f64 element: the JIT reads the init /
+    // fill value from the floating-point register and fills every slot with it,
+    // so every engine — the explicit JIT included — returns the value, not the
+    // bits of some register the value was never in. 2.0 is f32 1073741824 / f64
+    // 4611686018427387904, 2.5 is f32 1075838976. Each width is its own module,
+    // so a broken branch of one width is not masked by the other.
+} ++ eachOn(&all_engines, AN32, &.{.{ "new_f32", "1073741824\n" }}) ++
+    eachOn(&all_engines, AN64, &.{.{ "new_f64", "4611686018427387904\n" }}) ++
+    eachOn(&all_engines, AF32, &.{ .{ "fill_f32_c", "1075838976\n" }, .{ "fill_f32_r", "1073741824\n" } }) ++
+    eachOn(&all_engines, AF64, &.{ .{ "fill_f64_c", "4611686018427387904\n" }, .{ "fill_f64_r", "4611686018427387904\n" } }) ++
+    // A SIMD export beside an f32 array.new: the module compiles wholly on the
+    // JIT (no module-wide decline), so the v128 export runs there and the
+    // default engine does not fall to the interpreter — which cannot run this
+    // module at all (`v128.const`), so only the JIT and default engines apply.
+    eachOn(jit_engines, SI, &.{ .{ "simd", "7\n" }, .{ "mk", "1073741824\n" } }) ++
+    // A spilled f32/f64 array.new / array.fill element, in a frame large enough
+    // (4200 i64 locals → spill base > 32,760 B) that the spill slot is past the
+    // FP load's imm bound. The arm64 emit loads the operand's bits straight from
+    // the slot into the GPR with the large-offset-safe GPR frame load, so the
+    // element holds the right value on the JIT instead of declining. The value is
+    // a call result (homed large-offset-safe), read back in a small-frame helper
+    // so no later FP op forces its own spill. jit + default engine.
+    eachOn(jit_engines, LF, &.{ .{ "new_f32", "1073741824\n" }, .{ "new_f64", "4611686018427387904\n" }, .{ "fill_f32", "1073741824\n" }, .{ "fill_f64", "4611686018427387904\n" } }) ++
+    eachOn(&sa_engines, SA, &sa_list) ++ throw_ref_rows;
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
